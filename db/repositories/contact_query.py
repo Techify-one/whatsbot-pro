@@ -24,6 +24,19 @@ from db.tables import (contact_tags, contacts, conversations, observations,
 
 # ── Row shaping ────────────────────────────────────────────────────────────
 
+def _get(row, key, default=None):
+    """Read ``key`` from a SQLAlchemy mapping row, tolerating its absence.
+
+    Not every contacts query selects every column; a plain ``row[key]`` raises
+    ``KeyError`` when the column wasn't in the SELECT, so callers that shape a
+    partial row use this to fall back to a default instead of blowing up.
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 def coerce_attrs(row) -> dict:
     """Return the custom_attributes dict for a row, tolerating missing/serialized."""
     try:
@@ -53,6 +66,9 @@ def row_to_dict(row) -> dict:
         "can_send": bool(row["can_send"]) if row["can_send"] is not None else True,
         "unread_count": row["unread_count"],
         "unread_ai_count": row["unread_ai_count"],
+        # Tipo do contato herdado do canal (plano tipos-de-contato). Defensivo:
+        # nem toda query seleciona a coluna → default 'outros'.
+        "contact_type": _get(row, "contact_type") or "outros",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         # Custom attributes (plano 05). Defensive: not every contacts query
@@ -132,6 +148,57 @@ def contact_hidden_by_inbox_scope(contact_id: int,
 
 # ── Whole-contact reads ──────────────────────────────────────────────────────
 
+def _export_row(row, tags_list: list[str]) -> dict:
+    """Row (contacts) + tags já carregadas → dict de export (shape do CSV)."""
+    custom = row["custom_attributes"]
+    return {
+        "phone": row["phone"],
+        "name": row["name"] or "",
+        "email": row["email"] or "",
+        "profession": row["profession"] or "",
+        "company": row["company"] or "",
+        "address": row["address"] or "",
+        "ai_enabled": bool(row["ai_enabled"]),
+        # Tipo do contato (plano tipos-de-contato) — vira a coluna `type` no CSV.
+        "contact_type": _get(row, "contact_type") or "outros",
+        "tags": tags_list,
+        "custom_attributes": custom if isinstance(custom, dict) else {},
+    }
+
+
+def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500):
+    """Gerador de contatos p/ export CSV, em CHUNKS (plano 50 F11) — memória constante.
+
+    Pagina a leitura de ``chunk`` em ``chunk`` (offset) e, por chunk, carrega as tags
+    de TODOS os contatos do chunk em UMA query (:func:`tags_by_contact`) — corrige o
+    N+1 (era 1 query de tags por contato). Tags ordenadas alfabéticamente (igual ao
+    ``ORDER BY tags.name`` anterior). ``inbox_ids`` escopa como :func:`list_for_export`.
+
+    Nota: offset entre chunks pode driftar se a base mudar DURANTE o export (insert/
+    delete concorrente) — aceitável p/ um snapshot de export. Groups são pulados."""
+    if inbox_ids is not None and not inbox_ids:
+        return
+    base = select(contacts).where(contacts.c.is_group == 0)
+    if inbox_ids is not None:
+        base = base.where(contacts.c.id.in_(
+            select(conversations.c.contact_id).where(
+                conversations.c.inbox_id.in_(inbox_ids))
+        ))
+    base = base.order_by(contacts.c.name, contacts.c.phone)
+    offset = 0
+    with get_engine().connect() as conn:
+        while True:
+            rows = conn.execute(base.limit(chunk).offset(offset)).mappings().all()
+            if not rows:
+                break
+            tags_map = tags_by_contact(conn, [r["id"] for r in rows])
+            for row in rows:
+                yield _export_row(row, sorted(tags_map.get(row["id"], [])))
+            if len(rows) < chunk:
+                break
+            offset += chunk
+
+
 def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
     """Return non-group contacts with full info + tags, for CSV export.
 
@@ -139,39 +206,11 @@ def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
     ``list_contacts``: ``None`` ⇒ no scoping; empty ⇒ nothing; a list ⇒ only contacts
     with a conversation in one of those inboxes. Includes both archived and active
     contacts (an export should be complete). Groups are skipped — they can't be
-    re-imported by phone."""
-    if inbox_ids is not None and not inbox_ids:
-        return []
-    stmt = select(contacts).where(contacts.c.is_group == 0)
-    if inbox_ids is not None:
-        stmt = stmt.where(contacts.c.id.in_(
-            select(conversations.c.contact_id).where(
-                conversations.c.inbox_id.in_(inbox_ids))
-        ))
-    stmt = stmt.order_by(contacts.c.name, contacts.c.phone)
-    results = []
-    with get_engine().connect() as conn:
-        rows = conn.execute(stmt).mappings().all()
-        for row in rows:
-            tag_rows = conn.execute(
-                select(tags.c.name)
-                .join(contact_tags, contact_tags.c.tag_id == tags.c.id)
-                .where(contact_tags.c.contact_id == row["id"])
-                .order_by(tags.c.name)
-            ).all()
-            custom = row["custom_attributes"]
-            results.append({
-                "phone": row["phone"],
-                "name": row["name"] or "",
-                "email": row["email"] or "",
-                "profession": row["profession"] or "",
-                "company": row["company"] or "",
-                "address": row["address"] or "",
-                "ai_enabled": bool(row["ai_enabled"]),
-                "tags": [t.name for t in tag_rows],
-                "custom_attributes": custom if isinstance(custom, dict) else {},
-            })
-    return results
+    re-imported by phone.
+
+    Materializa :func:`iter_for_export` (batch de tags, sem N+1). O endpoint usa o
+    gerador direto p/ streaming; esta forma-lista fica p/ callers que querem tudo."""
+    return list(iter_for_export(inbox_ids))
 
 
 def get_full_contact(variants: list[str]) -> dict | None:
@@ -208,6 +247,9 @@ def get_full_contact(variants: list[str]) -> dict | None:
         # Custom attributes (plano 05): also surface them under `info` so the
         # contact panel and the resolve guard read a single, reliable source.
         "custom_attributes": data["custom_attributes"],
+        # Tipo do contato (plano tipos-de-contato) — o painel do contato lê daqui
+        # para renderizar a marca abaixo do nome/telefone.
+        "contact_type": data["contact_type"],
     }
     data["tags"] = [t.name for t in tag_rows]
     return data

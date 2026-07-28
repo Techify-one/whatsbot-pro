@@ -35,6 +35,7 @@ Antes de gerar qualquer arquivo, **leia** estes arquivos para seguir os padrões
 - [assets/plugin_examples/blacklist/filters.py](assets/plugin_examples/blacklist/filters.py) — exemplo de filter que retorna `None` pra abortar (`filter.message.before_save`)
 - [assets/plugin_examples/auto_signature/filters.py](assets/plugin_examples/auto_signature/filters.py) — exemplo de filter que modifica valor (`filter.reply.part`)
 - [plugins/events.py](plugins/events.py) — implementação do bus (assinaturas reais, prioridade, sync/async)
+- [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md) — como registrar as ações do plugin na trilha de Auditoria (leia se o plugin tiver `routes.py`)
 
 ## Passo 3 — Gerar a estrutura
 
@@ -145,9 +146,9 @@ def execute_my_tool(ctx, args: dict) -> str | None:
 CORE_TOOLS = [(MY_TOOL, execute_my_tool)]
 ```
 
-**Banco de dados (importante)**: o WhatsBot agora roda em cima de SQLAlchemy
-Core (SQLite default, Postgres opcional via tela Settings → Banco). Plugin
-acessa o banco SEMPRE via:
+**Banco de dados (importante)**: o WhatsBot roda em cima de SQLAlchemy Core
+com **PostgreSQL como único backend** (plano 29 — a env `DATABASE_URL` é
+obrigatória). Plugin acessa o banco SEMPRE via:
 
 ```python
 from sqlalchemy import text
@@ -160,13 +161,13 @@ with make_plugin_db() as conn:
     ).mappings().all()
 ```
 
-Proibido em código de plugin (quebra em Postgres):
+Proibido em código de plugin (o backend é Postgres):
 
 - `?` placeholders (use `:nome` bind params)
 - `strftime('%s','now')` → use `int(time.time())` em Python
 - `INSERT OR REPLACE` / `INSERT OR IGNORE` → ver `db.upsert.upsert()` ou refatore com select+update
 - `cur.lastrowid` direto → use `result.inserted_primary_key[0]`
-- Qualquer função/sintaxe SQLite-only (`||` concat com regras peculiares, `AUTOINCREMENT`, `PRAGMA`).
+- Qualquer função/sintaxe SQLite-only (`AUTOINCREMENT`, `PRAGMA`) — exceção: `INTEGER PRIMARY KEY AUTOINCREMENT` em migration é traduzido pra `SERIAL PRIMARY KEY` pelo migrator (compat com plugins publicados).
 
 ### prompts.py (se houver fragments)
 
@@ -192,11 +193,32 @@ from plugins.context import make_plugin_db, plugin_permission
 
 router = APIRouter()
 
+PLUGIN_ID = "<id>"
+
+# AUDITORIA (obrigatório em rota que MUDA algo) — ver docs/PLUGINS_AUDITAVEIS.md.
+# Import defensivo: o plugin roda por .zip e pode cair num core sem o seam.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra a rota."""
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
+
 # RBAC: gate a rota com a dependency plugin_permission("<key>"). Ela infere o id
 # do path, monta plugin.<id>.<key> e retorna 403 sem a permissão (default-allow
 # em instalação legado/open). Use as chaves declaradas no bloco rbac: do manifest.
 @router.get("/items", dependencies=[plugin_permission("view")])
 async def list_items():
+    # GET não audita.
     with make_plugin_db() as conn:
         rows = conn.execute(
             text("SELECT * FROM plugin_<id>_items ORDER BY ts DESC")
@@ -206,9 +228,23 @@ async def list_items():
 @router.delete("/items/{rid}", dependencies=[plugin_permission("delete")])
 async def delete_item(rid: int):
     with make_plugin_db() as conn:
+        # 1. snapshot ANTES  2. a ação  3. _audit DEPOIS do sucesso
+        before = conn.execute(
+            text("SELECT * FROM plugin_<id>_items WHERE id = :id"), {"id": rid}
+        ).mappings().first()
         conn.execute(text("DELETE FROM plugin_<id>_items WHERE id = :id"), {"id": rid})
+    _audit("item.delete", before=dict(before) if before else {},
+           after={"item_id": rid, "deleted": True})
     return {"ok": True}
 ```
+
+**Auditoria — o que auditar** (guia + checklist: `docs/PLUGINS_AUDITAVEIS.md`):
+
+- SIM: configuração do plugin, mudança de estado com dono (fechar/atribuir/aprovar/excluir), escrita em recurso do core (agentes, prompts, tools, tags), ação com efeito externo.
+- NÃO: `GET`/listagem/busca, teste de conexão, preferência pessoal por-usuário, evento de alto volume.
+- **NUNCA audite tráfego de conversa** — enviar/receber mensagem, reação, recibo, presença. A trilha é de CONFIGURAÇÃO; o histórico de `messages` já registra a conversa, e uma linha por mensagem afogaria a tela.
+- A ação é namespaceada pelo core → `<id>.<recurso>.<verbo>`; o ator é o usuário logado (automático). NUNCA ponha segredo/token no `before`/`after`; registre `{"secret_definido": True}`.
+- Plugin **só com `settings.py`** não precisa de nada: o core já audita o `PUT /api/plugins/<id>/settings`.
 
 ### settings.py (se houver settings)
 
@@ -314,14 +350,11 @@ FILTERS = {
 **Toda** tabela / índice tem que começar com `plugin_<id>_`. O migrator faz validação por regex.
 
 **Sintaxe das migrations.** O migrator usa `engine.begin()` e roda contra o
-backend ativo — SQLite por default, Postgres se o usuário trocou pelo Settings.
-Para máxima portabilidade, evite `strftime` (gere timestamps no Python com
-`int(time.time())`) e defaults baseados em funções específicas. `INTEGER PRIMARY
-KEY AUTOINCREMENT` funciona em SQLite (default) mas falha em fresh Postgres
-install — se o plugin precisar rodar em Postgres direto do zero, prefira
-gerar o `id` no código (UUID, snowflake) e declarar `id TEXT PRIMARY KEY`.
-Para uma migração SQLite → Postgres existente, o endpoint admin reflete as
-tabelas do source e recria no destino com os tipos corretos.
+**Postgres** (único backend). Evite `strftime` (gere timestamps no Python com
+`int(time.time())`) e defaults baseados em funções específicas. `INTEGER
+PRIMARY KEY AUTOINCREMENT` é aceito por compat (o migrator traduz pra `SERIAL
+PRIMARY KEY`), mas em plugin novo prefira `SERIAL PRIMARY KEY` direto — ou
+gere o `id` no código (UUID) e declare `id TEXT PRIMARY KEY`.
 
 ```sql
 CREATE TABLE IF NOT EXISTS plugin_<id>_items (
@@ -406,6 +439,7 @@ Ao terminar, mostre:
 - **Tool name é global**: se conflitar com um nome existente o loader rejeita o plugin. Prefira nomes específicos como `<id>_<verbo>` (ex: `orders_create`, `cardapio_listar`).
 - **RBAC é declarativo no manifest** (bloco `rbac:`); **nunca cheque permissão na mão** — gate rotas com `dependencies=[plugin_permission("<key>")]` e esconda ações na UI com `can(key)`. Esconda a screen sem permissão com `requires:` no manifest. Convenção de chaves: `view`/`edit`/`delete`. As permissões aparecem sozinhas na tela Usuários, agrupadas pelo plugin.
 - **Settings UI é gerada automaticamente** a partir do schema Pydantic — strings, ints, floats, bools, enums. Não escreva form manual.
+- **Toda rota que MUDA algo chama `_audit(...)`** (helper com import defensivo de `plugins.context.audit`) — configuração, mudança de estado com dono, escrita em recurso do core. `GET`/teste de conexão/preferência pessoal não. Segredo nunca entra no `before`/`after`. Guia: [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md).
 - **Configuração SEMPRE na aba do próprio plugin** (settings declarativas e/ou screen `config: true` → modal "Configurar" em `/plugins`). **NUNCA** adicione seção/aba ao painel de Configurações do core (`web/static/js/components/ConfigPanel.js`) — isso é mexer no core e é proibido.
 - **Migrations rodam uma única vez** por versão. Para evoluir o schema, crie `002_*.sql`, `003_*.sql` — não edite `001`.
 

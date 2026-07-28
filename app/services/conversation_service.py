@@ -31,8 +31,10 @@ they delegate (no double-emission). Payload shapes are preserved byte-for-byte �
 DTO normalization is C1's job.
 
 Filters: :func:`set_status` applies ``filter.conversation.before_status`` (relocated
-from the route, same semantics — ``None`` aborts a close); :func:`assign` applies
-the NEW ``filter.conversation.before_assign`` (``None`` aborts the assign).
+from the route, same semantics — ``None`` aborts a close) and, on a close,
+``filter.conversation.clear_assignee_on_close`` (bool, default ``True``; ``False``
+keeps the human attendant assigned — plano 67); :func:`assign` applies the NEW
+``filter.conversation.before_assign`` (``None`` aborts the assign).
 
 The service never imports ``server.app``; it reuses
 ``app.services.messaging_service.broadcast_and_emit`` (the generalized lift of
@@ -46,8 +48,8 @@ import logging
 import time
 
 from db.repositories import (conversation_repo, contact_repo, user_repo,
-                             agent_repo)
-from server import system_notices
+                             agent_repo, tag_repo, config_repo)
+from server import sound_catalog, system_notices
 from plugins.events import apply_filter, emit_with_filter
 from domain.events import (emit_domain, ConversationReopened,
                            ConversationAttributeSet)
@@ -93,6 +95,42 @@ async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
         "ts": time.time(),
     }
     await broadcast_and_emit(deps, ws_event, bus_event, payload)
+
+
+def _agent_alert_gate() -> tuple[bool, int]:
+    """Lê o gate do alerta entre atendentes (sync — vai num ``to_thread``)."""
+    return sound_catalog.event_gate(
+        config_repo.get("sound_settings", None), "assigned_to_me",
+        legacy_enabled=config_repo.get("agent_transfer_alert_enabled", True),
+        legacy_duration=config_repo.get("agent_transfer_alert_duration", 5))
+
+
+async def _maybe_agent_transfer_alert(deps, conv: dict, assignee_user_id,
+                                      actor_id) -> None:
+    """Toca o alerta sonoro de transferência ENTRE atendentes, apenas para o
+    atendente que recebeu a conversa.
+
+    Espelha o ``human_transfer_alert`` (IA→humano). Ativação/duração vêm do padrão
+    da equipe (``config.sound_settings`` → evento ``assigned_to_me``, editável na
+    aba "Notificações e sons"), com fallback nas keys legadas
+    (``agent_transfer_alert_enabled``/``_duration``). Só dispara numa transferência
+    real PARA OUTRO humano: ``assignee_user_id`` presente e ``!= actor_id`` — assim
+    "assumir para mim" (auto-atribuição) nunca soa. O broadcast vai a todos os
+    clientes; o frontend filtra por ``assignee_user_id === currentUserId``.
+    Defensivo: uma falha aqui nunca quebra a atribuição."""
+    if not assignee_user_id or assignee_user_id == actor_id:
+        return
+    try:
+        enabled, duration = await asyncio.to_thread(_agent_alert_gate)
+        if not enabled:
+            return
+        await deps.ws_manager.broadcast("agent_transfer_alert", {
+            "assignee_user_id": assignee_user_id,
+            "enabled": True,
+            "duration": duration,
+        })
+    except Exception as e:
+        logger.debug("agent_transfer_alert broadcast failed: %s", e)
 
 
 async def _emit_notice(conv: dict, event_type: str, *, actor_name: str | None = None,
@@ -142,9 +180,12 @@ async def set_status(deps, conv: dict, status: str, *, actor_id=None,
 
     Owns the LIFECYCLE ORCHESTRATION the route used to do inline: applies
     ``filter.conversation.before_status`` on a close (a plugin may abort by
-    returning ``None`` → the caller raises the 403), persists the status via the
-    repo's status-derived data write (close also drops the assignment + stamps
-    ``resolved_at``; open clears ``resolved_at``), and emits — EXACTLY once each:
+    returning ``None`` → the caller raises the 403), then ``filter.conversation.
+    clear_assignee_on_close`` (default ``True``; a plugin returns ``False`` to KEEP
+    the human attendant assigned across the close — plano 67), persists the status
+    via the repo's status-derived data write (close always drops the active AI
+    agent + stamps ``resolved_at``, and drops the human assignee unless a plugin
+    kept it; open clears ``resolved_at``), and emits — EXACTLY once each:
       * ``conversation.status_changed`` (WS ``conversation_status_changed``),
       * ``conversation.reopened`` (additive, only on a closed→open transition),
       * the ``status_closed`` / ``status_open`` system-notice card.
@@ -155,6 +196,7 @@ async def set_status(deps, conv: dict, status: str, *, actor_id=None,
     conv_id = conv["id"]
     previous_status = conv.get("status")
 
+    clear_assignee = True
     if status == "closed":
         allowed = await apply_filter(
             "filter.conversation.before_status",
@@ -164,7 +206,19 @@ async def set_status(deps, conv: dict, status: str, *, actor_id=None,
         if allowed is None:
             return "blocked"
 
-    updated = await asyncio.to_thread(conversation_repo.set_status, conv_id, status)
+        # plano 67: a política default é limpar o assignee humano no fechamento
+        # (conversa volta a "Não atribuída"). Um plugin pode preservar o atendente
+        # retornando ``False`` neste filtro genérico. ``None`` (abort/ausente) cai
+        # no default seguro = limpar (byte-idêntico quando ninguém hooka).
+        keep = await apply_filter(
+            "filter.conversation.clear_assignee_on_close",
+            True,
+            ctx_extras={"conversation_id": conv_id, "user_id": actor_id},
+        )
+        clear_assignee = True if keep is None else bool(keep)
+
+    updated = await asyncio.to_thread(
+        conversation_repo.set_status, conv_id, status, clear_assignee=clear_assignee)
     if not updated:
         return None
 
@@ -199,6 +253,21 @@ async def archive(deps, conv: dict, archived: int, *, actor_name: str | None = N
     await _broadcast(deps, "conversation_archived", "conversation.archived", updated)
     await _emit_notice(updated, "archived" if archived else "unarchived",
                        actor_name=actor_name)
+    return updated
+
+
+async def pin(deps, conv: dict, pinned: int) -> dict | None:
+    """Fixar/desafixar uma conversa no topo da sidebar (plano 54 — por atendimento).
+
+    Ação cosmética de ordenação: escreve ``is_pinned`` e emite ``conversation.pinned``
+    (WS ``conversation_pinned``, carregando ``is_pinned``) pra sincronizar outros
+    clientes. NÃO grava card de sistema (o pin por contato também não gravava)."""
+    updated = await asyncio.to_thread(
+        conversation_repo.set_pinned, conv["id"], pinned)
+    if not updated:
+        return None
+    await _broadcast(deps, "conversation_pinned", "conversation.pinned", updated,
+                     is_pinned=updated.get("is_pinned"))
     return updated
 
 
@@ -260,9 +329,29 @@ async def delete(deps, conv: dict) -> None:
 
 # ── Ownership (assign / agent / per-conversation AI) — unified via _transfer ──
 
+async def _clear_transfer_tag(deps, contact_id) -> None:
+    """Plano 29 A5: a tag ``transferido_atendente`` é lida como trava da IA
+    (belt-and-suspenders do gate de humano), então REATIVAR a IA precisa
+    removê-la — senão a conversa fica muda para sempre. Best-effort: falha aqui
+    nunca quebra a ação. Também sincroniza o cache de ``ContactMemory``."""
+    from agent.tools.transfer_to_human import TRANSFER_TAG
+    if contact_id is None:
+        return
+    try:
+        await asyncio.to_thread(tag_repo.remove_contact_tag, contact_id, TRANSFER_TAG)
+        handler = getattr(deps, "agent_handler", None)
+        if handler is not None:
+            contact = await asyncio.to_thread(contact_repo.get, contact_id)
+            if contact:
+                for cm in handler.iter_cached_contacts(contact["phone"]):
+                    if TRANSFER_TAG in cm.tags:
+                        cm.tags.remove(TRANSFER_TAG)
+    except Exception:
+        logger.debug("Falha ao limpar tag de transferência do contato %s", contact_id)
+
 async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
                     ai_active, mirror_contact_ai: bool | None,
-                    contact_id=None) -> dict | None:
+                    contact_id=None, clear_transfer_tag: bool = True) -> dict | None:
     """UNIFY the ownership transition that ``set_ai`` / ``assign_agent`` /
     ``toggle_contact_ai`` each used to do divergently.
 
@@ -272,6 +361,10 @@ async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
     AI gate column untouched (the repo skips it). ``mirror_contact_ai`` is the
     contact-level ``ai_enabled`` to write (True/False) or ``None`` to leave the
     contact gate alone. ``contact_id`` defaults to the conversation's contact.
+    ``clear_transfer_tag`` (default True) controls whether re-enabling the AI
+    (``ai_active=1``) also removes the ``transferido_atendente`` tag — callers that
+    want to KEEP the tag as a visual label (o fechar-protocolo religa a IA mas
+    preserva a tag) pass ``False``.
 
     Returns the updated conversation, or ``None`` if it vanished. Does NOT emit the
     ``conversation.assigned``/``ai_toggled`` events itself — each public caller
@@ -284,6 +377,11 @@ async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
         ai_active=ai_active)
     if not updated:
         return None
+    # Plano 29 A5: a IA reassumindo a conversa limpa a trava de transferência.
+    # ``clear_transfer_tag=False`` preserva a tag (o fechar-protocolo mantém o rótulo).
+    if ai_active == 1 and clear_transfer_tag:
+        await _clear_transfer_tag(
+            deps, contact_id if contact_id is not None else updated.get("contact_id"))
     if mirror_contact_ai is not None:
         cid = contact_id if contact_id is not None else updated.get("contact_id")
         contact = await asyncio.to_thread(contact_repo.get, cid)
@@ -330,6 +428,7 @@ async def assign(deps, conv: dict, assignee_user_id, *, actor_id=None,
     bus_event = "conversation.assigned" if assignee_user_id else "conversation.unassigned"
     await _broadcast(deps, "conversation_assigned", bus_event, updated,
                      previous_assignee=previous_assignee)
+    await _maybe_agent_transfer_alert(deps, updated, assignee_user_id, actor_id)
     if assignee_user_id:
         target = await asyncio.to_thread(user_repo.get, assignee_user_id)
         await _emit_notice(updated, "assigned", actor_name=actor_name,
@@ -383,6 +482,8 @@ async def assign_unified(deps, conv: dict, *, kind: str, user_id=None,
     if not updated:
         return None
     await _broadcast(deps, "conversation_assigned", "conversation.assigned", updated)
+    if kind == "user":
+        await _maybe_agent_transfer_alert(deps, updated, user_id, actor_id)
     # Parity with the sidebar right-click (assign / assign-me / agent): surface a
     # lifecycle card in the thread. Defensive — a failed notice never fails the action.
     if kind == "user":
@@ -420,7 +521,8 @@ async def set_agent(deps, conv: dict, agent_key: str | None, *,
 
 
 async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
-                 actor_name: str | None = None) -> dict | None:
+                 actor_name: str | None = None,
+                 clear_transfer_tag: bool = True) -> dict | None:
     """Toggle the AI for ONE conversation AND (re)assign it (plano 17), via
     :func:`_transfer` (the unified ownership policy, moved out of
     ``conversation_repo.set_conversation_ai``):
@@ -429,6 +531,9 @@ async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
         off (``actor_id``); when no operator identity (legacy/open mode) it lands
         UNASSIGNED, mirroring a close.
       * ON  → AI on, the inbox's default AI agent re-bound, human assignee cleared.
+
+    ``clear_transfer_tag=False`` religa a IA (ON) sem remover a tag
+    ``transferido_atendente`` — usado pelo fechar-protocolo, que mantém o rótulo.
 
     Emits, EXACTLY once each: ``conversation.assigned`` (the row repositions) AND
     ``conversation.ai_toggled`` (the badge) — both over WS too. Plus the
@@ -441,7 +546,8 @@ async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
             conversation_repo.default_agent_key_for_inbox, conv.get("inbox_id"))
         updated = await _transfer(
             deps, conv, assignee_user_id=None, active_agent_key=agent_key,
-            ai_active=1, mirror_contact_ai=None)
+            ai_active=1, mirror_contact_ai=None,
+            clear_transfer_tag=clear_transfer_tag)
     else:
         updated = await _transfer(
             deps, conv, assignee_user_id=new_assignee, active_agent_key=None,
@@ -459,7 +565,8 @@ async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
 
 
 async def toggle_contact_ai(deps, *, phone: str, enabled: bool, contact_id: int,
-                            actor_name: str | None = None) -> None:
+                            actor_name: str | None = None,
+                            inbox_id: int | None = None) -> None:
     """Per-CONTACT AI gate toggle (POST /api/contacts/{phone}/toggle-ai).
 
     The route already flipped the contact-level ``ai_enabled`` (via the
@@ -471,15 +578,22 @@ async def toggle_contact_ai(deps, *, phone: str, enabled: bool, contact_id: int,
         (un)assign) + WS ``conversation_ai_toggled`` so the sidebar badge flips —
         this mirror is a WS broadcast ONLY (NOT a bus emit), preserving the
         characterized behavior that the bus sees only ``contact.ai_toggled`` here.
+
+    Plano 37 (B3/P2): ``inbox_id`` (o canal onde o operador agiu) ancora o card + o
+    mirror ``ai_active`` NAQUELA conversa — num contato com conversas em vários
+    canais, desligar a IA numa NÃO reflete na outra. Ausente → legado channel-blind.
     """
     await deps.ws_manager.broadcast("contact_ai_toggled", {
         "phone": phone, "ai_enabled": enabled})
     await emit_with_filter("contact.ai_toggled", {
         "phone": phone, "ai_enabled": enabled, "ts": time.time()})
+    # Plano 29 A5: religar a IA do contato limpa a trava de transferência.
+    if enabled:
+        await _clear_transfer_tag(deps, contact_id)
     conv = await asyncio.to_thread(
         system_notices.emit_for_contact,
         event_type="ai_on" if enabled else "ai_off",
-        contact_id=contact_id, phone=phone, actor=actor_name)
+        contact_id=contact_id, phone=phone, actor=actor_name, inbox_id=inbox_id)
     if conv is not None:
         await asyncio.to_thread(
             conversation_repo.set_ai_active, conv["id"], 1 if enabled else 0)

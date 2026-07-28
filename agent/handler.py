@@ -17,10 +17,20 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class ProcessResult:
-    """Result of an agent turn with optional tool call metadata."""
+    """Result of an agent turn with optional tool call metadata.
+
+    ``aborted=True`` marks a DELIBERATE empty reply (filter abort / agent
+    resolution error already sinalizado) — callers must not treat it as the
+    engine having run and produced nothing (plano 31 F4).
+    """
     reply: str
     tool_calls: list[dict] = dataclasses.field(default_factory=list)
     contact_info: dict | None = None
+    aborted: bool = False
+    # Agente de IA que efetivamente respondeu este turno (após routing hub-and-spoke).
+    # Carimbado nas mensagens salvas (resposta + cards de tool) para o painel exibir
+    # "IA - <NOME>" / "Ferramenta IA - <NOME>". None quando o turno abortou/errou.
+    agent_key: str | None = None
 
 
 class AgentHandler:
@@ -34,7 +44,6 @@ class AgentHandler:
         audio_model: str = "google/gemini-2.5-flash",
         image_model: str = "google/gemini-2.5-flash",
         document_model: str = "google/gemini-2.5-flash",
-        improvement_model: str = "",
         pricing_fn=None,
         default_ai_enabled: bool = True,
     ):
@@ -47,9 +56,6 @@ class AgentHandler:
         self.audio_model = audio_model
         self.image_model = image_model
         self.document_model = document_model
-        # Model used for the one-shot "improvement analysis" of a flagged AI
-        # reply. Empty → fall back to ``self.model`` (the chat model).
-        self.improvement_model = improvement_model
         self.default_ai_enabled = default_ai_enabled
         # Keyed by (channel_id, phone) — plano 11 D3.
         self._contacts: dict[tuple[str, str], ContactMemory] = {}
@@ -123,6 +129,10 @@ class AgentHandler:
         """Names of every tool currently registered (core + plugin)."""
         return self._tools.known_tool_names()
 
+    def is_tool_active(self, name: str) -> bool:
+        """Registrada e não desabilitada por override (entra no schema do LLM)."""
+        return self._tools.is_tool_active(name)
+
     def refresh_tool_overrides(self) -> None:
         """Re-read ``tool_overrides`` and rebuild the effective tool schemas."""
         self._tools.refresh_tool_overrides()
@@ -178,7 +188,6 @@ class AgentHandler:
         audio_model: str | None = None,
         image_model: str | None = None,
         document_model: str | None = None,
-        improvement_model: str | None = None,
         split_messages: bool | None = None,
         default_ai_enabled: bool | None = None,
     ):
@@ -196,8 +205,6 @@ class AgentHandler:
             self.image_model = image_model
         if document_model is not None:
             self.document_model = document_model
-        if improvement_model is not None:
-            self.improvement_model = improvement_model
         if split_messages is not None:
             self.split_messages = split_messages
         if default_ai_enabled is not None:
@@ -309,7 +316,7 @@ class AgentHandler:
         logger.error("Resolução de agente falhou para %s: %s", sender, exc)
         try:
             from db.repositories import conversation_repo
-            conv = (conversation_repo.get_open_for_contact(contact.id)
+            conv = (conversation_repo.get_open_for_contact_scoped(contact)
                     if getattr(contact, "id", None) else None)
             conversation_id = conv["id"] if conv else None
             content = ("[WhatsBot] Não foi possível resolver o agente de IA desta "
@@ -326,16 +333,6 @@ class AgentHandler:
             logger.exception(
                 "Falha ao gravar card de erro de resolução para %s", sender)
 
-    def generate_improvement(self, phone: str, target_message: dict,
-                             feedback: str) -> str:
-        """One-shot quality analysis of an AI reply flagged as incorrect.
-
-        Delegates to ``app.services.improvement_service`` (Fase B5). DIRECT,
-        non-agentic LLM call via the ISOLATED SYNC client (``_get_client``)."""
-        from app.services import improvement_service
-        return improvement_service.generate_improvement(
-            self, phone, target_message, feedback)
-
     def _ensure_conversation_agent(self, contact, agent_spec) -> None:
         """Attribute the active conversation to the AI agent that is answering so
         the inbox shows its assignee chip (e.g. "IA padrão") sempre que a IA
@@ -344,7 +341,8 @@ class AgentHandler:
         try:
             from db.repositories import conversation_repo, agent_repo
             agent_key = agent_spec.agent_key if agent_spec else agent_repo.DEFAULT_AGENT_KEY
-            conv = conversation_repo.ensure_ai_agent(contact.id, agent_key)
+            conv = conversation_repo.ensure_ai_agent(
+                contact.id, agent_key, getattr(contact, "inbox_id", None))
             if not conv:
                 return
             try:
@@ -366,25 +364,42 @@ class AgentHandler:
     def save_assistant_message(self, phone: str, text: str, *,
                                msg_id: str | None = None,
                                status: str = "sent",
-                               channel_id: str = "default") -> dict:
-        """Save an assistant (bot) message to contact memory after successful send."""
+                               channel_id: str = "default",
+                               agent_key: str | None = None,
+                               execution_id: int | None = None) -> dict:
+        """Save an assistant (bot) message to contact memory after successful send.
+
+        ``agent_key`` atribui a mensagem ao agente que a produziu (do ProcessResult
+        do turno), para o painel exibir "IA - <NOME>". ``execution_id`` (plano 51)
+        liga a resposta à execução do turno (todas as partes de um split herdam o
+        mesmo id)."""
         contact = self._get_contact(phone, channel_id=channel_id)
-        contact.add_message("assistant", text, msg_id=msg_id, status=status)
+        contact.add_message("assistant", text, msg_id=msg_id, status=status,
+                            agent_key=agent_key, execution_id=execution_id)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
     def save_operator_message(self, phone: str, text: str, *,
                               status: str | None = None,
                               msg_id: str | None = None,
                               reply_to_msg_id: str | None = None,
-                              channel_id: str = "default") -> dict:
+                              sent_by_user_id: int | None = None,
+                              sent_by_name: str | None = None,
+                              channel_id: str = "default",
+                              reopen: bool | None = None) -> dict:
         """Save a manually sent message (from the operator) without LLM processing.
 
         ``channel_id`` decides which inbox owns the conversation the message lands
         in (plano 11) — so an operator-initiated message routed through a specific
-        channel is saved in that channel's conversation, not always 'default'."""
+        channel is saved in that channel's conversation, not always 'default'.
+
+        ``sent_by_user_id``/``sent_by_name`` gravam QUEM (operador logado) enviou —
+        o nome (snapshot) é exibido no painel no lugar de "Manual". None quando não
+        há usuário logado (instalação legada/aberta) → cai em "Manual"."""
         contact = self._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", text, status=status, msg_id=msg_id,
-                            reply_to_msg_id=reply_to_msg_id)
+                            reply_to_msg_id=reply_to_msg_id,
+                            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                            reopen=reopen)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
     def mark_message_sent(self, phone: str, content: str,
@@ -394,10 +409,19 @@ class AgentHandler:
         message_repo.update_status(contact.id, content, "sent", msg_id=msg_id)
         return {"content": content}
 
-    def update_last_user_message_content(self, phone: str, new_content: str) -> None:
-        """Update the content of the last user message (e.g., with transcription)."""
-        contact = self._get_contact(phone)
-        msg = message_repo.get_last_user_message(contact.id)
+    def update_last_user_message_content(self, phone: str, new_content: str,
+                                         channel_id: str = "default") -> None:
+        """Update the content of the last user message (e.g., with transcription).
+
+        Plano 37 (B5): escopa à conversa do CANAL do turno (o ``ContactMemory`` é
+        construído com ``channel_id`` → carrega ``inbox_id``), evitando a corrida
+        cross-canal em que a transcrição sobrescreveria a última msg de outro canal.
+        Fail-open: sem conversa aberta naquele inbox, cai no contact-global."""
+        contact = self._get_contact(phone, channel_id=channel_id)
+        from db.repositories import conversation_repo
+        conv = conversation_repo.get_open_for_contact_scoped(contact)
+        msg = message_repo.get_last_user_message(
+            contact.id, conv["id"] if conv else None)
         if msg and msg.get("_id"):
             message_repo.update_content(msg["_id"], new_content)
 

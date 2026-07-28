@@ -3,7 +3,7 @@
 Chatwoot-style: the operator builds a filter in the inbox toolbar and saves it
 under a name; saved presets can be re-applied with one click and an active-preset
 chip is shown in the toolbar. Presets are scoped to the logged-in user (or shared
-on the install in legacy single-password mode, where there's no user identity).
+on the install in open mode, before the first admin — where there's no identity).
 """
 
 import asyncio

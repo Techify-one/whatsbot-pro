@@ -44,7 +44,7 @@ class GOWASendError(Exception):
 
 
 class GOWAClient:
-    """HTTP client for the GOWA REST API (go-whatsapp-web-multidevice v8.8.0)."""
+    """HTTP client for the GOWA REST API (go-whatsapp-web-multidevice v8.11.0)."""
 
     def __init__(self, port: int = 3000, timeout: float = 15.0):
         self.port = port
@@ -176,6 +176,19 @@ class GOWAClient:
         payload = {"device_id": device_id} if device_id else {}
         return self._request("POST", "/devices", json=payload, skip_device_header=True)
 
+    def delete_device(self) -> bool:
+        """Full purge of THIS device's slot from the GOWA process.
+
+        ``DELETE /devices/{id}`` (GOWA ≥ 8.10: logout + WhatsApp unlink + registry
+        removal — unlike ``/app/logout``, which now keeps the slot). Used by the
+        plano-52 shared→dedicated transition so a number moving to a proxied
+        process never stays connected on the shared one.
+        """
+        result = self._request("DELETE", f"/devices/{self.device_id}",
+                               skip_device_header=True)
+        self._device_ready = False
+        return result is not None
+
     # ── Health / Status ──────────────────────────────────────────────
 
     def health_check(self) -> bool:
@@ -190,7 +203,14 @@ class GOWAClient:
         return self._request("GET", "/app/status")
 
     def is_connected(self) -> bool:
-        """Check if WhatsApp is connected."""
+        """Check if WhatsApp is connected.
+
+        NOTE (plano 27 / D2): this **conflates** the two GOWA states — it returns
+        ``is_logged_in`` OR ``is_connected`` (the OR is the legacy "any liveness"
+        semantics that hot paths like ``server/background.py`` rely on). For the
+        two states **separated** (socket vs paired session), use
+        :meth:`connection_state`.
+        """
         status = self.get_status()
         if not status:
             return False
@@ -199,39 +219,96 @@ class GOWAClient:
             return results.get("is_logged_in", results.get("is_connected", False))
         return False
 
+    def connection_state(self) -> dict:
+        """Return the two GOWA connection states **separated** (plano 27).
+
+        - ``connected`` ← ``is_connected`` from ``/app/status`` (the device's
+          websocket is alive).
+        - ``logged_in`` ← ``is_logged_in`` (a WhatsApp session is paired).
+
+        Unlike :meth:`is_connected`, these are never OR-ed. Any failure (no
+        device, GOWA down, malformed payload) yields both ``False`` — callers
+        can treat that as "nothing to report".
+        """
+        try:
+            if not self._device_ready:
+                self.ensure_device()
+            status = self.get_status()
+            results = status.get("results", status.get("data", status)) if status else None
+            if isinstance(results, dict):
+                return {
+                    "connected": bool(results.get("is_connected", False)),
+                    "logged_in": bool(results.get("is_logged_in", False)),
+                }
+        except Exception as e:  # noqa: BLE001
+            logger.debug("connection_state failed: %s", e)
+        return {"connected": False, "logged_in": False}
+
     def get_own_number(self) -> str:
         """Best-effort: the connected account's own phone number (digits only).
 
-        GOWA does not expose the logged-in number consistently, so we probe
-        both /app/status and /devices for anything resembling a JID and
-        extract its user part. Returns "" if it can't be determined.
+        **Device-scoped (plano 32 F1):** GOWA does not expose the logged-in
+        number consistently, so we probe ``/app/status`` (already scoped to this
+        client's ``X-Device-Id``) and, as a fallback, the GLOBAL ``/devices``
+        list. The ``/devices`` fallback MUST filter to *this* device — an earlier
+        version returned the first device with any JID, which on a multi-device
+        GOWA process (N channels, one process) could return the number of a
+        DIFFERENT channel (misattribution). We therefore only read the entry
+        whose registered id matches ``self.device_id``; if none does, return "".
+
+        When more than one JID is present on an entry (e.g. both an
+        ``@s.whatsapp.net`` and an ``@lid`` form), the ``@s.whatsapp.net`` form is
+        preferred — it is the stable phone-number namespace, whereas ``@lid`` is
+        an opaque linked-device id that must never be mistaken for the number.
+
+        Returns "" if it can't be determined for this device.
         """
-        def _extract(value: object) -> str:
+        def _num_from_jid(value: object) -> str:
             text = str(value or "")
             if "@" not in text:
                 return ""
             return text.split("@")[0].split(":")[0].strip()
 
+        def _best_jid(values: list) -> str:
+            """Pick the most authoritative JID, preferring @s.whatsapp.net over @lid."""
+            jids = [str(v) for v in values if v and "@" in str(v)]
+            for j in jids:
+                if j.endswith("@s.whatsapp.net"):
+                    return j
+            return jids[0] if jids else ""
+
+        def _id_candidates(d: dict) -> set:
+            """Fields on a /devices entry that could carry the *registered* device
+            id (the session string we POSTed), so we can tell our entry apart."""
+            return {str(d.get(k, "")).strip() for k in ("id", "name", "device") if d.get(k)}
+
+        # 1) /app/status is scoped to this client's X-Device-Id → always THIS device.
         try:
             status = self.get_status()
             if status and isinstance(status, dict):
                 results = status.get("results", status.get("data", status))
                 if isinstance(results, dict):
-                    for key in ("jid", "device", "phone", "id", "user"):
-                        num = _extract(results.get(key))
-                        if num:
-                            return num
+                    jid = _best_jid([results.get(k)
+                                     for k in ("jid", "device", "phone", "id", "user")])
+                    num = _num_from_jid(jid)
+                    if num:
+                        return num
         except Exception as e:
             logger.debug("get_own_number: /app/status probe failed: %s", e)
 
+        # 2) /devices is GLOBAL → only trust the entry for THIS device (never adopt
+        #    another channel's number). Skip the filter only when device_id is unset
+        #    (legacy singleton without a bound device), preserving old behaviour.
         try:
             for d in self.list_devices():
                 if not isinstance(d, dict):
                     continue
-                for key in ("device", "jid", "phone", "id"):
-                    num = _extract(d.get(key))
-                    if num:
-                        return num
+                if self.device_id and self.device_id not in _id_candidates(d):
+                    continue
+                jid = _best_jid([d.get(k) for k in ("device", "jid", "phone", "id")])
+                num = _num_from_jid(jid)
+                if num:
+                    return num
         except Exception as e:
             logger.debug("get_own_number: /devices probe failed: %s", e)
 
@@ -273,8 +350,11 @@ class GOWAClient:
         """
         if not self._device_ready:
             self.ensure_device()
-        # Skip if already connected
-        if self.is_connected():
+        # Skip only when the socket is actually alive (plano 27 D3). A paired
+        # but offline device (logged_in && !connected) must NOT short-circuit the
+        # QR — that was the old ``is_connected()`` conflation swallowing QR for a
+        # device with a stale session.
+        if self.connection_state().get("connected"):
             logger.debug("get_qr_code: already connected, skipping.")
             return None
         result = self._request("GET", "/app/login")
@@ -368,6 +448,47 @@ class GOWAClient:
             raise
         except Exception as e:
             raise GOWASendError(f"Erro ao enviar imagem: {e}", error_type="unknown")
+
+    def send_video(self, phone: str, video_path: str, caption: str = "") -> dict:
+        """Send a video via POST /send/video (plano 64 · F9).
+
+        Mirrors :meth:`send_image` but with the longer timeout of
+        :meth:`send_file` — vídeo é grande e o upload ao WhatsApp demora.
+        Raises GOWASendError on failure.
+        """
+        phone = self._format_target(phone)
+        url = f"{self.base_url}/send/video"
+        mime = mimetypes.guess_type(video_path)[0] or "video/mp4"
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                with open(video_path, "rb") as f:
+                    files = {"video": (Path(video_path).name, f, mime)}
+                    data = {"phone": phone}
+                    if caption:
+                        data["caption"] = caption
+                    resp = client.post(url, headers=self._headers, data=data, files=files)
+                    resp.raise_for_status()
+                    return resp.json() if resp.text else {}
+        except httpx.ConnectError:
+            raise GOWASendError(
+                "WhatsApp não está acessível. Verifique se o serviço está rodando.",
+                error_type="network",
+            )
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                body = e.response.json()
+                detail = body.get("message", body.get("error", ""))
+            except Exception:
+                pass
+            msg = f"Erro da API do WhatsApp (HTTP {e.response.status_code})"
+            if detail:
+                msg += f": {detail}"
+            raise GOWASendError(msg, error_type="api")
+        except GOWASendError:
+            raise
+        except Exception as e:
+            raise GOWASendError(f"Erro ao enviar vídeo: {e}", error_type="unknown")
 
     def send_file(self, phone: str, file_path: str, caption: str = "",
                   filename: str | None = None) -> dict:
@@ -478,6 +599,15 @@ class GOWAClient:
         except Exception as e:
             logger.warning("revoke_message failed for %s: %s", message_id, e)
             return None
+
+    def update_message(self, message_id: str, phone: str, text: str) -> dict | None:
+        """Edit a sent message's text via ``POST /message/{id}/update``.
+
+        Raises on error (``raise_on_error=True``) so the caller can surface an edit
+        failure — WhatsApp only allows editing text messages within ~15 min."""
+        payload = {"phone": self._message_jid(phone), "message": text}
+        return self._request("POST", f"/message/{message_id}/update",
+                             json=payload, raise_on_error=True)
 
     def delete_message(self, message_id: str, phone: str) -> dict | None:
         """Delete a message for me only (local device). Best-effort, never raises."""

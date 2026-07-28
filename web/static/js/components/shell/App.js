@@ -9,18 +9,22 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { PluginModalHost } from '../../plugins/ModalHost.js';
+import { Slot } from '../../plugins/Slot.js';
 import { buildPluginApi, isFrontendApiCompatible } from '../../plugins/api.js';
 import { reset as resetRegistry, subscribe as subscribeRegistry, inventory as registryInventory, getRouteOverride } from '../../plugins/registry.js';
 import { SetupWizard } from '../SetupWizard.js';
 import { LowBalanceModal } from '../LowBalanceModal.js';
+import { ChangePasswordModal } from '../ChangePasswordModal.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import { authHeaders, getUnreadCount } from '../../services/api.js';
-import { playTransferAlert } from '../../utils/alertSound.js';
-import { getNotifPref, playNotificationSound, showBrowserNotification } from '../../utils/notifications.js';
+import { shouldNotifyNewMessage } from '../../services/conversationRows.js';
+import * as soundEngine from '../../utils/soundEngine.js';
+import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
 import { GearMenu } from './GearMenu.js';
 import { ScreenRouter } from './ScreenRouter.js';
+import { Toaster } from './Toaster.js';
 import {
   pluginTabId, tabFromPath, pathForTab, redirectLegacyPath,
   contactIdFromPath, conversationIdFromPath, scrollMsgFromSearch,
@@ -81,6 +85,12 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // overrides) so route-override resolution and <Slot>s re-render once the async
   // extends modules register (they load after first paint).
   const [extVersion, setExtVersion] = useState(0);
+  // True once the plugin frontend-extension modules have finished loading (or the
+  // manifest fetch failed). Gates the `attendances → contacts` fallback in
+  // ScreenRouter so a hard reload doesn't bounce to the home page during the async
+  // window before a route-override (e.g. protocolos) has registered.
+  const [extensionsLoaded, setExtensionsLoaded] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);  // self-service password modal (plano 47)
   const [tab, setTabState] = useState(() => tabFromPath([]));
   const [unreadConvos, setUnreadConvos] = useState(0);  // conversations with unread msgs (tab-title badge)
   const [newMessage, setNewMessage] = useState(null);
@@ -100,7 +110,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
   const [lowBalance, setLowBalance] = useState(null);
   const [initialContactId, setInitialContactId] = useState(contactIdFromPath);
   const [initialConversationId, setInitialConversationId] = useState(conversationIdFromPath);
-  // Mensagem-alvo do permalink (?message=<_id>): scroll + destaque ao abrir a conversa.
+  // Mensagem-alvo do permalink (?message=<_id>): scroll + destaque ao abrir o atendimento.
   const [initialScrollMsgId, setInitialScrollMsgId] = useState(scrollMsgFromSearch);
   // Seleção de entidade vinda da URL (deep-link genérico das demais telas).
   const [initialEntity, setInitialEntity] = useState(entityFromPath);
@@ -128,7 +138,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
     fetch('/api/plugins/manifest', { headers: authHeaders() })
       .then(r => r.json())
       .then(res => {
-        if (!res || !res.ok) return;
+        if (!res || !res.ok) { setExtensionsLoaded(true); return; }  // no plugins → fallback applies
         const plugins = res.data.plugins || [];
         const screens = plugins.flatMap(p =>
           (p.screens || [])
@@ -137,11 +147,13 @@ export function App({ onLogout, hasPassword, currentUser }) {
         );
         setPluginScreens(screens);
         // Load plugin frontend-extension modules (filters / UI slots / route overrides).
-        loadPluginExtensions(plugins);
+        // Only after they register (or fail) do we let ScreenRouter treat a missing
+        // route-override as "plugin disabled" (see extensionsLoaded gating).
+        loadPluginExtensions(plugins).finally(() => setExtensionsLoaded(true));
         // Re-evaluate tab now that we know about plugin paths.
         setTabState(tabFromPath(screens));
       })
-      .catch(() => { /* ignore */ });
+      .catch(() => { setExtensionsLoaded(true); /* fetch failed → fallback applies */ });
   }, []);
 
   // Re-render when the extension registry mutates (extends modules register after
@@ -162,6 +174,26 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // Boot: rewrite any legacy PT URL (/contatos, /painel, …) to its English path
   // before the rest of the app reads window.location.
   useEffect(() => { redirectLegacyPath(); }, []);
+
+  // Plano 64 · F0 — guarda global de arrastar-e-soltar. Sem ela, soltar um
+  // arquivo FORA de uma zona de drop faz o navegador navegar para o arquivo e
+  // destruir o estado do app (perda do que estava digitado/aberto). Os dois
+  // listeners só cancelam o default do navegador; as zonas de drop reais
+  // (overlay da conversa, linha da sidebar) continuam recebendo o evento
+  // normalmente — elas rodam antes, na fase de bubbling.
+  useEffect(() => {
+    function swallow(e) {
+      if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+        e.preventDefault();
+      }
+    }
+    window.addEventListener('dragover', swallow);
+    window.addEventListener('drop', swallow);
+    return () => {
+      window.removeEventListener('dragover', swallow);
+      window.removeEventListener('drop', swallow);
+    };
+  }, []);
 
   useEffect(() => {
     function onPopState() {
@@ -198,7 +230,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
       if (data.version) setQrVersion(data.version);
     }, []),
     onGowaStatus: useCallback((data) => setNotification(data.message), []),
-    onConfigSaved: useCallback(() => { setNotification('Configurações salvas!'); reloadConfig(); }, [reloadConfig]),
+    onConfigSaved: useCallback(() => { setNotification('Configurações salvas!'); reloadConfig(); soundEngine.reloadPrefs(); }, [reloadConfig]),
     onNewMessage: useCallback((data) => setNewMessage(data), []),
     onChatPresence: useCallback((data) => setChatPresence(data), []),
     onAiTyping: useCallback((data) => setAiTyping(data), []),
@@ -214,7 +246,10 @@ export function App({ onLogout, hasPassword, currentUser }) {
         : !(cfg && cfg.transfer_alert_enabled === false);
       if (!enabled) return;
       const duration = (data && data.duration) || cfg?.transfer_alert_duration || 5;
-      playTransferAlert(duration);
+      // plano 63 F2 — motor unificado (som/volume da sirene agora configuráveis).
+      // O servidor já silenciou acima (`if (!enabled) return`); passamos a duração
+      // resolvida como override.
+      soundEngine.playEvent('ia_to_human', { enabledOverride: enabled, durationOverride: duration });
     }, []),
     onContactAiToggled: useCallback((data) => setContactAiToggled(data), []),
     onMessagesRead: useCallback((data) => setMessagesRead(data), []),
@@ -243,7 +278,9 @@ export function App({ onLogout, hasPassword, currentUser }) {
     fetch('/api/balance', { headers: authHeaders() })
       .then(r => r.json())
       .then(res => {
-        if (res && res.ok && res.data && res.data.low_balance_enabled && res.data.below_threshold) {
+        // plano 42 C: available===false is the degraded shape (proxy down, no
+        // cache) — never open the modal for it (it also lacks below_threshold).
+        if (res && res.ok && res.data && res.data.available !== false && res.data.low_balance_enabled && res.data.below_threshold) {
           setLowBalance({
             remaining: res.data.remaining,
             total_credits: res.data.total_credits,
@@ -283,10 +320,15 @@ export function App({ onLogout, hasPassword, currentUser }) {
     return () => window.removeEventListener('whatsbot:notif-prefs', onPrefs);
   }, []);
 
+  // plano 63 — carrega o override de som do usuário + o padrão global da equipe
+  // no boot (antes disso o motor usa os code-seeds, nunca fica mudo). A tela
+  // "Notificações e sons" chama reloadPrefs() após salvar.
+  useEffect(() => { soundEngine.reloadPrefs(); }, []);
+
   // Tab-title badge — gated by the "tab notification" preference.
   useEffect(() => {
     const tabBadge = getNotifPref('tab');
-    document.title = (tabBadge && unreadConvos > 0) ? `(${unreadConvos}) WhatsBot` : 'WhatsBot';
+    document.title = (tabBadge && unreadConvos > 0) ? `(${unreadConvos}) WhatsBot-Pro` : 'WhatsBot-Pro';
   }, [unreadConvos, notifVersion]);
 
   // Browser notification + sound on a new INBOUND message (from a contact).
@@ -295,15 +337,39 @@ export function App({ onLogout, hasPassword, currentUser }) {
   useEffect(() => {
     if (!newMessage) return;
     const m = newMessage.message;
+    // plano 57: o re-emit AUTORITATIVO pós-save (mesma msg do t=0, com `_id`/`msg_id`
+    // reais) NÃO deve re-notificar — o som/alerta já tocou no broadcast do ingest, e o
+    // contrato `silent` (ex.: "ignorar abertura") só marca o payload do t=0. Sem este
+    // guard, toda mensagem tocaria 2× e uma msg silenciosa tocaria no re-emit.
+    if (m && m.authoritative) return;
+    // Nota privada (mensagem interna do operador): o ícone verde na conversa e a
+    // contagem na aba do navegador são dirigidos pelo backend (unread_count, quando
+    // a conta liga `notify_private_messages`) — nada a fazer aqui para eles. O SOM
+    // fica DESLIGADO para nota privada hoje. Ponto de extensão futuro, gated pela
+    // MESMA config da conta (já chega ao cliente via GET /api/config):
+    //   if (configRef.current?.notify_private_messages && getNotifPref('sound')) playNotificationSound();
+    if (m && m.role === 'private_note') return;
     if (!m || m.role !== 'user') return;
-    if (getNotifPref('sound')) playNotificationSound();
+    // Regra "ignorar abertura" (plugin protocolos): mensagem marcada como silenciosa
+    // não gera som nem alerta de nova mensagem (também não conta como não-lida no back).
+    if (m.silent) return;
+    // Escopo por ATRIBUIÇÃO: só notifica se a conversa é minha ou não tem dono nenhum
+    // (nem humano nem IA) — a mensagem da conversa de outro atendente não é minha para
+    // atender. Vale para o som E para o pop-up do navegador logo abaixo. O backend manda
+    // `assignee_user_id`/`active_agent_key` no payload do ingest; sem eles, notifica
+    // como antes (fail-open — ver shouldNotifyNewMessage).
+    if (!shouldNotifyNewMessage(m, (currentUser && currentUser.id != null) ? currentUser.id : null)) return;
+    // plano 63 F2 — o motor resolve as 3 camadas (usuário/global/dispositivo). O
+    // interruptor per-device (`whatsbot_notif_sound`) é checado DENTRO do motor,
+    // então o gate legado `getNotifPref('sound')` sai daqui (evita gate duplo).
+    soundEngine.playEvent('new_message');
     const away = document.hidden || !document.hasFocus();
     if (getNotifPref('browser') && away) {
       let preview = (m.content || '').trim();
       if (!preview) {
         preview = m.media_type ? 'Enviou uma mídia' : 'Nova mensagem';
       }
-      showBrowserNotification('WhatsBot — nova mensagem', preview.slice(0, 140));
+      showBrowserNotification('WhatsBot-Pro — nova mensagem', preview.slice(0, 140));
     }
   }, [newMessage]);
 
@@ -395,13 +461,14 @@ export function App({ onLogout, hasPassword, currentUser }) {
 
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} />
+      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} onChangePassword=${() => setShowChangePassword(true)} />
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         <${ScreenRouter}
           tab=${tab}
           setTab=${setTab}
           activeRouteOverride=${activeRouteOverride}
+          extensionsLoaded=${extensionsLoaded}
           activePluginScreen=${activePluginScreen}
           currentUser=${currentUser}
           config=${config}
@@ -423,8 +490,22 @@ export function App({ onLogout, hasPassword, currentUser }) {
         onSnooze=${(ms) => snoozeLowBalance(ms)}
       />` : null}
 
+      ${showChangePassword && currentUser ? html`<${ChangePasswordModal}
+        user=${currentUser}
+        onNotify=${handleNotify}
+        onClose=${() => setShowChangePassword(false)}
+      />` : null}
+
       <!-- Host for plugin-opened modals (e.g. the "popup ao resolver" flow). -->
       <${PluginModalHost} />
+
+      <!-- Host global de toasts (avisos transitórios: 403 "Permissão negada." etc.). -->
+      <${Toaster} />
+
+      <!-- Root overlay extension point (P: dev tools): a plugin may register a
+           persistent, non-blocking floating widget here via addSlot('app.overlay').
+           Renders nothing until a plugin fills it, so it has zero impact by default. -->
+      <${Slot} name="app.overlay" ctx=${{ tab, currentUser }} />
     </div>
   `;
 }

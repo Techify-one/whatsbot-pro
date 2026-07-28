@@ -10,8 +10,10 @@
 // Behavior-preserving: same optimistic update shapes, same best-effort error
 // handling (WS reconciles), same permalink format, same group-prefix stripping.
 import { useState } from 'preact/hooks';
-import { deleteMessage, reactToMessage, generateImprovement } from '../../../services/api.js';
+import { deleteMessage, editMessage, reactToMessage } from '../../../services/api.js';
 import { copyToClipboard } from '../MessageContextMenu.js';
+import { deepLinkUrl } from '../../../utils/copyDeepLink.js';
+import { notify } from '../../../services/notify.js';
 
 // The operator's own current reaction on a message (stored under reactor "me").
 export function myReaction(message) {
@@ -29,16 +31,50 @@ export function myReaction(message) {
  * @param {any} opts.conversationId
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  */
+// Stable selection key for a message: saved rows have `_id` (db id); optimistic
+// ones only `_localId` (plano 51 · 04 F1 — `_id ?? _localId`).
+export function selectionKey(m) {
+  if (!m) return null;
+  return m._id != null ? m._id : (m._localId != null ? m._localId : null);
+}
+
 export function useMessageActions({ phone, conversationId, setContactData }) {
-  // Per-message context menu: { x, y, message, isFromMe } | null
+  // Per-message context menu: { x, y, message, isFromMe, items } | null.
+  // `items` is resolved by the caller (ContactDetail) when the menu opens — base
+  // items + the `filter.message.contextMenu.items` plugin chain.
   const [msgMenu, setMsgMenu] = useState(null);
   // Delete confirmation dialog: { message, isFromMe } | null
   const [deleteDialog, setDeleteDialog] = useState(null);
-  // Improvement-analysis dialog for a flagged AI reply: { message } | null
-  const [improveDialog, setImproveDialog] = useState(null);
-  const [improveText, setImproveText] = useState('');
-  const [improveLoading, setImproveLoading] = useState(false);
-  const [improveError, setImproveError] = useState('');
+  // plano 51 (04 F1): batch message-selection mode. Off by default; entered via
+  // the "Selecionar mensagens" context-menu item (which only exists when some
+  // plugin registered `filter.selection.batchActions`). `selection` holds the
+  // stable keys (see selectionKey) of the marked messages.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selection, setSelection] = useState(() => new Set());
+
+  function enterSelection(firstMsg) {
+    const key = selectionKey(firstMsg);
+    setSelection(key != null ? new Set([key]) : new Set());
+    setSelectionMode(true);
+  }
+
+  function toggleSelect(message) {
+    const key = selectionKey(message);
+    if (key == null) return;
+    setSelection(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectionMode(false);
+    setSelection(new Set());
+  }
+
+  // Edit dialog: { message } | null
+  const [editDialog, setEditDialog] = useState(null);
 
   // Helper to find and update a message by its local ID
   function updateMsgByLocalId(localId, updater) {
@@ -51,14 +87,9 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     });
   }
 
-  // Open the per-message context menu at the given screen coords.
-  function openMsgMenu(e, message, isFromMe) {
-    e.preventDefault();
-    e.stopPropagation();
-    const x = e.clientX || (e.currentTarget && e.currentTarget.getBoundingClientRect().left) || 0;
-    const y = e.clientY || (e.currentTarget && e.currentTarget.getBoundingClientRect().bottom) || 0;
-    setMsgMenu({ x, y, message, isFromMe });
-  }
+  // (The context menu is opened by ContactDetail, which resolves the item list
+  // through the `filter.message.contextMenu.items` plugin seam and calls
+  // `setMsgMenu`. This hook only owns the menu STATE + the item operations.)
 
   // Copy the (display) text of a message to the clipboard, stripping the
   // "[Sender]: " group prefix the backend adds for LLM context.
@@ -71,55 +102,20 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     copyToClipboard(text);
   }
 
-  // Permalink estilo Chatwoot: âncora na conversa + id interno da mensagem (a mesma
-  // chave que o scroll-to-message usa via data-mid). Prefere a conversa da própria
-  // mensagem; cai no prop da conversa aberta. null quando não há como ancorar (msg
+  // Permalink estilo Chatwoot: âncora no atendimento + id interno da mensagem (a mesma
+  // chave que o scroll-to-message usa via data-mid). Prefere o atendimento da própria
+  // mensagem; cai no prop do atendimento aberto. null quando não há como ancorar (msg
   // sem _id ou pré-plano-11 sem conversation_id na visão mesclada) → item desabilitado.
   function messagePermalink(message) {
     if (!message || message._id == null) return null;
     const convId = message.conversation_id != null ? message.conversation_id : conversationId;
     if (convId == null) return null;
-    return `${window.location.origin}/conversations/${convId}?message=${message._id}`;
+    return deepLinkUrl(`/conversations/${convId}?message=${message._id}`);
   }
 
   function copyMessageLink(message) {
     const url = messagePermalink(message);
     if (url) copyToClipboard(url);
-  }
-
-  // Open the "Gerar melhoria" dialog for a flagged AI reply.
-  function openImprove(message) {
-    setImproveDialog({ message });
-    setImproveText('');
-    setImproveError('');
-  }
-
-  // Ask the backend for an improvement analysis. The result arrives as a
-  // panel-only "system" message via the WS "new_message" event (no manual
-  // insertion needed), so we just close the dialog on success.
-  async function submitImprovement() {
-    if (!improveDialog || improveLoading) return;
-    setImproveLoading(true);
-    setImproveError('');
-    try {
-      const res = await generateImprovement(phone, {
-        message: {
-          content: improveDialog.message.content,
-          ts: improveDialog.message.ts,
-          _id: improveDialog.message._id,
-        },
-        feedback: improveText.trim(),
-      });
-      if (res && res.ok) {
-        setImproveDialog(null);
-        setImproveText('');
-      } else {
-        setImproveError((res && res.error) || 'Falha ao gerar a análise.');
-      }
-    } catch {
-      setImproveError('Erro de conexão.');
-    }
-    setImproveLoading(false);
   }
 
   // Perform a message deletion. scope: 'me' | 'all'. Optimistically updates the
@@ -144,6 +140,51 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
     try {
       if (msgId || dbId) await deleteMessage(phone, { msgId, dbId, scope, conversationId });
     } catch (_) { /* best-effort; WS will reconcile if it succeeded */ }
+  }
+
+  // Edit an outgoing message's text. Optimistically swaps the content in place
+  // (and marks it edited); on failure reverts to the previous content and toasts.
+  // The WS `message_edited` broadcast reconciles other clients.
+  async function performEdit(message, newText) {
+    const text = (newText || '').trim();
+    setEditDialog(null);
+    if (!text || text === message.content) return;
+    const msgId = message.msg_id || null;
+    const dbId = message._id || message.id || null;
+    const localId = message._localId || null;
+    const prevContent = message.content;
+    const matches = (m) => (msgId && m.msg_id === msgId)
+      || (dbId && (m._id === dbId || m.id === dbId))
+      || (localId && m._localId === localId);
+    const nowTs = Date.now() / 1000;
+    // Optimistic content swap.
+    setContactData(prev => {
+      if (!prev || !prev.messages) return prev;
+      const updated = prev.messages.map(m =>
+        matches(m) ? { ...m, content: text, edited_ts: nowTs } : m);
+      return { ...prev, messages: updated };
+    });
+    try {
+      const res = await editMessage(phone, { msgId, dbId, text, conversationId });
+      if (!res || res.ok === false) {
+        // Revert and inform the operator (e.g. edit window expired at the provider).
+        setContactData(prev => {
+          if (!prev || !prev.messages) return prev;
+          const reverted = prev.messages.map(m =>
+            matches(m) ? { ...m, content: prevContent, edited_ts: message.edited_ts } : m);
+          return { ...prev, messages: reverted };
+        });
+        notify((res && res.error) || 'Não foi possível editar a mensagem.', { kind: 'error' });
+      }
+    } catch (_) {
+      setContactData(prev => {
+        if (!prev || !prev.messages) return prev;
+        const reverted = prev.messages.map(m =>
+          matches(m) ? { ...m, content: prevContent, edited_ts: message.edited_ts } : m);
+        return { ...prev, messages: reverted };
+      });
+      notify('Não foi possível editar a mensagem.', { kind: 'error' });
+    }
   }
 
   // React (or toggle off) on a message. Clicking the current emoji removes it.
@@ -174,9 +215,9 @@ export function useMessageActions({ phone, conversationId, setContactData }) {
 
   return {
     msgMenu, setMsgMenu, deleteDialog, setDeleteDialog,
-    improveDialog, setImproveDialog, improveText, setImproveText,
-    improveLoading, improveError,
-    updateMsgByLocalId, openMsgMenu, copyMessageText, messagePermalink, copyMessageLink,
-    openImprove, submitImprovement, performDelete, performReact,
+    editDialog, setEditDialog,
+    updateMsgByLocalId, copyMessageText, messagePermalink, copyMessageLink,
+    performDelete, performEdit, performReact,
+    selectionMode, selection, enterSelection, toggleSelect, clearSelection,
   };
 }

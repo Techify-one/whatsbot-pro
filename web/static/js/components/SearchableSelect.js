@@ -22,6 +22,10 @@ const html = htm.bind(h);
 // @param {string}   [props.searchPlaceholder] - placeholder while searching
 // @param {boolean}  [props.disabled]
 // @param {string}   [props.inputClass]     - override the closed-control classes
+// @param {boolean}  [props.allowCustom]    - COMBOBOX mode: what the user types IS
+//   a valid value (the options become mere suggestions). Typing commits on every
+//   keystroke, and a "Usar «texto»" row tops the list when the query matches no
+//   option. Off by default, so plain pickers keep discarding the query on close.
 export function SearchableSelect({
   value,
   onChange,
@@ -32,6 +36,7 @@ export function SearchableSelect({
   searchPlaceholder,
   disabled,
   inputClass,
+  allowCustom,
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -64,9 +69,14 @@ export function SearchableSelect({
   // The "clear" row only shows when allowEmpty and no active query — so typing
   // still filters real options. It's part of the navigable (keyboard) list.
   const showEmptyRow = !!allowEmpty && !ql;
-  const navItems = showEmptyRow
-    ? [{ value: '', label: emptyLabel || '—', __empty: true }, ...matches]
-    : matches;
+  // Combobox: offer the raw text as a value whenever it isn't already an option.
+  const showCustomRow = !!allowCustom && !!query.trim()
+    && !opts.some((o) => String(o.value) === query.trim());
+  const navItems = [
+    ...(showEmptyRow ? [{ value: '', label: emptyLabel || '—', __empty: true }] : []),
+    ...(showCustomRow ? [{ value: query.trim(), label: `Usar "${query.trim()}"`, __custom: true }] : []),
+    ...matches,
+  ];
 
   // Reset highlight when the filtered list changes.
   useEffect(() => { setHighlightIdx(0); }, [query]);
@@ -127,8 +137,18 @@ export function SearchableSelect({
         value=${displayValue}
         placeholder=${open ? (searchPlaceholder || placeholder || 'Buscar...') : (placeholder || 'Selecione...')}
         disabled=${disabled}
-        onFocus=${() => { if (!disabled) { setOpen(true); setQuery(''); } }}
-        onInput=${(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus=${() => {
+          if (disabled) return;
+          setOpen(true);
+          // Combobox: seed the box with the current text so focusing doesn't look
+          // like it wiped the field. Plain picker: clear, the query is a filter.
+          setQuery(allowCustom ? String(value == null ? '' : value) : '');
+        }}
+        onInput=${(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+          if (allowCustom) onChange(e.target.value);  // o texto digitado JÁ é o valor
+        }}
         onKeyDown=${handleKeyDown}
         class=${closedClass}
         title=${current ? current.label : (value || '')}
@@ -161,4 +181,3 @@ export function SearchableSelect({
   `;
 }
 
-export default SearchableSelect;

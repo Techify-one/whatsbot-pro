@@ -53,10 +53,14 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(null); // plugin id
+  const [descOpen, setDescOpen] = useState(null); // plugin id do popup "descrição completa"
   const [importing, setImporting] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [exporting, setExporting] = useState({}); // { [pluginId]: pct (0-100) }
+  const [updating, setUpdating] = useState(null); // pid sendo atualizado
   const fileRef = useRef(null);
+  const updateFileRef = useRef(null);
+  const pendingUpdatePid = useRef(null); // pid alvo do <input> de atualização
 
   // Deep-link /plugins/<id>: a URL reflete o plugin com o modal Configurar aberto.
   const pushUrl = useDeepLink({
@@ -206,6 +210,44 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
     }
   }
 
+  // Atualizar: troca o código do plugin por um novo .zip SEM apagar tabelas/dados
+  // (diferente de Deletar + Importar). O backend preserva o banco e roda só as
+  // migrations novas no restart.
+  function pickUpdate(pid) {
+    if (!confirm(
+      `Atualizar o plugin '${pid}' com um novo .zip?\n\n` +
+      `Os dados e tabelas dele são PRESERVADOS — apenas o código é trocado e ` +
+      `as migrations novas rodam no reinício.`
+    )) return;
+    pendingUpdatePid.current = pid;
+    if (updateFileRef.current) updateFileRef.current.click();
+  }
+
+  async function updatePlugin(pid, file) {
+    if (!file || !pid) return;
+    setUpdating(pid);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(`/api/plugins/${pid}/update`, { method: 'POST', body: fd, headers: authHeaders() });
+      if (r.status === 401) { handleUnauthorized(); throw new Error('Não autenticado.'); }
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error || 'falha');
+      if (data.data && data.data.warning) alert(`Atenção — ${data.data.warning}`);
+      // Limpa o estado por-card: o RestartBanner (overlay) assume a UI a partir
+      // daqui, e se o poll de restart estourar o timeout o botão não fica preso
+      // em "Atualizando…".
+      setUpdating(null);
+      setRestarting(true);
+    } catch (e) {
+      alert(`Erro ao atualizar: ${e.message || e}`);
+      setUpdating(null);
+    } finally {
+      pendingUpdatePid.current = null;
+      if (updateFileRef.current) updateFileRef.current.value = '';
+    }
+  }
+
   if (loading) return html`<div class="text-wa-secondary">Carregando plugins…</div>`;
   if (error) return html`<div class="text-red-600">Erro: ${error}</div>`;
 
@@ -232,6 +274,8 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
           >Loja de Plugins</a>
           <input type="file" ref=${fileRef} accept=".zip" class="hidden"
             onChange=${e => importPlugin(e.target.files && e.target.files[0])} />
+          <input type="file" ref=${updateFileRef} accept=".zip" class="hidden"
+            onChange=${e => updatePlugin(pendingUpdatePid.current, e.target.files && e.target.files[0])} />
           <button
             disabled=${importing}
             onClick=${() => fileRef.current && fileRef.current.click()}
@@ -262,8 +306,19 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
                   </div>
                   <${StatusBadge} plugin=${p} />
                 </div>
-                ${p.description ? html`
-                  <div class="text-[13px] mt-2 text-wa-text">${p.description}</div>
+                ${(p.short_description || p.description) ? html`
+                  <button
+                    type="button"
+                    onClick=${() => setDescOpen(p.id)}
+                    title="Clique para ver a descrição completa"
+                    class="block w-full text-left text-[13px] mt-2 text-wa-text hover:text-wa-teal cursor-pointer"
+                  >
+                    <span
+                      class="block overflow-hidden"
+                      style="display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;"
+                    >${p.short_description || p.description}</span>
+                    <span class="text-[12px] text-wa-teal mt-0.5 inline-block">ver mais</span>
+                  </button>
                 ` : null}
                 ${(p.dependencies && p.dependencies.length) ? html`
                   <div class="text-[11px] mt-2 text-wa-secondary">
@@ -291,6 +346,12 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
                     class="px-3 py-1 text-[13px] rounded bg-wa-panel border border-wa-border disabled:opacity-50"
                   >${exporting[p.id] != null ? 'Exportando…' : 'Exportar'}</button>
                   <button
+                    onClick=${() => pickUpdate(p.id)}
+                    disabled=${updating === p.id}
+                    title="Enviar um novo .zip preservando os dados/tabelas do plugin"
+                    class="px-3 py-1 text-[13px] rounded bg-blue-50 text-blue-700 border border-blue-200 disabled:opacity-50"
+                  >${updating === p.id ? 'Atualizando…' : 'Atualizar'}</button>
+                  <button
                     onClick=${() => deletePlugin(p.id)}
                     class="px-3 py-1 text-[13px] rounded bg-red-50 text-red-700 border border-red-200"
                   >Deletar</button>
@@ -311,6 +372,33 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
             `)}
           </div>`
       }
+
+      ${descOpen ? (() => {
+        const dp = plugins.find(p => p.id === descOpen);
+        if (!dp) return null;
+        return html`
+          <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center"
+               onClick=${() => setDescOpen(null)}>
+            <div class="bg-wa-bg rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[85vh] overflow-y-auto"
+                 onClick=${e => e.stopPropagation()}>
+              <div class="border-b border-wa-border px-4 py-3 flex items-center justify-between">
+                <div>
+                  <div class="font-medium">${dp.name || dp.id}</div>
+                  <div class="text-[12px] text-wa-secondary">
+                    <code>${dp.id}</code>${dp.version ? html` · v${dp.version}` : null}
+                    ${dp.author ? html` · ${dp.author}` : null}
+                  </div>
+                </div>
+                <button class="text-wa-secondary hover:text-wa-text"
+                        onClick=${() => setDescOpen(null)}>×</button>
+              </div>
+              <div class="p-4 text-[14px] text-wa-text whitespace-pre-line leading-relaxed">
+                ${dp.description || dp.short_description || 'Sem descrição.'}
+              </div>
+            </div>
+          </div>
+        `;
+      })() : null}
 
       ${settingsOpen ? html`
         <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center">
@@ -335,4 +423,3 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
   `;
 }
 
-export default PluginsManager;

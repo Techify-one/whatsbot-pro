@@ -11,13 +11,13 @@ import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { getConfig, saveConfig, testApiKey } from '../../services/api.js';
-import { ModelSelect } from '../ModelSelect.js';
+import { Slot } from '../../plugins/Slot.js';
 
 const html = htm.bind(h);
 
 export default function GeneralSettings() {
   const [config, setConfig] = useState(null);
-  // Interruptor GLOBAL da IA (checado antes do toggle por canal e por conversa).
+  // Interruptor GLOBAL da IA (checado antes do toggle por canal e por atendimento).
   const [autoReply, setAutoReply] = useState(true);
   // API
   const [apiKey, setApiKey] = useState('');
@@ -26,8 +26,14 @@ export default function GeneralSettings() {
   // Saldo
   const [lowBalanceEnabled, setLowBalanceEnabled] = useState(true);
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
-  // Modelo da análise de melhoria ('' = usar o mesmo do chat).
-  const [improvementModel, setImprovementModel] = useState('');
+  // Exibir o nome do agente de IA nas mensagens ("IA - <NOME>") e nos cards de tool.
+  const [showAgentName, setShowAgentName] = useState(true);
+  // A "sugestão de melhoria" (modelo/prompt + análises geradas) migrou para o
+  // plugin "melhorias", renderizado no slot `ai.settings.sections` abaixo.
+  // plano 43 — lista-negra por regex do histórico da IA (uma regex por linha).
+  const [historyExcludePatterns, setHistoryExcludePatterns] = useState('');
+  // plano 47 (D9) — tamanho máx. (chars) do resultado de tool reaproveitado.
+  const [toolReuseMaxChars, setToolReuseMaxChars] = useState(800);
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -39,7 +45,9 @@ export default function GeneralSettings() {
     setAutoReply(cfg.auto_reply ?? true);
     setLowBalanceEnabled(cfg.low_balance_enabled ?? true);
     setLowBalanceThreshold(cfg.low_balance_threshold ?? 0.5);
-    setImprovementModel(cfg.improvement_model ?? '');
+    setShowAgentName(cfg.show_agent_name ?? true);
+    setHistoryExcludePatterns((cfg.ai_history_exclude_patterns || []).join('\n'));
+    setToolReuseMaxChars(cfg.ai_tool_reuse_result_max_chars ?? 800);
   }
 
   async function load() {
@@ -87,7 +95,13 @@ export default function GeneralSettings() {
       auto_reply: autoReply,
       low_balance_enabled: lowBalanceEnabled,
       low_balance_threshold: isNaN(parseFloat(lowBalanceThreshold)) ? 0.5 : parseFloat(lowBalanceThreshold),
-      improvement_model: improvementModel || '',
+      show_agent_name: showAgentName,
+      // plano 43 — uma regex por linha; descarta linhas vazias. O backend também
+      // ignora regex inválida (fail-open), então não bloqueamos o save.
+      ai_history_exclude_patterns: historyExcludePatterns
+        .split('\n').map((s) => s.trim()).filter(Boolean),
+      // plano 47 (D9) — cap por-resultado do reaproveitamento; fallback 800.
+      ai_tool_reuse_result_max_chars: parseInt(toolReuseMaxChars, 10) || 800,
     };
     // Only include the API key when the user typed a new one.
     if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
@@ -119,6 +133,15 @@ export default function GeneralSettings() {
       </div>
     `;
   }
+
+  // plano 43 — sinaliza (sem bloquear) as linhas de regex inválidas. O backend
+  // também as ignora (fail-open), então isto é só um aviso visual.
+  const invalidPatternLines = [];
+  historyExcludePatterns.split('\n').forEach((line, i) => {
+    const t = line.trim();
+    if (!t) return;
+    try { new RegExp(t); } catch { invalidPatternLines.push(i + 1); }
+  });
 
   return html`
     <div class="flex flex-col gap-4">
@@ -213,21 +236,74 @@ export default function GeneralSettings() {
         ` : null}
       </div>
 
-      <!-- Modelo da sugestão de melhoria -->
+      <!-- Nome do agente nas mensagens -->
       <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-        <label class="text-[14px] font-semibold text-wa-text">Modelo de IA (sugestão de melhoria)</label>
+        <label class="flex items-center gap-2 text-[14px] font-medium text-wa-text cursor-pointer">
+          <input
+            type="checkbox"
+            checked=${showAgentName}
+            onChange=${(e) => setShowAgentName(e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+          />
+          Mostrar o nome do agente de IA nas mensagens
+        </label>
+        <span class="text-[12px] text-wa-secondary">Exibe "IA - &lt;nome do agente&gt;" nas respostas e "Ferramenta IA - &lt;nome do agente&gt;" nos cards de tool. Desligado, mostra apenas "IA".</span>
+      </div>
+
+      <!-- Seção "Sugestão de melhoria" (config de modelo/prompt + análises geradas):
+           preenchida pelo plugin "melhorias" via o slot. Some quando o plugin está
+           desativado. -->
+      <${Slot} name="ai.settings.sections" ctx=${{}} />
+
+      <!-- Filtro de histórico por regex (lista-negra) -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <label class="text-[14px] font-semibold text-wa-text">Filtro de histórico (regex)</label>
         <span class="text-[12px] text-wa-secondary">
-          Modelo usado ao gerar a análise de uma resposta marcada como incorreta
-          (botão direito numa resposta da IA → "Gerar melhoria"). Deixe em branco para
-          usar o mesmo modelo do chat.
+          Uma expressão regular por linha. Uma mensagem do histórico é
+          <span class="font-medium">cortada do contexto enviado à IA</span> quando
+          <span class="font-medium">role⇥conteúdo</span> casa algum padrão (busca parcial).
+          Útil para não mandar à IA notas de automação (ex.: protocolos). Deixe vazio para
+          não cortar nada.
         </span>
-        <${ModelSelect}
-          value=${improvementModel}
-          onChange=${(v) => setImprovementModel(v || '')}
-          allowEmpty=${true}
-          emptyLabel="— Usar o mesmo do chat —"
-          placeholder="Usar o mesmo do chat"
+        <textarea
+          value=${historyExcludePatterns}
+          onInput=${(e) => setHistoryExcludePatterns(e.target.value)}
+          rows="4"
+          spellcheck="false"
+          placeholder=${'^private_note\\t\nProtocolo aberto\nPROT-\\d{8}'}
+          class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono"
+        ></textarea>
+        ${invalidPatternLines.length ? html`
+          <span class="text-[12px] text-red-500">
+            Regex inválida na(s) linha(s) ${invalidPatternLines.join(', ')} — será ignorada ao salvar.
+          </span>
+        ` : null}
+        <span class="text-[12px] text-wa-secondary">
+          Exemplos: <code>${'^private_note\\t'}</code> corta todas as notas privadas ·
+          <code>Protocolo aberto</code> corta por conteúdo ·
+          <code>${'PROT-\\d{8}'}</code> por padrão de protocolo.
+        </span>
+      </div>
+
+      <!-- plano 47 — tamanho máx. do resultado de tool reaproveitado (D9) -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <label class="text-[14px] font-semibold text-wa-text">Tamanho máx. do resultado reaproveitado (caracteres)</label>
+        <span class="text-[12px] text-wa-secondary">
+          Quando uma tool está marcada com <span class="font-medium">"Reaproveitar a resposta"</span>
+          (na tela <span class="font-medium">IA → Tools</span>), a IA passa a lembrar o resultado dela nas
+          próximas mensagens em vez de consultar de novo. Este é o limite de caracteres por resultado
+          reaproveitado — vale para todas as tools marcadas. Resultados maiores são truncados.
+        </span>
+        <input
+          type="number"
+          min="50"
+          max="8000"
+          step="50"
+          value=${toolReuseMaxChars}
+          onInput=${(e) => setToolReuseMaxChars(e.target.value)}
+          class="wa-field w-40 px-3 py-1.5 rounded-md text-[14px]"
         />
+        <span class="text-[12px] text-wa-secondary">Padrão: 800. Mínimo efetivo: 50.</span>
       </div>
 
       <!-- Save -->

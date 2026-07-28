@@ -24,9 +24,20 @@ ROLE_LABELS = {
 ROLE_DEFAULTS = {
     "gestor": {
         "conversation.read", "conversation.reply", "conversation.assign",
-        "conversation.resolve", "contact.read", "contact.write", "channel.manage",
-        "settings.manage", "plugins.manage", "billing.manage", "agent.manage",
+        "conversation.resolve", "contact.read", "contact.write", "contact.import",
+        "channel.manage", "settings.manage", "plugins.manage", "billing.manage",
+        # Abas de Configurações Gerais (a aba "Sons" é pessoal, sem permissão).
+        "settings.general", "settings.advanced", "settings.notifications",
+        # IA granular (substitui o antigo agent.manage — gestor recebe todas).
+        # Prompt dividido em edit/version/delete (substitui agent.prompts.manage).
+        "agent.config.manage", "agent.create", "agent.duplicate",
+        "agent.prompts.edit", "agent.prompts.version", "agent.prompts.delete",
+        "agent.tools.manage", "agent.variables.manage",
         "quickreply.manage", "template.create", "template.delete", "audit.read",
+        # Plano 24 — gestor recebe as 9 novas (database.manage fica admin-only)
+        "contact.delete", "conversation.delete", "tag.manage",
+        "conversation_label.manage", "sandbox.use", "usage.read",
+        "custom_attribute.manage", "execution.read", "execution.delete",
     },
     "atendente": {
         "conversation.read", "conversation.reply", "conversation.resolve",

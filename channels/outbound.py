@@ -45,7 +45,8 @@ class OutboundRouter:
     def supports(self, channel_id: str, cap: str) -> bool:
         return bool(getattr(self.capabilities(channel_id), cap, False))
 
-    def session_open(self, channel_id: str, last_inbound_ts: float | None) -> bool:
+    def session_open(self, channel_id: str, last_inbound_ts: float | None, *,
+                     by_human: bool = False) -> bool:
         """Whether FREE TEXT is allowed to ``channel_id`` right now (plano 11 Fase 6).
 
         Channels with ``session_window_hours == 0`` (GOWA/linked-device) are always
@@ -54,8 +55,17 @@ class OutboundRouter:
         template (HSM, via :meth:`send_template`) is required. Driven by CAPABILITY,
         never provider name. The agentic auto-reply is inherently in-window (it
         answers a just-received inbound); this guards proactive/operator sends.
+
+        ``by_human=True`` (plano 46 · 02.2) additionally honours
+        ``capabilities.human_window_hours`` — the EXTENDED window a provider grants
+        to a real human reply (Messenger/Instagram: 7 days via the ``HUMAN_AGENT``
+        tag). Only the operator-initiated send paths pass it; the AI never does, so
+        the AI can never reach a human-only escape hatch.
         """
-        hours = self.capabilities(channel_id).session_window_hours
+        caps = self.capabilities(channel_id)
+        hours = caps.session_window_hours
+        if by_human:
+            hours = max(hours, getattr(caps, "human_window_hours", 0) or 0)
         if not hours:
             return True
         if not last_inbound_ts:
@@ -151,6 +161,28 @@ class OutboundRouter:
             logger.warning("create_template failed on %s: %s", channel_id, e)
             return {"ok": False, "error": str(e)}
 
+    def upload_template_example(self, channel_id: str, file_bytes: bytes,
+                                mime: str, filename: str) -> dict:
+        """Upload a media sample and return its provider handle (plano 73).
+
+        Capability-gated exactly like ``create_template``: the returned handle is
+        what ``create_template(header_handle=...)`` expects. Returns
+        ``{ok, handle?, error?}`` — never raises, so the route maps a failure to a
+        clean API error instead of a 500.
+        """
+        if not self.supports(channel_id, "templates"):
+            return {"ok": False, "error": "templates_not_supported"}
+        inst = self.get(channel_id)
+        if inst is None:
+            return {"ok": False, "error": "channel_not_registered"}
+        try:
+            return inst.upload_example(file_bytes, mime, filename)
+        except NotImplementedError:
+            return {"ok": False, "error": "templates_not_supported"}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("upload_template_example failed on %s: %s", channel_id, e)
+            return {"ok": False, "error": str(e)}
+
     def delete_template(self, channel_id: str, name: str) -> dict:
         """Delete a template (all languages) on a channel (capability-gated)."""
         if not self.supports(channel_id, "templates"):
@@ -187,6 +219,21 @@ class OutboundRouter:
         except Exception:  # noqa: BLE001
             logger.debug("mark_read failed on %s", channel_id, exc_info=True)
 
+    def fetch_avatar(self, channel_id: str, chat_id: str) -> bytes | None:
+        """Profile photo bytes for ``chat_id`` on ``channel_id`` (plano 38 F5), via the
+        channel's ``fetch_avatar`` hook. Returns ``None`` when the channel has no live
+        instance or its provider doesn't implement avatars (Telegram/Cloud) — the
+        ``None`` is the gate, so no cross-provider GOWA fetch ever happens."""
+        inst = self.get(channel_id)
+        if inst is None or not chat_id:
+            return None
+        try:
+            data = inst.fetch_avatar(chat_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("fetch_avatar failed on %s", channel_id, exc_info=True)
+            return None
+        return data if isinstance(data, bytes) else None
+
     def react(self, channel_id: str, chat_id: str, msg_id: str, emoji: str) -> None:
         if not self.supports(channel_id, "reactions"):
             return
@@ -215,3 +262,21 @@ class OutboundRouter:
         except Exception:  # noqa: BLE001
             logger.debug("revoke failed on %s", channel_id, exc_info=True)
             return False
+
+    def edit_text(self, channel_id: str, chat_id: str, msg_id: str,
+                  text: str) -> SendResult:
+        """Edit a sent message's text via the conversation's channel (capability-gated).
+
+        Returns ``SendResult(ok=False, error="edit_not_supported")`` when the channel
+        doesn't declare ``edit_message`` or isn't live, so the caller maps it to a
+        clean API error. Driven by CAPABILITY, never provider name.
+        """
+        if not self.supports(channel_id, "edit_message"):
+            return SendResult(ok=False, error="edit_not_supported")
+        inst = self.get(channel_id)
+        if inst is None or not msg_id:
+            return SendResult(ok=False, error="channel_not_registered")
+        try:
+            return inst.edit_text(chat_id, msg_id, text)
+        except Exception as e:  # noqa: BLE001
+            return SendResult(ok=False, error=str(e))

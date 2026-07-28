@@ -20,11 +20,11 @@
   },
   "notices": [
     {
-      "content": "🧑‍💼 Conversa atribuída para Atendente Unassign.",
+      "content": "🧑‍💼 Operador atribuiu a conversa para Atendente Unassign.",
       "role": "conversation_event"
     },
     {
-      "content": "🧑‍💼 Atribuição da conversa removida.",
+      "content": "🧑‍💼 Operador removeu a atribuição da conversa.",
       "role": "conversation_event"
     }
   ],

@@ -31,6 +31,8 @@ from channels.events import InboundEvent
 from channels import jid as jid_classifier
 from db.repositories import channel_repo, contact_repo, conversation_repo
 from plugins.events import apply_filter, emit_with_filter
+from app.services.realtime_broadcast import build_inbound_saved_message
+from server.transcription import placeholder_for_unrenderable
 
 logger = logging.getLogger(__name__)
 
@@ -417,7 +419,14 @@ class MessageIngestService:
                 "phone": phone, "archived": bool(event.is_archived),
                 "ts": time.time(),
             })
-        await asyncio.to_thread(contact.increment_unread, msg_id)
+        # Regra "ignorar abertura" (plugin): um filtro pode marcar a mensagem como
+        # SILENCIOSA (sem badge de não-lida / som / alerta) — a msg ainda é salva e
+        # exibida. Sem plugin registrado → True → notifica normalmente.
+        _notify = await apply_filter(
+            "filter.message.notify", True,
+            {"phone": phone, "role": "user", "text": display_text})
+        if _notify:
+            await asyncio.to_thread(contact.increment_unread, msg_id)
         if event.is_group and event.mentioned:
             await asyncio.to_thread(contact.mark_mention)
 
@@ -455,8 +464,48 @@ class MessageIngestService:
         media_path = _filtered.media_path
         media_extras = _filtered.media_extras
 
-        broadcast_msg: dict = {"role": "user", "content": display_text,
+        # Regra "ignorar abertura" (plugin): um filtro pode impedir que esta mensagem
+        # recebida REABRA uma conversa fechada — a mensagem ainda aparece (broadcast +
+        # save abaixo), só a conversa continua resolvida. Sem plugin → True → reopen=None.
+        _allow_reopen = await apply_filter(
+            "filter.conversation.before_reopen", True,
+            {"phone": phone, "role": "user", "text": display_text})
+        _reopen = False if not _allow_reopen else None
+
+        # plano 25 Fase 2 (bug #2): materialize the atendimento thread NOW (t=0), so a
+        # brand-new conversation's sidebar row appears together with the tab badge —
+        # not only when the batch saves the combined message (t≈message_batch_delay).
+        # Idempotent: the batch's add_message re-resolves the SAME thread → no
+        # re-announce. Runs AFTER echo suppression (:400) and filter.message.before_save
+        # (:447) so a dropped/echo message never creates a conversation.
+        conversation_id = await asyncio.to_thread(
+            contact.ensure_conversation_live, "user", _reopen)
+
+        # plano 75 F3 — safety net shared with the batch save (messaging_service):
+        # an unrenderable media_type with no body would paint a blank bubble, so
+        # the optimistic t=0 text must already carry the same placeholder that
+        # will be persisted. Legitimate media (with media_path) is untouched.
+        ui_text = placeholder_for_unrenderable(display_text, media_type, media_path)
+
+        broadcast_msg: dict = {"role": "user", "content": ui_text,
                                "ts": time.time(), "msg_id": msg_id}
+        if not _notify:
+            broadcast_msg["silent"] = True  # frontend pula som/alerta de nova mensagem
+        # The frontend matches the sidebar row by conversation_id first (precedence
+        # over phone/channel), so a NEW conversation's row updates in place at t=0.
+        if conversation_id is not None:
+            broadcast_msg["conversation_id"] = conversation_id
+            # Quem "possui" a conversa — o painel usa isto para decidir se toca o som
+            # de mensagem nova (só as minhas ou as sem atendente e sem IA). Defensivo:
+            # falha aqui ⇒ campos AUSENTES ⇒ o cliente toca (fail-open), nunca fica
+            # mudo por causa de uma query.
+            try:
+                _asg = await asyncio.to_thread(conversation_repo.assignment_of, conversation_id)
+                if _asg:
+                    broadcast_msg["assignee_user_id"] = _asg.get("assignee_user_id")
+                    broadcast_msg["active_agent_key"] = _asg.get("active_agent_key")
+            except Exception:
+                logger.debug("assignment_of falhou para a conversa %s", conversation_id)
         if reply_to:
             broadcast_msg["reply_to_msg_id"] = reply_to
         if media_type:
@@ -472,12 +521,20 @@ class MessageIngestService:
         # Group message with no @mention (group_reply_mode): save to history +
         # message.saved, but do NOT run the agent (plano 13 Fase 0 — trigger_ai).
         if not getattr(event, "trigger_ai", True):
-            await asyncio.to_thread(
-                contact.add_message, "user", display_text,
+            saved = await asyncio.to_thread(
+                contact.add_message, "user", ui_text,
                 media_type=media_type, media_path=media_path,
-                msg_id=msg_id, reply_to_msg_id=reply_to)
+                msg_id=msg_id, reply_to_msg_id=reply_to, reopen=_reopen)
+            # plano 57: new_message autoritativo pós-save (grupo sem @menção — 1 linha).
+            try:
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone, "channel_id": channel_id,
+                    "message": build_inbound_saved_message(saved),
+                })
+            except Exception:
+                logger.exception("[Ingest] falha ao re-emitir new_message (grupo) pós-save para %s", phone)
             await emit_with_filter("message.saved", {
-                "phone": phone, "channel_id": channel_id, "text": display_text,
+                "phone": phone, "channel_id": channel_id, "text": ui_text,
                 "msg_id": msg_id, "media_type": media_type, "media_path": media_path,
                 "media_extras": media_extras, "is_group": event.is_group,
                 "group_jid": event.chat_id if event.is_group else None,

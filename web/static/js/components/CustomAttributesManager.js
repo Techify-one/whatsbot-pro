@@ -1,7 +1,7 @@
 // Custom attributes admin screen (plano 05) — full-page (FQ6).
 // Define contact AND conversation custom attributes: key, type, options…
 // attribute_key + applies_to are identity: settable on create, immutable after.
-// Chatwoot-style: abas (Conversas | Contato) + tabela.
+// Chatwoot-style: abas (Atendimentos | Contato) + tabela.
 // Dispatches `whatsbot:custom-attributes-changed` so open contact/conversation panels reload.
 
 import { h } from 'preact';
@@ -35,7 +35,7 @@ const SCOPES = [
   ['conversation', 'Conversa'],
 ];
 
-// Tab order mirrors the Chatwoot layout (Conversas first, then Contato).
+// Tab order mirrors the Chatwoot layout (Atendimentos first, then Contato).
 const SCOPE_TABS = [
   ['conversation', 'Conversas'],
   ['contact', 'Contato'],
@@ -62,6 +62,29 @@ function slugify(name) {
 
 function notifyChanged() {
   try { window.dispatchEvent(new Event('whatsbot:custom-attributes-changed')); } catch (e) {}
+}
+
+// Modal de confirmação in-app (substitui o confirm() nativo do navegador).
+function ConfirmModal({ title, message, confirmLabel = 'Confirmar', danger = false, busy = false, onConfirm, onClose }) {
+  return html`
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick=${onClose}>
+      <div class="bg-wa-bg border border-wa-border rounded-lg p-5 w-full max-w-sm"
+        onClick=${(e) => e.stopPropagation()}>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[15px] font-medium text-wa-text">${title}</div>
+          <button class="text-wa-secondary hover:text-wa-text text-xl leading-none" onClick=${onClose}>×</button>
+        </div>
+        <div class="text-[13px] text-wa-secondary mb-4 break-words">${message}</div>
+        <div class="flex gap-2 justify-end">
+          <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+            onClick=${onClose} disabled=${busy}>Cancelar</button>
+          <button
+            class="px-4 py-2 rounded-md text-[14px] text-white transition-opacity disabled:opacity-50 ${danger ? 'bg-red-600 hover:opacity-90' : 'bg-wa-teal hover:opacity-90'}"
+            onClick=${onConfirm} disabled=${busy}>${busy ? 'Aguarde…' : confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
@@ -146,7 +169,7 @@ function AttributeForm({ editing, defaultScope, onSubmit, onCancel, busy }) {
           </select>
           <div class="text-[12px] text-wa-secondary mt-1">
             ${appliesTo === 'conversation'
-              ? 'Aparece no painel "Informações da conversa" — um valor por atendimento.'
+              ? 'Aparece no painel "Informações da conversa" — um valor por conversa.'
               : 'Aparece no painel "Informações do contato" — um valor por contato.'}
           </div>
         </div>
@@ -201,8 +224,16 @@ export default function CustomAttributesManager({ initialEntity }) {
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null); // row pendente de exclusão
   // Aba de escopo (Chatwoot-style) espelha /custom-attributes/<scope>[/<key>].
   const [tab, setTab] = useState(() => initialEntity?.sub || 'conversation');
+
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editing || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editing, creating]);
 
   async function load() {
     setLoading(true);
@@ -212,9 +243,15 @@ export default function CustomAttributesManager({ initialEntity }) {
       getCustomAttributes('conversation'),
     ]);
     if ((cRes && cRes.ok) || (vRes && vRes.ok)) {
+      // Esta tela administra APENAS os atributos criados aqui (is_system=0). Os
+      // is_system=1 são rótulos registrados por plugins (o Atendimentos espelha seus
+      // campos de "Resolver atendimento" como atributos de atendimento) — eles vivem e são
+      // editados na config do próprio plugin, não nesta lista. O backend já bloqueia
+      // editar/excluir is_system, então aqui só os escondemos da gestão.
+      const onlyUserCreated = (rows) => (rows || []).filter(a => !a.is_system);
       setItems([
-        ...((cRes && cRes.ok && cRes.data) || []),
-        ...((vRes && vRes.ok && vRes.data) || []),
+        ...onlyUserCreated(cRes && cRes.ok && cRes.data),
+        ...onlyUserCreated(vRes && vRes.ok && vRes.data),
       ]);
       setError('');
     } else {
@@ -268,11 +305,13 @@ export default function CustomAttributesManager({ initialEntity }) {
     else setError((res && res.error) || 'Falha ao salvar.');
   }
 
-  async function handleDelete(row) {
-    if (!confirm(`Excluir o atributo "${row.attribute_key}"? Os valores já preenchidos são preservados.`)) return;
-    const res = await deleteCustomAttribute(row.id);
-    if (res && res.ok) { notifyChanged(); load(); }
-    else setError((res && res.error) || 'Falha ao excluir.');
+  async function handleDelete() {
+    if (!confirmDelete) return;
+    setBusy(true);
+    const res = await deleteCustomAttribute(confirmDelete.id);
+    setBusy(false);
+    if (res && res.ok) { setConfirmDelete(null); notifyChanged(); load(); }
+    else { setConfirmDelete(null); setError((res && res.error) || 'Falha ao excluir.'); }
   }
 
   const typeLabel = (t) => (TYPES.find(([v]) => v === t) || [t, t])[1];
@@ -311,8 +350,10 @@ export default function CustomAttributesManager({ initialEntity }) {
         `)}
       </div>
 
-      ${creating ? html`<${AttributeForm} defaultScope=${tab} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
-      ${editing ? html`<${AttributeForm} editing=${editing} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      <div ref=${formRef}>
+        ${creating ? html`<${AttributeForm} defaultScope=${tab} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
+        ${editing ? html`<${AttributeForm} editing=${editing} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
@@ -339,7 +380,6 @@ export default function CustomAttributesManager({ initialEntity }) {
                 <tr key=${row.id} class="border-b border-wa-border last:border-0 hover:bg-wa-hover transition-colors">
                   <td class="px-4 py-3 text-[14px] text-wa-text">
                     ${row.display_name}${row.required ? html`<span class="text-red-500"> *</span>` : null}
-                    ${row.is_system ? html`<span class="ml-2 text-[10px] font-semibold text-wa-teal bg-wa-teal/10 rounded px-[5px] py-[1px] align-middle" title="Atributo padrão do sistema — não pode ser apagado nem ter a chave alterada.">Sistema</span>` : null}
                   </td>
                   <td class="px-4 py-3 text-[14px] text-wa-secondary">${row.description || '—'}</td>
                   <td class="px-4 py-3 text-[14px] text-wa-text">
@@ -351,11 +391,9 @@ export default function CustomAttributesManager({ initialEntity }) {
                       <button title="Editar" aria-label="Editar"
                         class="p-1.5 rounded-md text-wa-secondary hover:text-wa-text hover:bg-wa-hover transition-colors"
                         onClick=${() => { setEditing(row); setCreating(false); setError(''); }}>${PencilIcon}</button>
-                      ${!row.is_system ? html`
                       <button title="Excluir" aria-label="Excluir"
                         class="p-1.5 rounded-md text-red-500 hover:bg-red-500/10 transition-colors"
-                        onClick=${() => handleDelete(row)}>${TrashIcon}</button>
-                      ` : null}
+                        onClick=${() => setConfirmDelete(row)}>${TrashIcon}</button>
                     </div>
                   </td>
                 </tr>
@@ -363,6 +401,17 @@ export default function CustomAttributesManager({ initialEntity }) {
             </tbody>
           </table>
         </div>
+      ` : null}
+
+      ${confirmDelete ? html`
+        <${ConfirmModal}
+          title="Excluir atributo"
+          message=${html`Excluir o atributo "${confirmDelete.display_name}"? Os valores já preenchidos são preservados.`}
+          confirmLabel="Excluir"
+          danger
+          busy=${busy}
+          onConfirm=${handleDelete}
+          onClose=${() => setConfirmDelete(null)} />
       ` : null}
     </div>
   `;

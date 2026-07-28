@@ -4,11 +4,12 @@
 import { h } from 'preact';
 import htm from 'htm';
 import { GROUP_MODES } from './grouping.js';
+import { OptionListSelect } from '../OptionListSelect.js';
 
 const html = htm.bind(h);
 
 export function GroupBySelector({ mode, onMode, stageAttrs, stageAttrKey, onStageAttr }) {
-  // 'stage' só faz sentido se existir ao menos um atributo de conversa tipo lista.
+  // 'stage' só faz sentido se existir ao menos um atributo de atendimento tipo lista.
   const modes = GROUP_MODES.filter(m => m.id !== 'stage' || (stageAttrs && stageAttrs.length > 0));
 
   return html`
@@ -20,13 +21,14 @@ export function GroupBySelector({ mode, onMode, stageAttrs, stageAttrKey, onStag
       </select>
 
       ${mode === 'stage' && stageAttrs && stageAttrs.length > 1 ? html`
-        <select class="wa-field px-2 py-1.5 rounded-md text-[13px]" value=${stageAttrKey || ''}
-          onChange=${(e) => onStageAttr(e.target.value)}>
-          ${stageAttrs.map(a => html`<option key=${a.attribute_key} value=${a.attribute_key}>${a.display_name || a.attribute_key}</option>`)}
-        </select>
+        <div class="min-w-[180px]">
+          <${OptionListSelect} float=${true}
+            options=${stageAttrs.map(a => ({ value: a.attribute_key, label: a.display_name || a.attribute_key }))}
+            value=${stageAttrKey || ''} onChange=${onStageAttr}
+            placeholder="Escolha o atributo" searchPlaceholder="Pesquisar atributo…" />
+        </div>
       ` : null}
     </div>
   `;
 }
 
-export default GroupBySelector;

@@ -2,9 +2,12 @@ import base64
 import logging
 import mimetypes
 import time
+import uuid
 from pathlib import Path
 
-from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo, inbox_repo
+from db.repositories import contact_repo, conversation_repo, message_repo, tag_repo, usage_repo, inbox_repo, channel_repo
+
+from agent import history_filter
 
 logger = logging.getLogger(__name__)
 
@@ -16,25 +19,83 @@ DEFAULT_CHANNEL_ID = "default"
 _INBOX_BY_CHANNEL: dict[str, int] = {}
 
 
-def resolve_inbox_id(channel_id: str) -> int:
-    """Inbox id that owns ``channel_id`` (plano 11). Cached; falls back to the
-    default inbox (id=1) if resolution fails so a save never blows up."""
-    cid = channel_id or DEFAULT_CHANNEL_ID
+def resolve_inbox_id(channel_id: str) -> int | None:
+    """Inbox id that owns ``channel_id`` (plano 11). Cached process-lifetime.
+
+    Returns ``None`` when there is no inbox to resolve (plano exclui-default): the
+    default channel is now deletable, so a stale/absent ``channel_id`` must NOT
+    fabricate an orphan inbox nor fall back to the seeded inbox id=1 (which is
+    itself CASCADE-deleted when the default channel is purged — an FK violation
+    waiting to happen). ``None`` lets the caller save the message unlinked instead."""
+    cid = channel_id or channel_repo.primary_channel_id()
+    if not cid:
+        return None
     cached = _INBOX_BY_CHANNEL.get(cid)
     if cached is not None:
         return cached
     try:
         inbox = inbox_repo.get_or_create_for_channel(cid)
-        inbox_id = int(inbox["id"])
+        inbox_id = int(inbox["id"]) if inbox else None
     except Exception:
-        logger.exception("Falha ao resolver inbox do canal %s; usando default", cid)
-        inbox_id = conversation_repo.DEFAULT_INBOX_ID
-    _INBOX_BY_CHANNEL[cid] = inbox_id
+        logger.exception("Falha ao resolver inbox do canal %s", cid)
+        inbox_id = None
+    # Only cache a real hit — an absent channel (None) must re-resolve so the
+    # zero-channel state self-heals the moment a channel is (re)created, without
+    # waiting for a cache invalidation the create path doesn't issue.
+    if inbox_id is not None:
+        _INBOX_BY_CHANNEL[cid] = inbox_id
     return inbox_id
 
 
+def invalidate_channel_caches(channel_id: str) -> None:
+    """Drop the process-lifetime inbox/provider caches for ``channel_id`` (plano
+    exclui-default). Called when a channel is archived/purged so a stale
+    ``channel_id -> inbox_id`` entry stops routing to a deleted inbox until restart."""
+    _INBOX_BY_CHANNEL.pop(channel_id, None)
+    _PROVIDER_BY_CHANNEL.pop(channel_id, None)
+
+
+# channel_id -> provider name cache (plano 42). A channel's provider is immutable
+# for the life of the channel, so a process-lifetime cache with no TTL is safe —
+# same rationale as _INBOX_BY_CHANNEL above.
+_PROVIDER_BY_CHANNEL: dict[str, str | None] = {}
+
+
+def _resolve_provider_class(channel_id: str):
+    """Provider CLASS that owns ``channel_id`` (plano 42 A1), or ``None``.
+
+    Resolves the provider NAME from the channel row (cached process-lifetime) and
+    the CLASS from the wired ChannelRegistry — the only registry that also carries
+    plugin providers. Cycle-free: ``plugins.context`` only TYPE_CHECKING-imports
+    ``agent.memory``, and ``agent.prompt_builder`` already uses this same accessor
+    from the agent layer. Returns ``None`` whenever unresolved (registry not wired
+    — e.g. tests/legacy — channel row missing, or provider not registered) so the
+    caller falls back byte-identically to the WhatsApp JID form."""
+    cid = channel_id or channel_repo.primary_channel_id()
+    if not cid:
+        return None
+    if cid in _PROVIDER_BY_CHANNEL:
+        provider = _PROVIDER_BY_CHANNEL[cid]
+    else:
+        try:
+            row = channel_repo.get(cid)
+            provider = (row or {}).get("provider")
+        except Exception:
+            logger.exception("Falha ao resolver provider do canal %s", cid)
+            provider = None
+        _PROVIDER_BY_CHANNEL[cid] = provider
+    if not provider:
+        return None
+    try:
+        from plugins.context import get_channel_runtime
+        registry, _outbound, _ingest = get_channel_runtime()
+        return registry.get_provider(provider) if registry is not None else None
+    except Exception:
+        return None
+
+
 class TagRegistry:
-    """Global tag registry backed by SQLite tags table."""
+    """Global tag registry backed by the tags table."""
 
     def __init__(self):
         self._tags: dict[str, dict] = {}
@@ -81,10 +142,10 @@ class TagRegistry:
 
 
 class ContactMemory:
-    """Persistent per-contact memory backed by SQLite.
+    """Persistent per-contact memory backed by the database.
 
     Maintains an in-memory cache of contact metadata for fast access.
-    Messages and usage are stored directly in SQLite (not cached in memory).
+    Messages and usage are stored directly in the database (not cached in memory).
     """
 
     def __init__(self, phone: str, default_ai_enabled: bool = True, *,
@@ -110,8 +171,86 @@ class ContactMemory:
         self.updated_at: float = time.time()
         self._load()
 
+    def _resolve_ai_seed(self) -> bool:
+        """Whether a brand-new conversation on this channel is born AI-active.
+
+        Fix atribuição-IA-off (2026-07): exige o master do canal ("Ativar a IA
+        neste canal", ``ai_enabled``) E o "IA ativada por padrão para novos
+        contatos" (``default_ai_enabled``) — antes só o segundo contava, então um
+        canal com a IA desligada paria conversas "IA ON + agente" que nunca
+        seriam respondidas. Resolvido fresh via ``ai_settings`` (cache 30s) na
+        hora do CREATE; qualquer falha cai no valor congelado do construtor
+        (comportamento legado, fail-open)."""
+        try:
+            from channels import ai_settings
+            if not bool(ai_settings.value(self.channel_id, "ai_enabled", True)):
+                return False
+            return bool(ai_settings.value(
+                self.channel_id, "default_ai_enabled", self._default_ai_enabled))
+        except Exception:
+            return self._default_ai_enabled
+
+    def _resolve_default_assignee(self) -> int | None:
+        """O "atendente padrão para novas conversas" do canal (plano 71): um
+        ``user_id`` humano que carimba ``assignee_user_id`` no NASCIMENTO de uma
+        conversa deste canal (que então nasce com a IA desligada). Lido fresh da
+        config do canal (``config['ai']['default_assignee_user_id']``, cache 30s do
+        ``ai_settings``), espelhando ``_resolve_ai_seed``.
+
+        Defensivo (fail-open → ``None`` = comportamento legado, sem dono):
+        - Coage para ``int`` positivo. ``None``/``""``/``"0"``/``0``/bool/inválido
+          ⇒ ``None``. A coerção malformada é ESPERADA (valor vem da UI/edição à mão),
+          então é tratada em silêncio — nada de traceback por mensagem.
+        - IGNORA um atendente inativo/removido (guarda P5). Usa
+          ``user_repo.is_active`` (1 coluna, indexado) em vez de ``get`` — este
+          método roda no caminho quente de ``add_message``; só pagam o custo canais
+          que de fato configuram o campo (canal sem o campo sai no early-return, sem
+          tocar o banco)."""
+        from channels import ai_settings
+        raw = ai_settings.value(self.channel_id, "default_assignee_user_id", None)
+        # bool é subclasse de int → int(True)==1 stamparia o user 1; barra explícito.
+        if raw is None or isinstance(raw, bool):
+            return None
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                return None
+        try:
+            uid = int(raw)
+        except (ValueError, TypeError):
+            return None  # config malformada (ex.: "abc") — coage quieto, sem traceback
+        if uid <= 0:
+            return None
+        try:
+            from db.repositories import user_repo
+            if not user_repo.is_active(uid):
+                return None
+        except Exception:
+            logger.exception("Falha ao validar atendente padrão %s do canal %s",
+                             uid, self.channel_id)
+            return None
+        return uid
+
+    def _resolve_contact_type(self) -> str:
+        """Tipo do contato declarado pelo provider do canal (plano tipos-de-contato).
+
+        Resolve a CLASSE do provider que dona o canal e lê ``contact_type()`` dela
+        (GOWA/Cloud → ``whatsapp``, Telegram → ``telegram``). Fail-open para
+        ``outros`` sempre que o provider não puder ser resolvido (registry não
+        cabeado em testes/legado, canal sem provider) — o mesmo fallback que
+        ``_resolve_provider_class`` já usa para o source_id."""
+        try:
+            provider_cls = _resolve_provider_class(self.channel_id)
+            if provider_cls is not None:
+                return provider_cls.contact_type() or "outros"
+        except Exception:
+            logger.exception("Falha ao resolver contact_type do canal %s", self.channel_id)
+        return "outros"
+
     def _load(self):
-        data = contact_repo.get_or_create(self.phone, default_ai_enabled=self._default_ai_enabled)
+        data = contact_repo.get_or_create(
+            self.phone, default_ai_enabled=self._default_ai_enabled,
+            contact_type=self._resolve_contact_type())
         self.id = data["id"]
         self.ai_enabled = data["ai_enabled"]
         self.is_group = data["is_group"]
@@ -140,11 +279,11 @@ class ContactMemory:
 
     @property
     def messages(self) -> list[dict]:
-        """Lazy-load all messages from SQLite."""
+        """Lazy-load all messages from the database."""
         return message_repo.get_all(self.id)
 
     def save(self):
-        """Persist current contact metadata to SQLite."""
+        """Persist current contact metadata to the database."""
         self.updated_at = time.time()
         contact_repo.update(
             self.id,
@@ -163,77 +302,241 @@ class ContactMemory:
         )
 
     def _jid(self) -> str:
-        """Reconstruct the WhatsApp JID, mirroring the 0013 backfill (source_id)."""
+        """Historical WhatsApp JID form, mirroring the 0013 backfill (source_id).
+        The fail-safe when the provider can't be resolved (registry not wired in
+        tests/legacy) — see :meth:`_source_id`."""
         suffix = "g.us" if self.is_group else "s.whatsapp.net"
         return f"{self.phone}@{suffix}"
+
+    def _source_id(self) -> str:
+        """Channel-native ``source_id`` for this contact's conversation, resolved via
+        the PROVIDER of ``self.channel_id`` (plano 42 A1). GOWA keeps the WhatsApp
+        JID suffix; native-id providers (Telegram/Cloud) use the bare id. Fail-safe:
+        on any unresolved provider it falls back to :meth:`_jid` (WhatsApp suffix),
+        byte-identical to the pre-plano-42 behavior — so nothing regresses for the
+        default GOWA channel or in the test suite (which typically doesn't wire the
+        channel registry)."""
+        cls = _resolve_provider_class(self.channel_id)
+        if cls is not None:
+            try:
+                return cls.source_id_for(self.phone, self.is_group)
+            except Exception:
+                logger.exception("source_id_for falhou no canal %s; usando JID",
+                                 self.channel_id)
+        return self._jid()
+
+    def _resolve_conversation(self, role: str, *,
+                              reopen: bool | None = None) -> tuple[dict | None, int | None, str | None]:
+        """Resolve (idempotent get-or-create + reopen-if-closed) the atendimento
+        thread for a save. PURE — no side effects, so the caller decides WHEN the
+        lifecycle reactions run (``add_message`` keeps them AFTER the INSERT,
+        byte-identical to before; the ingest runs them at t=0).
+
+        ``resolve_for_contact_ex`` is idempotent: the 2nd resolve of the same thread
+        returns ``transition=None``. That is the mechanism that makes the
+        created/reopened announcements fire EXACTLY ONCE across the two-phase ingest
+        (materialize, t=0) + batch (save, t≈batch_delay) pipeline (plano 25 Fase 2).
+
+        Uma conversa closed é reaberta tanto por mensagem do cliente ("user") quanto
+        por resposta do atendente/IA ("assistant"); roles painel-only NÃO reabrem.
+        Returns ``(conv, conversation_id, transition)``; on a resolution error returns
+        ``(None, None, None)`` (fail-soft — the save still happens, just unlinked)."""
+        try:
+            # plano 28: stamp provenance on a brand-new thread — a customer message
+            # ('user') opens an 'inbound' conversation (shows on the sidebar at t=0
+            # via the origin gate); anything else (AI/operator/panel-only) is 'outbound'.
+            origin = "inbound" if role == "user" else "outbound"
+            # reopen=None → regra padrão (user/assistant reabrem; painel-only não). Um caller
+            # pode forçar reopen=False p/ NÃO reabrir uma conversa fechada (ex.: a mensagem
+            # de avaliação enviada no FECHAR do protocolo não deve reabrir o atendimento).
+            reopen_closed = (role in ("user", "assistant")) if reopen is None else bool(reopen)
+            # regra "ignorar abertura": um caller que força reopen=False p/ NÃO reabrir também
+            # NÃO deve ABRIR um atendimento num contato NOVO — cria a conversa já FECHADA (a
+            # mensagem fica salva/visível, sem atendimento aberto nem protocolo). reopen=None
+            # (regra padrão) e reopen=True seguem criando aberta. Uma conversa já existente cai
+            # no ramo de reabrir/manter do repo, então create_closed não a afeta.
+            create_closed = (reopen is False)
+            # plano 38 F1 + fix atribuição-IA-off (2026-07): seed a brand-new
+            # conversation's ai_active from the channel's CURRENT config, resolved
+            # na HORA do create (não mais o valor congelado no construtor — mudar a
+            # config do canal vale em ≤30s, o TTL do cache do ai_settings). Only
+            # applies on CREATE — a reopen never re-seeds.
+            seed = 1 if self._resolve_ai_seed() else 0
+            # plano 71: se o canal tem um "atendente padrão para novas conversas",
+            # a conversa nasce carimbada com ele (assignee_user_id) e — como um humano
+            # assume 100% (D1) — nasce com a IA desligada (seed=0 ⇒ sem agente, pela
+            # regra do INSERT). O carimbo só vale no CREATE; o reopen NÃO re-carimba
+            # (o repo threada isso apenas no ramo `created`). None ⇒ legado (sem dono).
+            assignee_seed = self._resolve_default_assignee()
+            if assignee_seed:
+                seed = 0
+            conv, transition = conversation_repo.resolve_for_contact_ex(
+                self.id, self._source_id(), reopen_if_closed=reopen_closed,
+                inbox_id=self.inbox_id, origin=origin, create_closed=create_closed,
+                ai_active_seed=seed, assignee_user_id_seed=assignee_seed)
+            return conv, conv["id"], transition
+        except Exception:
+            logger.exception("Falha ao resolver conversa para %s", self.phone)
+            return None, None, None
+
+    def _run_lifecycle_reactions(self, conversation_id: int, transition: str | None,
+                                 conv: dict | None, role: str) -> None:
+        """Drive the after-resolve lifecycle reactions for one resolve: the automatic
+        created/reopened notice card, the ``conversation_created`` /
+        ``conversation_status_changed`` list broadcasts (sidebar/kanban re-file live)
+        and the ``conversation.reopened`` bus verb (plano 23 Fase C5 — they live in
+        :mod:`agent.message_listeners`). Runs SYNCHRONOUSLY in the caller's thread (a
+        sync ``add_message`` must still broadcast — the reopen-assertion suite checks
+        this right after the call). Exactly-once: only the resolve that actually
+        transitioned carries a non-None ``transition``; a reused thread no-ops inside
+        :func:`on_message_persisted`. Defensive — a failed reaction never breaks the
+        caller."""
+        try:
+            from agent.message_listeners import on_message_persisted
+            on_message_persisted(
+                conversation_id, self.id, self.phone,
+                transition=transition, conv=conv, role=role)
+        except Exception:
+            logger.exception("Falha nas reações de message.persisted para %s", self.phone)
+
+    def _broadcast_conversation_upsert(self, conversation_id: int, role: str) -> None:
+        """Emit the ``conversation_upsert`` list-row broadcast (plano 28). Delegates
+        to :func:`agent.message_listeners.broadcast_conversation_upsert`, which gates
+        panel-only roles and is fully defensive (never breaks the save)."""
+        try:
+            from agent.message_listeners import broadcast_conversation_upsert
+            broadcast_conversation_upsert(conversation_id, role)
+        except Exception:
+            logger.exception("Falha ao emitir conversation_upsert para %s", self.phone)
+
+    @staticmethod
+    def _notify_private_enabled() -> bool:
+        """A conta optou por notificar mensagens privadas? (config global, default off)."""
+        try:
+            from db.repositories import config_repo
+            return bool(config_repo.get("notify_private_messages", False))
+        except Exception:
+            return False
+
+    def _notify_private_unread(self, conversation_id: int, msg_id: str) -> None:
+        """Marca a nota privada como não-lida (badge verde + aba) reaproveitando o
+        encanamento de msg_id: ``increment_unread`` bump o ``contacts.unread_count`` E
+        insere a linha ``unread_msg_ids`` (que a subquery por-conversa conta). Depois
+        força o ``conversation_upsert`` para a sidebar refletir ao vivo. Todos os
+        caminhos de leitura (mark_as_read / mark_conversation_read / …) já limpam isso
+        sem mudança. Defensivo — nunca quebra o save."""
+        try:
+            from db.repositories import unread_repo
+            from agent.message_listeners import emit_conversation_upsert_row
+            unread_repo.increment_unread(self.id, msg_id)
+            emit_conversation_upsert_row(conversation_id)
+        except Exception:
+            logger.exception("Falha ao notificar nota privada para %s", self.phone)
 
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
                     status: str | None = None, msg_id: str | None = None,
-                    reply_to_msg_id: str | None = None):
+                    reply_to_msg_id: str | None = None,
+                    sent_by_user_id: int | None = None,
+                    sent_by_name: str | None = None,
+                    agent_key: str | None = None,
+                    execution_id: int | None = None,
+                    reopen: bool | None = None) -> dict:
         # plano 01 Fase 2: resolve/stamp the atendimento thread centrally, so every
         # save site (inbound batch/media/group + outbound) links conversation_id sem
-        # tocar webhook.py. Inbound user message reabre uma conversa closed.
-        conversation_id = None
-        conv = None
-        transition = None  # "created" | "reopened" | None (plano 12 §3)
-        try:
-            # Uma conversa closed é reaberta tanto por mensagem do cliente ("user")
-            # quanto por resposta do atendente/IA ("assistant") — qualquer um dos dois
-            # lados voltando a falar reativa o atendimento (comportamento Chatwoot).
-            # Roles painel-only (private_note, system, tool_call, …) NÃO reabrem.
-            conv, transition = conversation_repo.resolve_for_contact_ex(
-                self.id, self._jid(), reopen_if_closed=(role in ("user", "assistant")),
-                inbox_id=self.inbox_id)
-            conversation_id = conv["id"]
-            # New thread → tell the panel so the inbox row shows its assignee
-            # (e.g. "IA padrão") live, without waiting for a full refetch.
-            if conv.get("created"):
-                try:
-                    from plugins.context import broadcast
-                    broadcast("conversation_created", {
-                        "conversation_id": conv["id"],
-                        "contact_id": self.id,
-                        "status": conv.get("status"),
-                        "assignee_user_id": conv.get("assignee_user_id"),
-                        "active_agent_key": conv.get("active_agent_key"),
-                        "ai_active": conv.get("ai_active"),
-                    })
-                except Exception:
-                    logger.debug("conversation_created broadcast falhou para %s", self.phone)
-        except Exception:
-            logger.exception("Falha ao resolver conversa para %s", self.phone)
+        # tocar webhook.py. plano 25 Fase 2: the resolve is now a shared helper (also
+        # used by the ingest's ensure_conversation_live); the lifecycle reactions stay
+        # AFTER the INSERT — byte-identical ordering for any save not preceded by an
+        # ingest materialization (user message row first, then the created notice card).
+        conv, conversation_id, transition = self._resolve_conversation(role, reopen=reopen)
+        # Notificação de nota privada (opt-in ``notify_private_messages``): dá à nota um
+        # ``msg_id`` sintético para ela PARTICIPAR do encanamento de não-lida baseado em
+        # msg_id — o mesmo que uma mensagem de cliente usa. Assim ela acende o badge verde
+        # POR-CONVERSA (subquery ``unread_msg_ids ⋈ messages.msg_id`` por conversa) E a
+        # contagem da aba (``contacts.unread_count``), e é limpa por TODOS os caminhos de
+        # leitura existentes sem código novo. Som fica de fora (nunca toca hoje). Off (ou
+        # msg_id já presente) → comportamento legado byte-a-byte (msg_id=None).
+        notify_private = False
+        if role == "private_note" and msg_id is None and self._notify_private_enabled():
+            msg_id = "pn:" + uuid.uuid4().hex
+            notify_private = True
         saved = message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,
             status=status, msg_id=msg_id, reply_to_msg_id=reply_to_msg_id,
             conversation_id=conversation_id,
+            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+            agent_key=agent_key,
+            execution_id=execution_id,
         )
         if conversation_id is not None:
             try:
                 conversation_repo.touch_activity(conversation_id)
             except Exception:
                 logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
-            # plano 23 Fase C5 (§2.4 — desacoplar memory.py): the hot path EMITS
-            # ``message.persisted`` (the single decoupling signal for plugins/audit)
-            # AND drives the lifecycle LISTENER directly. The after-INSERT side
-            # effects (automatic created/reopened notice, conversation_created /
-            # conversation_status_changed list broadcasts, the conversation.reopened
-            # bus verb) moved OUT of here into ``agent.message_listeners`` — this is
-            # the listener-reacts inversion. Driving it directly (not via the bus)
-            # keeps it exactly-once and synchronous (a sync save with no running bus
-            # loop must still broadcast — the 876 reopen assertion). Defensive: a
-            # failed reaction never breaks the save.
+            # plano 23 Fase C5 (§2.4): the hot path EMITS the PUBLIC ``message.persisted``
+            # signal (for plugins/audit) and then drives the lifecycle listener directly
+            # (kept here AFTER the INSERT to preserve the old ordering). Driving it
+            # directly (not via the bus) keeps it exactly-once and synchronous.
             self._emit_message_persisted(conversation_id, role, msg_id, saved)
-            try:
-                from agent.message_listeners import on_message_persisted
-                on_message_persisted(
-                    conversation_id, self.id, self.phone,
-                    transition=transition, conv=conv, role=role)
-            except Exception:
-                logger.exception("Falha nas reações de message.persisted para %s", self.phone)
+            self._run_lifecycle_reactions(conversation_id, transition, conv, role)
+            if notify_private:
+                # Bump o unread baseado em msg_id (contato + subquery por-conversa) e
+                # FORÇA o upsert do row (a nota é preview-excluded, então o broadcast
+                # normal a barraria — mas o unread precisa chegar na sidebar).
+                self._notify_private_unread(conversation_id, msg_id)
+            else:
+                # plano 28: Event-Carried State Transfer — after the INSERT (preview/unread
+                # now real), push the authoritative list row so the sidebar upserts it by
+                # conversation_id without a stale refetch. Panel-only roles are gated out
+                # inside the helper. Never breaks the save.
+                self._broadcast_conversation_upsert(conversation_id, role)
         # Touch updated_at
         contact_repo.update(self.id)
+        # Return the inserted row (id/ts/conversation_id/…) so callers that need
+        # the freshly-saved message — e.g. broadcasting a private_note with its
+        # conversation_id — use it directly instead of re-reading via
+        # ``message_repo.get_last`` (which returns the contact's LAST row and, in a
+        # burst of concurrent saves, can be a DIFFERENT message → wrong _id/ts).
+        return saved
+
+    def ensure_conversation_live(self, role: str = "user",
+                                 reopen: bool | None = None) -> int | None:
+        """Materialize the atendimento thread at INGEST time (t=0) WITHOUT saving a
+        message (plano 25 Fase 2, bug #2 — "aba notifica antes da lista").
+
+        ``reopen=False`` materializa/exibe a conversa mas mantém uma FECHADA fechada (não
+        reabre no t=0) — usado pela regra "ignorar abertura" (direção received): a mensagem
+        aparece, mas a conversa continua resolvida.
+
+        The receive pipeline is two-phase: the inbound message is only saved by the
+        batch (t≈``message_batch_delay``), which is also where ``add_message`` would
+        create/announce a brand-new conversation. Until then the conversa-cêntrica
+        sidebar has no row to show, so a NEW conversation appears ~3-4 s after the tab
+        badge. This resolves/creates the conversation NOW and fires the
+        created/reopened lifecycle reactions, so the panel's conversation list
+        materializes the row immediately (the ingest's ``new_message`` also carries the
+        returned ``conversation_id`` so the row updates in place).
+
+        Idempotent / exactly-once: the later batch ``add_message`` re-resolves the SAME
+        thread → ``transition=None`` → no re-announce. Deliberately does NOT save a
+        message and does NOT emit ``message.persisted`` (those belong to the real save
+        in the batch). Returns the conversation_id (``None`` if resolution failed).
+        Best-effort — never blocks ingest."""
+        conv, conversation_id, transition = self._resolve_conversation(role, reopen=reopen)
+        if conversation_id is not None:
+            try:
+                conversation_repo.touch_activity(conversation_id)
+            except Exception:
+                logger.exception("Falha ao atualizar last_activity da conversa %s", conversation_id)
+            self._run_lifecycle_reactions(conversation_id, transition, conv, role)
+            # plano 28 Fase 4: aparição em t=0. Emit the fully-formed list row NOW
+            # (name/channel/status; origin='inbound', last_message_ts=0) so the sidebar
+            # shows the brand-new conversation immediately — the gate keys on
+            # origin=='inbound', not on a message existing yet. The batch's later
+            # add_message re-emits with the real preview (guard-merged on the client).
+            self._broadcast_conversation_upsert(conversation_id, role)
+        return conversation_id
 
     def _emit_message_persisted(self, conversation_id: int, role: str,
                                 msg_id: str | None, saved: dict | None) -> None:
@@ -329,7 +632,11 @@ class ContactMemory:
         URI so the vision model can see it.  Older images are replaced with a
         placeholder to keep token usage reasonable.
         """
-        recent = message_repo.get_context(self.id, limit)
+        # plano 43 — the global regex blacklist cuts history rows (e.g. automation
+        # ``private_note``s) BEFORE the private_note→"[Nota privada]" wrap below, over
+        # the raw role+content. Empty config ⇒ byte-identical to the old path.
+        compiled = history_filter.load_compiled()
+        recent = message_repo.get_context(self.id, limit, exclude=compiled)
 
         # Find the index of the last user image message that still needs the
         # binary inlined.  If the content already has a textual description
@@ -361,7 +668,22 @@ class ContactMemory:
                 if m["role"] == "assistant" and m.get("status") == "operator":
                     content = f"[Mensagem do operador humano]: {content}"
                 result.append({"role": m["role"], "content": content})
-        return result
+
+        # 12.2 (plano 31 F5): colapsa respostas ASSISTANT idênticas ADJACENTES —
+        # um loop degenerado ("mesma resposta 3x seguidas") não se realimenta
+        # pelo contexto. Vale SÓ para a montagem do contexto do LLM; o histórico
+        # persistido e o painel não mudam.
+        deduped: list[dict] = []
+        for m in result:
+            if (deduped
+                    and m.get("role") == "assistant"
+                    and deduped[-1].get("role") == "assistant"
+                    and isinstance(m.get("content"), str)
+                    and m.get("content")
+                    and m["content"] == deduped[-1].get("content")):
+                continue
+            deduped.append(m)
+        return deduped
 
     def set_wa_name(self, wa_name: str) -> None:
         """Set contact name from WhatsApp pushName if no manual name exists."""
@@ -424,16 +746,11 @@ class ContactMemory:
         parts = []
         if self.info.get("name"):
             parts.append(f"Nome: {self.info['name']}")
-        if self.info.get("email"):
-            parts.append(f"Email: {self.info['email']}")
-        if self.info.get("profession"):
-            parts.append(f"Profissão: {self.info['profession']}")
-        if self.info.get("company"):
-            parts.append(f"Empresa: {self.info['company']}")
-        if self.info.get("address"):
-            parts.append(f"Endereço: {self.info['address']}")
         for obs in self.info.get("observations", []):
             parts.append(f"Obs: {obs}")
+        # Email/Profissão/Empresa/Endereço are now custom attributes (seeded as
+        # default contact attributes) — listed by `_custom_attr_lines` below, so
+        # they're NOT repeated here.
         # Custom attributes (plano 05): tell the AI which attributes it may fill
         # (via set_custom_attribute) and the values already set. Both scopes:
         # contact-level and the currently-open conversation (plano 54).
@@ -456,7 +773,9 @@ class ContactMemory:
                 return []
             if applies_to == "conversation":
                 from db.tables import conversations as _entity_tbl
-                conv = conversation_repo.get_open_for_contact(self.id)
+                # plano 37: atributos DESTA conversa = a do canal deste ContactMemory
+                # (self.inbox_id), não a mais recente de qualquer canal do contato.
+                conv = conversation_repo.get_open_for_contact_inbox(self.id, self.inbox_id)
                 if not conv:
                     return []
                 entity_id = conv["id"]

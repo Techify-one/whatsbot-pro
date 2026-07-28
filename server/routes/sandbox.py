@@ -11,11 +11,16 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import File, Form, UploadFile
+from fastapi import Depends, File, Form, UploadFile
 
-from db.repositories import config_repo
-from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
+from db.repositories import channel_repo, config_repo
+from server.deps import require_permission, install_exception_handlers
+from server.execution import (
+    astart_execution, aend_execution, atrack_step, prune_executions,
+    astamp_execution_channel,
+)
 from server.helpers import _ok, _err, parse_split_reply
+from server.upload_names import unique_media_name
 
 # Config-key prefix flagging a contact as a sandbox/test number. Operator sends
 # from the official chat check this and stay local instead of hitting GOWA.
@@ -30,6 +35,8 @@ def register_routes(app, deps):
     state = deps.state
     settings = deps.settings
     statics_outbox_dir = deps.statics_outbox_dir
+
+    install_exception_handlers(app)
 
     async def _broadcast_user_message(phone: str, content: str, *,
                                       media_type: str | None = None,
@@ -63,7 +70,8 @@ def register_routes(app, deps):
 
         if result.tool_calls:
             try:
-                await deps.broadcast_tool_calls(phone, result.tool_calls, result.contact_info)
+                await deps.broadcast_tool_calls(phone, result.tool_calls, result.contact_info,
+                                                agent_key=result.agent_key)
             except Exception as e:
                 logger.error("[Sandbox] broadcast_tool_calls failed for %s: %s", phone, e)
 
@@ -92,6 +100,7 @@ def register_routes(app, deps):
                 continue
             await asyncio.to_thread(
                 agent_handler.save_assistant_message, phone, part, status="sent",
+                agent_key=result.agent_key,
             )
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
@@ -112,18 +121,24 @@ def register_routes(app, deps):
             "bot_name": state.bot_name,
         })
         try:
-            await asyncio.to_thread(prune_executions, settings.get("max_executions", 200))
+            await asyncio.to_thread(
+                prune_executions,
+                settings.get("max_executions", 200),
+                settings.get("execution_retention_days", 0),
+            )
         except Exception:
             pass
 
     def _save_upload(upload: UploadFile, content: bytes, default_name: str) -> str:
         """Persist an uploaded file under statics/outbox and return its rel path."""
-        suffix = Path(upload.filename or default_name).suffix or Path(default_name).suffix
-        dest = statics_outbox_dir / f"{int(time.time() * 1000)}{suffix}"
+        dest = statics_outbox_dir / unique_media_name(
+            upload.content_type, upload.filename or default_name,
+            default_ext=(Path(default_name).suffix or ".bin"))
         dest.write_bytes(content)
         return f"statics/outbox/{dest.name}"
 
-    @app.post("/api/sandbox/send")
+    @app.post("/api/sandbox/send",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_send(body: dict):
         """Process a text message through the agent pipeline (local, no GOWA)."""
         phone = (body.get("phone") or "").strip()
@@ -138,6 +153,9 @@ def register_routes(app, deps):
         try:
             await atrack_step("webhook_received", {"phone": phone, "message_preview": message[:200]})
             contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(
+                contact, channel_repo.primary_channel_id() or "default",
+                channel_label="Sandbox")
             contact.add_message("user", message)
             await _broadcast_user_message(phone, message)
 
@@ -156,7 +174,8 @@ def register_routes(app, deps):
         logger.info("[Sandbox] Reply to %s: %s", phone, (replies[0] if replies else "")[:80])
         return _ok({"reply": "\n".join(replies), "replies": replies, "phone": phone})
 
-    @app.post("/api/sandbox/send-image")
+    @app.post("/api/sandbox/send-image",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_send_image(
         phone: str = Form(...),
         caption: str = Form(""),
@@ -181,6 +200,9 @@ def register_routes(app, deps):
         try:
             await atrack_step("webhook_received", {"phone": phone, "media": "image"})
             contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(
+                contact, channel_repo.primary_channel_id() or "default",
+                channel_label="Sandbox")
             contact.add_message("user", caption, media_type="image", media_path=rel_path)
             await _broadcast_user_message(phone, caption, media_type="image", media_path=rel_path)
 
@@ -219,7 +241,8 @@ def register_routes(app, deps):
         await _after_send()
         return _ok({"replies": replies, "phone": phone})
 
-    @app.post("/api/sandbox/send-audio")
+    @app.post("/api/sandbox/send-audio",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_send_audio(
         phone: str = Form(...),
         audio: UploadFile = File(...),
@@ -240,6 +263,9 @@ def register_routes(app, deps):
         try:
             await atrack_step("webhook_received", {"phone": phone, "media": "audio"})
             contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(
+                contact, channel_repo.primary_channel_id() or "default",
+                channel_label="Sandbox")
             contact.add_message("user", "[Áudio recebido]", media_type="audio", media_path=rel_path)
             await _broadcast_user_message(phone, "[Áudio recebido]",
                                           media_type="audio", media_path=rel_path)
@@ -277,7 +303,8 @@ def register_routes(app, deps):
         await _after_send()
         return _ok({"replies": replies, "phone": phone})
 
-    @app.post("/api/sandbox/send-document")
+    @app.post("/api/sandbox/send-document",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_send_document(
         phone: str = Form(...),
         caption: str = Form(""),
@@ -300,6 +327,9 @@ def register_routes(app, deps):
         try:
             await atrack_step("webhook_received", {"phone": phone, "media": "document"})
             contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(
+                contact, channel_repo.primary_channel_id() or "default",
+                channel_label="Sandbox")
             contact.add_message("user", content, media_type="document", media_path=rel_path)
             await _broadcast_user_message(phone, content,
                                           media_type="document", media_path=rel_path)
@@ -340,7 +370,50 @@ def register_routes(app, deps):
         await _after_send()
         return _ok({"replies": replies, "phone": phone})
 
-    @app.post("/api/sandbox/clear")
+    @app.post("/api/sandbox/send-video",
+              dependencies=[Depends(require_permission("sandbox.use"))])
+    async def sandbox_send_video(
+        phone: str = Form(...),
+        caption: str = Form(""),
+        video: UploadFile = File(...),
+    ):
+        """Process a video message through the agent pipeline (local, no GOWA).
+
+        Video is not transcribed/described; the raw clip is stored and the agent
+        reacts to the caption (mirrors the received-media flow — plano 65)."""
+        phone = phone.strip()
+        if not phone:
+            return _err("Campo 'phone' é obrigatório.")
+        filename = video.filename or "video.mp4"
+        rel_path = _save_upload(video, await video.read(), filename)
+        caption = caption or ""
+
+        logger.info("[Sandbox] Video from %s: %s", phone, filename)
+        exec_id = await astart_execution(phone, "sandbox")
+        try:
+            await atrack_step("webhook_received", {"phone": phone, "media": "video"})
+            contact = agent_handler._get_contact(phone)
+            await astamp_execution_channel(
+                contact, channel_repo.primary_channel_id() or "default",
+                channel_label="Sandbox")
+            contact.add_message("user", caption, media_type="video", media_path=rel_path)
+            await _broadcast_user_message(phone, caption, media_type="video", media_path=rel_path)
+
+            replies = await _sandbox_reply(phone)
+            await atrack_step("response_sent", {
+                "phone": phone, "reply_preview": "\n".join(replies)[:200],
+            })
+            await aend_execution(exec_id)
+        except Exception as e:
+            logger.error("[Sandbox] Error processing video: %s", e)
+            await aend_execution(exec_id, error=str(e))
+            return _err(f"Erro ao processar vídeo: {e}", status=500)
+
+        await _after_send()
+        return _ok({"replies": replies, "phone": phone})
+
+    @app.post("/api/sandbox/clear",
+              dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_clear(body: dict):
         """Clear conversation history for a sandbox phone number."""
         phone = (body.get("phone") or "").strip()

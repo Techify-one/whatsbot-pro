@@ -8,7 +8,6 @@ from collections import deque
 from fastapi import Request
 
 from server.auth import (
-    auth_required, hash_password, generate_token, verify_token,
     hash_password_argon2, verify_password_argon2, generate_session_token,
     resolve_request_token,
 )
@@ -29,7 +28,6 @@ def _client_ip(request: Request) -> str:
 
 
 def register_routes(app, deps):
-    settings = deps.settings
     state = deps.state
 
     @app.post("/api/auth/login")
@@ -47,48 +45,29 @@ def register_routes(app, deps):
             logger.warning("Login rate limit triggered for %s.", ip)
             return _err("Muitas tentativas. Tente novamente em alguns minutos.", status=429)
 
-        password = body.get("password", "")
-        if not password:
-            return _err("Senha não informada.", status=400)
-
-        # ── RBAC user login (plano 03) — when an email is supplied ──────
+        # Login is RBAC-only (plano 48): email + senha → Argon2id verify + opaque
+        # session token. The legacy single-password scheme was retired.
         email = (body.get("email") or "").strip().lower()
-        if email:
-            auth_row = await asyncio.to_thread(user_repo.get_auth_row, email)
-            ok = bool(auth_row) and bool(auth_row.get("is_active")) and \
-                verify_password_argon2(password, auth_row.get("password_hash", ""))
-            if not ok:
-                attempts.append(now)
-                logger.warning("Failed user login (%s) from %s.", email, ip)
-                return _err("Email ou senha incorretos.", status=401)
-            state.login_attempts.pop(ip, None)
-            token = generate_session_token()
-            ua = request.headers.get("user-agent", "")
-            await asyncio.to_thread(session_repo.create, token, auth_row["id"],
-                                    user_agent=ua, ip=ip)
-            await asyncio.to_thread(user_repo.touch_login, auth_row["id"])
-            user = await asyncio.to_thread(user_repo.get, auth_row["id"])
-            logger.info("Successful user login (%s) from %s.", email, ip)
-            return _ok({"token": token, "user": user})
+        password = body.get("password", "")
+        if not email or not password:
+            return _err("Informe email e senha.", status=400)
 
-        # ── Legacy single-password login (unchanged) ───────────────────
-        if not auth_required(settings):
-            return _err("Nenhuma senha configurada.", status=400)
-
-        salt = settings.get("web_password_salt", "")
-        expected_hash = settings.get("web_password_hash", "")
-        actual_hash = hash_password(password, salt)
-
-        import hmac as _hmac
-        if not _hmac.compare_digest(actual_hash, expected_hash):
+        auth_row = await asyncio.to_thread(user_repo.get_auth_row, email)
+        ok = bool(auth_row) and bool(auth_row.get("is_active")) and \
+            verify_password_argon2(password, auth_row.get("password_hash", ""))
+        if not ok:
             attempts.append(now)
-            logger.warning("Failed login attempt from %s.", ip)
-            return _err("Senha incorreta.", status=401)
-
+            logger.warning("Failed user login (%s) from %s.", email, ip)
+            return _err("Email ou senha incorretos.", status=401)
         state.login_attempts.pop(ip, None)
-        token = generate_token(expected_hash, salt)
-        logger.info("Successful login from %s.", ip)
-        return _ok({"token": token})
+        token = generate_session_token()
+        ua = request.headers.get("user-agent", "")
+        await asyncio.to_thread(session_repo.create, token, auth_row["id"],
+                                user_agent=ua, ip=ip)
+        await asyncio.to_thread(user_repo.touch_login, auth_row["id"])
+        user = await asyncio.to_thread(user_repo.get, auth_row["id"])
+        logger.info("Successful user login (%s) from %s.", email, ip)
+        return _ok({"token": token, "user": user})
 
     def _bearer(request: Request) -> str:
         h = request.headers.get("authorization", "")
@@ -96,22 +75,22 @@ def register_routes(app, deps):
 
     @app.get("/api/auth/check")
     async def check_auth(request: Request):
-        has_password = auth_required(settings)
-        has_users = (await asyncio.to_thread(user_repo.count)) > 0
+        # ``has_password`` is retained (fixed False) for frontend compat — the
+        # legacy panel password was retired (plano 48). Auth hinges on has_users.
+        has_users = await asyncio.to_thread(user_repo.has_any)
 
-        if not has_password and not has_users:
+        if not has_users:
             return _ok({"authenticated": True, "has_password": False, "has_users": False})
 
         token = _bearer(request)
-        kind, user = await asyncio.to_thread(resolve_request_token, token, settings)
+        kind, user = await asyncio.to_thread(resolve_request_token, token)
         if kind is not None:
-            return _ok({"authenticated": True, "has_password": has_password,
-                        "has_users": has_users, "user": user})
-        # Carry has_password/has_users on the 401 too, so the panel can offer the
-        # first-admin bootstrap even when a legacy password is set but no user
-        # exists yet (migration to multi-user — plano 03/10).
+            return _ok({"authenticated": True, "has_password": False,
+                        "has_users": True, "user": user})
+        # Carry has_users on the 401 too so the panel can drive the login/bootstrap
+        # flow (a request only reaches here once ≥1 user exists).
         return _err("Não autenticado.", status=401,
-                    data={"has_password": has_password, "has_users": has_users})
+                    data={"has_password": False, "has_users": has_users})
 
     @app.post("/api/auth/logout")
     async def logout(request: Request):
@@ -123,15 +102,12 @@ def register_routes(app, deps):
     @app.get("/api/auth/me")
     async def me(request: Request):
         token = _bearer(request)
-        kind, user = await asyncio.to_thread(resolve_request_token, token, settings)
+        kind, user = await asyncio.to_thread(resolve_request_token, token)
         if kind == "user":
             perms = await asyncio.to_thread(rbac_repo.user_permissions, user["id"])
             user = dict(user)
             user["permissions"] = sorted(perms)
             return _ok({"user": user})
-        if kind == "legacy":
-            # Legacy single-password session has no user identity but full access.
-            return _ok({"user": None, "legacy": True})
         return _err("Não autenticado.", status=401)
 
     @app.post("/api/auth/bootstrap")

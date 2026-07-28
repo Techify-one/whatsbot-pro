@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { PlusIcon } from './icons.js';
 
@@ -19,11 +19,17 @@ export const TAG_COLORS = [
 //  - onToggle(name): apply/remove the tag.
 //  - onCreateTag(name, color): create a NEW global tag; returns a truthy promise on
 //                    success. The freshly created tag is then applied via onToggle.
-export function TagPicker({ globalTags, isActive, onToggle, onCreateTag }) {
+export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClearAll = null, onCreatingChange = null }) {
   const [search, setSearch] = useState('');
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newColor, setNewColor] = useState(TAG_COLORS[0]);
+
+  // Let the host know when the inline "create tag" form is open. In the context-menu
+  // flyout the form pops up away from the pointer, so the host pins the flyout open
+  // (no hover-close) while the user fills it in. Optional — callers that inline the
+  // picker (bulk menu) just don't pass it.
+  useEffect(() => { if (onCreatingChange) onCreatingChange(creating); }, [creating]);
 
   const term = search.trim();
   const entries = Object.entries(globalTags || {})
@@ -31,6 +37,7 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag }) {
   const hasExact = Object.keys(globalTags || {}).some(
     n => n.toLowerCase() === term.toLowerCase()
   );
+  const anyActive = Object.keys(globalTags || {}).some(n => isActive(n));
 
   async function doCreate(name) {
     const n = (name || '').trim();
@@ -53,8 +60,8 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag }) {
             type="text"
             value=${search}
             onInput=${(e) => setSearch(e.target.value)}
-            placeholder="Buscar tag..."
-            class="w-full bg-wa-bg text-wa-text text-[13px] rounded-[6px] px-2.5 py-1.5 border border-wa-border outline-none placeholder-wa-secondary focus:border-wa-iconActive"
+            placeholder="Buscar tags"
+            class="wa-field w-full text-[13px] rounded-md px-2 py-1.5 border border-wa-border outline-none"
           />
         </div>
         <div class="max-h-[200px] overflow-y-auto wa-scrollbar">
@@ -85,6 +92,16 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag }) {
             <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma tag criada</div>
           ` : null}
         </div>
+        ${(onClearAll && anyActive) ? html`
+          <button
+            type="button"
+            onClick=${() => onClearAll()}
+            class="w-full text-left px-4 py-[8px] text-[13px] text-red-400 hover:bg-wa-hover transition-colors flex items-center gap-2 border-t border-wa-border"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+            <span class="font-medium">Remover todas as tags</span>
+          </button>
+        ` : null}
         ${(term && !hasExact) ? html`
           <button
             type="button"

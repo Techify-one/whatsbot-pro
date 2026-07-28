@@ -29,6 +29,38 @@
 //                                   channelId, contact}           below the header)
 //     • conversation.header.actions, conversation.info.panel,
 //       attendances.toolbar, gear.menu.items                     (pre-existing)
+//     • ai.settings.sections — ctx {}                            (AI settings tab,
+//                                   at the bottom of "Configurações")
+//     • channel.card.rows   — ctx {channel, descriptor}          (ChannelCard, no
+//                                   corpo do card de canal, abaixo dos status dots)
+//       Aditivo: cada componente registrado renderiza uma linha extra no card do
+//       canal. O provider é dono da sua linha — o whatsapp_cloud injeta aqui o
+//       WebhookHealthRow (plano 76 · V6); o componente filtra por
+//       ctx.channel.provider DENTRO do plugin. Vazio ⇒ card byte-idêntico.
+//
+//   FILTERS (applyFilter/addFilter) — priority-ordered; null aborts the chain.
+//     • filter.message.contextMenu.items — value: the per-message context-menu
+//       item array (each {label, icon, onClick, disabled?, danger?}); ctx
+//       {message, isFromMe, phone, conversationId, sandbox}. Applied by
+//       ContactDetail WHEN THE MENU OPENS (async), so a plugin can append/remove
+//       items. Return the (modified) array; returning `null` aborts (the caller
+//       falls back to the base items so the menu still opens).
+//     • filter.selection.batchActions — value: array of batch-action items (each
+//       {label, icon?, onClick, disabled?}) shown in the batch bar of the chat's
+//       message-SELECTION mode (plano 51 · 04 F1); ctx {messages, phone,
+//       conversationId, sandbox, clearSelection}. `messages` = the FULL selected
+//       message objects ({content, ts, _id, role, media_type, media_path, …}).
+//       The "Selecionar mensagens" context-menu entry only exists when at least
+//       one plugin registered here (no plugin ⇒ chat byte-identical). Re-applied
+//       whenever the selection changes. Always return an array (never null —
+//       null aborts and the bar falls back to no plugin actions). The single-
+//       message seam `filter.message.contextMenu.items` is UNCHANGED (F1).
+//     • filter.contact.headerSubtitle — value: the string shown under the contact
+//       name (the raw phone by default); ctx {phone, channelId?, contact?, info?}.
+//       Applied by the chat header + contact info panel (via useContactSubtitle)
+//       on contact change. Return a friendlier label (e.g. the website widget maps
+//       `wsess_…` → `WEB-XXXXXX`); returning the value unchanged / a non-string
+//       keeps the phone. Display only — the phone stays the routing identity.
 //
 //   ROUTE OVERRIDE (overrideRoute/getRouteOverride) — EXCLUSIVE: first registrant
 //   wins, later claims are LOGGED + ignored (never silent). Decision Q5: keep

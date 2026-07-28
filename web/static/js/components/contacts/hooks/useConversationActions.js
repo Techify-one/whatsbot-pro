@@ -12,10 +12,11 @@
 // are passed in so an action that closes the open thread clears it.
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import {
-  markAsRead, markAsUnread, setConversationAi, deleteConversation, deleteContact,
-  archiveContact, pinContact, createTag, updateContactTags,
+  markAsRead, markAsUnread, markConversationRead, markConversationUnread,
+  setConversationAi, deleteConversation, deleteContact,
+  archiveConversation, pinConversation, createTag, updateContactTags,
   getMe, getAssignableAgents, getUsers, getTags,
-  getContactConversation, getConversation, assignConversation,
+  getContactConversation, getConversation, assignConversation, assignAgent,
 } from '../../../services/api.js';
 import { resolveConversation } from '../../../utils/resolveConversation.js';
 
@@ -32,10 +33,14 @@ import { resolveConversation } from '../../../utils/resolveConversation.js';
 export function useConversationActions({
   setContacts, sortContacts, setContactData,
   setSelected, setSelectedConvId, selectedRef, selectedConvIdRef,
+  // plano 72 F5 — reconcilia a lista server-filtrada após um patch otimista de
+  // membership (no-op fora de serverMode). Default no-op p/ callers antigos.
+  reconcileAfterMembershipChange = () => {},
 }) {
   const [globalTags, setGlobalTags] = useState({});
   // Identity + users for the "assign attendant" submenu (degrade gracefully on 403).
   const [currentUserId, setCurrentUserId] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);   // full user (permissions[]) for P48 hides
   const [users, setUsers] = useState([]);
   const [agentsUsers, setAgentsUsers] = useState([]);         // assignable human agents
   const [agentsAi, setAgentsAi] = useState([]);               // assignable AI agents
@@ -63,41 +68,61 @@ export function useConversationActions({
             }
           : c
       ));
+      // plano 72 F5: em serverMode o patch acima pode ter deixado a linha fora da view
+      // (ex.: ligar IA numa aba Não-atribuídas, ou desligar numa aba de um agente IA
+      // específico) — o refetch server-filtrado reconcilia a membership com o servidor.
+      reconcileAfterMembershipChange();
+    }
+  }, [setContacts, reconcileAfterMembershipChange]);
+
+  // Plano 49: por CONVERSA quando a linha tem conversation_id (número em 2 canais =
+  // 2 linhas, badges independentes); fallback por phone só na linha legada sem
+  // atendimento (convId == null). O patch otimista mira a mesma dimensão da chamada.
+  const handleMarkUnread = useCallback(async (phone, convId = null) => {
+    const res = convId != null ? await markConversationUnread(convId) : await markAsUnread(phone);
+    if (res.ok) {
+      setContacts(prev => prev.map(c => {
+        const hit = convId != null ? c.conversation_id === convId : c.phone === phone;
+        return hit ? { ...c, unread_count: Math.max(c.unread_count || 0, 1) } : c;
+      }));
     }
   }, [setContacts]);
 
-  const handleMarkUnread = useCallback(async (phone) => {
-    const res = await markAsUnread(phone);
+  const handleMarkRead = useCallback(async (phone, convId = null) => {
+    const res = convId != null ? await markConversationRead(convId) : await markAsRead(phone);
     if (res.ok) {
-      setContacts(prev => prev.map(c =>
-        c.phone === phone
-          ? { ...c, unread_count: Math.max(c.unread_count || 0, 1) }
-          : c
-      ));
+      setContacts(prev => prev.map(c => {
+        const hit = convId != null ? c.conversation_id === convId : c.phone === phone;
+        // unread_ai_count (badge "IA respondeu") é contato-nível (plano 28): no caminho
+        // por-conversa não o zeramos — coerente com abrir a conversa. Só o fallback
+        // por-phone (contato-nível) o limpa.
+        return hit
+          ? (convId != null
+              ? { ...c, unread_count: 0, has_unread_mention: false }
+              : { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false })
+          : c;
+      }));
     }
   }, [setContacts]);
 
-  const handleMarkRead = useCallback(async (phone) => {
-    const res = await markAsRead(phone);
+  // Arquivar/Desarquivar uma CONVERSA (plano 54 — antes era o contato inteiro, o que
+  // não sincronizava com a lista filtrada por atendimento e a conversa nunca sumia).
+  // Remove a linha por conversation_id (NUNCA phone — um número tem N atendimentos) e
+  // limpa a thread aberta só se for a arquivada. O WS `conversation_archived` faz o
+  // mesmo em outros clientes; a próxima mensagem NÃO re-injeta (o upsert filtra por view).
+  const handleArchive = useCallback(async (convId, archived) => {
+    if (convId == null) return;
+    const res = await archiveConversation(convId, archived);
     if (res.ok) {
-      setContacts(prev => prev.map(c =>
-        c.phone === phone ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
-      ));
-    }
-  }, [setContacts]);
-
-  const handleArchive = useCallback(async (phone, archived) => {
-    const res = await archiveContact(phone, archived);
-    if (res.ok) {
-      setContacts(prev => prev.filter(c => c.phone !== phone));
-      if (selectedRef.current === phone) {
+      setContacts(prev => prev.filter(c => c.conversation_id !== convId));
+      if (selectedConvIdRef.current === convId) {
         setSelected(null);
         setSelectedConvId(null);
         setContactData(null);
         history.pushState(null, '', '/');
       }
     }
-  }, [setContacts, selectedRef, setSelected, setSelectedConvId, setContactData]);
+  }, [setContacts, selectedConvIdRef, setSelected, setSelectedConvId, setContactData]);
 
   const handleDelete = useCallback(async (phone) => {
     const res = await deleteContact(phone);
@@ -129,11 +154,17 @@ export function useConversationActions({
     }
   }, [setContacts, selectedConvIdRef, setSelected, setSelectedConvId, setContactData]);
 
-  const handlePin = useCallback(async (phone, pinned) => {
-    const res = await pinContact(phone, pinned);
+  // Fixar/desafixar uma CONVERSA (plano 54 — antes era o contato inteiro). Mira a
+  // linha por conversation_id e re-ordena (fixadas ao topo). O WS `conversation_pinned`
+  // replica em outros clientes.
+  const handlePin = useCallback(async (convId, pinned) => {
+    if (convId == null) return;
+    const res = await pinConversation(convId, pinned);
     if (res.ok) {
+      const nextPinned = res.data && res.data.conversation
+        ? (res.data.conversation.is_pinned ? 1 : 0) : (pinned ? 1 : 0);
       setContacts(prev => sortContacts(prev.map(c =>
-        c.phone === phone ? { ...c, is_pinned: res.data.pinned } : c
+        c.conversation_id === convId ? { ...c, is_pinned: nextPinned } : c
       )));
     }
   }, [setContacts, sortContacts]);
@@ -153,6 +184,24 @@ export function useConversationActions({
     const res = await assignConversation(convId, userId);
     if (res && res.ok && res.data && res.data.conversation) {
       patchCtxConv({ assignee_user_id: res.data.conversation.assignee_user_id });
+    } else {
+      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir conversa.' }));
+    }
+  }, [patchCtxConv]);
+
+  // Unified assign (plano 10) for the context menu — routes to a HUMAN or an AI
+  // subagent via the same endpoint AssigneePicker uses. `payload` is the assignAgent
+  // body: {kind:'none'} | {kind:'user',userId} | {kind:'ai',agentKey}. Patches all
+  // three fields the menu reads (human clears AI + IA off; AI clears human + IA on).
+  const handleAssignAgent = useCallback(async (convId, payload) => {
+    const res = await assignAgent(convId, payload);
+    if (res && res.ok && res.data && res.data.conversation) {
+      const c = res.data.conversation;
+      patchCtxConv({
+        assignee_user_id: c.assignee_user_id,
+        active_agent_key: c.active_agent_key,
+        ai_active: c.ai_active,
+      });
     } else {
       setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir conversa.' }));
     }
@@ -213,7 +262,10 @@ export function useConversationActions({
   // All best-effort; degrade silently if forbidden.
   useEffect(() => {
     getMe().then(res => {
-      if (res && res.ok && res.data && res.data.user) setCurrentUserId(res.data.user.id);
+      if (res && res.ok && res.data && res.data.user) {
+        setCurrentUserId(res.data.user.id);
+        setCurrentUser(res.data.user);
+      }
     }).catch(() => {});
     getAssignableAgents().then(res => {
       if (res && res.ok && res.data) {
@@ -221,23 +273,25 @@ export function useConversationActions({
         setAgentsAi(Array.isArray(res.data.ai_agents) ? res.data.ai_agents : []);
       }
     }).catch(() => {});
-    getUsers().then((res) => {
+    // silent: read best-effort — sem `users.manage` o backend responde 403 e a
+    // lista fica vazia (degradação silenciosa), sem toast "Permissão negada.".
+    getUsers({ silent: true }).then((res) => {
       if (res && res.ok && res.data && Array.isArray(res.data.users)) setUsers(res.data.users);
     }).catch(() => {});
   }, []);
 
   // Resolve the contact's conversation whenever the context menu opens, so the
   // menu can show the current assignee and the resolve/reopen state. include_closed
-  // so a resolved thread still resolves (lets us show "Reabrir conversa").
+  // so a resolved thread still resolves (lets us show "Reabrir atendimento").
   useEffect(() => {
     if (!ctxMenu || !ctxMenu.phone) { setCtxConv({ loading: false, conv: null }); return; }
     const phone = ctxMenu.phone;
     const convId = ctxMenu.conversationId;
     let alive = true;
     setCtxConv({ loading: true, conv: null });
-    // Conversa-cêntrico: a linha clicada conhece sua conversa — carrega ELA por id.
-    // getContactConversation(phone) resolveria só uma das conversas do número e o
-    // menu agiria no canal errado (resolver/reabrir afetaria a conversa errada).
+    // Atendimento-cêntrico: a linha clicada conhece seu atendimento — carrega ELA por id.
+    // getContactConversation(phone) resolveria só uma dos atendimentos do número e o
+    // menu agiria no canal errado (resolver/reabrir afetaria o atendimento errada).
     const fetch = convId != null
       ? getConversation(convId)
       : getContactConversation(phone, { includeClosed: true });
@@ -250,11 +304,11 @@ export function useConversationActions({
 
   return {
     globalTags, setGlobalTags,
-    currentUserId, users, agentsUsers, agentsAi,
+    currentUserId, currentUser, users, agentsUsers, agentsAi,
     ctxMenu, setCtxMenu, ctxConv, setCtxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
-    handleAssignConversation, handleResolveConversation,
+    handleAssignConversation, handleAssignAgent, handleResolveConversation,
     handleCreateTag, applyTagResults, resolveAssignee,
   };
 }

@@ -18,7 +18,8 @@ from db.tables import channels
 
 _STATUS_FIELDS = ("connected", "logged_in", "own_phone", "last_error",
                   "enabled", "display_name", "config", "gowa_device_id",
-                  "gowa_isolation", "provider", "archived")
+                  "gowa_isolation", "provider", "archived",
+                  "account_identity", "account_identity_kind")
 
 # Cached device→channel index for inbound routing (see get_gowa_channel_for_device).
 # Channels change rarely; a short TTL keeps the per-message webhook lookup off the DB.
@@ -67,6 +68,27 @@ def get(channel_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def primary_channel_id() -> str | None:
+    """The channel that absorbs ``default``-less fallbacks (plano exclui-default).
+
+    Historically every ``channel_id or "default"`` fallback assumed a channel with
+    id ``"default"`` always existed. Now that the default channel is deletable, this
+    resolves to the literal ``"default"`` while it lives, else the oldest live
+    (``enabled=1``, ``archived=0``) channel, else ``None`` (zero channels). Pure read.
+    """
+    row = get("default")
+    if row is not None and not row.get("archived"):
+        return "default"
+    with get_engine().connect() as conn:
+        cid = conn.execute(
+            select(channels.c.id)
+            .where(channels.c.archived == 0, channels.c.enabled == 1)
+            .order_by(channels.c.created_at, channels.c.id)
+            .limit(1)
+        ).scalar_one_or_none()
+    return cid
+
+
 def create(*, id: str, provider: str, display_name: str = "", enabled: int = 1,
            gowa_device_id: str | None = None, gowa_isolation: str = "shared",
            config: str | None = None) -> dict:
@@ -94,7 +116,8 @@ def set_status(channel_id: str, **fields) -> dict | None:
         conn.execute(
             sa_update(channels).where(channels.c.id == channel_id).values(**values)
         )
-    # own_phone / gowa_device_id / enabled feed the device→channel index.
+    # own_phone / gowa_device_id / enabled feed the device→channel index; the
+    # status sweep (plano 32 F4) writes own_phone/account_identity here.
     invalidate_device_cache()
     return get(channel_id)
 
@@ -132,7 +155,10 @@ def _device_map() -> dict:
         dev = c.get("gowa_device_id") or c["id"]
         if dev:
             by_dev[str(dev)] = c["id"]
-        op = _digits(c.get("own_phone"))
+        # Normalize own_phone the same way get_gowa_channel_for_device normalizes the
+        # inbound JID (strip @suffix + :device part BEFORE digit-filtering — plano 32
+        # F4), so a stored "5511...:12" and an inbound "5511...:5@..." resolve equal.
+        op = _digits((str(c.get("own_phone") or "").split("@")[0]).split(":")[0])
         if op:
             by_phone[op] = c["id"]
     m = {"by_dev": by_dev, "by_phone": by_phone}
@@ -153,8 +179,8 @@ def get_gowa_channel_for_device(session_id: str | None = None,
 
     Prefers ``session_id`` (the registered device string — stable and available even
     before login); falls back to the receiving number (``device_jid`` → digits)
-    matched against the channel's ``own_phone`` (set by the status poll once logged
-    in). Best-effort: ``None`` lets the caller keep the URL's channel (legacy
+    matched against the channel's ``own_phone`` (persisted by the status sweep once
+    logged in — plano 32 F4). Best-effort: ``None`` lets the caller keep the URL's channel (legacy
     behaviour), so this never makes routing worse.
     """
     m = _device_map()

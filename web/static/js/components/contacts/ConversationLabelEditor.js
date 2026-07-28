@@ -6,6 +6,7 @@ import {
   createConversationLabel, updateConversationLabels,
 } from '../../services/api.js';
 import { PlusIcon } from './icons.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -19,7 +20,11 @@ const LABEL_COLORS = [
   '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280',
 ];
 
-export function ConversationLabelEditor({ conversationId }) {
+export function ConversationLabelEditor({ conversationId, currentUser = null }) {
+  // P48: creating/editing the GLOBAL label registry needs conversation_label.manage.
+  // Associating existing labels to the conversation is gated at the call site
+  // (conversation.reply); here we only hide the "create new label" affordances.
+  const canManageLabels = hasPermission(currentUser, 'conversation_label.manage');
   const [globalLabels, setGlobalLabels] = useState([]);   // [{id,name,color}]
   const [selected, setSelected] = useState([]);            // [name]
   const [search, setSearch] = useState('');
@@ -154,7 +159,7 @@ export function ConversationLabelEditor({ conversationId }) {
               ${available.length === 0 && !search.trim() ? html`
                 <div class="px-3 py-2 text-[13px] text-wa-secondary">Nenhuma etiqueta disponível</div>
               ` : null}
-              ${search.trim() && !searchHasExact ? html`
+              ${canManageLabels && search.trim() && !searchHasExact ? html`
                 <button type="button"
                   onClick=${() => { setCreating(true); setNewName(search.trim()); }}
                   class="w-full text-left px-3 py-2 text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-2 border-t border-wa-border">
@@ -162,7 +167,7 @@ export function ConversationLabelEditor({ conversationId }) {
                   <span class="text-wa-iconActive font-medium">Criar "${search.trim()}"</span>
                 </button>
               ` : null}
-              ${!search.trim() ? html`
+              ${canManageLabels && !search.trim() ? html`
                 <button type="button" onClick=${() => setCreating(true)}
                   class="w-full text-left px-3 py-2 text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-2 border-t border-wa-border">
                   <${PlusIcon} />
@@ -202,4 +207,3 @@ export function ConversationLabelEditor({ conversationId }) {
   `;
 }
 
-export default ConversationLabelEditor;

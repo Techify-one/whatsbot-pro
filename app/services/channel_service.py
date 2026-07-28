@@ -32,20 +32,84 @@ import re
 import time
 import uuid
 
+from sqlalchemy.exc import IntegrityError
+
+from channels import dedup
 from db.repositories import (channel_repo, channel_credential_repo, inbox_repo,
                              inbox_member_repo, user_repo)
 from plugins.events import emit_with_filter
 
 logger = logging.getLogger(__name__)
 
+
+# ── Account-identity dedup enforcement (plano 32 F4) ─────────────────────────────
+
+class DuplicateChannelError(Exception):
+    """Raised by create/update when the submitted credentials resolve to an account
+    already bound to another enabled channel of the same provider. The route maps it
+    to HTTP 409 (D1: block, don't just warn)."""
+
+    def __init__(self, existing_channel_id: str):
+        self.existing_channel_id = existing_channel_id
+        super().__init__(
+            f"Esta conta já está conectada no canal {existing_channel_id}.")
+
+
+def credential_identity(deps, provider: str, creds: dict):
+    """The account identity a provider derives from credentials, or ``None``.
+
+    Generic: reads the provider CLASS's ``identity_from_credentials`` hook (a
+    classmethod) via the registry — never branches on provider name. ``None`` when
+    the provider has no create-time identity (GOWA) or the plugin isn't loaded."""
+    registry = getattr(deps, "channel_registry", None)
+    if registry is None:
+        return None
+    cls = registry.get_provider(provider)
+    if cls is None:
+        return None
+    try:
+        return cls.identity_from_credentials(dict(creds or {}))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _guard_duplicate(deps, provider: str, creds: dict, *, exclude_channel_id):
+    """Resolve the credential identity and raise if it duplicates another channel.
+
+    Returns the identity to persist (or ``None`` when the provider has none at this
+    point, e.g. GOWA — which dedups later via the sweep). Raises
+    :class:`DuplicateChannelError` on a conflict."""
+    identity = credential_identity(deps, provider, creds)
+    if identity is None:
+        return None
+    conflict = dedup.find_conflict(provider, identity,
+                                   exclude_channel_id=exclude_channel_id)
+    if conflict:
+        raise DuplicateChannelError(conflict)
+    return identity
+
+
+def _persist_identity(provider: str, channel_id: str, identity) -> None:
+    """Write the resolved identity, mapping the index backstop to a 409."""
+    if identity is None:
+        return
+    try:
+        channel_repo.set_status(channel_id, account_identity=identity.value,
+                                account_identity_kind=identity.kind)
+    except IntegrityError:
+        conflict = dedup.find_conflict(provider, identity,
+                                       exclude_channel_id=channel_id) or channel_id
+        raise DuplicateChannelError(conflict)
+
 ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 ALLOWED_PROVIDERS = {"gowa", "whatsapp_cloud", "telegram", "test"}
 
-# Non-secret credential keys returned in CLEAR so the edit form can show + pre-fill
-# them (they are public identifiers, not secrets). Everything else is masked (P15).
-NON_SECRET_CRED_KEYS = {"waba_id", "phone_number_id"}
-
 TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
+
+# Name guard (plano 76 · V9): mesmo declarada ``type: "text"``, uma credencial cujo
+# NOME cheire a segredo nunca sai em claro — um plugin de terceiro que erre o tipo
+# não pode virar vazamento. Default é sempre mascarar.
+_SECRET_NAME_RE = re.compile(r"(token|secret|password|senha|key)", re.IGNORECASE)
 
 
 # ── Serialization / masking (P15) ───────────────────────────────────────────────
@@ -57,11 +121,43 @@ def _mask(value: str) -> str:
     return f"••••{tail}"
 
 
-def serialize(row: dict, creds: dict) -> dict:
-    """Mask a channel row's credentials at the API boundary (P15)."""
+def _public_cred_keys(deps, provider: str) -> set[str]:
+    """Credential keys the provider marks PUBLIC (``type: "text"``) — o que sai em
+    claro para o form de edição pré-preencher (plano 76 · V9). Derivado do
+    DESCRIPTOR do provider, não de uma lista hardcoded. Guarda de nome obrigatória:
+    uma chave cujo nome case ``_SECRET_NAME_RE`` é mascarada mesmo com ``type:text``
+    (+ WARNING). Provider não registrado / descriptor quebrado ⇒ conjunto vazio =
+    tudo mascarado (default seguro)."""
+    try:
+        desc = provider_descriptor(deps, provider)
+    except Exception:  # noqa: BLE001
+        return set()
+    out: set[str] = set()
+    for field in desc.get("credential_fields") or []:
+        if field.get("type") != "text":
+            continue
+        key = field.get("key") or ""
+        if not key:
+            continue
+        if _SECRET_NAME_RE.search(key):
+            logger.warning(
+                "Canal (%s): credencial %r marcada type=text mas o nome parece "
+                "segredo — mascarada por segurança.", provider, key)
+            continue
+        out.add(key)
+    return out
+
+
+def serialize(row: dict, creds: dict, public_keys: set[str] | None = None) -> dict:
+    """Mask a channel row's credentials at the API boundary (P15).
+
+    ``public_keys`` (plano 76 · V9) é o conjunto de chaves que o provider marcou
+    ``type: "text"`` (resolvido por ``_public_cred_keys``); só elas saem em claro.
+    Ausente/``None`` ⇒ tudo mascarado (default seguro, ex.: caminhos sem deps)."""
     row = dict(row)
+    pub = public_keys or set()
     row["credentials"] = {
-        k: (v if k in NON_SECRET_CRED_KEYS else _mask(v))
+        k: (v if k in pub else _mask(v))
         for k, v in creds.items()
     }
     return row
@@ -143,6 +239,11 @@ def _invalidate_channel_caches(channel_id: str) -> None:
         ai_settings.reset_cache(channel_id)
     except Exception:
         pass
+    try:
+        from agent import memory
+        memory.invalidate_channel_caches(channel_id)
+    except Exception:
+        pass
 
 
 async def _emit_channel_event(deps, bus_event: str, payload: dict) -> None:
@@ -153,6 +254,37 @@ async def _emit_channel_event(deps, bus_event: str, payload: dict) -> None:
         logger.debug("channel event %s failed: %s", bus_event, e)
 
 
+def audit_snapshot(row: dict | None, creds: dict | None = None) -> dict:
+    """Estado do canal seguro para a TRILHA DE AUDITORIA (before/after).
+
+    Carrega o que o operador de fato editou — nome, ligado/desligado, arquivado e
+    o ``config`` inteiro (onde moram os overrides de IA por canal, plano 21) — e
+    NUNCA valor de credencial: só a LISTA de chaves preenchidas. O mascaramento do
+    ``audit_repo`` é por nome de chave e não cobriria uma credencial de nome
+    inocente (``proxy_url``, ``page_id``), então a decisão é aqui: valor de
+    credencial não entra na trilha, ponto.
+    """
+    if not row:
+        return {}
+    cfg = row.get("config")
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except Exception:  # noqa: BLE001 — config malformada vai crua pro diff
+            pass
+    out = {
+        "id": row.get("id"),
+        "provider": row.get("provider"),
+        "display_name": row.get("display_name"),
+        "enabled": bool(row.get("enabled")),
+        "archived": bool(row.get("archived")),
+        "config": cfg,
+    }
+    if creds is not None:
+        out["credential_keys"] = sorted(k for k, v in (creds or {}).items() if v)
+    return out
+
+
 # ── Read paths ──────────────────────────────────────────────────────────────────
 
 async def list_channels(deps, archived: bool = False) -> list[dict]:
@@ -161,7 +293,7 @@ async def list_channels(deps, archived: bool = False) -> list[dict]:
     out = []
     for row in rows:
         creds = await asyncio.to_thread(channel_credential_repo.get_all, row["id"])
-        out.append(serialize(row, creds))
+        out.append(serialize(row, creds, _public_cred_keys(deps, row.get("provider"))))
     return out
 
 
@@ -188,13 +320,58 @@ async def list_connected(deps) -> list[dict]:
                 pass
         if not logged_in:
             continue
+        cls = registry.get_provider(row.get("provider")) if registry is not None else None
+        # Só canais em que o operador PODE iniciar uma conversa a frio (plano
+        # tipos-de-contato): o provider declara via Channel.can_initiate_conversation().
+        # O widget de site (sessão `wsess_…` nasce no navegador do visitante) devolve
+        # False e é escondido do seletor "Nova conversa". Resolvido pela classe (puro,
+        # sem rede), fail-open (True) — nunca por `if provider ==`.
+        if cls is not None:
+            try:
+                if not cls.can_initiate_conversation():
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+        # Tipo de contato do canal (plano tipos-de-contato): o provider declara via
+        # Channel.contact_type() — fail-open para "outros". Usado pela UI de "Nova
+        # conversa" pra filtrar as sugestões do campo "Para" pelo tipo do canal
+        # escolhido (canal Telegram → só contatos telegram).
+        contact_type = "outros"
+        if cls is not None:
+            try:
+                contact_type = cls.contact_type()
+            except Exception:  # noqa: BLE001
+                contact_type = "outros"
         out.append({
             "id": row["id"],
             "provider": row.get("provider"),
             "display_name": row.get("display_name") or "",
             "own_phone": row.get("own_phone"),
+            "contact_type": contact_type,
         })
     return out
+
+
+async def list_for_filter(deps) -> list[dict]:
+    """ALL channels that can appear as a conversation's ``channel_id``, for the
+    conversation-filter "Canais" options (plano 59).
+
+    Lower-privileged than ``GET /api/channels`` (gated by ``conversation.reply``,
+    no credentials) and broader than ``/connected`` (includes disabled and
+    archived channels): the filter must offer every channel a conversation could
+    belong to, independent of which conversations are currently loaded in the
+    sidebar. Projects only ``{id, provider, display_name}`` — no ``serialize``,
+    so no credential crosses the boundary.
+    """
+    rows = await asyncio.to_thread(channel_repo.list_all, True)  # include_archived=True
+    return [
+        {
+            "id": row["id"],
+            "provider": row.get("provider"),
+            "display_name": row.get("display_name") or "",
+        }
+        for row in rows
+    ]
 
 
 async def get(deps, channel_id: str) -> dict | None:
@@ -208,19 +385,81 @@ async def get_serialized(deps, channel_id: str) -> dict | None:
     if row is None:
         return None
     creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-    return serialize(row, creds)
+    return serialize(row, creds, _public_cred_keys(deps, row.get("provider")))
+
+
+def provider_descriptor(deps, provider: str) -> dict:
+    """The provider's self-description (plano 33), reconciled with capabilities.
+
+    Reads the provider CLASS's ``provider_descriptor`` (a classmethod) via the
+    registry — never branches on provider name — then guarantees every credential
+    key the provider marks REQUIRED via ``ChannelCapabilities.required_credentials``
+    is present + flagged ``required`` in the returned ``credential_fields`` (so a
+    provider that only declared its required set, or nothing, still yields a usable
+    generic form). Best-effort: a broken/absent provider degrades to a minimal
+    descriptor rather than failing the endpoint."""
+    registry = getattr(deps, "channel_registry", None)
+    cls = registry.get_provider(provider) if registry is not None else None
+    desc: dict = {}
+    if cls is not None:
+        try:
+            desc = dict(cls.provider_descriptor())
+        except Exception:  # noqa: BLE001
+            desc = {}
+    if not desc:
+        desc = {"provider": provider, "label": provider, "color": "gray",
+                "credential_fields": [], "config_fields": [],
+                "capabilities": {"needs_qr": False, "templates": False},
+                "ai_sequential_default": False, "post_create": None,
+                "form_component": None}
+    desc.setdefault("provider", provider)
+    desc.setdefault("label", provider)
+    desc.setdefault("color", "gray")
+    desc.setdefault("config_fields", [])
+    desc.setdefault("capabilities", {"needs_qr": False, "templates": False})
+    desc.setdefault("ai_sequential_default", False)
+    # Tipo de contato do provider (plano tipos-de-contato): garantido centralmente
+    # para TODO provider (os 3 shipped sobrescrevem provider_descriptor sem re-adicionar
+    # a chave), então o contrato "o descriptor expõe contact_type" vale sempre.
+    if cls is not None:
+        try:
+            desc.setdefault("contact_type", cls.contact_type())
+        except Exception:  # noqa: BLE001
+            desc.setdefault("contact_type", "outros")
+    else:
+        desc.setdefault("contact_type", "outros")
+    desc.setdefault("post_create", None)
+    desc.setdefault("form_component", None)
+    fields = list(desc.get("credential_fields") or [])
+    # Reconcile: capability-required credentials must appear + be flagged required.
+    have = {f.get("key") for f in fields}
+    for key in required_credentials(deps, provider):
+        matched = next((f for f in fields if f.get("key") == key), None)
+        if matched is not None:
+            matched["required"] = True
+        else:
+            fields.append({"key": key, "label": key, "type": "secret",
+                           "required": True})
+    desc["credential_fields"] = fields
+    return desc
 
 
 async def providers(deps) -> dict:
-    """Available providers (intersect registered with the allow-list) + required
-    credentials per provider (capability-driven)."""
+    """Available providers as full descriptors (plano 33) + a flat required-
+    credentials map (kept for the create-form gate + back-compat).
+
+    Offer = every provider currently REGISTERED in the live registry (its backing
+    plugin is enabled). ``ALLOWED_PROVIDERS`` is no longer the source of the offer
+    (a provider is offerable iff installed); it survives only as a legacy constant.
+    A provider that isn't installed simply doesn't appear."""
     registry = getattr(deps, "channel_registry", None)
-    if registry is not None:
-        names = sorted(set(registry.providers()) & ALLOWED_PROVIDERS)
-    else:
-        names = sorted(ALLOWED_PROVIDERS)
-    required = {p: required_credentials(deps, p) for p in names}
-    return {"providers": names, "required_credentials": required}
+    names = sorted(registry.providers()) if registry is not None else []
+    descriptors = [provider_descriptor(deps, p) for p in names]
+    required = {
+        d["provider"]: [f["key"] for f in d["credential_fields"] if f.get("required")]
+        for d in descriptors
+    }
+    return {"providers": descriptors, "required_credentials": required}
 
 
 async def status(deps, row: dict) -> dict:
@@ -281,6 +520,52 @@ async def qr(deps, row: dict):
     return png or ""
 
 
+async def _session_action(deps, row: dict, action: str):
+    """Shared body for per-channel ``reconnect``/``logout`` (plano 27 F3.1).
+
+    Mirrors :func:`qr`: gate to GOWA, register the live instance on-demand, then
+    call ``inst.<action>`` off-thread. Returns the ``{ok, error}`` dict, or a
+    sentinel: ``"not_gowa"`` (provider isn't GOWA) / ``"unavailable"`` (no live
+    instance / method)."""
+    if row.get("provider") != "gowa":
+        return "not_gowa"
+    registry = getattr(deps, "channel_registry", None)
+    channel_id = row["id"]
+    inst = registry.get(channel_id) if registry is not None else None
+    if inst is None:
+        register_live(deps, channel_id, "gowa", row)
+        inst = registry.get(channel_id) if registry is not None else None
+    method = getattr(inst, action, None)
+    if inst is None or method is None:
+        return "unavailable"
+    result = await asyncio.to_thread(method)
+    # Conectar/desconectar muda o ESTADO do canal (um logout derruba o número) —
+    # vai para a trilha com quem mandou. Sentinelas (not_gowa/unavailable) saem
+    # antes daqui: só a ação que de fato rodou é auditada.
+    await _emit_channel_event(deps, "channel.session_action", {
+        "channel_id": channel_id,
+        "provider": row.get("provider"),
+        "action": action,
+        "ok": bool((result or {}).get("ok")) if isinstance(result, dict) else None,
+        "ts": time.time(),
+        "_audit_after": {
+            "action": action,
+            "result": result if isinstance(result, dict) else str(result),
+        },
+    })
+    return result
+
+
+async def reconnect(deps, row: dict):
+    """Reconnect a GOWA channel's device socket (acts on the right device)."""
+    return await _session_action(deps, row, "reconnect")
+
+
+async def logout(deps, row: dict):
+    """Log a GOWA channel's device out of WhatsApp (acts on the right device)."""
+    return await _session_action(deps, row, "logout")
+
+
 # ── Members ─────────────────────────────────────────────────────────────────────
 
 async def get_members(deps, row: dict) -> dict:
@@ -298,8 +583,17 @@ async def set_members(deps, row: dict, user_ids: list[int]) -> dict:
     inbox = await asyncio.to_thread(
         inbox_repo.get_or_create_for_channel, channel_id,
         name=row.get("display_name") or channel_id)
+    previous = await asyncio.to_thread(inbox_member_repo.member_ids, inbox["id"])
     members = await asyncio.to_thread(
         inbox_member_repo.set_members, inbox["id"], user_ids)
+    await _emit_channel_event(deps, "channel.members_changed", {
+        "channel_id": channel_id,
+        "provider": row.get("provider"),
+        "inbox_id": inbox["id"],
+        "ts": time.time(),
+        "_audit_before": {"member_ids": sorted(previous or [])},
+        "_audit_after": {"member_ids": sorted(members or [])},
+    })
     return {"inbox_id": inbox["id"], "member_ids": members}
 
 
@@ -310,7 +604,14 @@ async def create(deps, *, cid: str, provider: str, display_name: str,
     """Create a channel + credentials + its inbox, register it live, and return the
     serialized row. The route does the validation (provider allow-list, missing
     creds, id format/uniqueness) and resolves the final ``cid``/``gowa_device_id``
-    before calling here so the persistence + side-effects live in one place."""
+    before calling here so the persistence + side-effects live in one place.
+
+    Account-identity dedup (plano 32 F4): if the provider derives an identity from
+    the submitted credentials (Cloud ``phone_number_id``, Telegram ``bot_token``)
+    and it duplicates another channel, raise ``DuplicateChannelError`` (→ 409)
+    BEFORE persisting anything. GOWA has no create-time identity → dedups later via
+    the sweep."""
+    identity = _guard_duplicate(deps, provider, submitted_creds, exclude_channel_id=None)
     row = await asyncio.to_thread(
         channel_repo.create, id=cid, provider=provider,
         display_name=display_name or cid,
@@ -320,6 +621,9 @@ async def create(deps, *, cid: str, provider: str, display_name: str,
     for key, value in submitted_creds.items():
         if value:  # never store an empty/placeholder secret
             await asyncio.to_thread(channel_credential_repo.set, cid, str(key), str(value))
+    if identity is not None:
+        await asyncio.to_thread(_persist_identity, provider, cid, identity)
+        row = await asyncio.to_thread(channel_repo.get, cid)
     # One inbox per channel (plano 11) — best-effort; resolve_inbox_id self-heals.
     try:
         await asyncio.to_thread(
@@ -330,16 +634,41 @@ async def create(deps, *, cid: str, provider: str, display_name: str,
     # Register the live channel now so status/QR/send work without a restart.
     register_live(deps, cid, provider, row)
     stored = await asyncio.to_thread(channel_credential_repo.get_all, cid)
-    return serialize(row, stored)
+    await _emit_channel_event(deps, "channel.created", {
+        "channel_id": cid,
+        "provider": provider,
+        "ts": time.time(),
+        "_audit_after": audit_snapshot(row, stored),
+    })
+    return serialize(row, stored, _public_cred_keys(deps, provider))
 
 
 async def update(deps, row: dict, body: dict) -> dict:
     """Apply a channel update (display_name / enabled / config / credentials).
 
     Keeps the inbox name in sync with ``display_name``, and on a config edit drops
-    the per-channel caches and emits the minimal ``channel.updated`` event (Q6).
+    the per-channel caches. Emite ``channel.updated`` (Q6) no fim, para QUALQUER
+    campo editado — não só ``config``, como era antes: a trilha de auditoria
+    precisa registrar também a troca de nome, o liga/desliga e a troca de
+    credencial (``_audit_before``/``_audit_after`` carregam o snapshot seguro).
     """
     channel_id = row["id"]
+    provider = row.get("provider")
+    # Snapshot ANTES de qualquer escrita — vira o "antes" do diff na Auditoria.
+    before_creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
+    before_snapshot = audit_snapshot(row, before_creds)
+    # Account-identity dedup on EDIT (plano 32 F4): a credential edit could make this
+    # channel collide with another (bypass of the create-guard). Resolve the EFFECTIVE
+    # credentials (stored overlaid with the non-placeholder submitted values) and
+    # block before persisting anything. GOWA has no create-time identity → None here.
+    submitted_creds = body.get("credentials") or {}
+    if submitted_creds:
+        effective = dict(await asyncio.to_thread(
+            channel_credential_repo.get_all, channel_id))
+        for k, v in submitted_creds.items():
+            if v and not str(v).startswith("••••"):
+                effective[str(k)] = str(v)
+        _guard_duplicate(deps, provider, effective, exclude_channel_id=channel_id)
     fields = {}
     if "display_name" in body:
         fields["display_name"] = body["display_name"]
@@ -358,29 +687,57 @@ async def update(deps, row: dict, body: dict) -> dict:
                     inbox_repo.update, inbox["id"],
                     name=fields["display_name"] or channel_id)
     # A config edit may change the GOWA JID-type filter / per-channel AI settings —
-    # invalidate the caches and emit the minimal channel.updated domain event (Q6).
+    # invalidate the caches (o evento sai no fim, cobrindo TODAS as chaves editadas).
     if "config" in body:
         _invalidate_channel_caches(channel_id)
-        await _emit_channel_event(deps, "channel.updated", {
-            "channel_id": channel_id,
-            "keys_changed": ["config"],
-            "ts": time.time(),
-        })
     # Credentials: a non-empty value replaces; the masked placeholder (••••) is ignored.
+    creds_changed: list[str] = []
     for key, value in (body.get("credentials") or {}).items():
         if value and not str(value).startswith("••••"):
             await asyncio.to_thread(channel_credential_repo.set, channel_id, str(key), str(value))
+            creds_changed.append(str(key))
+    # Persist the (already dedup-guarded) credential identity so the row + index
+    # reflect the edit (plano 32 F4).
+    if submitted_creds:
+        identity = credential_identity(deps, provider, effective)
+        if identity is not None:
+            await asyncio.to_thread(_persist_identity, provider, channel_id, identity)
+            row = await asyncio.to_thread(channel_repo.get, channel_id)
     stored = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-    return serialize(row, stored)
+    # ``channel.updated`` (Q6) — antes valia SÓ para edição de ``config``; agora sai
+    # para qualquer campo editado (nome, ligado/desligado, config, credenciais), que
+    # é o que a trilha de auditoria precisa registrar. ``keys_changed`` continua
+    # sendo o contrato do payload; ``credential_keys_changed`` lista só os NOMES.
+    keys_changed = sorted(fields.keys())
+    if creds_changed:
+        keys_changed.append("credentials")
+    if keys_changed:
+        await _emit_channel_event(deps, "channel.updated", {
+            "channel_id": channel_id,
+            "provider": provider,
+            "keys_changed": keys_changed,
+            "credential_keys_changed": sorted(creds_changed),
+            "ts": time.time(),
+            "_audit_before": before_snapshot,
+            "_audit_after": audit_snapshot(row, stored),
+        })
+    return serialize(row, stored, _public_cred_keys(deps, provider))
 
 
 async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
     """Remove a channel: soft-delete (archive, default) or hard-delete (purge).
 
     Returns the result dict, or ``None`` if the channel vanished mid-purge (the
-    route maps it to a 404). The caller already guarded ``default`` and existence.
+    route maps it to a 404). The caller already guarded existence. Any channel is
+    removable now, including ``default`` (plano exclui-default) — the process caches
+    keyed on this channel_id are dropped so routing stops pointing at a dead inbox.
     """
     registry = getattr(deps, "channel_registry", None)
+    # Snapshot ANTES de remover — a linha da Auditoria é a única memória do canal
+    # depois de um purge.
+    doomed = await asyncio.to_thread(channel_repo.get, channel_id)
+    doomed_creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
+    before_snapshot = audit_snapshot(doomed, doomed_creds)
     # Best-effort: log the GOWA device out so the WhatsApp number is freed.
     inst = registry.get(channel_id) if registry is not None else None
     if inst is not None and getattr(inst, "_client", None) is not None:
@@ -402,7 +759,16 @@ async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
                 registry.remove_channel(channel_id)
             except Exception:
                 pass
+        _invalidate_channel_caches(channel_id)
         logger.info("Canal %s removido (purge).", channel_id)
+        await _emit_channel_event(deps, "channel.deleted", {
+            "channel_id": channel_id,
+            "provider": (doomed or {}).get("provider"),
+            "purged": True,
+            "ts": time.time(),
+            "_audit_before": before_snapshot,
+            "_audit_after": {"purged": True},
+        })
         return {"deleted": channel_id, "purged": True}
 
     await asyncio.to_thread(channel_repo.archive, channel_id)
@@ -411,7 +777,16 @@ async def delete(deps, channel_id: str, *, purge: bool = False) -> dict | None:
             registry.remove_channel(channel_id)
         except Exception:
             pass
+    _invalidate_channel_caches(channel_id)
     logger.info("Canal %s arquivado (soft-delete).", channel_id)
+    await _emit_channel_event(deps, "channel.deleted", {
+        "channel_id": channel_id,
+        "provider": (doomed or {}).get("provider"),
+        "purged": False,
+        "ts": time.time(),
+        "_audit_before": before_snapshot,
+        "_audit_after": {"archived": True},
+    })
     return {"deleted": channel_id, "archived": True}
 
 
@@ -419,4 +794,10 @@ async def restore(deps, channel_id: str) -> dict:
     """Undo a soft-delete: unarchive (stays disabled until re-enabled)."""
     row = await asyncio.to_thread(channel_repo.restore, channel_id)
     creds = await asyncio.to_thread(channel_credential_repo.get_all, channel_id)
-    return serialize(row, creds)
+    await _emit_channel_event(deps, "channel.restored", {
+        "channel_id": channel_id,
+        "provider": row.get("provider"),
+        "ts": time.time(),
+        "_audit_after": audit_snapshot(row, creds),
+    })
+    return serialize(row, creds, _public_cred_keys(deps, row.get("provider")))

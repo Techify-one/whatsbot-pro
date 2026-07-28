@@ -1,30 +1,74 @@
 // AI Engine — agents editor (plano 06). Lists, CREATES, edits, duplicates and
-// deletes agents: display_name, prompt_key (select dos prompts), model (select
-// de /api/models), model_config (temperature/top_p/max_tokens → objeto),
-// tool_names (todas|null ou multiselect do registry completo — core + plugin +
-// code-in-DB), enabled, description, is_router toggle e routing_targets
-// (multiselect de agent_keys quando router). Criar um agente = mesmo PUT do
-// editar (upsert no backend), só com uma agent_key nova. Cada save bumpa a
-// versão; o botão Histórico lista versões com Reverter. O agente `default` é o
-// fallback do motor e não pode ser excluído.
+// deletes agents: display_name, prompt (texto inline, próprio de cada agente —
+// não reutilizável), model (select de /api/models), model_config
+// (temperature/top_p/max_tokens → objeto), tool_names (todas|null ou multiselect
+// do registry completo — core + plugin + code-in-DB), enabled, description,
+// is_router toggle e routing_targets (multiselect de agent_keys quando router).
+// Criar um agente = mesmo PUT do editar (upsert no backend), só com uma agent_key
+// nova. Cada save bumpa a versão; o botão Histórico lista versões com Reverter
+// (incluindo o prompt). O agente `default` é o fallback do motor e não pode ser
+// excluído.
 
 import { h } from 'preact';
-import { useEffect, useState, useRef } from 'preact/hooks';
+import { useEffect, useMemo, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
   listAgents,
   saveAgent,
+  saveAgentPrompt,
   deleteAgent,
   getAgentHistory,
   rollbackAgent,
-  listPrompts,
   listRegisteredTools,
 } from '../../services/api.js';
+import { hasPermission } from '../../utils/permissions.js';
 import { ModelSelect } from '../ModelSelect.js';
-import { SearchableSelect } from '../SearchableSelect.js';
+import { MarkdownEditor } from '../MarkdownEditor.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
+import { useUrlState } from '../../hooks/useUrlState.js';
+import { readParams, writeParams, bool } from '../../services/urlState.js';
+import PromptHistoryModal from './PromptHistoryModal.js';
 
 const html = htm.bind(h);
+
+// Deep-link (Plano 24) — flags de query ADITIVAS sobre o path /ai/agents/{key}
+// (o path já é dono do agente aberto via useDeepLink). Só refletem o modal aberto.
+const AGENT_URL_SCHEMA = [
+  bool('history'),         // ?history=1 → modal de histórico do agente
+  bool('prompt-history'),  // ?prompt-history=1 → modal de trilha de prompt
+];
+
+// Strip common markdown markup so the card preview shows clean, readable text
+// instead of raw syntax (**bold**, # heading, [link](url), `code`, lists, …).
+function stripMarkdown(body) {
+  return (body || '')
+    .replace(/```[\s\S]*?```/g, ' ')          // fenced code blocks
+    .replace(/`([^`]+)`/g, '$1')              // inline code
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')    // images
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')  // links → link text
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')       // headings
+    .replace(/^\s{0,3}>\s?/gm, '')            // blockquotes
+    .replace(/^\s{0,3}([-*+]|\d+\.)\s+/gm, '') // list markers
+    .replace(/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/gm, ' ') // horizontal rules
+    .replace(/(\*\*|__)(.*?)\1/g, '$2')       // bold
+    .replace(/(\*|_)(.*?)\1/g, '$2')          // italic
+    .replace(/~~(.*?)~~/g, '$1')              // strikethrough
+    .replace(/\s+/g, ' ')                      // collapse whitespace
+    .trim();
+}
+
+// Extract {placeholder} tokens from the prompt body for a small preview chip list
+// (resolved from the Variáveis tab at render time).
+function extractPlaceholders(body) {
+  const out = [];
+  const seen = new Set();
+  const re = /\{([a-zA-Z0-9_]+)\}/g;
+  let m;
+  while ((m = re.exec(body || '')) !== null) {
+    if (!seen.has(m[1])) { seen.add(m[1]); out.push(m[1]); }
+  }
+  return out;
+}
 
 // agent_key é IDENTIDADE — não pode ser renomeada depois (quebra executions.agent_key
 // e o histórico de usage). Mesmo padrão de prompts/tools.
@@ -90,18 +134,27 @@ function HistoryModal({ title, versions, current, busy, onRollback, onClose }) {
 // `isNew` toggles the agent_key field. For "create" the parent passes a blank
 // template ({}); for "duplicate" it passes an existing agent's config with the
 // key stripped, so every field comes pre-filled but the user picks a new key.
-function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCancel, busy }) {
+function AgentForm({ isNew, agent, existingKeys, tools, onSave, onSavePrompt, onCancel, busy, onOpenPromptHistory, isDuplicate, canConfig, canCreate, canDuplicate, canPromptEdit, canPromptVersion, canPromptDelete }) {
   const mc = agent.model_config || {};
   const [key, setKey] = useState('');
   const [displayName, setDisplayName] = useState(agent.display_name || '');
-  const [promptKey, setPromptKey] = useState(agent.prompt_key || '');
+  const [prompt, setPrompt] = useState(agent.prompt || '');
+  // Commit message for the prompt trail — ephemeral, not rehydrated from the agent.
+  const [changeNote, setChangeNote] = useState('');
+  const placeholders = useMemo(() => extractPlaceholders(prompt), [prompt]);
   const [model, setModel] = useState(mc.model || '');
   const [temperature, setTemperature] = useState(numField(mc.temperature));
   const [topP, setTopP] = useState(numField(mc.top_p));
   const [maxTokens, setMaxTokens] = useState(numField(mc.max_tokens));
+  // Nível de pensamento (plano 37 B1): texto livre → model_config.thinking_level,
+  // que o backend traduz para reasoning_effort (model_factory._ALIASES).
+  const [thinkingLevel, setThinkingLevel] = useState(mc.thinking_level || '');
   const [enabled, setEnabled] = useState(agent.enabled !== false);
   const [description, setDescription] = useState(agent.description || '');
   const [isRouter, setIsRouter] = useState(!!agent.is_router);
+  // Padrão para novas conversas (plano 36): flag radio (só um agente). Nome distinto
+  // de `isDefault` (linha abaixo), que significa "é o agente de chave literal default".
+  const [isNewConvDefault, setIsNewConvDefault] = useState(!!agent.is_default);
   // tool_names: null => "todas as tools". Otherwise a list of names.
   const [allTools, setAllTools] = useState(agent.tool_names == null);
   const [toolNames, setToolNames] = useState(
@@ -110,6 +163,37 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
   const [routingTargets, setRoutingTargets] = useState(
     Array.isArray(agent.routing_targets) ? [...agent.routing_targets] : []
   );
+  // Save flow: split button ("Salvar" = nova versão / caret = sobrescrever) gated
+  // by a confirmation modal. pendingMode ∈ {null, 'new', 'amend'}; menuOpen = caret.
+  const [pendingMode, setPendingMode] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Quando o pai troca o agente em edição por outra revisão (ex.: restaurar uma
+  // versão do prompt, que volta com a versão bumpada), re-sincroniza os campos do
+  // formulário — senão os useState ficam presos no valor da 1ª montagem e o
+  // textarea continua mostrando o prompt antigo até um reload da página.
+  const agentRev = `${agent.agent_key || ''}:v${agent.version || 1}`;
+  const lastRevRef = useRef(agentRev);
+  useEffect(() => {
+    if (lastRevRef.current === agentRev) return; // mesma revisão → não pisa edição em andamento
+    lastRevRef.current = agentRev;
+    const mc2 = agent.model_config || {};
+    setDisplayName(agent.display_name || '');
+    setPrompt(agent.prompt || '');
+    setModel(mc2.model || '');
+    setTemperature(numField(mc2.temperature));
+    setTopP(numField(mc2.top_p));
+    setMaxTokens(numField(mc2.max_tokens));
+    setThinkingLevel(mc2.thinking_level || '');
+    setEnabled(agent.enabled !== false);
+    setDescription(agent.description || '');
+    setIsRouter(!!agent.is_router);
+    setIsNewConvDefault(!!agent.is_default);
+    setAllTools(agent.tool_names == null);
+    setToolNames(Array.isArray(agent.tool_names) ? [...agent.tool_names] : []);
+    setRoutingTargets(Array.isArray(agent.routing_targets) ? [...agent.routing_targets] : []);
+    setChangeNote('');
+  }, [agentRev]);
 
   const trimmedKey = key.trim();
   const keyFormatErr = isNew && trimmedKey && !KEY_RE.test(trimmedKey)
@@ -121,6 +205,17 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
   // be empty (it is the fallback every other agent inherits). Other agents may
   // leave it blank to fall back to the app default.
   const isDefault = !isNew && agent.agent_key === 'default';
+  // Campos de config (nome, modelo, tools, roteamento) são editáveis ao editar
+  // um agente existente (agent.config.manage) OU ao criar/duplicar um novo
+  // (agent.create / agent.duplicate — criar já inclui a config inicial).
+  const canEditConfigFields = canConfig || (isNew && (isDuplicate ? canDuplicate : canCreate));
+  // Prompts-only: usuário com agent.prompts.edit mas SEM agent.config.manage
+  // edita apenas o prompt de um agente EXISTENTE (endpoint dedicado). Não vale
+  // para criação (novo agente vai pelo save completo).
+  const promptOnly = !isNew && !canConfig && canPromptEdit;
+  // O botão "Versões do prompt" abre o histórico (comparar/restaurar/apagar);
+  // basta ter versionar OU apagar.
+  const canPromptVersioning = canPromptVersion || canPromptDelete;
 
   function toggleTool(name) {
     setToolNames(prev => prev.includes(name) ? prev.filter(t => t !== name) : [...prev, name]);
@@ -135,35 +230,66 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
     if (temperature !== '') out.temperature = parseFloat(temperature);
     if (topP !== '') out.top_p = parseFloat(topP);
     if (maxTokens !== '') out.max_tokens = parseInt(maxTokens, 10);
+    // thinking_level (plano 37 B1): só emite quando preenchido; limpar o campo
+    // remove a chave. Também é EXCLUÍDO do preserve abaixo, senão um valor antigo
+    // de `mc` sobreviveria como chave-fantasma mesmo o usuário tendo limpado o input.
+    if (thinkingLevel.trim()) out.thinking_level = thinkingLevel.trim();
     // Preserve any extra keys the UI doesn't surface (e.g. provider-specific).
     for (const [k, v] of Object.entries(mc)) {
-      if (!['model', 'temperature', 'top_p', 'max_tokens'].includes(k)) out[k] = v;
+      if (!['model', 'temperature', 'top_p', 'max_tokens', 'thinking_level'].includes(k)) out[k] = v;
     }
     return out;
   }
 
-  const canSave = !busy && displayName.trim()
-    && (isNew ? (trimmedKey && !keyErr) : true)
-    && (!isDefault || !!model.trim());
+  const canSave = promptOnly
+    ? !busy
+    : (!busy && displayName.trim()
+        && (isNew ? (trimmedKey && !keyErr) : true)
+        && (!isDefault || !!model.trim()));
 
-  function submit() {
+  // Step 1 — a save button opens the confirmation modal for that mode.
+  function requestSave(mode) {
     if (!canSave) return;
+    setMenuOpen(false);
+    setPendingMode(mode);
+  }
+
+  // Step 2 — confirm: actually persist with the chosen version_mode.
+  function confirmSave() {
+    if (!canSave || !pendingMode) return;
     const finalKey = isNew ? trimmedKey : agent.agent_key;
-    onSave(finalKey, {
-      display_name: displayName.trim(),
-      prompt_key: promptKey,
-      model_config: buildModelConfig(),
-      tool_names: allTools ? null : toolNames,
-      enabled,
-      description: description.trim(),
-      is_router: isRouter,
-      routing_targets: isRouter ? routingTargets : null,
-    });
+    if (promptOnly) {
+      // Sem agent.config.manage: salva apenas o prompt (endpoint dedicado).
+      onSavePrompt(finalKey, prompt);
+    } else {
+      onSave(finalKey, {
+        display_name: displayName.trim(),
+        prompt: prompt,
+        // Sinaliza ao backend que é uma duplicação (exige agent.duplicate em vez
+        // de agent.create). Só relevante na criação de um agente novo.
+        duplicate: isNew && isDuplicate,
+        change_note: changeNote.trim() || null,
+        version_mode: pendingMode,
+        model_config: buildModelConfig(),
+        tool_names: allTools ? null : toolNames,
+        enabled,
+        description: description.trim(),
+        is_router: isRouter,
+        is_default: isNewConvDefault,
+        routing_targets: isRouter ? routingTargets : null,
+      });
+    }
+    setChangeNote('');
+    setPendingMode(null);
   }
 
   // Routing targets: other agents only (can't route to itself).
   const selfKey = isNew ? trimmedKey : agent.agent_key;
   const otherAgents = (window.__aiAgentsCache || []).filter(a => a.agent_key !== selfKey);
+  // Único roteador (plano 29 Eixo B): salvar este como roteador rebaixa o atual.
+  const currentRouter = otherAgents.find(a => a.is_router);
+  // Único padrão de novas conversas (plano 36): salvar este rebaixa o atual.
+  const currentDefault = otherAgents.find(a => a.is_default);
 
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-4 mb-4">
@@ -186,26 +312,50 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
 
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Nome de exibição</label>
-          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            type="text" value=${displayName} onInput=${(e) => setDisplayName(e.target.value)} />
+          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px] disabled:opacity-60"
+            type="text" value=${displayName} disabled=${!canEditConfigFields}
+            onInput=${(e) => setDisplayName(e.target.value)} />
         </div>
 
         <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">Prompt</label>
-          <${SearchableSelect}
-            value=${promptKey}
-            onChange=${setPromptKey}
-            options=${(prompts || []).map(p => ({ value: p.prompt_key, label: p.prompt_key }))}
-            placeholder="— padrão do app —"
-            searchPlaceholder="Buscar prompt..."
-            allowEmpty=${true}
-            emptyLabel="— padrão do app —"
-          />
-          <div class="text-[11px] text-wa-secondary mt-1">
-            Sem prompt selecionado, o agente usa o system prompt padrão do app. Crie prompts na aba <span class="font-medium">Prompts</span>.
+          <div class="flex items-center justify-between mb-1 gap-2">
+            <label class="block text-[12px] text-wa-secondary">Prompt do agente</label>
+            ${canPromptVersioning ? html`
+              <button type="button"
+                class="px-2 py-1 rounded-md text-[11px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 shrink-0"
+                disabled=${isNew}
+                title=${isNew ? 'Salve o agente para começar a versionar o prompt.' : 'Ver versões do prompt'}
+                onClick=${() => onOpenPromptHistory && onOpenPromptHistory()}>Versões do prompt</button>
+            ` : null}
           </div>
+          ${canPromptEdit ? html`
+            <${MarkdownEditor}
+              value=${prompt}
+              onChange=${setPrompt}
+              placeholder="Escreva a personalidade e as instruções deste agente. Use {variavel} para inserir valores das Variáveis." />
+            <div class="text-[11px] text-wa-secondary mt-1">
+              Edite o texto já formatado (negrito, listas, títulos) usando a barra de ferramentas — não precisa escrever markdown na mão. Cada agente tem seu próprio prompt (não é compartilhado com outros agentes). Se ficar vazio, o agente usa o prompt padrão do app.
+            </div>
+            <input class="wa-field w-full px-3 py-2 rounded-md text-[13px] mt-2"
+              type="text" placeholder="Descreva a mudança do prompt (opcional)"
+              value=${changeNote} onInput=${(e) => setChangeNote(e.target.value)} />
+          ` : html`
+            <div class="wa-field w-full px-3 py-2 rounded-md text-[13px] whitespace-pre-wrap max-h-48 overflow-y-auto opacity-80">${prompt || '(sem prompt — usa o padrão do app)'}</div>
+            <div class="text-[11px] text-wa-secondary mt-1">Você não tem permissão para editar o prompt (agent.prompts.edit).</div>
+          `}
+          ${placeholders.length > 0 ? html`
+            <div class="mt-2">
+              <div class="text-[11px] text-wa-secondary mb-1">Placeholders detectados (resolvidos pela aba <span class="font-medium">Variáveis</span>)</div>
+              <div class="flex flex-wrap gap-1">
+                ${placeholders.map(p => html`
+                  <span key=${p} class="px-2 py-0.5 rounded-full text-[11px] bg-wa-teal/10 text-wa-teal font-mono">{${p}}</span>
+                `)}
+              </div>
+            </div>
+          ` : null}
         </div>
 
+        ${canEditConfigFields ? html`
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Modelo${isDefault ? ' (obrigatório)' : ''}</label>
           <${ModelSelect}
@@ -238,6 +388,21 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
               value=${maxTokens} onInput=${(e) => setMaxTokens(e.target.value)} />
           </div>
         </div>
+        <div class="text-[11px] text-wa-secondary -mt-1">
+          max_tokens: modelos de raciocínio gastam esse orçamento para "pensar" antes de responder —
+          valores baixos podem zerar a resposta. Piso aplicado: 256 (1024 quando reasoning_effort está definido).
+        </div>
+
+        <div>
+          <label class="block text-[12px] text-wa-secondary mb-1">Nível de pensamento</label>
+          <input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+            type="text" placeholder="— padrão do modelo —"
+            value=${thinkingLevel} onInput=${(e) => setThinkingLevel(e.target.value)} />
+          <div class="text-[11px] text-wa-secondary mt-1">
+            Esforço de raciocínio (vira <span class="font-mono">reasoning_effort</span>). Conforme o modelo:
+            openai <span class="font-mono">minimal/low/medium/high</span>. Deixe vazio para o padrão.
+          </div>
+        </div>
 
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Tools disponíveis</label>
@@ -262,12 +427,22 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
               Lista todas as tools registradas (core, plugin e code-in-DB). Deixe "Todas" marcado para herdar o registry inteiro.
             </div>
           ` : null}
+          ${!isRouter && !allTools && toolNames.includes('transfer_to_human') ? html`
+            <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 mt-2">
+              Convenção hub-and-spoke: deixe <code>transfer_to_human</code> apenas no <b>roteador</b>.
+              Agentes especializados devolvem com <code>transferir_agente</code> (destino: o roteador) e ele decide escalar.
+            </div>
+          ` : null}
         </div>
 
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Descrição</label>
           <textarea class="wa-field w-full px-3 py-2 rounded-md text-[14px] resize-y" rows="2"
             value=${description} onInput=${(e) => setDescription(e.target.value)}></textarea>
+          <div class="text-[11px] text-wa-secondary mt-1">
+            Usada pelo roteador para decidir o destino da transferência — escreva curto e objetivo
+            (ex.: "Vendas e planos", "Suporte técnico de instalação").
+          </div>
         </div>
 
         <label class="flex items-center gap-2 cursor-pointer">
@@ -279,6 +454,28 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
           <input type="checkbox" checked=${isRouter} onChange=${(e) => setIsRouter(e.target.checked)} />
           <span class="text-[14px] text-wa-text">É roteador (handoff/routing)</span>
         </label>
+
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" checked=${isNewConvDefault} onChange=${(e) => setIsNewConvDefault(e.target.checked)} />
+          <span class="text-[14px] text-wa-text">Padrão para novas conversas</span>
+        </label>
+        <p class="text-[12px] text-wa-secondary -mt-1 ml-6">
+          Novas conversas nascem neste agente. Conversas em andamento não mudam.
+        </p>
+
+        ${isNewConvDefault && currentDefault ? html`
+          <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            Só pode existir <b>um</b> padrão para novas conversas. Ao salvar, o padrão atual
+            (<b>${currentDefault.display_name || currentDefault.agent_key}</b>) deixará de ser o padrão.
+          </div>
+        ` : null}
+
+        ${isRouter && currentRouter ? html`
+          <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            Só pode existir <b>um</b> roteador. Ao salvar, o roteador atual
+            (<b>${currentRouter.display_name || currentRouter.agent_key}</b>) deixará de ser roteador.
+          </div>
+        ` : null}
 
         ${isRouter ? html`
           <div>
@@ -298,21 +495,88 @@ function AgentForm({ isNew, agent, existingKeys, prompts, tools, onSave, onCance
               `}
           </div>
         ` : null}
+        ` : html`
+          <div class="text-[12px] text-wa-secondary bg-wa-panel border border-wa-border rounded-md px-3 py-2">
+            Você não tem permissão para editar a configuração do agente (modelo, tools, roteamento) — edição limitada ao prompt.
+          </div>
+        `}
 
-        <div class="flex gap-2 justify-end">
+        <div class="flex gap-2 justify-end items-center">
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
             onClick=${onCancel} disabled=${busy}>Cancelar</button>
-          <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
-            onClick=${submit} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar'}</button>
+          ${isNew ? html`
+            <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+              onClick=${() => requestSave('amend')} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar'}</button>
+          ` : promptOnly ? html`
+            <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+              onClick=${() => requestSave('new')} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar prompt'}</button>
+          ` : html`
+            <div class="relative flex">
+              <button class="px-4 py-2 rounded-l-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+                onClick=${() => requestSave('amend')} disabled=${!canSave}>${busy ? 'Salvando…' : 'Salvar'}</button>
+              <button class="px-2 py-2 rounded-r-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50 border-l border-white/25"
+                title="Mais opções de salvamento" onClick=${() => setMenuOpen(o => !o)} disabled=${!canSave}>▾</button>
+              ${menuOpen ? html`
+                <div class="fixed inset-0 z-30" onClick=${() => setMenuOpen(false)}></div>
+                <div class="absolute right-0 top-full mt-1 z-40 w-72 bg-wa-bg border border-wa-border rounded-md shadow-lg overflow-hidden">
+                  <button class="w-full text-left px-3 py-2 text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                    onClick=${() => requestSave('new')}>
+                    Salvar criando uma nova versão
+                    <div class="text-[11px] text-wa-secondary">Registra uma nova versão no histórico do prompt</div>
+                  </button>
+                </div>
+              ` : null}
+            </div>
+          `}
         </div>
       </div>
+
+      ${pendingMode ? html`
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick=${() => !busy && setPendingMode(null)}>
+          <div class="bg-wa-bg border border-wa-border rounded-lg w-full max-w-md flex flex-col"
+            onClick=${(e) => e.stopPropagation()}>
+            <div class="px-5 py-3 border-b border-wa-border text-[15px] font-medium text-wa-text">
+              ${isNew
+                ? 'Criar agente'
+                : (pendingMode === 'amend' ? 'Sobrescrever a versão atual' : 'Salvar e criar nova versão')}
+            </div>
+            <div class="px-5 py-4 text-[13px] text-wa-text">
+              ${isNew
+                ? html`Isso cria o agente e registra a <span class="font-medium">primeira versão</span> do prompt no histórico.`
+                : (pendingMode === 'amend'
+                  ? html`Isso salva o agente e <span class="font-medium">sobrescreve a última versão</span> do prompt no histórico, sem criar uma nova. O texto anterior dessa versão será <span class="font-medium">substituído e não poderá ser recuperado</span>.`
+                  : html`Isso salva o agente e registra uma <span class="font-medium">nova versão</span> do prompt no histórico, preservando as versões anteriores.`)}
+            </div>
+            <div class="px-5 py-3 border-t border-wa-border flex justify-end gap-2">
+              <button class="px-3 py-2 rounded-md text-[13px] text-wa-text bg-wa-panel border border-wa-border hover:bg-wa-hover transition-colors disabled:opacity-50"
+                disabled=${busy} onClick=${() => setPendingMode(null)}>Cancelar</button>
+              <button class=${`px-3 py-2 rounded-md text-[13px] text-white hover:opacity-90 transition-opacity disabled:opacity-50 ${pendingMode === 'amend' ? 'bg-amber-600' : 'bg-wa-teal'}`}
+                disabled=${busy} onClick=${confirmSave}>
+                ${busy
+                  ? 'Salvando…'
+                  : (isNew ? 'Criar agente' : (pendingMode === 'amend' ? 'Sobrescrever' : 'Criar versão'))}
+              </button>
+            </div>
+          </div>
+        </div>
+      ` : null}
     </div>
   `;
 }
 
-export default function AgentsManager({ initialEntity }) {
+export default function AgentsManager({ initialEntity, currentUser }) {
+  const canConfig = hasPermission(currentUser, 'agent.config.manage');
+  // Criar/duplicar são permissões próprias (separadas de config.manage, que
+  // agora só cobre editar agente existente).
+  const canCreate = hasPermission(currentUser, 'agent.create');
+  const canDuplicate = hasPermission(currentUser, 'agent.duplicate');
+  // Prompt granular: edit (editar texto), version (histórico/comparar/restaurar),
+  // delete (apagar versões). Substituíram o antigo agent.prompts.manage.
+  const canPromptEdit = hasPermission(currentUser, 'agent.prompts.edit');
+  const canPromptVersion = hasPermission(currentUser, 'agent.prompts.version');
+  const canPromptDelete = hasPermission(currentUser, 'agent.prompts.delete');
   const [agents, setAgents] = useState([]);
-  const [prompts, setPrompts] = useState([]);
   const [tools, setTools] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -324,12 +588,21 @@ export default function AgentsManager({ initialEntity }) {
   const [historyFor, setHistoryFor] = useState(null);
   const [historyRows, setHistoryRows] = useState([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+  // Dedicated prompt-trail modal state (separate from the whole-agent history)
+  const [promptHistoryFor, setPromptHistoryFor] = useState(null);
+
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editing || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editing, creating]);
 
   async function load() {
     setLoading(true);
     setError('');
-    const [aRes, pRes, tRes] = await Promise.all([
-      listAgents(), listPrompts(), listRegisteredTools(),
+    const [aRes, tRes] = await Promise.all([
+      listAgents(), listRegisteredTools(),
     ]);
     if (aRes && aRes.ok) {
       const list = aRes.data || [];
@@ -338,7 +611,6 @@ export default function AgentsManager({ initialEntity }) {
     } else {
       setError((aRes && aRes.error) || 'Falha ao carregar agentes.');
     }
-    if (pRes && pRes.ok) setPrompts(pRes.data || []);
     if (tRes && tRes.ok) setTools(tRes.data || []);
     setLoading(false);
   }
@@ -366,12 +638,51 @@ export default function AgentsManager({ initialEntity }) {
     pushUrl(editing ? { sub: 'agents', id: editing.agent_key } : { sub: 'agents' });
   }, [editing]);
 
+  // Reflete os modais de histórico na query (?history / ?prompt-history), aditivo
+  // ao path do agente. Ao hidratar/voltar, reabre o modal contra o agente já
+  // resolvido pelo path (editing) — reusa openHistory (carrega historyRows) e o
+  // mesmo setPromptHistoryFor do botão "Versões do prompt".
+  useUrlState({
+    read: () => readParams(window.location.search, AGENT_URL_SCHEMA),
+    apply: (s) => {
+      if (s.history) { if (editing && !historyFor) openHistory(editing); }
+      else if (historyFor) setHistoryFor(null);
+      if (s['prompt-history']) { if (editing && !promptHistoryFor) setPromptHistoryFor(editing); }
+      else if (promptHistoryFor) setPromptHistoryFor(null);
+    },
+    serialize: () => writeParams({
+      history: !!historyFor,
+      'prompt-history': !!promptHistoryFor,
+    }, AGENT_URL_SCHEMA),
+    deps: [historyFor, promptHistoryFor, editing],
+  });
+  // Corrida de montagem: o hydrate do useUrlState roda no mount, mas o agente do
+  // path (editing) só resolve depois da lista carregar. Quando editing aparecer,
+  // reabre o modal pedido pela URL uma única vez (não repete em cada troca).
+  const flagsHydratedRef = useRef(false);
+  useEffect(() => {
+    if (flagsHydratedRef.current || !editing) return;
+    flagsHydratedRef.current = true;
+    const s = readParams(window.location.search, AGENT_URL_SCHEMA);
+    if (s.history && !historyFor) openHistory(editing);
+    if (s['prompt-history'] && !promptHistoryFor) setPromptHistoryFor(editing);
+  }, [editing]);
+
   async function handleSave(key, data) {
     setBusy(true); setError('');
     const res = await saveAgent(key, data);
     setBusy(false);
     if (res && res.ok) { setEditing(null); setCreating(null); load(); }
     else setError((res && res.error) || 'Falha ao salvar o agente.');
+  }
+
+  // Prompts-only (sem agent.config.manage): salva só o prompt via endpoint dedicado.
+  async function handleSavePrompt(key, prompt) {
+    setBusy(true); setError('');
+    const res = await saveAgentPrompt(key, prompt);
+    setBusy(false);
+    if (res && res.ok) { setEditing(null); setCreating(null); load(); }
+    else setError((res && res.error) || 'Falha ao salvar o prompt.');
   }
 
   function startDuplicate(a) {
@@ -382,7 +693,7 @@ export default function AgentsManager({ initialEntity }) {
   }
 
   async function handleDelete(a) {
-    if (a.agent_key === 'default') return;
+    if (a.agent_key === fallbackKey) return; // fallback atual — o backend também recusa
     if (!confirm(`Excluir o agente "${a.display_name || a.agent_key}"? Conversas vinculadas voltam ao agente padrão. Esta ação não pode ser desfeita.`)) return;
     setError('');
     const res = await deleteAgent(a.agent_key);
@@ -410,6 +721,14 @@ export default function AgentsManager({ initialEntity }) {
     else setError((res && res.error) || 'Falha ao reverter a versão.');
   }
 
+  // Fallback atual do sistema (fix agente-padrão): o agente is_default habilitado,
+  // ou o "default" legado quando nenhum está marcado. É o único que não pode ser
+  // excluído — o botão some para ele (o backend recusa de qualquer forma) e o chip
+  // "padrão" marca o "default" legado apenas enquanto ele for de fato o fallback.
+  const fallbackAgent = agents.find(x => x.is_default && x.enabled)
+    || agents.find(x => x.agent_key === 'default');
+  const fallbackKey = fallbackAgent ? fallbackAgent.agent_key : null;
+
   const formOpen = !!editing || !!creating;
 
   return html`
@@ -419,7 +738,7 @@ export default function AgentsManager({ initialEntity }) {
           Agentes definem o prompt, o modelo e as tools que a IA usa. As mudanças valem
           na próxima mensagem (sem reiniciar). Um agente ativo já aparece para atribuir nas conversas.
         </p>
-        ${!formOpen ? html`
+        ${!formOpen && canCreate ? html`
           <button class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0"
             onClick=${() => { setCreating(true); setEditing(null); setError(''); }}>+ Novo agente</button>
         ` : null}
@@ -427,18 +746,29 @@ export default function AgentsManager({ initialEntity }) {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${creating ? html`
-        <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
-          existingKeys=${agents.map(a => a.agent_key)}
-          prompts=${prompts} tools=${tools}
-          onSave=${handleSave} onCancel=${() => setCreating(null)} busy=${busy} />
-      ` : null}
+      <div ref=${formRef}>
+        ${creating ? html`
+          <${AgentForm} isNew=${true} agent=${creating === true ? {} : creating}
+            isDuplicate=${creating !== true}
+            existingKeys=${agents.map(a => a.agent_key)}
+            tools=${tools} canConfig=${canConfig} canCreate=${canCreate}
+            canDuplicate=${canDuplicate} canPromptEdit=${canPromptEdit}
+            canPromptVersion=${canPromptVersion} canPromptDelete=${canPromptDelete}
+            onSave=${handleSave} onSavePrompt=${handleSavePrompt}
+            onCancel=${() => setCreating(null)} busy=${busy} />
+        ` : null}
 
-      ${editing ? html`
-        <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
-          prompts=${prompts} tools=${tools}
-          onSave=${handleSave} onCancel=${() => setEditing(null)} busy=${busy} />
-      ` : null}
+        ${editing ? html`
+          <${AgentForm} isNew=${false} agent=${editing} existingKeys=${[]}
+            isDuplicate=${false}
+            tools=${tools} canConfig=${canConfig} canCreate=${canCreate}
+            canDuplicate=${canDuplicate} canPromptEdit=${canPromptEdit}
+            canPromptVersion=${canPromptVersion} canPromptDelete=${canPromptDelete}
+            onSave=${handleSave} onSavePrompt=${handleSavePrompt}
+            onCancel=${() => setEditing(null)} busy=${busy}
+            onOpenPromptHistory=${() => setPromptHistoryFor(editing)} />
+        ` : null}
+      </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
@@ -459,24 +789,36 @@ export default function AgentsManager({ initialEntity }) {
                   ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-green-500/10 text-green-600">Ativo</span>`
                   : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Inativo</span>`}
                 ${a.is_router ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-teal/10 text-wa-teal">router</span>` : null}
-                ${a.agent_key === 'default' ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">padrão</span>` : null}
+                ${a.is_default ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-blue-500/10 text-blue-600">novas conversas</span>` : null}
+                ${a.agent_key === fallbackKey && !a.is_default ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">padrão</span>` : null}
               </div>
               <div class="text-[12px] text-wa-secondary mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
-                <span>prompt: <span class="font-mono">${a.prompt_key || '—'}</span></span>
                 <span>modelo: <span class="font-mono">${(a.model_config && a.model_config.model) || 'padrão'}</span></span>
                 <span>tools: ${a.tool_names == null ? 'todas' : `${a.tool_names.length} selecionadas`}</span>
                 <span>v${a.version || 1}</span>
               </div>
+              ${a.prompt ? (() => { const p = stripMarkdown(a.prompt); return p ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words line-clamp-2">${p.slice(0, 160)}${p.length > 160 ? '…' : ''}</div>` : null; })() : null}
               ${a.description ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words">${a.description}</div>` : null}
             </div>
             <div class="flex gap-1 shrink-0 flex-wrap justify-end">
-              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                onClick=${() => { setEditing(a); setCreating(null); setError(''); }}>Editar</button>
-              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                onClick=${() => startDuplicate(a)}>Duplicar</button>
-              <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                onClick=${() => openHistory(a)}>Histórico</button>
-              ${a.agent_key !== 'default' ? html`
+              <!-- Cada botão aparece conforme a permissão (RBAC): Editar abre o
+                   formulário do agente (config e/ou prompt — o prompt fica
+                   desabilitado sem agent.prompts.edit); Histórico é o
+                   versionamento do agente inteiro; Duplicar/Excluir são de
+                   config. Some quando o usuário não pode fazer a ação. -->
+              ${(canConfig || canPromptEdit) ? html`
+                <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                  onClick=${() => { setEditing(a); setCreating(null); setError(''); }}>Editar</button>
+              ` : null}
+              ${canDuplicate ? html`
+                <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                  onClick=${() => startDuplicate(a)}>Duplicar</button>
+              ` : null}
+              ${canPromptVersion ? html`
+                <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                  onClick=${() => openHistory(a)}>Histórico</button>
+              ` : null}
+              ${(a.agent_key !== fallbackKey && canConfig) ? html`
                 <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors"
                   onClick=${() => handleDelete(a)}>Excluir</button>
               ` : null}
@@ -487,12 +829,30 @@ export default function AgentsManager({ initialEntity }) {
 
       ${historyFor ? html`
         <${HistoryModal}
-          title=${`Histórico — ${historyFor.display_name || historyFor.agent_key}`}
+          title=${`Histórico do agente — ${historyFor.display_name || historyFor.agent_key}`}
           versions=${historyRows}
           current=${historyFor.version}
           busy=${historyBusy}
           onRollback=${handleRollback}
           onClose=${() => setHistoryFor(null)} />
+      ` : null}
+
+      ${promptHistoryFor ? html`
+        <${PromptHistoryModal}
+          agentKey=${promptHistoryFor.agent_key}
+          agentLabel=${promptHistoryFor.display_name || promptHistoryFor.agent_key}
+          currentVersion=${null}
+          canVersion=${canPromptVersion}
+          canDelete=${canPromptDelete}
+          onClose=${() => setPromptHistoryFor(null)}
+          onRestored=${(restored) => {
+            setPromptHistoryFor(null);
+            // Reflete o prompt restaurado no formulário aberto: troca o agente em
+            // edição pela linha restaurada (com a versão bumpada), o que remonta o
+            // AgentForm (via key) e reinicia o textarea com o prompt restaurado.
+            if (restored && restored.agent_key) setEditing(restored);
+            load();
+          }} />
       ` : null}
     </div>
   `;

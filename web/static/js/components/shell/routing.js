@@ -11,6 +11,9 @@
 export const CORE_ROUTES = {
   '/': 'contacts',
   '/contacts': 'contatos',
+  // A aba é exclusiva do plugin protocolos (override de rota). O path canônico é
+  // /protocolos; /attendances segue como ALIAS silencioso p/ links antigos.
+  '/protocolos': 'attendances',
   '/attendances': 'attendances',
   '/channels': 'channels',
   '/dashboard': 'dashboard',
@@ -24,11 +27,14 @@ export const CORE_ROUTES = {
   '/users': 'users',
   '/audit': 'audit',
   '/ai': 'ai',
+  // Alias legado: a tela virou a aba "Notificações e sons" de Configurações
+  // Gerais (Dashboard.js abre nela ao ver este path / ?tab=sons).
+  '/sounds': 'dashboard',
 };
 export const CORE_TAB_PATHS = {
   contacts: '/',
   contatos: '/contacts',
-  attendances: '/attendances',
+  attendances: '/protocolos',
   channels: '/channels',
   dashboard: '/dashboard',
   sandbox: '/sandbox',
@@ -46,9 +52,9 @@ export const CORE_TAB_PATHS = {
 // Legacy Portuguese URLs → canonical English paths. The routes were standardized
 // to English; these redirects keep old bookmarks/links working (applied with
 // replaceState so they don't pollute history).
-export const LEGACY_PATH_REDIRECTS = {
+const LEGACY_PATH_REDIRECTS = {
   '/contatos': '/contacts',
-  '/atendimentos': '/attendances',
+  '/atendimentos': '/protocolos',
   '/painel': '/dashboard',
   '/auditoria': '/audit',
 };
@@ -69,8 +75,8 @@ export function legacyRedirectTarget(pathname) {
  * @param {{tab:string}|null} ent already-resolved entity deep-link (entityFromPath)
  */
 export function tabFromPathPure(path, pluginScreens, ent) {
-  // Conversa-cêntrico (plano 11 D1): /conversations/<id> abre o chat daquela
-  // conversa no hub de contatos. (/conversations sem id segue na lista full-page.)
+  // Atendimento-cêntrico (plano 11 D1): /conversations/<id> abre o chat daquela
+  // atendimento no hub de contatos. (/conversations sem id segue na lista full-page.)
   // /contacts/<id> (detalhe do contato) é resolvido via entityFromPath → 'contatos'.
   if (path.match(/^\/conversations\/\d+$/)) return 'contacts';
   if (path.match(/^\/executions\/\d+$/)) return 'executions';

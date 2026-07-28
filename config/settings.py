@@ -40,7 +40,6 @@ _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "WHATSBOT_AUDIO_MODEL": ("audio_model", str),
     "WHATSBOT_IMAGE_MODEL": ("image_model", str),
     "WHATSBOT_DOCUMENT_MODEL": ("document_model", str),
-    "WHATSBOT_IMPROVEMENT_MODEL": ("improvement_model", str),
     "WHATSBOT_WEB_PORT": ("web_port", int),
     "WHATSBOT_GOWA_PORT": ("gowa_port", int),
     "WHATSBOT_AUTO_REPLY": ("auto_reply", lambda v: v.lower() in ("1", "true", "yes")),
@@ -78,14 +77,46 @@ _ENV_OVERRIDES_BY_KEY: dict[str, tuple[str, Callable[[str], Any]]] = {
 #                     once written) but are preserved byte-for-byte.
 #   * ``writable``  — accepted by ``PUT /api/config`` (the allowlist).
 #
-# Keys handled specially by the GET handler (masked / derived) are NOT exposed via
-# this metadata: ``openrouter_api_key`` (masked), ``has_password`` (derived from
-# ``web_password_hash``). They stay inline in the route.
+# Keys handled specially by the GET handler are NOT exposed via this metadata:
+# ``openrouter_api_key`` (masked) and ``has_password`` (a fixed ``False`` kept for
+# frontend compat — the legacy panel password was retired, plano 48). Inline in the route.
 
 from dataclasses import dataclass
 
 
 _NO_SEED = object()
+
+
+# ── Sons de notificação configuráveis (plano 63) ───────────────────────────────
+# Camada GLOBAL (padrão da equipe, definido pelo admin) das preferências de som.
+# É UMA config key JSON (herda GET/PUT/allowlist/auditoria de graça). A camada
+# POR-USUÁRIO mora na tabela ``user_sound_prefs`` (override esparso); a camada
+# POR-DISPOSITIVO mora em localStorage (multiplicador de volume/mudo local). A
+# resolução 3-tier fail-open é feita no cliente (``web/static/js/utils/soundEngine.js``).
+#
+# Os IDs de ``sound`` (ding/chime/…) casam com as receitas sintetizadas do
+# ``soundEngine.js`` e com o catálogo em ``server/routes/sound_prefs.py`` (fonte
+# única dos metadados servidos por ``GET /api/sounds/catalog``). Os dois eventos de
+# transferência só carregam ``sound``/``volume`` aqui — ``enabled``/``duration``
+# deles PODEM ser definidos no padrão da equipe (e sobrescritos por atendente),
+# mas enquanto ausentes o servidor cai nas keys legadas ``transfer_alert_*`` /
+# ``agent_transfer_alert_*`` (``server.sound_catalog.event_gate``) — preservando o
+# comportamento de instalações que nunca editaram o padrão.
+#
+# Padrão (plano 63 · decisões do usuário 2026-07-20): master LIGADO com volume
+# modesto (0.6) — hoje os atendentes reclamam de NÃO conseguir ligar o som; nascer
+# ON resolve a dor e é reversível por usuário. As sirenes de transferência nascem
+# em 0.6 (antes gain fixo 0.3, agora respeitado pelo slider) atendendo ao pedido
+# de "diminuir" — cada atendente calibra no preview da tela "Notificações e sons".
+SOUND_SETTINGS_SEED: dict = {
+    "master_enabled": True,
+    "events": {
+        "new_message":    {"enabled": True, "sound": "ding",  "volume": 0.6},
+        "mention":        {"enabled": True, "sound": "chime", "volume": 0.8},
+        "ia_to_human":    {"sound": "siren", "volume": 0.6},
+        "assigned_to_me": {"sound": "siren", "volume": 0.6},
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -108,13 +139,17 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("audio_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
     ConfigKey("image_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
     ConfigKey("document_model", default="google/gemini-2.5-flash", exposed=True, writable=True),
-    # Model for the one-shot "improvement analysis" of a flagged AI reply.
-    # Empty → falls back to the chat ``model``. Override env WHATSBOT_IMPROVEMENT_MODEL.
-    ConfigKey("improvement_model", default="", exposed=True, writable=True),
+    # (A config da "sugestão de melhoria" — improvement_model/improvement_prompt —
+    # migrou para o plugin "melhorias", namespace plugin.melhorias.*.)
     ConfigKey("group_reply_mode", default="mention_only", exposed=True, writable=True),
     # Historical GET fallback was True (inert — the key is always seeded False).
     ConfigKey("auto_reply", default=False, exposed=True, get_default=True, writable=True),
     ConfigKey("max_context_messages", default=10, exposed=True, writable=True),
+    # plano 43 — filtro de lista-negra por regex do histórico que vai à IA. Lista
+    # GLOBAL de padrões; cada linha do histórico é testada como ``role<TAB>content``
+    # e cortada do contexto do LLM se algum padrão casar (``agent/history_filter.py``).
+    # Default ``[]`` = nada cortado (retrocompatível). Editável em Configurações → IA.
+    ConfigKey("ai_history_exclude_patterns", default=[], exposed=True, writable=True),
     ConfigKey("message_batch_delay", default=3.0, exposed=True, writable=True),
     ConfigKey("split_messages", default=True, exposed=True, writable=True),
     ConfigKey("split_message_delay", default=2.0, exposed=True, writable=True),
@@ -125,21 +160,80 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("document_transcription_enabled", default=True, exposed=True, writable=True),
     ConfigKey("transfer_alert_enabled", default=True, exposed=True, writable=True),
     ConfigKey("transfer_alert_duration", default=5, exposed=True, writable=True),
+    # Alerta sonoro na transferência de um atendente humano para OUTRO atendente
+    # (reatribuição entre humanos). Independente do alerta IA→humano acima; toca a
+    # MESMA sirene (``playTransferAlert``), mas só para o atendente que recebeu a
+    # conversa. Config GLOBAL (é sobre o destinatário, não sobre o canal). Emitido
+    # por ``conversation_service`` como o evento WS ``agent_transfer_alert``.
+    ConfigKey("agent_transfer_alert_enabled", default=True, exposed=True, writable=True),
+    ConfigKey("agent_transfer_alert_duration", default=5, exposed=True, writable=True),
     # max_executions is NOT seeded (no DEFAULT_CONFIG entry); GET falls back to 200.
     ConfigKey("max_executions", exposed=True, get_default=200, writable=True),
+    # audit_retention_days: dias de retenção da trilha de auditoria (lido por
+    # server.background.audit_purge_loop). NÃO seedado; GET cai em 365. Antes
+    # faltava aqui, então o campo do ConfigPanel nunca persistia (era inerte).
+    ConfigKey("audit_retention_days", exposed=True, get_default=365, writable=True),
+    # plano 36 F3 — KILL-SWITCH da captura do contexto enviado à IA (system prompt
+    # + histórico) no step ``llm_context``. Default OFF (conservador: o banco não
+    # cresce até o operador ligar para depurar). Toggle na tela de Execuções.
+    # plano 51 (01 F2): default ON — captura o prompt+histórico EXATO por hop
+    # (step llm_context) para a melhoria agêntica; kill-switch continua editável.
+    ConfigKey("execution_capture_context", default=True, exposed=True, writable=True),
+    # plano 36 F3 — retenção de execuções por dias (poda no mesmo loop do
+    # ``max_executions``, via ``delete_older_than``). 0 = desligado (só a poda por
+    # quantidade). Complementa a captura de contexto (que infla cada execução).
+    ConfigKey("execution_retention_days", default=0, exposed=True, writable=True),
     ConfigKey("default_ai_enabled", default=True, exposed=True, writable=True),
+    # plano 37 A1 — KILL-SWITCH da memória compacta de tool no contexto do turno.
+    # Injeta um bloco ``system`` curto ("ferramentas já executadas / atributos já
+    # definidos NESTE atendimento") para o modelo parar de re-rodar pesquisas e
+    # regravar atributos idênticos a cada turno (o role ``tool_call`` é excluído do
+    # contexto do LLM, então sem isso o modelo não "lembra" o que já rodou). Default
+    # ON (é o fix pedido; OFF ⇒ comportamento legado, sem o bloco).
+    ConfigKey("ai_tool_memory_enabled", default=True, exposed=True, writable=True),
+    # plano 47 (D9) — tamanho MÁX. (chars) do resultado de tool reaproveitado no
+    # bloco ``tool_memory``, por-resultado, GLOBAL (vale para todas as tools
+    # marcadas com ``reuse_result``). Editável em Configurações → IA. Guardado por
+    # ``max(50, int(...))`` no motor; fallback 800 se ausente/inválido.
+    ConfigKey("ai_tool_reuse_result_max_chars", default=800, exposed=True, writable=True),
     # ⚠️ KILL-SWITCH — code-in-DB. ``ai_tools`` rows hold Python code the installer
     # runs in an isolated subprocess at boot (RLIMIT_CPU/RLIMIT_AS/timeout —
     # P62/P67). Seeded ON so user tools register automatically; set env
     # WHATSBOT_AI_TOOLS_CODE=0 to lock (untrusted host). Historical GET fallback
     # was False (inert — the key is always seeded True). See DECISOES.md P62.
     ConfigKey("ai_tools_code_enabled", default=True, exposed=True, get_default=False, writable=True),
+    # Guardrails do motor de agentes (plano 29 A1): teto default de chamadas POR
+    # TOOL por mensagem, aplicado a toda tool sem ``call_limit`` próprio no
+    # ``hooks_config`` do agente. 0 = ilimitado (comportamento legado).
+    ConfigKey("ai_tool_call_limit_per_tool", default=0, exposed=True, writable=True),
+    # Plano 29 A3: total de runs de agente por mensagem no routing within-turn
+    # (1º hop + handoffs). Substitui o MAX_ROUTING_DEPTH hardcoded.
+    ConfigKey("ai_max_route_depth", default=5, exposed=True, writable=True),
+    # Plano 29 A8: teto TOTAL de tool calls por run do Agent AGNO (freio de loop
+    # desenfreado). 0 = sem teto; env WHATSBOT_TOOL_CALL_LIMIT tem precedência.
+    ConfigKey("ai_tool_call_limit_total", default=25, exposed=True, writable=True),
     ConfigKey("setup_completed", default=False, exposed=True, writable=True),
+    # ── Installation identity (seeded once on first boot; see
+    # ``_seed_installation_metadata``). Exposed in GET /api/config but NEVER
+    # writable — ``installation_id`` is a stable, immutable per-install identity.
+    ConfigKey("installation_id", exposed=True, get_default=""),
+    ConfigKey("installed_at", exposed=True, get_default=None),
+    ConfigKey("app_version", exposed=True, get_default=""),
     # Techify account — account_url is the customer's recharge page (exposed);
     # access_token is the credential for that account (kept server-side only).
     ConfigKey("account_url", default="", exposed=True),
+    # URL pública base do painel (domínio real). Capturada automaticamente no 1º
+    # acesso ao GET /api/config (``_capture_public_base_url`` em
+    # server/routes/config.py, com self-heal de IP local→domínio) e editável à mão
+    # na tela Configurações → Avançado. Consumida por features que montam links
+    # externos (ex.: alerta de reconexão do gowa, link do painel de melhorias).
+    # O env ``WHATSBOT_PUBLIC_URL`` tem prioridade sobre a edição manual.
+    ConfigKey("public_base_url", default="", exposed=True, writable=True),
     ConfigKey("low_balance_enabled", default=True, exposed=True, writable=True),
     ConfigKey("low_balance_threshold", default=0.50, exposed=True, writable=True),
+    # Exibir o nome do agente de IA nas mensagens/cards de tool do painel
+    # ("IA - <NOME>" / "Ferramenta IA - <NOME>"). Puro display; default ligado.
+    ConfigKey("show_agent_name", default=True, exposed=True, writable=True),
     # Avisos de sistema no chat (plano 12) — gate GLOBAL por grupo de evento.
     # Grupo desligado ⇒ o aviso não é gerado (nada grava/emite) para ninguém.
     ConfigKey("system_notice_assignment", default=True, exposed=True, writable=True),
@@ -147,6 +241,24 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("system_notice_conv_labels", default=True, exposed=True, writable=True),
     ConfigKey("system_notice_status", default=True, exposed=True, writable=True),
     ConfigKey("system_notice_ai", default=True, exposed=True, writable=True),
+    # Trilha de auditoria (plano 07) — master global. Desligado ⇒ o listener core
+    # (``server/audit_listener.py``) faz early-return e nenhum evento é gravado em
+    # ``audit_log``. Checado por evento (sem restart). Toggle na tela Auditoria,
+    # gated por ``audit.manage``.
+    ConfigKey("audit_enabled", default=True, exposed=True, writable=True),
+    # Notificação de mensagens privadas (nota interna do operador — role
+    # ``private_note``). Desligado por padrão: preserva o comportamento atual (nota
+    # privada não acende ícone verde nem contagem na aba). Ligado ⇒ a nota privada
+    # incrementa ``unread_count`` do contato e emite ``conversation_upsert`` (mesmo
+    # encanamento da não-lida de cliente). Nunca toca som hoje (ver o seam em
+    # ``web/static/js/components/shell/App.js``); a chave é exposta no GET só para o
+    # cliente ler esse gate de som futuro.
+    ConfigKey("notify_private_messages", default=False, exposed=True, writable=True),
+    # plano 63 — padrão GLOBAL (equipe) de som de notificação (JSON). Exposto no
+    # GET /api/config e editável via PUT (special-case de normalização no route).
+    # Overrides por usuário vivem em ``user_sound_prefs``; por dispositivo, em
+    # localStorage. Ver ``SOUND_SETTINGS_SEED`` acima.
+    ConfigKey("sound_settings", default=SOUND_SETTINGS_SEED, exposed=True, writable=True),
     # ── Seed-only keys (not exposed in GET, not part of the PUT allowlist) ──────
     ConfigKey("inactivity_timeout_min", default=30),
     ConfigKey("response_delay_min", default=1.0),
@@ -156,8 +268,6 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("usd_brl_rate", default=5.50),
     ConfigKey("bot_phone", default=""),  # writable via the PUT special-case below
     ConfigKey("bot_name", default=""),
-    ConfigKey("web_password_hash", default=""),
-    ConfigKey("web_password_salt", default=""),
     ConfigKey("access_token", default=""),
 )
 
@@ -180,6 +290,30 @@ def exposed_config_keys() -> list[ConfigKey]:
 def writable_config_keys() -> set[str]:
     """The ``PUT /api/config`` allowlist (R17 single source)."""
     return {ck.key for ck in CONFIG_KEYS if ck.writable} | {_BOT_PHONE_WRITABLE}
+
+
+# ── Permissão de ESCRITA por chave (abas de Configurações Gerais) ──────────────
+# ``PUT /api/config`` exige ``settings.manage`` por padrão. As chaves editadas por
+# uma aba específica aceitam TAMBÉM a permissão granular daquela aba, senão quem
+# só tem `settings.notifications` veria a aba e tomaria 403 ao salvar. Chave fora
+# do mapa ⇒ só ``settings.manage`` (fechado por padrão).
+_TAB_PERMISSION: dict[str, str] = {
+    **{k: "settings.general" for k in (
+        "system_notice_assignment", "system_notice_tags", "system_notice_conv_labels",
+        "system_notice_status", "system_notice_ai")},
+    **{k: "settings.advanced" for k in (
+        "public_base_url", "max_executions", "audit_retention_days")},
+    **{k: "settings.notifications" for k in ("notify_private_messages",)},
+    # O padrão da equipe de som é editado nas abas Notificações (ativação) e Sons
+    # (som/volume/duração); a aba Sons é pessoal, então quem administra o padrão
+    # entra por ``settings.notifications`` ou ``settings.manage``.
+    "sound_settings": "settings.notifications",
+}
+
+
+def config_key_permission(key: str) -> str | None:
+    """Permissão granular que TAMBÉM autoriza escrever ``key`` (ou ``None``)."""
+    return _TAB_PERMISSION.get(key)
 
 
 # Prefix of the per-group "system notice" gate keys (plano 12 / plano 23 Fase C3).
@@ -234,6 +368,35 @@ class Settings:
                     current.get("openrouter_api_key") or env_key
                 )
             config_repo.set_many(missing)
+        self._seed_installation_metadata(current)
+
+    def _seed_installation_metadata(self, current: dict):
+        """Persist per-installation identity on first boot; refresh app_version.
+
+        - ``installation_id``: a UUID minted ONCE and never overwritten — a stable
+          identity for this install (support, telemetry, distinguishing instances
+          that share the same Postgres). Mirrors Chatwoot's INSTALLATION_IDENTIFIER.
+        - ``installed_at``: unix timestamp captured ONCE. For an install predating
+          this feature it records the first boot AFTER the upgrade, not the true
+          original install time.
+        - ``app_version``: the running code version, refreshed on EVERY boot so the
+          DB always reflects the deployed build.
+        """
+        import time
+        import uuid
+
+        from config.version import get_app_version
+
+        to_set = {}
+        if not current.get("installation_id"):
+            to_set["installation_id"] = str(uuid.uuid4())
+        if not current.get("installed_at"):
+            to_set["installed_at"] = time.time()
+        version = get_app_version()
+        if current.get("app_version") != version:
+            to_set["app_version"] = version
+        if to_set:
+            config_repo.set_many(to_set)
 
     @staticmethod
     def _env_override(key: str):

@@ -33,18 +33,185 @@ from typing import Optional
 
 import httpx
 
-from channels.base import Channel, ChannelCapabilities, SendResult
+from channels.base import AccountIdentity, Channel, ChannelCapabilities, SendResult
 from channels.events import InboundEvent
 
 logger = logging.getLogger(__name__)
+
+# ── Limites de mídia da Meta (plano 65 + pré-validação de anexo) ─────────────
+# A POLÍTICA é do provider e mora aqui; o core só executa (valida tamanho/formato
+# genericamente, inspeciona codec com ffprobe e recomprime com ffmpeg). Números do
+# WhatsApp Cloud API (docs "Supported Media Types"):
+#   imagem     5 MB   · JPEG/PNG
+#   áudio     16 MB   · AAC/AMR/MP3/M4A/OGG(opus)
+#   vídeo     16 MB   · MP4/3GP, vídeo H.264, áudio AAC, 1 faixa de áudio
+#   documento 100 MB  · PDF/TXT/DOC(X)/XLS(X)/PPT(X)
+#   figurinha 500 KB  · WebP
+# Fora disso a Meta RECUSA o envio — o painel usa estes números pra bloquear o
+# anexo na hora (popup) em vez de deixar o envio falhar.
+# Import defensivo: num core anterior ao plano 65 ``VideoLimits`` não existe — o
+# plugin continua carregando e o core cai no seu fallback legado.
+try:
+    from channels.base import VideoLimits
+
+    _MEDIA_LIMITS = {
+        "video": VideoLimits(
+            max_bytes=16 * 1024 * 1024,
+            extensions=(".mp4", ".3gp", ".3gpp"),
+            video_codecs=("h264",),
+            audio_codecs=("aac",),
+            max_audio_streams=1,
+        ),
+    }
+    try:
+        # Core mais novo: os demais tipos também são declarados pelo provider.
+        from channels.base import MediaLimits
+
+        _MEDIA_LIMITS.update({
+            "image": MediaLimits(
+                max_bytes=5 * 1024 * 1024,
+                extensions=(".jpg", ".jpeg", ".png"),
+            ),
+            "audio": MediaLimits(
+                max_bytes=16 * 1024 * 1024,
+                extensions=(".aac", ".amr", ".mp3", ".m4a", ".mp4", ".ogg"),
+            ),
+            "document": MediaLimits(
+                max_bytes=100 * 1024 * 1024,
+                extensions=(".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx",
+                            ".ppt", ".pptx"),
+            ),
+            "sticker": MediaLimits(
+                max_bytes=500 * 1024,
+                extensions=(".webp",),
+            ),
+        })
+    except ImportError:  # pragma: no cover - core sem MediaLimits
+        pass
+    try:
+        # Core com transcode de áudio: declaramos os CODECS além do container, o
+        # que habilita a recodificação server-side. A regra que motiva isso é da
+        # Meta: `audio/ogg` só é aceito com OPUS — um Ogg/Vorbis passa em qualquer
+        # checagem de extensão e ainda assim é recusado no envio. Declarando isso,
+        # o core reencoda pra Ogg/Opus em vez de deixar o envio falhar.
+        from channels.base import AudioLimits
+
+        _MEDIA_LIMITS["audio"] = AudioLimits(
+            max_bytes=16 * 1024 * 1024,
+            extensions=(".aac", ".amr", ".mp3", ".m4a", ".mp4", ".ogg"),
+            # Aceitos quando o container não tem regra própria (AAC em .m4a/.mp4,
+            # MP3 em .mp3, AMR em .amr).
+            codecs=("aac", "mp3", "amr_nb", "amr_wb"),
+            codecs_by_ext=(
+                (".ogg", ("opus",)),          # Meta: base audio/ogg não é suportado
+                (".mp3", ("mp3",)),
+                (".aac", ("aac",)),
+                (".m4a", ("aac",)),
+                (".mp4", ("aac",)),
+                (".amr", ("amr_nb", "amr_wb")),
+            ),
+            transcode=True,
+            # Ordem de preferência da saída: Opus (formato nativo de áudio do
+            # WhatsApp, melhor voz por byte), depois AAC, depois MP3.
+            transcode_targets=(".ogg", ".m4a", ".mp3"),
+        )
+    except ImportError:  # pragma: no cover - core sem AudioLimits
+        pass
+except ImportError:  # pragma: no cover - core antigo
+    _MEDIA_LIMITS = None
+
+# ── MIME por extensão (o upload NÃO pode depender de ``mimetypes``) ──────────
+# ``mimetypes.guess_type`` consulta ``/etc/mime.types``, que NÃO existe numa
+# imagem slim (o pacote ``media-types`` não é instalado). Sem esse arquivo o
+# Python cai na tabela embutida, que não conhece ``.ogg``/``.m4a``/``.amr``/
+# ``.webp``/``.docx``/``.xlsx``/``.pptx`` — todos viravam
+# ``application/octet-stream`` e a Meta recusava o upload com
+# ``(#100) Param file must be a file with one of the following types: …``,
+# ironicamente listando o tipo correto do arquivo. Caso real em produção: um
+# Ogg/Opus VÁLIDO (o formato nativo de voz do WhatsApp, e o alvo preferencial do
+# transcode do core) era recusado 100% das vezes, incluindo toda gravação feita
+# pelo microfone do painel.
+# Por isso a tabela é FIXA aqui: são exatamente os formatos que este provider
+# declara aceitar em ``_MEDIA_LIMITS`` acima, então o mapa é a contraparte
+# natural daquela política e não depende do sistema de arquivos da imagem.
+# Mesmo precedente do ``_MIME_EXT_OVERRIDE`` em ``server/upload_names.py``.
+_EXT_MIME = {
+    # Áudio (Meta: audio/ogg só com OPUS — ver AudioLimits acima).
+    ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg", ".aac": "audio/aac", ".amr": "audio/amr",
+    ".m4a": "audio/mp4",
+    # Imagem / figurinha.
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp",
+    # Vídeo.
+    ".mp4": "video/mp4", ".3gp": "video/3gpp", ".3gpp": "video/3gpp",
+    # Documento.
+    ".pdf": "application/pdf", ".txt": "text/plain",
+    ".doc": "application/msword",
+    ".docx": ("application/vnd.openxmlformats-officedocument"
+              ".wordprocessingml.document"),
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": ("application/vnd.openxmlformats-officedocument"
+              ".presentationml.presentation"),
+}
+
+
+# Inverso, para o caminho INBOUND (a Meta manda o mime, precisamos da extensão).
+# Primeira extensão declarada vence — ``.ogg`` sobre ``.oga``/``.opus``,
+# ``.jpg`` sobre ``.jpeg``.
+_MIME_EXT: dict[str, str] = {}
+for _e, _m in _EXT_MIME.items():
+    _MIME_EXT.setdefault(_m, _e)
+
+
+def _mime_for(path: str) -> str:
+    """MIME do arquivo: tabela fixa primeiro, ``mimetypes`` só como reserva.
+
+    A ordem importa. ``mimetypes`` é a RESERVA, não a fonte: numa imagem com
+    ``/etc/mime.types`` ele acerta o mesmo resultado, e sem ela erraria — logo
+    consultar a tabela antes é o que torna o upload independente do ambiente.
+    """
+    ext = os.path.splitext(path or "")[1].lower()
+    return (_EXT_MIME.get(ext)
+            or mimetypes.guess_type(path or "")[0]
+            or "application/octet-stream")
+
+# ── Formatter PT-BR dos tipos inbound (plano 75 F1/F2) ──────────────────────
+# Toda a tradução tipo→texto mora em ``inbound_text`` (puro, stdlib-only). Aqui
+# só ligamos o resultado em ``InboundEvent.text`` — antes o parse deixava
+# ``text=""`` para contacts/order/system/unsupported/button_reply e a bolha do
+# painel nascia MUDA (caso real: card de contato com o telefone que o atendente
+# tinha acabado de pedir).
+# Import defensivo pelo mesmo motivo do ``MediaLimits`` acima: um zip antigo
+# (ou uma instalação onde o arquivo novo não chegou) tem que continuar
+# CARREGANDO — sem o formatter o parse cai no fallback genérico.
+try:
+    from .inbound_text import describe_message
+except Exception:  # noqa: BLE001 — pragma: no cover (plugin sem o módulo novo)
+    def describe_message(msg: dict) -> str:  # type: ignore[misc]
+        return ""
 
 GRAPH_BASE = "https://graph.facebook.com"
 DEFAULT_GRAPH_VERSION = "v21.0"
 HTTP_TIMEOUT = 20.0
 
 
+def _unsupported_text(msg_type: str) -> str:
+    """Fallback genérico: um tipo que ninguém sabe descrever NUNCA vira bolha
+    vazia — o operador ao menos vê que algo chegou e de que tipo era."""
+    return f'⚠️ Mensagem do tipo "{msg_type or "desconhecido"}" não suportada'
+
+
 class WhatsAppCloudChannel(Channel):
     provider = "whatsapp_cloud"
+
+    # ── Contact type (marca por canal — plano tipos-de-contato) ──────
+    @classmethod
+    def contact_type(cls) -> str:
+        """WhatsApp Cloud é WhatsApp — mesmo tipo que o GOWA."""
+        return "whatsapp"
 
     def __init__(self, channel_id: str, registry=None, credentials: Optional[dict] = None):
         super().__init__(
@@ -56,6 +223,13 @@ class WhatsAppCloudChannel(Channel):
                 presence=False,
                 reactions=True,
                 media=True,
+                # WhatsApp Cloud é o único canal SEM apagar nem editar no painel: o
+                # Graph API não tem endpoint de revoke, e a edição via messages
+                # endpoint exige permissões/janela que não valem a pena expor (dava
+                # OAuthException na prática). Ambas as capabilities ficam False → o
+                # menu de contexto esconde "Apagar" e "Editar" para Cloud.
+                revoke=False,
+                edit_message=False,
                 inbound_route="path",
                 session_window_hours=24,  # free text only within 24h of last inbound
                 # No QR / connect step: a channel missing these can never connect,
@@ -63,6 +237,9 @@ class WhatsAppCloudChannel(Channel):
                 # core webhook handshake needs verify_token). The core rejects
                 # creating one without them — see channels.base.required_credentials.
                 required_credentials=("access_token", "phone_number_id", "verify_token"),
+                # Limites de vídeo da Meta — o core valida/recomprime a partir daqui
+                # (plano 65). ``**`` para não passar a chave em core antigo.
+                **({"media_limits": _MEDIA_LIMITS} if _MEDIA_LIMITS else {}),
             ),
         )
         self.registry = registry
@@ -71,6 +248,65 @@ class WhatsAppCloudChannel(Channel):
         # Short cache for list_templates (avoid hitting the Graph API on every
         # picker open): (fetched_at, [templates]).
         self._templates_cache: Optional[tuple] = None
+
+    # ── Provider descriptor (plano 33) ───────────────────────────────
+    @classmethod
+    def provider_descriptor(cls) -> dict:
+        """WhatsApp Cloud API (Meta Graph): credential-only (no QR), supports
+        templates (HSM). After create the core shows the inbound webhook callback
+        URL to paste into the Meta app config (``post_create`` = ``webhook_url``).
+        ``verify_token`` offers a "suggest random token" button."""
+        return {
+            "provider": "whatsapp_cloud",
+            "label": "WhatsApp Cloud",
+            "color": "blue",
+            "credential_fields": [
+                {"key": "access_token", "label": "Access Token", "type": "secret",
+                 "required": True, "placeholder": "EAAB..."},
+                {"key": "phone_number_id", "label": "Phone Number ID",
+                 "type": "text", "required": True,
+                 "placeholder": "ID do número (Meta)"},
+                {"key": "waba_id", "label": "WABA ID", "type": "text",
+                 "required": False,
+                 "placeholder": "WhatsApp Business Account ID",
+                 "help": "Necessário para listar e criar templates (HSM). Em "
+                         "WhatsApp Manager → Configurações da conta. Diferente do "
+                         "Phone Number ID."},
+                {"key": "app_id", "label": "App ID (Meta)", "type": "text",
+                 "required": False,
+                 "placeholder": "ID do App na Meta",
+                 "help": "Necessário só para criar templates com cabeçalho de "
+                         "mídia (imagem/vídeo/documento). Em "
+                         "developers.facebook.com → seu App → Configurações → "
+                         "ID do aplicativo."},
+                {"key": "verify_token", "label": "Verify Token",
+                 "type": "token_suggest", "required": True,
+                 "placeholder": "token de verificação do webhook"},
+            ],
+            "config_fields": [],
+            "capabilities": {"needs_qr": False, "templates": True},
+            "ai_sequential_default": False,
+            "post_create": {
+                "kind": "webhook_url",
+                "path": "/api/webhook/whatsapp_cloud/{channel_id}",
+                "title": "Canal criado",
+                "help": "Cole esta URL como Callback URL na configuração de "
+                        "webhook do seu app na Meta:",
+            },
+            "form_component": None,
+        }
+
+    # ── Account identity (dedup contract — plano 32 F5) ──────────────
+    @classmethod
+    def identity_from_credentials(cls, creds: dict) -> Optional[AccountIdentity]:
+        """The Cloud account is the ``phone_number_id`` — known at create time.
+
+        Two channels with the same ``phone_number_id`` are the same WhatsApp
+        Business number connected twice, so the core rejects the duplicate before
+        it is persisted (no network needed). ``None`` when the field is blank.
+        """
+        pid = (creds.get("phone_number_id") or "").strip()
+        return AccountIdentity("phone_number_id", pid) if pid else None
 
     # ── Credential access ────────────────────────────────────────────
     def _cred(self, key: str) -> str:
@@ -128,13 +364,18 @@ class WhatsAppCloudChannel(Channel):
                 resp = client.get(url, headers=self._headers())
             if resp.status_code == 200:
                 data = resp.json()
+                display = data.get("display_phone_number") or ""
                 return {
                     "connected": True,
                     "logged_in": True,
                     "needs_qr": False,
                     "error": None,
                     "verified_name": data.get("verified_name"),
-                    "display_phone_number": data.get("display_phone_number"),
+                    "display_phone_number": display,
+                    # Número da conta em dígitos: o sweep de identidade persiste em
+                    # channels.own_phone, e o painel usa para mostrar de qual número
+                    # a mensagem/template sai.
+                    "own_phone": "".join(c for c in display if c.isdigit()) or None,
                     "quality_rating": data.get("quality_rating"),
                 }
             return {
@@ -183,6 +424,11 @@ class WhatsAppCloudChannel(Channel):
             payload["context"] = {"message_id": reply_to}
         return self._post_message(payload)
 
+    # edit_text: NOT implemented on purpose — WhatsApp Cloud edits require Graph
+    # permissions/window that yield OAuthException in practice, so ``edit_message``
+    # is False and the panel never offers "Editar" for Cloud. Inherits Channel's
+    # refusing default as a belt-and-suspenders guard.
+
     def upload_media(self, path: str, *, mime_type: Optional[str] = None) -> Optional[str]:
         """Upload a LOCAL file to the Graph API and return its media id.
 
@@ -197,7 +443,7 @@ class WhatsAppCloudChannel(Channel):
         phone_id = self._phone_number_id
         if not phone_id or not self._access_token or not path:
             return None
-        mime = mime_type or mimetypes.guess_type(path)[0] or "application/octet-stream"
+        mime = mime_type or _mime_for(path)
         url = f"{self._base_url()}/{phone_id}/media"
         try:
             with httpx.Client(timeout=HTTP_TIMEOUT) as client, open(path, "rb") as fh:
@@ -438,11 +684,113 @@ class WhatsAppCloudChannel(Channel):
     def _invalidate_templates_cache(self) -> None:
         self._templates_cache = None
 
+    # ── Upload de exemplo de mídia (resumable upload — plano 73) ─────
+    def upload_example(self, file_bytes: bytes, mime: str,
+                       filename: str) -> dict:
+        """Upload a media sample via the Meta **resumable upload** API.
+
+        Two steps, both authenticated with ``Authorization: OAuth {token}`` (the
+        upload API rejects ``Bearer``) and the token in the HEADER, never in the
+        query string (a URL is logged; a header isn't):
+
+        1. ``POST /{app_id}/uploads?file_name=&file_length=&file_type=`` → session id
+        2. ``POST /{upload_session_id}`` with ``file_offset: 0`` and the raw bytes
+           as body → ``{"h": "4:…"}`` — that ``h`` is the ``header_handle``.
+
+        Returns ``{ok, handle?, error?}``. This is a DIFFERENT flow from the
+        ``/{phone_number_id}/media`` upload used to send media at runtime: only the
+        resumable handle is accepted as a template header example.
+        """
+        app_id = self._cred("app_id")
+        token = self._access_token
+        if not token:
+            return {"ok": False, "error": "missing_credentials"}
+        if not app_id:
+            return {"ok": False,
+                    "error": "App ID não configurado no canal — necessário para "
+                             "cabeçalho de mídia."}
+        if not file_bytes:
+            return {"ok": False, "error": "arquivo vazio"}
+
+        mime = self._normalize_upload_mime(mime)
+        headers = {"Authorization": f"OAuth {token}"}
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+                start = client.post(
+                    f"{self._base_url()}/{app_id}/uploads",
+                    headers=headers,
+                    params={"file_name": filename or "example",
+                            "file_length": str(len(file_bytes)),
+                            "file_type": mime})
+                if start.status_code not in (200, 201):
+                    return {"ok": False, "error": _graph_error(start)}
+                session_id = (start.json() or {}).get("id") or ""
+                if not session_id:
+                    return {"ok": False, "error": "sessão de upload não retornada"}
+
+                finish = client.post(
+                    f"{self._base_url()}/{session_id}",
+                    headers={**headers, "file_offset": "0", "Content-Type": mime},
+                    content=file_bytes)
+                if finish.status_code not in (200, 201):
+                    return {"ok": False, "error": _graph_error(finish)}
+                handle = (finish.json() or {}).get("h") or ""
+                if not handle:
+                    return {"ok": False, "error": "handle não retornado pela Meta"}
+                return {"ok": True, "handle": handle}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("whatsapp_cloud upload_example failed", exc_info=True)
+            return {"ok": False, "error": str(e)}
+
+    @staticmethod
+    def _normalize_upload_mime(mime: str) -> str:
+        """Collapse the video MIMEs browsers report onto what Meta accepts."""
+        m = (mime or "").split(";")[0].strip().lower()
+        if m in ("video/quicktime", "video/mpeg", "video/x-msvideo"):
+            return "video/mp4"
+        return m or "application/octet-stream"
+
+    @staticmethod
+    def _graph_buttons(buttons: list) -> list[dict]:
+        """Convert the core's typed buttons into the Graph BUTTONS shape.
+
+        The core validated types/limits already; here we only map field names —
+        the Graph specifics (COPY_CODE carrying no ``text``, the URL example being
+        a list) stay inside the provider.
+        """
+        out: list[dict] = []
+        for b in buttons or []:
+            btype = (b.get("type") or "").strip().upper()
+            text = (b.get("text") or "").strip()
+            if btype == "QUICK_REPLY":
+                out.append({"type": "QUICK_REPLY", "text": text})
+            elif btype == "URL":
+                comp: dict = {"type": "URL", "text": text,
+                              "url": (b.get("url") or "").strip()}
+                example = b.get("example")
+                if isinstance(example, str):
+                    example = [example]
+                if example:
+                    comp["example"] = list(example)
+                out.append(comp)
+            elif btype == "PHONE_NUMBER":
+                out.append({"type": "PHONE_NUMBER", "text": text,
+                            "phone_number": (b.get("phone_number") or "").strip()})
+            elif btype == "COPY_CODE":
+                example = b.get("example")
+                if isinstance(example, list):
+                    example = example[0] if example else ""
+                out.append({"type": "COPY_CODE", "example": example or ""})
+        return out
+
     def create_template(self, name: str, *, category: str, language: str,
                         body_text: str, header_text: Optional[str] = None,
                         footer_text: Optional[str] = None,
                         body_examples: Optional[list] = None,
-                        header_examples: Optional[list] = None) -> dict:
+                        header_examples: Optional[list] = None,
+                        header_format: Optional[str] = None,
+                        header_handle: Optional[str] = None,
+                        buttons: Optional[list] = None) -> dict:
         """Create a template via ``POST /{waba_id}/message_templates`` (Graph API).
 
         Assembles the Graph ``components`` from a simple normalized definition so the
@@ -459,7 +807,14 @@ class WhatsAppCloudChannel(Channel):
             return {"ok": False, "error": "name e body_text são obrigatórios"}
 
         components: list[dict] = []
-        if header_text and header_text.strip():
+        media_format = (header_format or "").strip().upper()
+        if media_format in ("IMAGE", "VIDEO", "DOCUMENT") and header_handle:
+            # Media header: Meta wants the sample as an upload handle, never a URL.
+            components.append({
+                "type": "HEADER", "format": media_format,
+                "example": {"header_handle": [header_handle]},
+            })
+        elif header_text and header_text.strip():
             header_comp: dict = {"type": "HEADER", "format": "TEXT",
                                  "text": header_text.strip()}
             if header_examples:
@@ -472,13 +827,21 @@ class WhatsAppCloudChannel(Channel):
         components.append(body_comp)
         if footer_text and footer_text.strip():
             components.append({"type": "FOOTER", "text": footer_text.strip()})
+        graph_buttons = self._graph_buttons(buttons or [])
+        if graph_buttons:
+            components.append({"type": "BUTTONS", "buttons": graph_buttons})
 
+        cat = (category or "UTILITY").strip().upper()
         payload = {
             "name": name.strip(),
             "language": (language or "pt_BR").strip(),
-            "category": (category or "UTILITY").strip().upper(),
+            "category": cat,
             "components": components,
         }
+        if cat == "UTILITY":
+            # 12h TTL — only meaningful (and only accepted without hurting review)
+            # for utility templates.
+            payload["message_send_ttl_seconds"] = 43200
         url = f"{self._base_url()}/{waba_id}/message_templates"
         try:
             with httpx.Client(timeout=HTTP_TIMEOUT) as client:
@@ -582,7 +945,12 @@ class WhatsAppCloudChannel(Channel):
                                    media_id, blob.status_code)
                     return None
                 data = blob.content
-            ext = mimetypes.guess_extension((mime or "").split(";")[0].strip() or "") or ""
+            # Mesma razão do ``_mime_for`` no upload: a tabela fixa primeiro, o
+            # ``mimetypes`` só como reserva. Sem isso ``audio/mp4`` (m4a) e
+            # ``audio/ogg`` caíam em ``.bin`` numa imagem sem ``/etc/mime.types``
+            # — e um arquivo sem extensão não toca no player do painel.
+            _m = (mime or "").split(";")[0].strip()
+            ext = _MIME_EXT.get(_m) or mimetypes.guess_extension(_m or "") or ""
             # Normalise the two WhatsApp voice/ogg variants stdlib gets wrong.
             if not ext and "ogg" in mime:
                 ext = ".ogg"
@@ -728,13 +1096,77 @@ class WhatsAppCloudChannel(Channel):
             )
         elif msg_type in ("button", "interactive"):
             inter = msg.get(msg_type) or {}
-            media_type = "interactive"
+            media_type = "interactive"          # dado histórico — NÃO renomear
             media_extras = {"payload": inter}
-            text = inter.get("text") or ""
+            # O caminho legado lia ``inter["text"]``, chave que só existe no
+            # quick-reply de template (``type: "button"``); button_reply /
+            # list_reply / nfm_reply chegavam em branco. O formatter cobre os
+            # quatro e mantém a saída do ``button`` byte-idêntica. O ``or`` é a
+            # rede para o caso do import defensivo ter caído no stub.
+            text = describe_message(msg) or (inter.get("text") or "")
+        elif msg_type == "system":
+            # plano 82: um AVISO DE CICLO DE VIDA do canal (número trocado /
+            # identidade trocada: ``user_changed_number`` / ``customer_identity_changed``),
+            # NÃO uma fala do cliente. Emite ``kind="system"`` — o dispatch do core
+            # o grava como card painel-only na conversa EXISTENTE, sem abrir/reabrir
+            # conversa, sem materializar contato, sem IA e sem disparar automação
+            # (protocolos). O texto pronto vem de ``describe_system`` (via
+            # ``describe_message``, prefixo ℹ️); o subtipo estruturado + a nova
+            # identidade (``wa_id``) viajam em ``media_extras`` para quem quiser
+            # reagir ao evento ``channel.system_event``. ``chat_id`` continua sendo
+            # o número ANTIGO (``from``) — nunca respondemos a ele.
+            sys_obj = msg.get("system") or {}
+            return InboundEvent(
+                channel_id=channel_id,
+                provider=self.provider,
+                kind="system",
+                direction="in",
+                external_msg_id=external_id,
+                chat_id=sender,
+                sender_id=sender,
+                sender_name=sender_name,
+                is_group=False,
+                text=describe_message(msg),   # "" degenerado ⇒ dispatch não grava card
+                media_type="system",
+                media_extras={
+                    "system_type": sys_obj.get("type"),
+                    "wa_id": sys_obj.get("wa_id"),
+                    "body": sys_obj.get("body"),
+                },
+                ts=ts,
+                raw=msg,
+            )
+        elif msg_type in ("contacts", "order"):
+            # Tipos estruturados que a Cloud API entrega SEM texto próprio, mas que
+            # SÃO falas reais do cliente (vCard compartilhado / pedido do catálogo)
+            # ⇒ seguem ``kind="message"``. O despacho de formatação está em
+            # ``inbound_text`` — não duplicar aqui.
+            media_type = msg_type
+            media_extras = {"payload": msg.get(msg_type)}
+            text = describe_message(msg) or _unsupported_text(msg_type)
         else:
-            # Unknown/unsupported type — keep metadata, leave text empty.
+            # Unknown/unsupported type — mantém a metadata (plugins leem via o
+            # evento ``message.saved``) e agora também preenche o texto, para a
+            # bolha nunca nascer muda (plano 75 F2).
             media_type = msg_type or None
             media_extras = {"unsupported_type": msg_type, "payload": msg.get(msg_type)}
+            text = describe_message(msg) or _unsupported_text(msg_type)
+
+        # Citação/resposta feita pelo cliente (plano 75 F9 — bug C1). ``context``
+        # é campo de MENSAGEM, não de tipo, então resolve-se UMA vez, aqui, e
+        # vale para todos os ramos acima.
+        # ⚠️ PROIBIDO normalizar/limpar o id: quatro formatos convivem no banco
+        # (``wamid.…`` nativo, ``WAID:wamid.…`` importado do Chatwoot, ``3EB0…``
+        # do GOWA, inteiro em string do Telegram) e cada um só precisa casar
+        # consigo mesmo, por igualdade exata.
+        # ⚠️ ``context.referred_product`` (produto do catálogo) e
+        # ``context.forwarded`` NÃO são citação — só ``context.id`` vira reply.
+        reply_to: Optional[str] = None
+        context = msg.get("context")
+        if isinstance(context, dict):
+            context_id = context.get("id")
+            if isinstance(context_id, str) and context_id:
+                reply_to = context_id
 
         return InboundEvent(
             channel_id=channel_id,
@@ -750,6 +1182,7 @@ class WhatsAppCloudChannel(Channel):
             media_type=media_type,
             media_path=None,           # filled by the core inbound media resolver
             media_extras=media_extras,
+            reply_to_msg_id=reply_to,
             ts=ts,
             raw=msg,
         )

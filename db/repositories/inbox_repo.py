@@ -56,15 +56,22 @@ def create(*, channel_id: str, name: str = "WhatsApp",
 
 
 def get_or_create_for_channel(channel_id: str, *, name: str = "",
-                              channel_type: str = "whatsapp") -> dict:
+                              channel_type: str = "whatsapp") -> dict | None:
     """Idempotent: return the channel's inbox, creating it on first use.
 
     Used by the runtime to resolve the inbox for an inbound event's channel
     even on installs predating the inbox-per-channel migration (defensive).
+
+    Returns ``None`` when ``channel_id`` has no channel row (plano exclui-default):
+    now that the default channel is deletable, a stale ``"default"`` fallback must
+    NOT fabricate an orphan inbox pointing at a channel that no longer exists.
     """
     existing = get_by_channel(channel_id)
     if existing:
         return existing
+    from db.repositories import channel_repo
+    if channel_repo.get(channel_id) is None:
+        return None
     return create(channel_id=channel_id, name=name or channel_id or "WhatsApp",
                   channel_type=channel_type)
 

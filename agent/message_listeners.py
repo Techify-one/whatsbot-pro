@@ -28,7 +28,53 @@ from __future__ import annotations
 import logging
 import time
 
+from db.repositories._mapping import LIST_PANEL_ONLY_ROLES
+
 logger = logging.getLogger(__name__)
+
+
+def broadcast_conversation_upsert(conversation_id: int, role: str) -> None:
+    """Push the AUTHORITATIVE list row for a conversation live (plano 28).
+
+    Event-Carried State Transfer: after a VISIBLE message is persisted, emit the
+    whole enriched conversation row (same shape as a ``/api/atendimentos`` item) so
+    the sidebar upserts it by ``conversation_id`` WITHOUT a refetch — no
+    notification-then-stale-read race. Runs pós-commit (the caller is past the INSERT),
+    so ``get_row_for_broadcast`` reads real preview/unread/ts.
+
+    Gated by :data:`LIST_PANEL_ONLY_ROLES` — panel-only saves (``tool_call``,
+    ``private_note``, ``system_notice``, ...) never change a conversation's
+    last-message preview, so they must not emit a list update. Defensive: a failed
+    broadcast never breaks the save.
+
+    NOTE: a private note that opts into notification (``notify_private_messages``)
+    IS pushed live, but NOT through here — ``ContactMemory.add_message`` handles it
+    with a forced upsert AFTER bumping the msg_id-based unread, so the preview gate
+    above still holds (private_note keeps ``_PREVIEW_EXCLUDED``)."""
+    if role in LIST_PANEL_ONLY_ROLES:
+        return
+    try:
+        from db.repositories import conversation_repo
+        from plugins.context import broadcast
+        row = conversation_repo.get_row_for_broadcast(conversation_id)
+        if row is not None:
+            broadcast("conversation_upsert", row)
+    except Exception:
+        logger.exception("Falha ao emitir conversation_upsert para conversa %s", conversation_id)
+
+
+def emit_conversation_upsert_row(conversation_id: int) -> None:
+    """Force-emit the authoritative list row for ``conversation_id`` regardless of
+    role (used by the private-note notification path — the note is preview-excluded
+    but its unread must reach the sidebar). Defensive: never breaks the save."""
+    try:
+        from db.repositories import conversation_repo
+        from plugins.context import broadcast
+        row = conversation_repo.get_row_for_broadcast(conversation_id)
+        if row is not None:
+            broadcast("conversation_upsert", row)
+    except Exception:
+        logger.exception("Falha ao emitir conversation_upsert (privada) para conversa %s", conversation_id)
 
 
 def _broadcast_conversation_created(conversation_id: int, contact_id: int,

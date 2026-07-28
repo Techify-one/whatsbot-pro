@@ -24,6 +24,8 @@ events — the handler owns those, since it also owns the surrounding
 try/except and usage snapshot.
 """
 
+import os
+import re
 import time
 import logging
 from dataclasses import dataclass, field
@@ -35,7 +37,7 @@ from agno.tools.function import Function
 
 from config.settings import LLM_API_BASE_URL
 from ai_engine.hooks import check_hooks as _hooks_check
-from agent.execution import track_step
+from agent.execution import track_step, mark_execution_has_ai
 from plugins.events import (
     apply_filter,
     apply_filter_sync,
@@ -54,6 +56,95 @@ _RESERVED_TOOL_KWARGS = {
 }
 
 _DEFAULT_MAX_TOKENS = 1024
+# plano 36 F2: the tool result is persisted onto the ``tool_executed`` step so the
+# Executions panel shows input AND output. Results can be huge JSON (e.g.
+# ``pesquisar_ofertas``), so truncate before storing.
+TOOL_RESULT_MAX_CHARS = 4000
+
+
+def _truncate_result(value, limit: int = TOOL_RESULT_MAX_CHARS):
+    """Coerce a tool result to a bounded string for persistence (best-effort).
+
+    None passes through as None (tool returned nothing). Anything longer than
+    ``limit`` is cut with a ``"… (truncado)"`` suffix.
+    """
+    if value is None:
+        return None
+    try:
+        s = value if isinstance(value, str) else str(value)
+    except Exception:
+        return None
+    if len(s) > limit:
+        return s[:limit] + "… (truncado)"
+    return s
+
+
+# plano 36 F3: capture of the FULL context sent to the LLM (system prompt +
+# message array) onto an ``llm_context`` step, gated by the ``execution_capture_context``
+# kill-switch (default ON since plano 51 — the agentic improvement needs the EXACT
+# prompt/history the model saw; the switch remains to turn it off). Each message is
+# truncated and base64 blobs are scrubbed so a media-heavy turn does not bloat the DB.
+LLM_CONTEXT_MSG_MAX_CHARS = 2000
+LLM_CONTEXT_TOTAL_MAX_CHARS = 20000
+_BASE64_DATA_URI_RE = re.compile(r"data:[^;,\s]*;base64,[A-Za-z0-9+/=]+")
+_LONG_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
+
+
+def _context_capture_enabled() -> bool:
+    """Read the ``execution_capture_context`` kill-switch (default ON, best-effort).
+
+    plano 51 (01 F2 · DL1): a captura exata passa a ser o default — a melhoria
+    agêntica reconstrói o que a IA viu a partir do step ``llm_context``. Um erro
+    de leitura da config continua fail-closed (não captura) para nunca quebrar o
+    turno."""
+    try:
+        from db.repositories import config_repo
+        return bool(config_repo.get("execution_capture_context", True))
+    except Exception:
+        return False
+
+
+def _scrub_and_truncate(content, limit: int = LLM_CONTEXT_MSG_MAX_CHARS):
+    """Return (scrubbed+truncated string, truncated_flag) for one context message."""
+    try:
+        s = content if isinstance(content, str) else str(content)
+    except Exception:
+        return "", False
+    s = _BASE64_DATA_URI_RE.sub("[base64 removido]", s)
+    s = _LONG_BASE64_RE.sub("[base64 removido]", s)
+    if len(s) > limit:
+        return s[:limit] + "… (truncado)", True
+    return s, False
+
+
+def _capture_llm_context(system_prompt, convo, model_id) -> None:
+    """Emit an ``llm_context`` step with the system prompt + message array.
+
+    No-op when the kill-switch is OFF. Fully best-effort — any failure is swallowed
+    so context capture never breaks the turn. Base64 media blobs are scrubbed and
+    every message is truncated (per-message + total cap).
+    """
+    if not _context_capture_enabled():
+        return
+    try:
+        msgs: list[dict] = []
+        total = 0
+        if system_prompt:
+            c, tr = _scrub_and_truncate(system_prompt)
+            msgs.append({"role": "system", "content": c, "truncated": tr})
+            total += len(c)
+        for m in convo:
+            if total >= LLM_CONTEXT_TOTAL_MAX_CHARS:
+                msgs.append({"role": "system", "content": "… (contexto truncado)",
+                             "truncated": True})
+                break
+            c, tr = _scrub_and_truncate(getattr(m, "content", "") or "")
+            msgs.append({"role": getattr(m, "role", "user") or "user",
+                         "content": c, "truncated": tr})
+            total += len(c)
+        track_step("llm_context", {"model": model_id, "engine": "agno", "messages": msgs})
+    except Exception:
+        logger.debug("llm_context capture failed", exc_info=True)
 # Last-resort model when an AgentSpec carries no model (config-in-DB only path,
 # plano 22). The AgentHandler no longer has an in-code ``model`` attribute.
 from agent.agent_factory import DEFAULT_MODEL as _FALLBACK_MODEL
@@ -135,7 +226,8 @@ def _clean_args(kwargs: dict) -> dict:
     return {k: v for k, v in kwargs.items() if k not in _RESERVED_TOOL_KWARGS}
 
 
-def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None):
+def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None,
+                           default_call_limit=None):
     async def entrypoint(**kwargs):
         args = _clean_args(kwargs)
         filtered = await apply_filter(
@@ -149,7 +241,8 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
         name = filtered.get("tool_name", tool_name)
         args = filtered.get("args", args)
 
-        block = _hooks_check(hooks_config, name, executed)
+        block = _hooks_check(hooks_config, name, executed,
+                             default_call_limit=default_call_limit)
         if block is not None:
             executed.append({"tool": name, "args": args, "skipped": True, "blocked": block})
             return block
@@ -172,14 +265,17 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
             feedback = "" if fr is None else fr
 
         executed.append({"tool": name, "args": args, "result": feedback})
-        track_step("tool_executed", {"tool": name, "args": args})
+        track_step("tool_executed", {
+            "tool": name, "args": args, "result": _truncate_result(feedback),
+        })
         logger.info("Tool call for %s: %s(%s)", sender, name, args)
         return feedback or "Informações salvas com sucesso."
 
     return entrypoint
 
 
-def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None):
+def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_config=None,
+                          default_call_limit=None):
     def entrypoint(**kwargs):
         args = _clean_args(kwargs)
         filtered = apply_filter_sync(
@@ -193,7 +289,8 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
         name = filtered.get("tool_name", tool_name)
         args = filtered.get("args", args)
 
-        block = _hooks_check(hooks_config, name, executed)
+        block = _hooks_check(hooks_config, name, executed,
+                             default_call_limit=default_call_limit)
         if block is not None:
             executed.append({"tool": name, "args": args, "skipped": True, "blocked": block})
             return block
@@ -216,22 +313,40 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
             feedback = "" if fr is None else fr
 
         executed.append({"tool": name, "args": args, "result": feedback})
-        track_step("tool_executed", {"tool": name, "args": args})
+        track_step("tool_executed", {
+            "tool": name, "args": args, "result": _truncate_result(feedback),
+        })
         logger.info("Tool call for %s: %s(%s)", sender, name, args)
         return feedback or "Informações salvas com sucesso."
 
     return entrypoint
 
 
+def _resolve_default_call_limit() -> int | None:
+    """Per-tool default cap (plano 29 A1): config ``ai_tool_call_limit_per_tool``.
+
+    ``0``/absent/malformed ⇒ ``None`` (unlimited — legacy behaviour). Read once
+    per run; a broken config read never blocks the pipeline.
+    """
+    try:
+        from db.repositories import config_repo
+        raw = config_repo.get("ai_tool_call_limit_per_tool", 0)
+        n = int(raw)
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
 def build_functions(handler, contact, sender, active_tools, executed, *, is_async,
-                    hooks_config=None):
+                    hooks_config=None, default_call_limit=None):
     """Wrap each active tool schema into an AGNO Function.
 
     ``active_tools`` is the post-``filter.llm.tools`` list of OpenAI tool
     schemas. ``executed`` is the per-request sink that collects what actually
     ran (used to build ProcessResult and detect ``save_contact_info``).
     ``hooks_config`` (config-in-DB) gates calls declaratively (call_limit /
-    requires_prior_call) using ``executed`` as per-message state.
+    requires_prior_call) using ``executed`` as per-message state;
+    ``default_call_limit`` caps tools without an explicit ``call_limit``.
     """
     make = _make_async_entrypoint if is_async else _make_sync_entrypoint
     functions: dict[str, Function] = {}
@@ -245,7 +360,8 @@ def build_functions(handler, contact, sender, active_tools, executed, *, is_asyn
             name=name,
             description=fn.get("description", ""),
             parameters=params,
-            entrypoint=make(handler, contact, sender, name, executed, hooks_config),
+            entrypoint=make(handler, contact, sender, name, executed, hooks_config,
+                            default_call_limit),
             skip_entrypoint_processing=True,
         )
     return functions
@@ -270,12 +386,43 @@ _CONTEXT_OFF = dict(
 # ``build_context`` configures the single Agent.
 _AGENT_CONTEXT_OFF = dict(_CONTEXT_OFF, build_context=False)
 
+# Safety backstop for tool-call loops. AGNO's ``Agent.tool_call_limit`` defaults
+# to ``None`` (unbounded): a tool that keeps asking to be called again loops until
+# the model gives up — which it may not (QA Teste 3b: 12/12 iterations without
+# stopping, ~US$0.025 in a single message). We cap the number of tool calls per
+# agent run. On overflow AGNO does NOT raise: it feeds the model a "limit reached"
+# message for the extra calls and the run ends gracefully (confirmed on agno
+# 2.6.x: ``create_tool_call_limit_error_result``). Resolution (plano 29 A8):
+# env ``WHATSBOT_TOOL_CALL_LIMIT`` > config ``ai_tool_call_limit_total`` >
+# :data:`DEFAULT_TOOL_CALL_LIMIT`. ``0``/non-positive = disable the cap.
+DEFAULT_TOOL_CALL_LIMIT = 25
+
+
+def _resolve_tool_call_limit() -> int | None:
+    """Per-run tool-call cap: env > config ``ai_tool_call_limit_total`` > default.
+
+    Returns ``None`` (no cap) only when explicitly disabled with a non-positive
+    value; a malformed value falls back to the default (fail safe, not open)."""
+    raw = os.environ.get("WHATSBOT_TOOL_CALL_LIMIT")
+    if raw is None or raw.strip() == "":
+        try:
+            from db.repositories import config_repo
+            raw = config_repo.get("ai_tool_call_limit_total", DEFAULT_TOOL_CALL_LIMIT)
+        except Exception:
+            raw = DEFAULT_TOOL_CALL_LIMIT
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TOOL_CALL_LIMIT
+    return n if n > 0 else None
+
 
 def _build_single_agent(handler, system_prompt, functions, model_config=None):
     return Agent(
         model=build_model(handler, model_config=model_config),
         system_message=system_prompt,
         tools=list(functions.values()) or None,
+        tool_call_limit=_resolve_tool_call_limit(),
         **_AGENT_CONTEXT_OFF,
     )
 
@@ -414,7 +561,8 @@ async def run_async(handler, contact, sender, messages, active_tools,
     executed: list[dict] = []
     hooks_config = (model_config or {}).get("_hooks_config")
     functions = build_functions(handler, contact, sender, active_tools, executed,
-                                is_async=True, hooks_config=hooks_config)
+                                is_async=True, hooks_config=hooks_config,
+                                default_call_limit=_resolve_default_call_limit())
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
     model_id = (model_config or {}).get("model") or _FALLBACK_MODEL
 
@@ -424,6 +572,8 @@ async def run_async(handler, contact, sender, messages, active_tools,
         "context_messages": len(convo),
         "tools": list(functions.keys()),
     })
+    mark_execution_has_ai()  # this turn actually invoked the model (Nexus filter)
+    _capture_llm_context(system_prompt, convo, model_id)
     run_output = await runner.arun(input=convo)
 
     reply = _extract_reply(run_output)
@@ -455,6 +605,13 @@ async def run_async(handler, contact, sender, messages, active_tools,
         "completion_tokens": (usage or {}).get("completion_tokens", 0),
         "has_tool_calls": bool(executed),
     })
+    if not reply:
+        # A5 (plano 31 F4): an empty reply used to leave zero trace in the logs.
+        logger.warning(
+            "Empty reply from %s for %s (completion_tokens=%s, tools=%d) — "
+            "possível max_tokens baixo demais (modelos de raciocínio gastam o "
+            "orçamento pensando)",
+            model_id, sender, (usage or {}).get("completion_tokens"), len(executed))
     return EngineResult(reply=reply, executed_tools=executed, usage=usage)
 
 
@@ -465,7 +622,8 @@ def run_sync(handler, contact, sender, messages, active_tools,
     executed: list[dict] = []
     hooks_config = (model_config or {}).get("_hooks_config")
     functions = build_functions(handler, contact, sender, active_tools, executed,
-                                is_async=False, hooks_config=hooks_config)
+                                is_async=False, hooks_config=hooks_config,
+                                default_call_limit=_resolve_default_call_limit())
     runner = build_runner(handler, system_prompt, functions, model_config=model_config)
     model_id = (model_config or {}).get("model") or _FALLBACK_MODEL
 
@@ -475,6 +633,8 @@ def run_sync(handler, contact, sender, messages, active_tools,
         "context_messages": len(convo),
         "tools": list(functions.keys()),
     })
+    mark_execution_has_ai()  # this turn actually invoked the model (Nexus filter)
+    _capture_llm_context(system_prompt, convo, model_id)
     run_output = runner.run(input=convo)
 
     reply = _extract_reply(run_output)
@@ -502,4 +662,11 @@ def run_sync(handler, contact, sender, messages, active_tools,
         "completion_tokens": (usage or {}).get("completion_tokens", 0),
         "has_tool_calls": bool(executed),
     })
+    if not reply:
+        # A5 (plano 31 F4): see run_async — surface the silent-mute case.
+        logger.warning(
+            "Empty reply from %s for %s (completion_tokens=%s, tools=%d) — "
+            "possível max_tokens baixo demais (modelos de raciocínio gastam o "
+            "orçamento pensando)",
+            model_id, sender, (usage or {}).get("completion_tokens"), len(executed))
     return EngineResult(reply=reply, executed_tools=executed, usage=usage)

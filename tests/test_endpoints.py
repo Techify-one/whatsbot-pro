@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -18,6 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from server import upload_limits  # noqa: E402  (plano 64 — tetos de upload)
+
 # Load-bearing (plano 13): the test's Settings() resolves data_dir to the repo
 # root, so create_app reads the REAL storages/plugins + assets/plugin_examples.
 # This flag makes bootstrap_gowa_upgrade a no-op so the suite never copies/enables
@@ -25,21 +28,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # create_app behavior and dirty the tree). Set BEFORE importing server.app.
 os.environ["WHATSBOT_TEST"] = "1"
 
-# Initialize the engine in a temp directory before importing anything else.
-# Default: SQLite. Override with ``WHATSBOT_TEST_DB_URL`` to run the same
-# assertions against Postgres (e.g. via testcontainers).
+# Initialize the engine on the Postgres TEST database (plano 29 C3): schema
+# reset + Alembic head via tests.pg (URL de WHATSBOT_TEST_DB_URL ou .env).
+# ``_tmpdir`` continua existindo só para artefatos de mídia do teste.
 _tmpdir = tempfile.mkdtemp(prefix="whatsbot_test_")
-_db_path = Path(_tmpdir) / "whatsbot.db"
 
-from db import init_db, init_engine
+from tests.pg import init_test_engine  # noqa: E402
 
-_test_url = os.environ.get("WHATSBOT_TEST_DB_URL", "").strip()
-if _test_url:
-    init_engine(_test_url)
-    from db.connection import _run_alembic_upgrade  # noqa: E402
-    _run_alembic_upgrade()
-else:
-    init_db(_db_path)
+init_test_engine(reset=True)
 
 # Seed some test data
 from db.repositories import contact_repo, message_repo, usage_repo, tag_repo, config_repo, execution_repo
@@ -100,6 +96,10 @@ mock_gowa_client.delete_message = MagicMock(return_value=None)
 mock_gowa_client.react_to_message = MagicMock(return_value=None)
 mock_gowa_client.reconnect = MagicMock(return_value=None)
 mock_gowa_client.logout = MagicMock(return_value=None)
+# plano 27: connection_state must be stubbed — a bare MagicMock is truthy and
+# would make status()/get_qr_code() read "connected" everywhere.
+mock_gowa_client.connection_state = MagicMock(
+    return_value={"connected": False, "logged_in": False})
 mock_gowa_client.get_own_number = MagicMock(return_value="5511999990001")
 # Lookups parse_gowa_inbound makes via the client (return concrete values, not
 # bare MagicMocks, so contact.save() doesn't try to persist a Mock — plano 13).
@@ -134,6 +134,11 @@ app.router.lifespan_context = _noop_lifespan
 
 from starlette.testclient import TestClient
 client = TestClient(app, raise_server_exceptions=False)
+# Anonymous client (never carries a default auth header). Used for the "no token"
+# assertions once the suite bootstraps an admin and sets a default Authorization
+# header on ``client`` (plano 48 F0 — the API gate closes once ≥1 user exists, so
+# an unauthenticated request must come from a client with no bearer token).
+anon = TestClient(app, raise_server_exceptions=False)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -183,6 +188,27 @@ check("GET /api/auth/check -> has_password=false", r.json()["data"]["has_passwor
 r = client.post("/api/auth/login", json={"password": "test"})
 check("POST /api/auth/login (no pw set) -> 400", r.status_code == 400)
 
+# ── plano 48 F1 — anti-lockout: numa instalação nova (0 usuários) o gate fica
+#    ABERTO para o 1º admin ser criável. /auth/check reporta has_users=false, o
+#    /api/* responde sem token e o /ws conecta — senão a instalação novinha
+#    ficaria trancada. O bootstrap em si (0→1 admin) é exercitado adiante, na
+#    seção RBAC; aqui ainda há 0 usuários.
+import json as _json_f1
+check("F1 fresh install: /auth/check -> has_users=false",
+      client.get("/api/auth/check").json()["data"]["has_users"] is False)
+check("F1 fresh install: /api/config aberto sem token (0 usuários)",
+      anon.get("/api/config").status_code == 200)
+# (At 0 users the gate is open, so this proves bootstrap is REACHABLE — reaches the
+# handler and validates the body — not the prefix-exemption mechanism per se.)
+check("F1 fresh install: /api/auth/bootstrap alcançável a 0 usuários (400 sem body)",
+      anon.post("/api/auth/bootstrap", json={}).status_code == 400)
+try:
+    with anon.websocket_connect("/ws") as _ws_f1:
+        _ev_f1 = _json_f1.loads(_ws_f1.receive_text())
+    check("F1 fresh install: /ws aberto sem token (0 usuários)", _ev_f1.get("event") == "status")
+except Exception:
+    check("F1 fresh install: /ws aberto sem token (0 usuários)", False)
+
 # ═══════════════════════════════════════════════════════════════════
 #  3. Config
 # ═══════════════════════════════════════════════════════════════════
@@ -228,6 +254,74 @@ r = client.get("/api/config")
 check("PUT /api/config -> setup_completed persisted", r.json()["data"]["setup_completed"] is True)
 client.put("/api/config", json={"setup_completed": False})  # restore
 
+# plano 47 (D9) — tamanho global do resultado de tool reaproveitado
+r = client.get("/api/config")
+check("GET /api/config -> has ai_tool_reuse_result_max_chars",
+      "ai_tool_reuse_result_max_chars" in r.json()["data"])
+r = client.put("/api/config", json={"ai_tool_reuse_result_max_chars": 350})
+check("PUT /api/config (ai_tool_reuse_result_max_chars) -> 200", r.status_code == 200)
+check("PUT /api/config -> ai_tool_reuse_result_max_chars persisted",
+      client.get("/api/config").json()["data"]["ai_tool_reuse_result_max_chars"] == 350)
+client.put("/api/config", json={"ai_tool_reuse_result_max_chars": 800})  # restore
+
+# plano 47 (D8) — toggle reuse_result por-tool (uniforme, sem guarda por nome)
+_tools = client.get("/api/tools").json()["data"]["tools"]
+check("GET /api/tools -> item traz reuse_result", bool(_tools) and "reuse_result" in _tools[0])
+if _tools:
+    _tname = _tools[0]["name"]
+    r = client.put(f"/api/tools/{_tname}", json={"reuse_result": True})
+    check("PUT /api/tools {reuse_result:true} -> 200", r.status_code == 200)
+    check("PUT /api/tools -> reuse_result persisted", r.json()["data"]["reuse_result"] is True)
+    client.put(f"/api/tools/{_tname}", json={"reuse_result": False})  # restore
+
+# ── public_base_url: captura + self-heal + override por env ──────────────────
+# Garante um estado limpo de env (sem override) para os testes de captura/self-heal.
+_saved_pbu_env = {k: os.environ.pop(k, None)
+                  for k in ("WHATSBOT_PUBLIC_URL", "PUBLIC_BASE_URL")}
+try:
+    # public_base_url é exposto e writable (editável na UI Configurações → Avançado)
+    check("GET /api/config -> has public_base_url", "public_base_url" in data)
+
+    # Semeia um IP de LAN (cenário do bug: 1º acesso foi direto pelo IP:porta local)
+    client.put("/api/config", json={"public_base_url": "http://203.0.113.40:8090"})
+
+    # Self-heal: acessando pelo domínio (headers de proxy reverso), um IP de LAN
+    # salvo é substituído pelo domínio real — regressão do link com IP local.
+    r = client.get("/api/config", headers={
+        "x-forwarded-host": "whatsbot-dev.teste.techify.run",
+        "x-forwarded-proto": "https"})
+    check("public_base_url self-heal: IP de LAN -> domínio",
+          r.json()["data"]["public_base_url"] == "https://whatsbot-dev.teste.techify.run")
+
+    # Um domínio já salvo NÃO é sobrescrito por um acesso via loopback (visita dev).
+    r = client.get("/api/config", headers={
+        "x-forwarded-host": "localhost:8090", "x-forwarded-proto": "http"})
+    check("public_base_url: loopback não sobrescreve domínio salvo",
+          r.json()["data"]["public_base_url"] == "https://whatsbot-dev.teste.techify.run")
+
+    # Edição manual via PUT (campo writable) persiste, normalizada (sem barra final).
+    r = client.put("/api/config", json={"public_base_url": "https://manual.example.com/"})
+    check("PUT public_base_url -> 200", r.status_code == 200)
+    r = client.get("/api/config", headers={
+        "x-forwarded-host": "manual.example.com", "x-forwarded-proto": "https"})
+    check("public_base_url: edição manual persiste sem barra final",
+          r.json()["data"]["public_base_url"] == "https://manual.example.com")
+
+    # Override por env é autoritativo (proxies que não repassam x-forwarded-*).
+    os.environ["WHATSBOT_PUBLIC_URL"] = "https://env-forced.example.com"
+    r = client.get("/api/config", headers={
+        "x-forwarded-host": "outro.example.com", "x-forwarded-proto": "https"})
+    check("public_base_url: env WHATSBOT_PUBLIC_URL tem prioridade",
+          r.json()["data"]["public_base_url"] == "https://env-forced.example.com")
+finally:
+    # Restaura env e limpa o valor semeado para não vazar pros próximos testes.
+    os.environ.pop("WHATSBOT_PUBLIC_URL", None)
+    os.environ.pop("PUBLIC_BASE_URL", None)
+    for _k, _v in _saved_pbu_env.items():
+        if _v is not None:
+            os.environ[_k] = _v
+    config_repo.set("public_base_url", "")
+
 # Test key (will fail since no real API)
 r = client.post("/api/config/test-key", json={"api_key": ""})
 check("POST /api/config/test-key (empty) -> error", r.json()["ok"] is False)
@@ -256,6 +350,52 @@ check("GET /api/contacts -> is list", isinstance(contacts_data, list))
 non_archived = [c for c in contacts_data if not c.get("is_archived")]
 check("GET /api/contacts -> has non-archived contacts", len(non_archived) >= 1)
 check("GET /api/contacts -> exposes avatar_v (cache-busting)", all("avatar_v" in c for c in contacts_data))
+
+# plano 50 F5 — paginação server-side (só quando `limit` é passado; sem ele = legado).
+# Semear contatos suficientes p/ ter mais de uma página.
+for _i in range(8):
+    _seed = contact_repo.get_or_create(f"55000512{_i:04d}")
+    contact_repo.update(_seed["id"], name=f"Seed Pag {_i}")
+r = client.get("/api/contacts?limit=3&offset=0")
+check("GET /api/contacts?limit=3 -> 200", r.status_code == 200)
+_pg = r.json()["data"]
+check("F5: com limit -> envelope {items,total,has_more}",
+      isinstance(_pg, dict) and "items" in _pg and "total" in _pg and "has_more" in _pg)
+check("F5: página respeita limit (<=3 itens)", len(_pg["items"]) <= 3)
+check("F5: total >= itens da página e has_more coerente",
+      _pg["total"] >= len(_pg["items"]) and _pg["has_more"] is (0 + len(_pg["items"]) < _pg["total"]))
+check("F5: itens da página expõem avatar_v", all("avatar_v" in c for c in _pg["items"]))
+# Caminhar as páginas reconstrói o universo sem dup (mesmo total).
+_seen_ids, _off, _guard = set(), 0, 0
+while _guard < 500:
+    _guard += 1
+    _p = client.get(f"/api/contacts?limit=25&offset={_off}").json()["data"]
+    for _c in _p["items"]:
+        _seen_ids.add(_c["id"])
+    if not _p["has_more"]:
+        break
+    _off += 25
+check("F5: paginação cobre todos os contatos (sem dup)", len(_seen_ids) == _p["total"],
+      f"vistos={len(_seen_ids)} total={_p['total']}")
+# limit gigante é capado (não estoura), offset negativo vira 0.
+_r_cap = client.get("/api/contacts?limit=99999").json()["data"]
+check("F5: limit=99999 capado por CAP_LIST (<=200)", len(_r_cap["items"]) <= 200)
+# Busca + paginação: envelope também, e a página é subconjunto do filtro.
+_r_qp = client.get("/api/contacts?q=Seed+Pag&limit=5&offset=0").json()["data"]
+check("F5: busca paginada -> envelope", isinstance(_r_qp, dict) and "items" in _r_qp)
+check("F5: busca paginada respeita limit", len(_r_qp["items"]) <= 5)
+check("F5: sem limit continua lista legada (retrocompat)",
+      isinstance(client.get("/api/contacts").json()["data"], list))
+
+# plano 50 F7 — sort=name devolve a página em ordem alfabética (tela /contacts).
+_r_sort = client.get("/api/contacts?limit=50&offset=0&sort=name").json()["data"]
+_names = [(c.get("name") or c.get("phone") or "") for c in _r_sort["items"]]
+check("F7: sort=name -> página em ordem alfabética",
+      _names == sorted(_names, key=lambda s: s.lower()))
+# default (recency) difere de name (ordenações distintas) — sanity de que o param pega.
+_r_rec = client.get("/api/contacts?limit=50&offset=0").json()["data"]
+check("F7: sort default é recência (envelope válido)",
+      isinstance(_r_rec.get("items"), list))
 
 # Search
 r = client.get("/api/contacts?q=Alice")
@@ -296,6 +436,23 @@ check("GET /api/contacts?q=remarcada -> matches by transcription",
 r = client.get("/api/contacts?q=conteudoinexistente123")
 check("GET /api/contacts?q=conteudoinexistente123 -> empty",
       not any(c["phone"] == "5511999990010" for c in r.json()["data"]))
+
+# plano 50 F6 — o scan de conteúdo é bounded (só as N recentes) + guarda de >=2 chars.
+# Match por conteúdo com 2+ chars ainda funciona (regressão coberta acima); uma busca de
+# 1 caractere NÃO aciona o scan (não traz o contato que só casa por mensagem).
+_r1 = client.get("/api/contacts?q=ç").json()["data"]  # 1 char: só nome/telefone/tag
+check("F6: busca de 1 char não casa por conteúdo de mensagem",
+      not any(c["phone"] == "5511999990010" for c in _r1))
+from db.search.contact_search import (MESSAGE_SCAN_CAP as _SCAN_CAP,
+                                      MIN_SCAN_QUERY_LEN as _MINLEN,
+                                      contact_ids_matching_message as _cimm)
+from db.engine import get_engine as _f6_get_engine
+check("F6: guarda de comprimento mínimo do scan (>=2)", _MINLEN >= 2)
+check("F6: scan cap é um teto positivo", _SCAN_CAP > 0)
+# O scan de 1 char retorna vazio direto (nem toca no banco).
+with _f6_get_engine().connect() as _c6:
+    check("F6: contact_ids_matching_message('a') -> {} (abaixo do mínimo)",
+          _cimm(_c6, "a", False) == {})
 
 # Bot @mention flag: surfaces in the list and clears when the chat is read
 _mc = contact_repo.get_or_create("5511999990011")
@@ -344,6 +501,47 @@ check("POST /pin (no field) -> 400", r.status_code == 400)
 r = client.post("/api/contacts/5511999999999/pin", json={"pinned": True})
 check("POST /pin (unknown contact) -> 404", r.status_code == 404)
 
+# ═══════════════════════════════════════════════════════════════════
+#  plano 50 F11 — Export CSV: streaming, sem N+1 de tags, íntegro
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Export (plano 50 F11)")
+# Contato com tags, para validar que o batch de tags carrega certo no export.
+_exp_c = contact_repo.get_or_create("5500051100001")
+contact_repo.update(_exp_c["id"], name="Export Zeca")
+tag_repo.create("vip-export", "#ff0000")
+tag_repo.set_contact_tags(_exp_c["id"], ["vip-export"])  # set_contact_tags usa NOMES
+r = client.get("/api/contacts/export")
+check("F11: GET /contacts/export -> 200", r.status_code == 200)
+check("F11: export content-type é CSV", "text/csv" in r.headers.get("content-type", ""))
+check("F11: export é attachment (contatos.csv)",
+      "contatos.csv" in r.headers.get("content-disposition", ""))
+_lines = r.text.splitlines()
+check("F11: CSV tem header com phone/name/tags", bool(_lines) and "phone" in _lines[0] and "tags" in _lines[0])
+check("F11: BOM no início (Excel UTF-8)", r.text[:1] == "﻿")
+# A linha do Zeca traz a tag (batch de tags funcionou; sem N+1).
+_zeca = [ln for ln in _lines if "5500051100001" in ln]
+check("F11: contato exportado aparece no CSV", len(_zeca) == 1)
+check("F11: tag do contato vem na linha (batch, sem N+1)",
+      bool(_zeca) and "vip-export" in _zeca[0])
+# iter_for_export em chunks cobre todos os contatos (paridade com list_for_export).
+from db.repositories import contact_query as _cq
+_all_export = list(_cq.iter_for_export(None))
+_chunked = list(_cq.iter_for_export(None, chunk=2))
+check("F11: iter_for_export chunk=2 == chunk padrão (mesma cobertura)",
+      [c["phone"] for c in _all_export] == [c["phone"] for c in _chunked])
+check("F11: list_for_export delega ao gerador (mesmo total)",
+      len(contact_repo.list_for_export(None)) == len(_all_export))
+
+# plano 50 F12 — defesa em profundidade: a lista de atendimentos também capa o limit
+# (já tinha min(limit,200); confirma que ?limit gigante nunca estoura). Os demais list
+# endpoints admin (agents/tools/users/roles/channels/quick-replies/custom-attributes)
+# não recebem `limit` — dataset naturalmente pequeno (1 linha por entidade).
+_r_atd = client.get("/api/atendimentos?limit=99999")
+check("F12: /api/atendimentos?limit=99999 -> 200", _r_atd.status_code == 200)
+_atd_data = _r_atd.json()["data"]
+_atd_items = _atd_data.get("conversations") if isinstance(_atd_data, dict) else _atd_data
+check("F12: lista de atendimentos capa o limit (<=200)",
+      not isinstance(_atd_items, list) or len(_atd_items) <= 200)
 # ═══════════════════════════════════════════════════════════════════
 #  6. Contact detail
 # ═══════════════════════════════════════════════════════════════════
@@ -398,6 +596,10 @@ r = client.post("/api/contacts/5511999990001/send", json={"message": "Teste manu
 check("POST /send -> 200", r.status_code == 200)
 check("POST /send -> message sent", "enviada" in r.json()["data"]["message"].lower())
 check("POST /send -> gowa called", mock_gowa_client.send_message.called)
+# Sem usuário logado (instalação aberta): a mensagem manual não carrega remetente,
+# então o painel cai no rótulo "Manual" (sent_by_name ausente).
+_nm_last = message_repo.get_last(contact_repo.get_full_contact("5511999990001")["id"])
+check("POST /send (sem usuário) -> sem sent_by_name", not _nm_last.get("sent_by_name"))
 
 # Empty message
 r = client.post("/api/contacts/5511999990001/send", json={"message": ""})
@@ -467,6 +669,62 @@ check("POST /messages/delete (me) -> scope me", bool(_kept) and _kept[0].get("re
 r = client.post("/api/contacts/5511999990001/messages/delete", json={"scope": "me"})
 check("POST /messages/delete (no id) -> 400", r.status_code == 400)
 
+# ── Edit message (plano — editar mensagem) ──────────────────────────
+# Provider capabilities: GOWA revokes + edits; WhatsApp Cloud edits but does NOT
+# revoke (so the panel hides "Apagar" there). Drives the UI by capability.
+from channels.providers.gowa_channel import GOWAChannel as _GC
+_gc = _GC("default")
+check("cap: GOWA revoke", _gc.capabilities.revoke is True)
+check("cap: GOWA edit_message", _gc.capabilities.edit_message is True)
+import importlib.util as _ilu
+def _load_provider(_name, _path):
+    _s = _ilu.spec_from_file_location(_name, _path)
+    _m = _ilu.module_from_spec(_s); _s.loader.exec_module(_m); return _m
+_wac = _load_provider("wac_test", "assets/plugin_examples/whatsapp_cloud/channels.py")
+_cc = _wac.WhatsAppCloudChannel("c_test", credentials={
+    "access_token": "x", "phone_number_id": "y", "verify_token": "z"})
+# WhatsApp Cloud é o único canal sem apagar NEM editar (ambas as capabilities off).
+check("cap: Cloud revoke=False (hides Apagar)", _cc.capabilities.revoke is False)
+check("cap: Cloud edit_message=False (hides Editar)", _cc.capabilities.edit_message is False)
+# Telegram suporta apagar E editar (deleteMessage / editMessageText).
+_tg = _load_provider("tg_test", "assets/plugin_examples/telegram/channels.py")
+_tc = _tg.TelegramChannel("t_test", credentials={"bot_token": "123:abc"})
+check("cap: Telegram revoke=True", _tc.capabilities.revoke is True)
+check("cap: Telegram edit_message=True", _tc.capabilities.edit_message is True)
+check("cap: Telegram has edit_text override", "edit_text" in type(_tc).__dict__)
+check("cap: Telegram has revoke override", "revoke" in type(_tc).__dict__)
+
+# Edit an outgoing (assistant) text message on the default (GOWA) channel -> 200
+message_repo.add(_del_cid, "assistant", "Texto original", msg_id="WAMID_EDIT_1", status="operator")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_1", "text": "Texto editado"})
+check("POST /messages/edit -> 200", r.status_code == 200)
+_e = message_repo.get_by_msg_id("WAMID_EDIT_1")
+check("POST /messages/edit -> content updated", bool(_e) and _e.get("content") == "Texto editado")
+check("POST /messages/edit -> edited_ts set", bool(_e) and _e.get("edited_ts"))
+
+# Edit a contact (user) message -> rejected
+message_repo.add(_del_cid, "user", "Msg do contato", msg_id="WAMID_EDIT_USER")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_USER", "text": "hack"})
+check("POST /messages/edit (user msg) -> 400", r.status_code == 400)
+
+# Edit a media message -> rejected (text only)
+message_repo.add(_del_cid, "assistant", "", msg_id="WAMID_EDIT_MEDIA",
+                 status="operator", media_type="image", media_path="/x.jpg")
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_MEDIA", "text": "legenda nova"})
+check("POST /messages/edit (media) -> 400", r.status_code == 400)
+
+# Missing msg_id -> 400
+r = client.post("/api/contacts/5511999990001/messages/edit", json={"text": "x"})
+check("POST /messages/edit (no msg_id) -> 400", r.status_code == 400)
+
+# Empty text -> 400
+r = client.post("/api/contacts/5511999990001/messages/edit",
+                json={"msg_id": "WAMID_EDIT_1", "text": "   "})
+check("POST /messages/edit (empty text) -> 400", r.status_code == 400)
+
 # ═══════════════════════════════════════════════════════════════════
 #  8b. React to message
 # ═══════════════════════════════════════════════════════════════════
@@ -525,10 +783,41 @@ r = client.get("/api/contacts/5511999990001")
 msgs = r.json()["data"]["messages"]
 private_notes = [m for m in msgs if m.get("role") == "private_note"]
 check("GET /api/contacts -> private_note present", len(private_notes) >= 1)
+# Regressão (C2): a nota retornada/transmitida carrega conversation_id, para o painel
+# conversa-cêntrico rotear ao vivo (sem ele a nota some em canal não-default).
+check("POST /private-message -> carries conversation_id (routing)",
+      "conversation_id" in _pn and _pn.get("conversation_id") == private_notes[-1].get("conversation_id"))
+# Regressão (C4): o _id retornado é o da PRÓPRIA linha inserida (add_message agora
+# retorna a linha), não um get_last racy que pegaria a última msg do contato.
+check("POST /private-message -> _id is the inserted row (no get_last race)",
+      _pn.get("_id") == private_notes[-1].get("_id"))
 check(
     "GET /api/contacts -> private_note status is null",
     private_notes and private_notes[-1].get("status") in (None, ""),
 )
+
+# Plano 53 — contrato de identidade do payload/response da nota (dedup do painel):
+# (a) default (notify_private_messages OFF): `_id` sempre presente, `msg_id` ausente
+#     (a row nasce sem msg_id); autor no payload espelha a row (ausente em modo aberto).
+check("POST /private-message -> sem msg_id com notify_private_messages off",
+      not _pn.get("msg_id"))
+check("POST /private-message -> sent_by_name espelha a row",
+      _pn.get("sent_by_name") == private_notes[-1].get("sent_by_name"))
+
+# (b) com notify_private_messages ON a nota ganha o msg_id sintético "pn:<uuid>"
+#     e o response/broadcast o carregam — identidade estável imune a clock skew.
+config_repo.set("notify_private_messages", True)
+r = client.post("/api/contacts/5511999990001/private-message",
+                json={"text": "nota com identidade pn"})
+check("POST /private-message (notify on) -> 200", r.status_code == 200)
+_pn2 = r.json()["data"]
+check("POST /private-message (notify on) -> msg_id sintético pn:",
+      str(_pn2.get("msg_id") or "").startswith("pn:"))
+check("POST /private-message (notify on) -> _id presente junto do msg_id",
+      bool(_pn2.get("_id")))
+config_repo.set("notify_private_messages", False)
+# Limpa o unread que o modo notify gera (não vazar estado p/ testes seguintes).
+client.post("/api/contacts/5511999990001/read")
 
 # Private notes are deletable by DB id (scope=me) without a msg_id -> kept, flagged revoked
 r = client.post("/api/contacts/5511999990001/messages/delete",
@@ -547,6 +836,69 @@ check(
 r = client.post("/api/contacts/5511999990001/private-message", json={"text": ""})
 check("POST /private-message (empty) -> 400", r.status_code == 400)
 
+# ── Notificação de mensagens privadas (config notify_private_messages) ───────────
+# Padrão OFF: uma nota privada NÃO incrementa a não-lida (ícone verde / contagem da
+# aba) — preserva o comportamento legado. Ligada: acende (mesmo encanamento da
+# não-lida de cliente, via unread_count + conversation_upsert). Contato isolado para
+# não colidir com a não-lida deixada por outros testes.
+section("Contacts — Private Message Notification")
+_np_phone = "5511999990077"
+
+_u_before = client.get("/api/contacts/unread-count").json()["data"]["count"]
+r = client.post(f"/api/contacts/{_np_phone}/private-message", json={"text": "nota interna A"})
+check("POST /private-message (notif OFF) -> 200", r.status_code == 200)
+_u_off = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify_private_messages OFF -> unread-count inalterado", _u_off == _u_before)
+
+r = client.put("/api/config", json={"notify_private_messages": True})
+check("PUT /api/config notify_private_messages=True -> 200", r.status_code == 200)
+check("GET /api/config -> notify_private_messages persisted",
+      client.get("/api/config").json()["data"].get("notify_private_messages") is True)
+
+_u_before_on = client.get("/api/contacts/unread-count").json()["data"]["count"]
+r = client.post(f"/api/contacts/{_np_phone}/private-message", json={"text": "nota interna B"})
+check("POST /private-message (notif ON) -> 200", r.status_code == 200)
+_pn_on = r.json()["data"]
+_u_on = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify_private_messages ON -> unread-count (aba) incrementa", _u_on == _u_before_on + 1)
+
+# Badge VERDE por-conversa: a nota privada notificada participa do unread por-conversa
+# (subquery unread_msg_ids ⋈ messages) via um msg_id sintético, então o atendimento
+# mostra unread_count > 0 (mark_read=false p/ não zerar ao observar).
+_conv_id = _pn_on.get("conversation_id")
+_rconv = client.get(f"/api/atendimentos/{_conv_id}?mark_read=false")
+check("notify ON -> atendimento GET 200", _rconv.status_code == 200)
+_conv = (_rconv.json().get("data") or {}).get("conversation") or {}
+check("notify ON -> badge verde por-conversa (unread_count>0)", (_conv.get("unread_count") or 0) > 0)
+
+# Preview + subida ao topo: com a config ligada a nota privada vira a "última mensagem"
+# da sidebar (conteúdo + role + ts), então a linha sobe e desenha o cadeado no front.
+check("notify ON -> preview = conteúdo da nota privada",
+      _conv.get("last_message") == "nota interna B")
+check("notify ON -> last_message_role = 'private_note' (dispara o cadeado)",
+      _conv.get("last_message_role") == "private_note")
+check("notify ON -> last_message_ts avança (sobe ao topo)",
+      (_conv.get("last_message_ts") or 0) > 0)
+
+# Abrir o atendimento (GET .../messages, mark_read=True) zera o verde E a aba: o msg_id
+# sintético é apagado de unread_msg_ids e o contador do contato decrementa — reusando
+# mark_conversation_read, sem código de clear novo.
+_rread = client.get(f"/api/atendimentos/{_conv_id}/messages")  # mark_read=True (default) → limpa
+check("notify ON -> abrir atendimento (messages) retorna 200", _rread.status_code == 200)
+_conv_after = (client.get(f"/api/atendimentos/{_conv_id}").json().get("data") or {}).get("conversation") or {}
+check("notify ON -> verde zera após abrir o atendimento", (_conv_after.get("unread_count") or 0) == 0)
+_u_read = client.get("/api/contacts/unread-count").json()["data"]["count"]
+check("notify ON -> aba zera após abrir o atendimento", _u_read == _u_before_on)
+
+# Reset da config para não afetar as checagens seguintes.
+client.put("/api/config", json={"notify_private_messages": False})
+
+# Gate do preview: com a config DESLIGADA a nota privada volta a ser pulada no preview
+# da sidebar (comportamento legado) — não vira a última mensagem, então não há cadeado.
+_conv_off = (client.get(f"/api/atendimentos/{_conv_id}").json().get("data") or {}).get("conversation") or {}
+check("notify OFF -> preview NÃO reflete a nota privada (legado)",
+      _conv_off.get("last_message_role") != "private_note")
+
 # ═══════════════════════════════════════════════════════════════════
 #  9. Contact send image
 # ═══════════════════════════════════════════════════════════════════
@@ -561,6 +913,14 @@ r = client.post(
 )
 check("POST /send-image -> 200", r.status_code == 200)
 check("POST /send-image -> gowa called", mock_gowa_client.send_image.called)
+# plano 64 · F12 — ids opcionais no envelope (a UI reconcilia por _localId
+# quando ausentes, então isto é aditivo e não-quebrante).
+_img_data = r.json().get("data") or {}
+check("send-image -> _ok traz media_path",
+      str(_img_data.get("media_path", "")).startswith("statics/outbox/"))
+check("send-image -> _ok tem a chave msg_id", "msg_id" in _img_data)
+check("send-image -> mensagem original preservada",
+      _img_data.get("message") == "Imagem enviada.")
 
 # ═══════════════════════════════════════════════════════════════════
 #  10. Contact send audio
@@ -588,6 +948,269 @@ r = client.post(
 )
 check("POST /send-document -> 200", r.status_code == 200)
 check("POST /send-document -> gowa called", mock_gowa_client.send_file.called)
+
+# ═══════════════════════════════════════════════════════════════════
+#  10c. Contact send video (plano 65)
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Send Video")
+
+# GOWA (always-open) routes kind="video" to send_file — no Cloud validation.
+mock_gowa_client.send_file.reset_mock()
+fake_mp4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100
+r = client.post(
+    "/api/contacts/5511999990001/send-video",
+    files={"video": ("clip.mp4", io.BytesIO(fake_mp4), "video/mp4")},
+    data={"caption": "Vídeo teste"},
+)
+check("POST /send-video -> 200", r.status_code == 200)
+# plano 64 · F9: o GOWA passou a ter /send/video, então o vídeo vai NATIVO
+# (antes do plano 64 este caminho degradava para send_file).
+check("POST /send-video -> gowa send_video chamado", mock_gowa_client.send_video.called)
+_vid_call = mock_gowa_client.send_video.call_args
+_vid_path = _vid_call.args[1] if len(_vid_call.args) > 1 else _vid_call.kwargs.get("video_path")
+check("vídeo gravado com extensão vinda do MIME", str(_vid_path).endswith(".mp4"))
+check("vídeo em disco tem entropia (plano 64 · F1)",
+      re.match(r"^\d+_[0-9a-f]{8}\.mp4$", Path(_vid_path).name) is not None)
+_vid_msgs = client.get("/api/contacts/5511999990001").json()["data"]["messages"]
+check("vídeo persiste com media_type=video",
+      any(m.get("media_type") == "video" for m in _vid_msgs))
+
+# Video validator policy — declared BY THE PROVIDER (plano 65), never by name.
+# A channel declaring VideoLimits is enforced; one declaring none never blocks;
+# a windowed channel from a plugin that predates media_limits falls back to the
+# legacy Cloud limits (retrocompat).
+from types import SimpleNamespace as _NS
+from channels import video_validate as _vv
+from channels.base import VideoLimits as _VL
+_declared = _NS(session_window_hours=24, media_limits={"video": _VL(
+    max_bytes=16 * 1024 * 1024, extensions=(".mp4", ".3gp", ".3gpp"),
+    video_codecs=("h264",), audio_codecs=("aac",), max_audio_streams=1)})
+_legacy = _NS(session_window_hours=24)          # plugin sem media_limits
+_open = _NS(session_window_hours=0)             # GOWA/Telegram: sem limites
+check("video_limits: no declaration + always-open -> None",
+      _vv.video_limits(_open) is None)
+check("video_limits: no declaration + windowed -> legacy Cloud fallback",
+      _vv.video_limits(_legacy) is _vv.LEGACY_CLOUD_VIDEO_LIMITS)
+check("video_limits: declared wins over fallback",
+      _vv.video_limits(_declared).max_bytes == 16 * 1024 * 1024)
+check("validate_video: no limits -> ok (any file)",
+      _vv.validate_video("/tmp/whatever.mkv", _open).ok)
+check("validate_video: declared + non-mp4 -> bad_format",
+      _vv.validate_video("/tmp/clip.mkv", _declared).reason == _vv.BAD_FORMAT)
+check("validate_video: legacy fallback + non-mp4 -> bad_format",
+      _vv.validate_video("/tmp/clip.mkv", _legacy).reason == _vv.BAD_FORMAT)
+# Oversized mp4 (>16 MB) -> too_big, under both declared and fallback policy.
+import tempfile as _tf, os as _os
+_big = _os.path.join(_tf.gettempdir(), "wac_big_test.mp4")
+with open(_big, "wb") as _fh:
+    _fh.truncate(16 * 1024 * 1024 + 1)
+check("validate_video: declared + >16MB -> too_big",
+      _vv.validate_video(_big, _declared).reason == _vv.TOO_BIG)
+check("validate_video: legacy fallback + >16MB -> too_big",
+      _vv.validate_video(_big, _legacy).reason == _vv.TOO_BIG)
+check("validate_video: too_big message cites the declared cap",
+      "16 MB" in _vv.validate_video(_big, _declared).message)
+# A provider declaring a different cap is honoured (no Meta numbers in the core).
+_small = _NS(media_limits={"video": _VL(max_bytes=1024)})
+check("validate_video: custom cap honoured (1 KB)",
+      _vv.validate_video(_big, _small).reason == _vv.TOO_BIG)
+_os.remove(_big)
+
+# Pré-validação genérica de anexo (imagem/áudio/documento) — mesma regra
+# policy-vs-mechanism: os números vêm do provider, o core só avalia/descreve.
+from channels import media_limits as _ml
+from channels.base import MediaLimits as _ML
+_cloudish = _NS(session_window_hours=24, media_limits={
+    "image": _ML(max_bytes=5 * 1024 * 1024, extensions=(".jpg", ".jpeg", ".png")),
+    "document": _ML(max_bytes=100 * 1024 * 1024, extensions=(".pdf", ".txt")),
+    "video": _VL(max_bytes=16 * 1024 * 1024),
+})
+check("media_limits: canal sem declaração -> sem limites (nada bloqueia)",
+      _ml.limits_for(_open, "image") is None
+      and _ml.validate_upload("x.exe", 10 ** 9, _open, "document").ok)
+check("media_limits: imagem fora do formato -> bad_format",
+      _ml.validate_upload("foto.gif", 10, _cloudish, "image").reason == _ml.BAD_FORMAT)
+check("media_limits: imagem acima do cap -> too_big",
+      _ml.validate_upload("foto.png", 6 * 1024 * 1024, _cloudish, "image").reason
+      == _ml.TOO_BIG)
+check("media_limits: mensagem de too_big cita o cap declarado",
+      "5 MB" in _ml.validate_upload("foto.png", 6 * 1024 * 1024, _cloudish, "image").message)
+check("media_limits: imagem conforme -> ok",
+      _ml.validate_upload("foto.PNG", 1024, _cloudish, "image").ok)
+check("media_limits: documento fora da lista -> bad_format",
+      _ml.validate_upload("a.zip", 10, _cloudish, "document").reason == _ml.BAD_FORMAT)
+check("media_limits: documento conforme -> ok",
+      _ml.validate_upload("a.pdf", 10 * 1024 * 1024, _cloudish, "document").ok)
+_hint = _NS(session_window_hours=24, media_limits={
+    "document": _ML(max_bytes=100 * 1024 * 1024, extensions=(".pdf",)),
+    "video": _VL(max_bytes=16 * 1024 * 1024, extensions=(".mp4",)),
+    "audio": _ML(max_bytes=16 * 1024 * 1024, extensions=(".ogg",)),
+})
+check("media_limits: arquivo no anexo errado aponta o anexo certo (vídeo)",
+      "use o anexo Vídeo" in _ml.validate_upload("c.mp4", 10, _hint, "document").message)
+check("media_limits: arquivo no anexo errado aponta o anexo certo (áudio)",
+      "use o anexo Áudio" in _ml.validate_upload("v.ogg", 10, _hint, "document").message)
+check("media_limits: extensão que nenhum kind aceita não ganha dica",
+      "use o anexo" not in _ml.validate_upload("a.zip", 10, _hint, "document").message)
+check("media_limits: kind sem declaração no canal -> ok",
+      _ml.validate_upload("v.ogg", 10 ** 9, _cloudish, "audio").ok)
+_desc = _ml.describe(_cloudish, video_transcode_available=True)
+check("media_limits.describe: expõe cap+extensões por tipo",
+      _desc["image"]["max_bytes"] == 5 * 1024 * 1024
+      and ".png" in _desc["image"]["extensions"])
+check("media_limits.describe: video carrega o flag de transcode",
+      _desc["video"]["transcode"] is True
+      and _ml.describe(_cloudish)["video"]["transcode"] is False)
+check("media_limits.describe: canal sem limites -> {} (painel não bloqueia nada)",
+      _ml.describe(_open) == {})
+
+# Áudio codec-aware: o provider declara os codecs por container (a Meta só aceita
+# ogg com OPUS), o core valida com ffprobe e recodifica em vez de deixar falhar.
+import shutil as _shutil, subprocess as _subprocess
+from channels import audio_transcode as _at, audio_validate as _av
+from channels.base import AudioLimits as _AL
+_AUDIO = _AL(
+    max_bytes=16 * 1024 * 1024,
+    extensions=(".mp3", ".m4a", ".ogg"),
+    codecs=("aac", "mp3"),
+    codecs_by_ext=((".ogg", ("opus",)), (".mp3", ("mp3",))),
+    transcode_targets=(".ogg", ".m4a"),
+)
+_audioish = _NS(session_window_hours=24, media_limits={"audio": _AUDIO})
+check("audio_validate: canal com MediaLimits simples não opta por codec/transcode",
+      _av.audio_limits(_cloudish) is None and _av.validate_audio("x.ogg", _cloudish).ok)
+check("audio_validate: canal sem limites -> ok",
+      _av.audio_limits(_open) is None and _av.validate_audio("x.ogg", _open).ok)
+check("audio_validate: container fora da lista -> bad_format",
+      _av.validate_audio("/tmp/x.wav", _audioish).reason == _av.BAD_FORMAT)
+check("AudioLimits.codecs_for: regra por container, com fallback no conjunto geral",
+      _AUDIO.codecs_for(".ogg") == ("opus",) and _AUDIO.codecs_for(".m4a") == ("aac", "mp3"))
+check("audio_transcode: alvo é o 1º container declarado pelo provider que o core encoda",
+      _at._target_ext(_AUDIO) == ".ogg"
+      and _at._target_ext(_AL(extensions=(".amr",))) is None)
+check("audio_transcode: bitrate cabe no cap declarado (e respeita os limites sãos)",
+      _at._bitrate_kbps(60 * 60, 1024 * 1024) == _at._MIN_KBPS
+      and _at._bitrate_kbps(1, 16 * 1024 * 1024) == _at._MAX_KBPS)
+check("audio_transcode: provider que proíbe re-encode nunca é recodificado",
+      _at.transcode_to_limits("/tmp/x.ogg", _AL(extensions=(".ogg",), transcode=False)) is None)
+_desc_a = _ml.describe(_audioish, audio_transcode_available=True)
+check("media_limits.describe: áudio carrega o flag de transcode",
+      _desc_a["audio"]["transcode"] is True
+      and _ml.describe(_audioish)["audio"]["transcode"] is False)
+
+# Ida-e-volta real com ffmpeg (o caso que motivou tudo: Ogg/Vorbis é recusado
+# pela Meta e vira Ogg/Opus). Pulado quando não há ffmpeg no ambiente.
+if _at.available() and _shutil.which("ffprobe"):
+    _ogg = _os.path.join(_tf.gettempdir(), "wb_test_vorbis.ogg")
+    _rc = _subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+         "sine=frequency=440:duration=2", "-c:a", "libvorbis", _ogg],
+        stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL).returncode
+    if _rc == 0:
+        check("audio_validate: ogg/vorbis (recusado pela Meta) -> bad_codec",
+              _av.validate_audio(_ogg, _audioish).reason == _av.BAD_CODEC)
+        _out = _at.transcode_to_limits(_ogg, _AUDIO)
+        check("audio_transcode: ogg/vorbis vira ogg/opus e passa a validar",
+              bool(_out) and _av.validate_audio(_out, _audioish).ok)
+        if _out:
+            _os.remove(_out)
+    _os.remove(_ogg)
+
+# ═══════════════════════════════════════════════════════════════════
+#  10d. Upload hardening (plano 64 · F1/F2)
+#  10d. Upload hardening (plano 64 · F1/F2)
+# ═══════════════════════════════════════════════════════════════════
+section("Contacts — Upload hardening (plano 64)")
+
+# F1 — dois uploads "no mesmo instante" nunca se sobrescrevem: o nome em disco
+# leva entropia própria (uuid), não só o milissegundo.
+mock_gowa_client.send_image.reset_mock()
+for _ in range(2):
+    client.post(
+        "/api/contacts/5511999990001/send-image",
+        files={"image": ("mesma.png", io.BytesIO(fake_png), "image/png")},
+    )
+_paths = [c.args[1] if len(c.args) > 1 else c.kwargs.get("image_path")
+          for c in mock_gowa_client.send_image.call_args_list]
+check("2 uploads seguidos -> nomes em disco distintos",
+      len(_paths) == 2 and _paths[0] != _paths[1])
+check("nome em disco tem entropia (ms_uuid)",
+      all(re.match(r"^\d+_[0-9a-f]{8}\.png$", Path(p).name) for p in _paths))
+
+# F1 — a extensão vem do MIME validado, não do nome do cliente: um .html
+# enviado como documento NUNCA nasce como .html em statics/outbox (XSS).
+mock_gowa_client.send_file.reset_mock()
+r = client.post(
+    "/api/contacts/5511999990001/send-document",
+    files={"document": ("payload.html", io.BytesIO(b"<script>alert(1)</script>"),
+                        "text/html")},
+)
+check("POST /send-document (.html) -> 200", r.status_code == 200)
+_doc_call = mock_gowa_client.send_file.call_args
+_doc_path = _doc_call.args[1] if len(_doc_call.args) > 1 else _doc_call.kwargs.get("file_path")
+check("documento .html não vira .html em disco",
+      not Path(_doc_path).name.lower().endswith(".html"))
+check("documento .html vira .bin em disco", Path(_doc_path).name.endswith(".bin"))
+check("nome ORIGINAL preservado para o contato",
+      _doc_call.kwargs.get("filename") == "payload.html")
+
+# F2 — teto de corpo: acima do limite responde 413 antes de ler o arquivo.
+_over = b"\x00" * (upload_limits.MAX_UPLOAD_BYTES + 1024)
+r = client.post(
+    "/api/contacts/5511999990001/send-image",
+    files={"image": ("grande.png", io.BytesIO(_over), "image/png")},
+)
+check("upload acima do teto -> 413", r.status_code == 413)
+check("413 -> envelope {ok:false,error}",
+      r.json().get("ok") is False and "MB" in (r.json().get("error") or ""))
+del _over
+
+r = client.post(
+    "/api/contacts/5511999990001/send-image",
+    files={"image": ("ok.png", io.BytesIO(fake_png), "image/png")},
+)
+check("upload abaixo do teto -> segue o fluxo normal", r.status_code == 200)
+
+# ═══════════════════════════════════════════════════════════════════
+#  10d. Serving de statics/outbox (plano 64 · F10 — XSS armazenado)
+# ═══════════════════════════════════════════════════════════════════
+section("Statics outbox — Content-Disposition (plano 64)")
+
+# A pasta real usada pelo app (o Settings() do teste resolve data_dir para a
+# raiz do repo), a mesma onde as rotas de envio já gravaram acima.
+_outbox = app.state.deps.statics_outbox_dir
+_outbox.mkdir(parents=True, exist_ok=True)
+(_outbox / "legit.png").write_bytes(fake_png)
+(_outbox / "evil.html").write_text("<script>alert(1)</script>")
+(_outbox / "evil.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>')
+(_outbox / "planilha.xlsx").write_bytes(b"PK\x03\x04")
+
+r = client.get("/statics/outbox/legit.png")
+check("png legítimo -> 200 inline", r.status_code == 200)
+check("png legítimo -> sem Content-Disposition", "content-disposition" not in r.headers)
+check("png legítimo -> media type de imagem", r.headers.get("content-type") == "image/png")
+
+r = client.get("/statics/outbox/evil.html")
+check("html -> 200 (não some, só não executa)", r.status_code == 200)
+check("html -> Content-Disposition: attachment",
+      r.headers.get("content-disposition", "").startswith("attachment"))
+check("html -> servido como octet-stream, não text/html",
+      r.headers.get("content-type", "").startswith("application/octet-stream"))
+
+r = client.get("/statics/outbox/evil.svg")
+check("svg -> forçado a download", r.headers.get("content-disposition", "").startswith("attachment"))
+
+r = client.get("/statics/outbox/planilha.xlsx")
+check("xlsx -> forçado a download", r.headers.get("content-disposition", "").startswith("attachment"))
+
+r = client.get("/statics/outbox/nao_existe.png")
+check("arquivo inexistente -> 404", r.status_code == 404)
+
+r = client.get("/statics/outbox/..%2F..%2Fetc%2Fpasswd")
+check("path traversal -> não serve", r.status_code in (404, 400))
+
+for _f in ("legit.png", "evil.html", "evil.svg", "planilha.xlsx"):
+    (_outbox / _f).unlink(missing_ok=True)
 
 # ═══════════════════════════════════════════════════════════════════
 #  11. Contact presence
@@ -674,6 +1297,37 @@ _e = r.json()
 check("PUT /info (invalid custom_attributes) -> ok False", _e.get("ok") is False)
 check("PUT /info (invalid) -> error is non-empty str",
       isinstance(_e.get("error"), str) and _e.get("error") != "")
+
+# Plano 77 — an orphan custom_attribute already stored on the contact (e.g. the
+# `cw_id`/`cw_identifier` leftovers from the Chatwoot migration, which have no
+# definition) must NOT block the save when the panel re-sends the whole JSON.
+from db.engine import get_engine as _p77_engine
+from db.tables import contacts as _p77_contacts
+from sqlalchemy import update as _p77_update, select as _p77_select
+_p77_row = contact_repo.get_by_phone("5511999990001")
+with _p77_engine().begin() as _c77:
+    _c77.execute(
+        _p77_update(_p77_contacts)
+        .where(_p77_contacts.c.id == _p77_row["id"])
+        .values(custom_attributes={"cw_id": "42", "cw_identifier": "abc"})
+    )
+# A genuinely new + undefined key still 400s (P50 preserved)
+r = client.put("/api/contacts/5511999990001/info",
+               json={"custom_attributes": {"totally_unknown_key": "x"}})
+check("PUT /info (new undefined key) -> ok False (P50)", r.json().get("ok") is False)
+# Re-sending the stored orphan alongside a real edit succeeds
+r = client.put("/api/contacts/5511999990001/info",
+               json={"name": "Alice Orphan", "custom_attributes": {"cw_id": "42"}})
+check("PUT /info (stored orphan re-sent) -> 200", r.status_code == 200)
+check("PUT /info (stored orphan) -> name saved",
+      r.json()["data"].get("name") == "Alice Orphan")
+with _p77_engine().connect() as _c77:
+    _p77_saved = _c77.execute(
+        _p77_select(_p77_contacts.c.custom_attributes)
+        .where(_p77_contacts.c.id == _p77_row["id"])
+    ).scalar()
+check("PUT /info (stored orphan) -> orphan key preserved",
+      (_p77_saved or {}).get("cw_id") == "42")
 
 # ═══════════════════════════════════════════════════════════════════
 #  15. Tags
@@ -790,6 +1444,162 @@ r = client.delete(f"/api/me/conversation-filters/{_fid}")
 check("DELETE saved-filter -> 200", r.status_code == 200)
 r = client.delete(f"/api/me/conversation-filters/{_fid}")
 check("DELETE saved-filter (404) -> 404", r.status_code == 404)
+
+# ═══════════════════════════════════════════════════════════════════
+#  15a3. Sons de notificação configuráveis (plano 63)
+# ═══════════════════════════════════════════════════════════════════
+section("Sons de notificação (plano 63)")
+
+# Catálogo estático
+r = client.get("/api/sounds/catalog")
+check("GET /api/sounds/catalog -> 200", r.status_code == 200)
+_cat = r.json()["data"]
+check("catalog tem 4 eventos", len(_cat["events"]) == 4)
+check("catalog tem 7 sons", len(_cat["sounds"]) == 7)
+check("catalog new_message notification/one-shot",
+      any(e["key"] == "new_message" and e["duration_applies"] is False for e in _cat["events"]))
+check("catalog ia_to_human alert/duration",
+      any(e["key"] == "ia_to_human" and e["duration_applies"] is True for e in _cat["events"]))
+
+# sound_settings exposto no GET /api/config (padrão global)
+r = client.get("/api/config")
+_ss = r.json()["data"].get("sound_settings")
+check("GET /api/config -> sound_settings presente", isinstance(_ss, dict))
+check("sound_settings master default ON", _ss.get("master_enabled") is True)
+check("sound_settings new_message volume 0.6", _ss["events"]["new_message"]["volume"] == 0.6)
+
+# PUT /api/config sound_settings — normaliza (fail-open): som inválido e volume
+# fora de faixa são descartados/clampados; não corrompe.
+r = client.put("/api/config", json={"sound_settings": {
+    "master_enabled": False,
+    "events": {"new_message": {"sound": "blip", "volume": 5, "enabled": True, "lixo": 1},
+               "evento_falso": {"x": 1}},
+}})
+check("PUT /api/config sound_settings -> 200", r.status_code == 200)
+_ss2 = client.get("/api/config").json()["data"]["sound_settings"]
+check("global norm: master off", _ss2["master_enabled"] is False)
+check("global norm: volume clampado a 1.0", _ss2["events"]["new_message"]["volume"] == 1.0)
+check("global norm: som válido mantido", _ss2["events"]["new_message"]["sound"] == "blip")
+check("global norm: evento falso descartado", "evento_falso" not in _ss2["events"])
+# Restaura o padrão global para não afetar asserts seguintes
+client.put("/api/config", json={"sound_settings": {
+    "master_enabled": True,
+    "events": {"new_message": {"enabled": True, "sound": "ding", "volume": 0.6}},
+}})
+
+# GET /api/me/sound-prefs (modo aberto → uid=None): override vazio + global + catálogo
+r = client.get("/api/me/sound-prefs")
+check("GET /api/me/sound-prefs -> 200", r.status_code == 200)
+_sp = r.json()["data"]
+check("me/sound-prefs: prefs esparso vazio", _sp["prefs"] == {})
+check("me/sound-prefs: global_default com eventos", bool(_sp["global_default"]["events"]))
+check("me/sound-prefs: catálogo embutido", len(_sp["catalog"]["events"]) == 4)
+
+# PUT override esparso (uid=None) — junk descartado, volume clampado
+r = client.put("/api/me/sound-prefs", json={"prefs": {
+    "events": {"mention": {"sound": "chime", "volume": -3, "enabled": False, "nope": 1},
+               "ia_to_human": {"volume": 0.4, "duration": 999},
+               "bogus": {"z": 1}},
+}})
+check("PUT /api/me/sound-prefs -> 200", r.status_code == 200)
+_saved = r.json()["data"]["prefs"]
+check("user override: volume clampado a 0.0", _saved["events"]["mention"]["volume"] == 0.0)
+check("user override: duração clampada a 30", _saved["events"]["ia_to_human"]["duration"] == 30)
+check("user override: evento inválido descartado", "bogus" not in _saved["events"])
+check("user override: esparso (sem new_message)", "new_message" not in _saved["events"])
+
+# GET persiste o override (uid=None)
+r = client.get("/api/me/sound-prefs")
+check("GET me/sound-prefs -> override persistido",
+      r.json()["data"]["prefs"]["events"]["mention"]["sound"] == "chime")
+
+# PUT com prefs não-dict → fail-open para {}
+r = client.put("/api/me/sound-prefs", json={"prefs": "lixo"})
+check("PUT me/sound-prefs (não-dict) -> {} fail-open", r.json()["data"]["prefs"] == {})
+
+# Repo unit: caminho uid REAL (ON CONFLICT) + isolamento entre usuários
+from db.repositories import user_sound_pref_repo as _uspr
+_uspr.upsert(4242, {"master_enabled": False, "events": {"new_message": {"volume": 0.1}}})
+check("repo uid real: get devolve override",
+      _uspr.get(4242)["events"]["new_message"]["volume"] == 0.1)
+_uspr.upsert(4242, {"events": {"new_message": {"volume": 0.9}}})  # overwrite (ON CONFLICT)
+check("repo uid real: upsert sobrescreve",
+      _uspr.get(4242)["events"]["new_message"]["volume"] == 0.9)
+check("repo isolamento: outro uid sem override", _uspr.get(4343) is None)
+
+from server import sound_catalog as _sound_catalog
+
+# ── Biblioteca de sons importados (aba "Sons") ─────────────────────────────────
+# Qualquer atendente logado importa; só ÁUDIO e no máximo 1 MB. O arquivo vai para
+# statics/sounds/<gerado> — o nome do upload nunca é usado no disco.
+r = client.get("/api/sounds/library")
+check("GET /api/sounds/library -> 200 lista", r.status_code == 200 and r.json()["data"] == [])
+
+_wav = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 32   # header WAV mínimo
+r = client.post("/api/sounds/library",
+                files={"file": ("meu-som.wav", _wav, "audio/wav")},
+                data={"name": "Sino da recepção"})
+check("POST /api/sounds/library -> 200", r.status_code == 200 and r.json()["ok"])
+_snd = r.json()["data"]
+_snd_num = int(_snd["id"].split(":")[1])
+check("som importado -> id custom:<n>", _snd["id"].startswith("custom:"))
+check("som importado -> nome escolhido", _snd["label"] == "Sino da recepção")
+check("som importado -> cls any (serve p/ alerta e one-shot)", _snd["cls"] == "any")
+check("som importado -> url em /statics/sounds/", _snd["url"].startswith("/statics/sounds/"))
+check("som importado -> arquivo renomeado (não usa o nome do upload)",
+      "meu-som" not in _snd["url"])
+
+# Recusa o que não é áudio (extensão fora da lista) e o que passa do teto.
+r = client.post("/api/sounds/library", files={"file": ("virus.exe", b"MZ\x90\x00", "application/x-msdownload")})
+check("import .exe -> recusado", r.status_code == 400 and r.json()["ok"] is False)
+r = client.post("/api/sounds/library", files={"file": ("falso.mp3", b"MZ\x90\x00nao-e-audio", "application/octet-stream")})
+check("import extensão de áudio com conteúdo não-áudio -> recusado", r.json()["ok"] is False)
+r = client.post("/api/sounds/library", files={"file": ("grande.wav", b"RIFF" + b"\x00" * (1024 * 1024 + 64), "audio/wav")})
+check("import acima de 1 MB -> recusado", r.json()["ok"] is False)
+check("import recusado -> nada gravado",
+      len(client.get("/api/sounds/library").json()["data"]) == 1)
+
+# O catálogo passa a oferecer o som importado junto dos sintetizados.
+_cat2 = client.get("/api/sounds/catalog").json()["data"]
+check("catálogo inclui o som importado",
+      any(s["id"] == _snd["id"] and s["kind"] == "file" for s in _cat2["sounds"]))
+# E o catálogo embutido em /api/me/sound-prefs também — é POR ELE que a tela
+# (seletor + lista de importados) e o motor de som carregam. Sem isso o som
+# importado não aparece em lugar nenhum nem toca (regressão corrigida).
+_cat3 = client.get("/api/me/sound-prefs").json()["data"]["catalog"]
+check("me/sound-prefs: catálogo inclui o som importado",
+      any(s["id"] == _snd["id"] and s.get("kind") == "file" for s in _cat3["sounds"]))
+
+# Uma preferência pode apontar para o som importado (normalize aceita custom:<n>).
+r = client.put("/api/me/sound-prefs", json={"prefs": {"events": {"new_message": {"sound": _snd["id"]}}}})
+check("preferência aceita som importado",
+      r.json()["data"]["prefs"]["events"]["new_message"]["sound"] == _snd["id"])
+check("normalize recusa custom: malformado",
+      _sound_catalog.is_valid_sound_id("custom:abc") is False
+      and _sound_catalog.is_valid_sound_id("custom:7") is True)
+
+r = client.put(f"/api/sounds/library/{_snd_num}", json={"name": "Sino novo"})
+check("PUT renomeia o som", r.json()["data"]["label"] == "Sino novo")
+
+r = client.delete(f"/api/sounds/library/{_snd_num}")
+check("DELETE remove o som", r.status_code == 200 and r.json()["ok"])
+check("DELETE -> biblioteca vazia", client.get("/api/sounds/library").json()["data"] == [])
+check("DELETE de som inexistente -> 404", client.delete("/api/sounds/library/99999").status_code == 404)
+# A preferência que apontava para o som excluído NÃO é reescrita (o motor cai no
+# som padrão do evento) — fail-open, sem varredura de preferências.
+check("preferência órfã sobrevive ao delete",
+      client.get("/api/me/sound-prefs").json()["data"]["prefs"]["events"]["new_message"]["sound"]
+      == _snd["id"])
+client.put("/api/me/sound-prefs", json={"prefs": {}})   # limpa p/ os asserts seguintes
+
+# ── Permissão de escrita POR CHAVE (abas de Configurações Gerais) ──────────────
+from config.settings import config_key_permission as _ckp
+check("chave de avisos -> settings.general", _ckp("system_notice_tags") == "settings.general")
+check("chave de avançado -> settings.advanced", _ckp("audit_retention_days") == "settings.advanced")
+check("notas privadas -> settings.notifications",
+      _ckp("notify_private_messages") == "settings.notifications")
+check("padrão de som -> settings.notifications", _ckp("sound_settings") == "settings.notifications")
+check("chave sem aba -> só settings.manage", _ckp("openrouter_api_key") is None)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15b. Quick Replies (plano 04)
@@ -976,6 +1786,26 @@ check("GET /channels/default -> 200", r.status_code == 200)
 r = client.get("/api/channels/inexistente")
 check("GET /channels/{unknown} -> 404", r.status_code == 404)
 
+# Plano 59 — opções do filtro "Canais" vêm do banco (endpoint leve, sem creds).
+r = client.get("/api/channels/for-filter")
+check("GET /channels/for-filter -> 200", r.status_code == 200)
+_ff = r.json()["data"]
+check("GET /channels/for-filter -> is list", isinstance(_ff, list))
+_ff_default = next((c for c in _ff if c["id"] == "default"), None)
+check("GET /channels/for-filter -> inclui 'default'", _ff_default is not None)
+check("GET /channels/for-filter -> só id/provider/display_name",
+      _ff_default is not None and set(_ff_default.keys()) == {"id", "provider", "display_name"})
+check("GET /channels/for-filter -> sem credentials", all("credentials" not in c for c in _ff))
+
+# plano 50 F13 — status-batch: UMA request cobre N canais.
+r = client.post("/api/channels/status-batch", json={"ids": ["default", "inexistente"]})
+check("F13: channels status-batch -> 200", r.status_code == 200)
+_sb = r.json()["data"]["status_by_id"]
+check("F13: status-batch traz o canal existente", "default" in _sb)
+check("F13: status-batch ignora canal inexistente", "inexistente" not in _sb)
+check("F13: status-batch ids não-lista -> erro",
+      client.post("/api/channels/status-batch", json={"ids": 5}).json().get("ok") is False)
+
 # Credential masking (P15): set a secret via repo, ensure the API masks it.
 from db.repositories import channel_credential_repo as _ccrepo
 _ccrepo.set("default", "access_token", "supersecrettoken9876")
@@ -1062,19 +1892,32 @@ check("GET members -> users é lista", isinstance(_m.get("users"), list))
 r = client.get("/api/channels/inexistente/members")
 check("GET members canal desconhecido -> 404", r.status_code == 404)
 # Cria um usuário e o atribui como membro da inbox do canal default.
+# Criar um usuário liga o gate has_users (plano 48 F0): a partir daqui as rotas
+# channel.manage exigem uma sessão de admin. O bootstrap do admin da suíte só
+# acontece na seção RBAC adiante, então autenticamos estas chamadas com uma
+# sessão de admin DESCARTÁVEL, removida no fim junto com o membro — o intervalo
+# seguinte (delete/restore de canais) volta a rodar em modo aberto (0 usuários).
 from db.repositories import user_repo as _urepo
+from server.auth import hash_password_argon2 as _hpa_mem
 _u = _urepo.create(email="agente_inbox@x.com", name="Agente Inbox",
                    password_hash="x", role_keys=["atendente"])
-r = client.put("/api/channels/default/members", json={"user_ids": [_u["id"]]})
+_mem_admin = _urepo.create(email="_memtest_admin@x.com", name="MemAdmin",
+                           password_hash=_hpa_mem("supersecret"), role_keys=["admin"])
+_mem_tok = client.post("/api/auth/login",
+                       json={"email": "_memtest_admin@x.com", "password": "supersecret"}
+                       ).json()["data"]["token"]
+_mem_h = {"Authorization": f"Bearer {_mem_tok}"}
+r = client.put("/api/channels/default/members", json={"user_ids": [_u["id"]]}, headers=_mem_h)
 check("PUT members -> 200", r.status_code == 200)
 check("PUT members -> persiste o membro", _u["id"] in r.json()["data"]["member_ids"])
-r = client.get("/api/channels/default/members")
+r = client.get("/api/channels/default/members", headers=_mem_h)
 check("GET members -> reflete o membro salvo", _u["id"] in r.json()["data"]["member_ids"])
-r = client.put("/api/channels/default/members", json={"user_ids": []})
+r = client.put("/api/channels/default/members", json={"user_ids": []}, headers=_mem_h)
 check("PUT members -> esvazia o conjunto", r.json()["data"]["member_ids"] == [])
-r = client.put("/api/channels/default/members", json={"user_ids": "nope"})
+r = client.put("/api/channels/default/members", json={"user_ids": "nope"}, headers=_mem_h)
 check("PUT members tipo inválido -> 400", r.status_code == 400)
 _urepo.delete(_u["id"])
+_urepo.delete(_mem_admin["id"])  # volta a 0 usuários (gate aberto) para o resto da seção
 
 # Handshake do webhook por provider (Cloud API verification) — auth-exempt
 r = client.get("/api/webhook/whatsapp_cloud/cloud_teste",
@@ -1091,9 +1934,10 @@ check("POST webhook inbound -> 200 (nunca 500)", r.status_code == 200)
 r = client.post("/api/webhook/whatsapp_cloud/inexistente", json={})
 check("POST webhook canal desconhecido -> 200 ignored", r.status_code == 200)
 
-r = client.delete("/api/channels/default")
-check("DELETE /channels/default -> 400 (protegido)", r.status_code == 400)
-# Soft-delete (default): arquiva, preserva credenciais/histórico, some da lista.
+# O canal 'default' agora É removível (plano exclui-default) — o teste destrutivo
+# (arquivar/purgar o default + estado zero-canais + recriar) roda no FIM da suíte,
+# depois de todos os testes que ainda dependem do canal/inbox default.
+# Soft-delete: arquiva, preserva credenciais/histórico, some da lista.
 r = client.delete("/api/channels/cloud_teste")
 check("DELETE /channels -> 200 (soft-delete)", r.status_code == 200)
 check("DELETE -> arquivado (archived=True)", r.json()["data"].get("archived") is True)
@@ -1149,8 +1993,8 @@ with _get_engine().connect() as _conn:
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 18 permissions", _perm_count == 18)
-check("RBAC seed -> role_permissions populated (gestor 15 + atendente 5)", _rp_count == 20)
+check("RBAC seed -> 40 permissions", _perm_count == 40)
+check("RBAC seed -> role_permissions populated (gestor 35 + atendente 5)", _rp_count == 40)
 with _get_engine().connect() as _conn:
     _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
 check("RBAC seed -> template.create/template.delete present",
@@ -1189,11 +2033,44 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 18 permissions", len([p for p in _perms if p != "*"]) == 18)
+check("admin me -> all 40 permissions", len([p for p in _perms if p != "*"]) == 40)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
       r.json()["data"]["authenticated"] is True)
+
+# ── Self-service password change (plano 47) — POST /api/me/password ──
+_meh = {"Authorization": f"Bearer {_utok}"}
+r = client.post("/api/me/password",
+                json={"current_password": "wrongpw", "new_password": "newsecret123"}, headers=_meh)
+check("POST /me/password (wrong current) -> 400", r.status_code == 400)
+r = client.post("/api/me/password",
+                json={"current_password": "supersecret", "new_password": "short"}, headers=_meh)
+check("POST /me/password (new too short) -> 400", r.status_code == 400)
+r = client.post("/api/me/password",
+                json={"current_password": "supersecret", "new_password": "supersecret"}, headers=_meh)
+check("POST /me/password (same as current) -> 400", r.status_code == 400)
+r = client.post("/api/me/password",
+                json={"current_password": "supersecret", "new_password": "newsecret123"}, headers=_meh)
+check("POST /me/password (valid) -> 200", r.status_code == 200)
+# Old password no longer authenticates; the new one does.
+r = client.post("/api/auth/login", json={"email": "admin@test.com", "password": "supersecret"})
+check("login old password after self-change -> 401", r.status_code == 401)
+r = client.post("/api/auth/login", json={"email": "admin@test.com", "password": "newsecret123"})
+check("login new password after self-change -> 200", r.status_code == 200)
+# No RBAC identity (no token) -> the middleware rejects with 401 before the handler
+# runs (plano 48 F0: the API gate is closed because ≥1 user exists). Uses `anon`
+# since `client` is about to carry a default admin header.
+r = anon.post("/api/me/password",
+              json={"current_password": "newsecret123", "new_password": "another12345"})
+check("POST /me/password (no session) -> 401", r.status_code == 401)
+# The session token stays valid across a password change (opaque, not derived).
+r = client.get("/api/auth/me", headers=_meh)
+check("session valid after self password change", r.status_code == 200)
+# Restore the admin password so downstream expectations hold.
+r = client.post("/api/me/password",
+                json={"current_password": "newsecret123", "new_password": "supersecret"}, headers=_meh)
+check("POST /me/password (restore) -> 200", r.status_code == 200)
 
 # Logout invalidates the session
 r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {_utok}"})
@@ -1201,13 +2078,24 @@ check("POST /auth/logout -> 200", r.status_code == 200)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (after logout) -> 401", r.status_code == 401)
 
+# ── From here on, the suite runs authenticated as a full admin BY DEFAULT ──────
+# The API gate is now closed (an admin exists → has_users, plano 48 F0), so every
+# tokenless `client.*` call would 401. We attach a DEDICATED admin session as the
+# default Authorization header — deliberately NOT `_utok` (just logged out above)
+# — so it stays valid through the rest of the suite. Requests that pass their own
+# `headers={Authorization: ...}` still override this; "no token" cases use `anon`.
+_suite_admin_tok = client.post(
+    "/api/auth/login", json={"email": "admin@test.com", "password": "supersecret"}
+).json()["data"]["token"]
+client.headers["Authorization"] = f"Bearer {_suite_admin_tok}"
+
 # Resolver + short-circuit (gestor via repo, since user-management UI is Fase 5)
 from db.repositories import user_repo as _urepo, rbac_repo as _rrepo
 from server.auth import hash_password_argon2 as _hpa
 _g = _urepo.create(email="gestor@test.com", name="G",
                    password_hash=_hpa("supersecret"), role_keys=["gestor"])
 _gperms = _rrepo.user_permissions(_g["id"])
-check("gestor resolver -> 15 perms, no '*'", "*" not in _gperms and len(_gperms) == 15)
+check("gestor resolver -> 35 perms, no '*'", "*" not in _gperms and len(_gperms) == 35)
 check("gestor lacks users.manage", "users.manage" not in _gperms)
 check("gestor has template.create/template.delete",
       {"template.create", "template.delete"} <= _gperms)
@@ -1216,11 +2104,11 @@ check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_adm
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 18 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 18)
+check("GET /api/roles -> 3 roles + 40 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 40)
 
 r = client.get("/api/users")
-check("GET /api/users (open/legacy) -> 200", r.status_code == 200)
+check("GET /api/users (admin session) -> 200", r.status_code == 200)
 check("GET /api/users -> lists admin + gestor", len(r.json()["data"]["users"]) >= 2)
 
 r = client.post("/api/users", json={"email": "att@test.com", "name": "Atendente",
@@ -1324,6 +2212,56 @@ check("POST /api/quick-replies (no quickreply.manage) -> 403", r.status_code == 
 r = client.put("/api/contacts/5511999/info", json={"name": "x"}, headers=_chdr)
 check("PUT /api/contacts/{p}/info (no contact.write) -> 403", r.status_code == 403)
 
+# ── Plano 24: new CRUD gates (custom user has neither) ─────────────
+r = client.post("/api/tags", json={"name": "z", "color": "#fff"}, headers=_chdr)
+check("POST /api/tags (no tag.manage) -> 403", r.status_code == 403)
+r = client.delete("/api/tags/qualquer", headers=_chdr)
+check("DELETE /api/tags/{n} (no tag.manage) -> 403", r.status_code == 403)
+r = client.post("/api/conversation-labels", json={"name": "z"}, headers=_chdr)
+check("POST /api/conversation-labels (no conversation_label.manage) -> 403", r.status_code == 403)
+r = client.post("/api/sandbox/send", json={"phone": "5511999", "message": "oi"}, headers=_chdr)
+check("POST /api/sandbox/send (no sandbox.use) -> 403", r.status_code == 403)
+r = client.get("/api/usage/summary", headers=_chdr)
+check("GET /api/usage/summary (no usage.read) -> 403", r.status_code == 403)
+r = client.get("/api/executions", headers=_chdr)
+check("GET /api/executions (no execution.read) -> 403", r.status_code == 403)
+r = client.delete("/api/executions", headers=_chdr)
+check("DELETE /api/executions (no execution.delete) -> 403", r.status_code == 403)
+r = client.delete("/api/contacts/5511999", headers=_chdr)
+check("DELETE /api/contacts/{p} (no contact.delete) -> 403", r.status_code == 403)
+r = client.delete("/api/conversations/999999", headers=_chdr)
+check("DELETE /api/conversations/{id} (no conversation.delete) -> 403", r.status_code == 403)
+r = client.post("/api/custom-attributes", json={"attribute_key": "z", "display_name": "Z"}, headers=_chdr)
+check("POST /api/custom-attributes (no custom_attribute.manage) -> 403", r.status_code == 403)
+r = client.get("/api/admin/database", headers=_chdr)
+check("GET /api/admin/database (no database.manage) -> 403", r.status_code == 403)
+r = client.get("/api/ai/agents", headers=_chdr)
+check("GET /api/ai/agents (no agent.config.manage) -> 403", r.status_code == 403)
+r = client.get("/api/ai/variables", headers=_chdr)
+check("GET /api/ai/variables (no agent.variables.manage) -> 403", r.status_code == 403)
+r = client.get("/api/ai/tools", headers=_chdr)
+check("GET /api/ai/tools (no agent.tools.manage) -> 403", r.status_code == 403)
+r = client.put("/api/ai/agents/default/prompt", json={"prompt": "x"}, headers=_chdr)
+check("PUT /api/ai/agents/default/prompt (no agent.prompts.edit) -> 403", r.status_code == 403)
+r = client.get("/api/ai/agents/default/prompt/history", headers=_chdr)
+check("GET /api/ai/agents/{k}/prompt/history (no agent.prompts.version) -> 403", r.status_code == 403)
+r = client.get("/api/ai/agents/default/history", headers=_chdr)
+check("GET /api/ai/agents/{k}/history (no agent.prompts.version) -> 403", r.status_code == 403)
+r = client.post("/api/ai/agents/default/rollback/1", headers=_chdr)
+check("POST /api/ai/agents/{k}/rollback (no agent.prompts.version) -> 403", r.status_code == 403)
+r = client.delete("/api/ai/agents/default/prompt/history/1", headers=_chdr)
+check("DELETE /api/ai/agents/{k}/prompt/history/{v} (no agent.prompts.delete) -> 403", r.status_code == 403)
+r = client.put("/api/ai/agents/rbac_new_agent", json={"display_name": "X"}, headers=_chdr)
+check("PUT /api/ai/agents/{new} create (no agent.create) -> 403", r.status_code == 403)
+r = client.put("/api/ai/agents/rbac_dup_agent",
+               json={"display_name": "X", "duplicate": True}, headers=_chdr)
+check("PUT /api/ai/agents/{new} duplicate (no agent.duplicate) -> 403", r.status_code == 403)
+r = client.get("/api/tools", headers=_chdr)
+check("GET /api/tools (no agent.tools.manage) -> 403", r.status_code == 403)
+r = client.post("/api/contacts/import",
+                files={"file": ("c.csv", "phone\n5511999\n", "text/csv")}, headers=_chdr)
+check("POST /api/contacts/import (no contact.import) -> 403", r.status_code == 403)
+
 # ── Switching modes + last-admin guard ────────────────────────────
 r = client.put(f"/api/users/{_cu_id}", json={
     "custom_permissions": False, "roles": ["atendente"]})
@@ -1346,9 +2284,9 @@ r = client.get("/api/roles")
 _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
-      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 15)
-check("GET /api/roles -> admin shows all 18",
-      len(_by_key["admin"]["permission_keys"]) == 18)
+      "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 35)
+check("GET /api/roles -> admin shows all 40",
+      len(_by_key["admin"]["permission_keys"]) == 40)
 
 # Create a custom role
 r = client.post("/api/roles", json={
@@ -1402,15 +2340,16 @@ check("PUT gestor role (shrink) -> 200", r.status_code == 200)
 check("gestor shrunk to 1 perm", _rrepo.get_role_permissions("gestor") == {"conversation.read"})
 r = client.post(f"/api/roles/{_gestor_role_id}/reset")
 check("POST /api/roles/{id}/reset -> 200", r.status_code == 200)
-check("gestor restored to 15 perms", len(_rrepo.get_role_permissions("gestor")) == 15)
+check("gestor restored to 35 perms", len(_rrepo.get_role_permissions("gestor")) == 35)
 
 # ── RBAC para plugins (plano "RBAC para Plugins") ──────────────────
 import asyncio as _asyncio
 import types as _types
 from plugins.manifest import _parse_rbac as _parse_rbac
-from plugins.context import plugin_permission as _plugin_permission
+from plugins.context import plugin_permission as _plugin_permission, core_permission as _core_permission
 from plugins import events as _events
 from server import authz as _authz
+from server.deps import PermissionDeniedError as _PermissionDeniedError
 from fastapi import HTTPException as _HTTPException
 
 # 1) Manifest: parse + validate the rbac: block (invalid keys dropped).
@@ -1427,6 +2366,10 @@ check("manifest rbac -> invalid/dup keys dropped",
 check("manifest rbac absent -> {}", _parse_rbac(None, "x") == {})
 
 # 2) Repo: upsert plugin perms → catalog merge + keys + delete cascade.
+# O plugin precisa existir ATIVO para suas permissões aparecerem no catálogo
+# (list_catalog esconde permissões de plugins desativados/ausentes).
+from db.repositories import plugin_repo as _prepo
+_prepo.upsert("lembretes", "1.0.0", enabled=True)
 _rrepo.upsert_plugin_permission("plugin.lembretes.view", "Ver lembretes",
                                 "lembretes", "Lembretes")
 _rrepo.upsert_plugin_permission("plugin.lembretes.delete", "Excluir lembretes",
@@ -1440,6 +2383,29 @@ check("list_catalog -> core + plugin rows", _cat_view is not None
       and _cat_view["plugin_id"] == "lembretes" and _cat_view["group_label"] == "Lembretes")
 check("list_catalog -> core perms have plugin_id None",
       any(c["key"] == "conversation.read" and c["plugin_id"] is None for c in _catalog))
+# Agrupamento core/plugin (metadado de exibição): tier + group em cada item.
+_cat_by_key = {c["key"]: c for c in _catalog}
+check("list_catalog -> core perm tier=core + group",
+      _cat_by_key["conversation.read"]["tier"] == "core"
+      and _cat_by_key["conversation.read"]["group"] == "Atendimentos e conversas")
+check("list_catalog -> AI perms under 'IA e agente'",
+      _cat_by_key["agent.config.manage"]["group"] == "IA e agente"
+      and _cat_by_key["agent.prompts.edit"]["tier"] == "core")
+check("list_catalog -> granular prompt perms present under 'IA e agente'",
+      all(k in _cat_by_key and _cat_by_key[k]["group"] == "IA e agente"
+          for k in ("agent.prompts.edit", "agent.prompts.version", "agent.prompts.delete")))
+check("list_catalog -> agent.create/duplicate present under 'IA e agente'",
+      all(k in _cat_by_key and _cat_by_key[k]["group"] == "IA e agente"
+          for k in ("agent.create", "agent.duplicate")))
+check("list_catalog -> agent.prompts.manage removido do catálogo",
+      "agent.prompts.manage" not in _cat_by_key)
+check("list_catalog -> templates shown under Plugins tier",
+      _cat_by_key["template.create"]["tier"] == "plugin"
+      and _cat_by_key["template.create"]["group"] == "Templates (WhatsApp Cloud)")
+check("list_catalog -> plugin perm carries tier=plugin",
+      _cat_view["tier"] == "plugin" and _cat_view["group"] == "Lembretes")
+check("list_catalog -> agent.manage removido do catálogo",
+      "agent.manage" not in _cat_by_key)
 
 # 3) /api/roles exposes plugin perms with metadata.
 _roles_payload = client.get("/api/roles").json()["data"]
@@ -1458,6 +2424,38 @@ check("create role -> valid plugin perm kept, bogus dropped",
       _lr_keys == ["plugin.lembretes.view"])
 client.delete(f"/api/roles/{_lr_id}")
 
+# 4b) Desativar o plugin ESCONDE suas permissões do picker mas PRESERVA os grants
+# (sobrevive ao ciclo desativar→editar→reativar). Ver rbac_repo.list_catalog +
+# set_role_permissions (hidden_plugin_permission_keys).
+r = client.post("/api/roles", json={"key": "lembrete_ops", "name": "Lembrete Ops",
+    "permission_keys": ["plugin.lembretes.view", "conversation.read"]})
+_lo_id = r.json()["data"]["role"]["id"]
+_prepo.set_enabled("lembretes", False)
+_cat_off = {c["key"] for c in _rrepo.list_catalog()}
+check("plugin desativado -> permissões somem do catálogo",
+      "plugin.lembretes.view" not in _cat_off and "plugin.lembretes.delete" not in _cat_off)
+check("plugin desativado -> chave ainda válida (grants persistem)",
+      "plugin.lembretes.view" in _rrepo.plugin_permission_keys())
+# Editar o cargo com o plugin OFF (picker manda só o que vê) NÃO apaga o grant escondido.
+r = client.put(f"/api/roles/{_lo_id}", json={"permission_keys": ["conversation.read"]})
+check("editar cargo com plugin off -> grant escondido preservado",
+      "plugin.lembretes.view" in _rrepo.get_role_permissions("lembrete_ops"))
+# Idem para usuário custom: editar sem ver o plugin preserva o grant escondido.
+_puo = _urepo.create(email="lembreteops@test.com", name="LO",
+                     password_hash=_hpa("supersecret"),
+                     permission_keys=["plugin.lembretes.view"], custom=True)
+_urepo.set_custom_permissions(_puo["id"], ["conversation.read"])
+check("editar usuário custom com plugin off -> grant escondido preservado",
+      "plugin.lembretes.view" in _rrepo.user_permissions(_puo["id"]))
+client.delete(f"/api/users/{_puo['id']}")
+# Reativar traz a permissão de volta ao catálogo, com o grant intacto.
+_prepo.set_enabled("lembretes", True)
+_cat_on = {c["key"] for c in _rrepo.list_catalog()}
+check("reativar plugin -> permissão volta ao catálogo", "plugin.lembretes.view" in _cat_on)
+check("reativar plugin -> grant continua no cargo",
+      "plugin.lembretes.view" in _rrepo.get_role_permissions("lembrete_ops"))
+client.delete(f"/api/roles/{_lo_id}")
+
 # 5) plugin_permission() dependency: infers id from path; default-allow legacy.
 _pu = _urepo.create(email="pluginuser@test.com", name="PU",
                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
@@ -1469,12 +2467,13 @@ def _freq(user=None, path="/api/plugins/lembretes/items/1"):
 # legacy/open (no user) -> allowed (no raise)
 _asyncio.run(_dep(_freq(user=None)))
 check("plugin_permission -> legacy/open allowed", True)
-# logged-in user WITHOUT the perm -> 403
+# logged-in user WITHOUT the perm -> raises PermissionDeniedError (rendered as the
+# unified {"ok": false, "error": "Permissão negada."} 403 envelope by the app handler).
 _denied = False
 try:
     _asyncio.run(_dep(_freq(user={"id": _pu_id})))
-except _HTTPException as e:
-    _denied = e.status_code == 403
+except _PermissionDeniedError:
+    _denied = True
 check("plugin_permission -> user without perm -> 403", _denied)
 # grant the perm to that user (custom) -> allowed
 _urepo.set_custom_permissions(_pu_id, ["plugin.lembretes.delete"])
@@ -1483,6 +2482,30 @@ check("plugin_permission -> user with perm -> allowed", True)
 # non-plugin path -> cannot infer id -> allowed (no raise)
 _asyncio.run(_dep(_freq(user={"id": _pu_id}, path="/api/contacts")))
 check("plugin_permission -> non-plugin path allowed", True)
+
+# 5b) core_permission() dependency (plano 81): gates a plugin route on a LITERAL
+# core catalog key (channel.manage), NOT plugin.<id>.<key>. Used by the channel
+# providers (gowa/telegram/whatsapp_cloud/website) so the same permission that
+# governs the core Channels screen also governs each provider's config endpoints.
+_cdep = _core_permission("channel.manage").dependency
+# legacy/open (no user) -> allowed (no raise)
+_asyncio.run(_cdep(_freq(user=None)))
+check("core_permission -> legacy/open allowed", True)
+# logged-in user WITHOUT channel.manage -> PermissionDeniedError (unified 403 envelope)
+_cpu = _urepo.create(email="corepu@test.com", name="CorePU",
+                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_cpu_id = _cpu["id"]
+_cdenied = False
+try:
+    _asyncio.run(_cdep(_freq(user={"id": _cpu_id})))
+except _PermissionDeniedError:
+    _cdenied = True
+check("core_permission -> user without channel.manage -> 403", _cdenied)
+# grant channel.manage (custom) -> allowed
+_urepo.set_custom_permissions(_cpu_id, ["channel.manage"])
+_asyncio.run(_cdep(_freq(user={"id": _cpu_id})))
+check("core_permission -> user with channel.manage -> allowed", True)
+_urepo.delete(_cpu_id)  # cleanup
 
 # 6) ABAC seam: filter.authz.decision can downgrade allow->deny.
 def _abac_deny(ctx, value):
@@ -1499,6 +2522,854 @@ check("delete_plugin_permissions -> rows removed", _removed == 2)
 check("delete_plugin_permissions -> keys gone",
       not _rrepo.plugin_permission_keys())
 _urepo.delete(_pu_id)  # cleanup the test user
+
+# ── Protocolos: Kanban Views (visualizações personalizadas) ──────────────
+section("Protocolos Kanban Views")
+import importlib.util as _ilu
+from plugins.manifest import load_manifest as _load_manifest, _parse_yaml as _parse_yaml
+from plugins.migrator import run_pending_migrations as _run_pending
+
+_atd_dir = Path(PROJECT_ROOT) / "storages" / "plugins" / "protocolos"
+
+# 1) Manifest declara a permissão nova manage_team_views (aparece no PermissionPicker).
+_atd_yaml = _parse_yaml((_atd_dir / "plugin.yaml").read_text(encoding="utf-8"))
+_atd_rbac = _parse_rbac(_atd_yaml.get("rbac"), "protocolos")
+check("protocolos rbac -> manage_team_views declarada",
+      any(p["key"] == "manage_team_views" for p in _atd_rbac.get("permissions", [])))
+check("protocolos rbac -> create_views declarada",
+      any(p["key"] == "create_views" for p in _atd_rbac.get("permissions", [])))
+
+# 2) Aplica as migrations do plugin no DB de teste (cria plugin_protocolos_* incl. 006).
+_atd_manifest = _load_manifest(_atd_dir)
+_run_pending(_atd_manifest, _atd_dir)
+# Carrega o plugin como PACOTE (igual ao runtime, que registra `whatsbot_plugins.<id>`):
+# logic.py usa imports RELATIVOS (`from . import kanban_index`), que só resolvem dentro de
+# um pacote. O __path__ sintético aponta para a pasta do plugin.
+import importlib as _il
+import sys as _sys
+import types as _types
+_APKG = "protocolos_pkg_test"
+if _APKG not in _sys.modules:
+    _apkg = _types.ModuleType(_APKG)
+    _apkg.__path__ = [str(_atd_dir)]
+    _sys.modules[_APKG] = _apkg
+_alogic_spec = _ilu.spec_from_file_location(f"{_APKG}.logic", _atd_dir / "logic.py")
+_alogic = _ilu.module_from_spec(_alogic_spec)
+_sys.modules[f"{_APKG}.logic"] = _alogic   # antes do exec: o pacote precisa se auto-resolver
+_alogic_spec.loader.exec_module(_alogic)
+
+# 2b) Seed 010: as abas padrão Status/Atendente agora são VIEWS REAIS (equipe, sem owner) —
+# editáveis/excluíveis como qualquer visualização criada pela interface. Roda antes do CRUD
+# abaixo, então só os 2 seeds existem (positions 0 e 1).
+_seeded = _alogic.list_kanban_views(user_id=None)
+_by_gb = {v["group_by"]: v for v in _seeded
+          if v.get("owner_user_id") is None and v.get("scope") == "team"}
+check("seed 010 -> view Status existe", "status" in _by_gb and _by_gb["status"]["name"] == "Status")
+check("seed 010 -> view Atendente existe",
+      "atendente" in _by_gb and _by_gb["atendente"]["name"] == "Atendente")
+check("seed 010 -> Status visível a todos (team legado)",
+      _alogic._view_visible(_by_gb["status"], 12345, set()) is True)
+check("seed 010 -> ordenadas primeiro por position",
+      _by_gb["status"]["position"] == 0 and _by_gb["atendente"]["position"] == 1)
+_su, _sue = _alogic.update_kanban_view(_by_gb["status"]["id"], name="Status renomeado")
+check("seed 010 -> Status editável", _sue is None and _su and _su.get("name") == "Status renomeado")
+_sd, _sde = _alogic.delete_kanban_view(_by_gb["atendente"]["id"])
+check("seed 010 -> Atendente excluível",
+      _sd and _sde is None and _alogic.get_kanban_view(_by_gb["atendente"]["id"]) is None)
+
+# 3) CRUD + validação. Agrupar por CAMPO DE PROTOCOLO (pfield) usa os field-defs do plugin
+# (defaults: motivo_abertura/resultado = select). Atributo de conversa NÃO agrupa mais.
+_v1, _e1 = _alogic.create_kanban_view(name="Por motivo", scope="personal", group_by="pfield",
+                                      group_field_scope="protocolo", group_attr_key="motivo_abertura",
+                                      filters={"status": "aberto"}, owner_user_id=101)
+check("create view pessoal (pfield) -> ok", _e1 is None and bool(_v1 and _v1.get("id")))
+check("create view -> filters round-trip dict", _v1 and _v1.get("filters") == {"status": "aberto"})
+check("pfield -> round-trip scope+key",
+      _v1.get("group_by") == "pfield" and _v1.get("group_field_scope") == "protocolo"
+      and _v1.get("group_attr_key") == "motivo_abertura")
+# favorite_filters: default None; create com lista faz round-trip; update com _UNSET preserva,
+# None limpa. Espelha o modelo de available_filters.
+check("create view -> favorite_filters default None", _v1.get("favorite_filters") is None)
+_vf, _evf = _alogic.create_kanban_view(name="Favoritos", scope="personal", group_by="status",
+                                       available_filters=["status", "atendente", "periodo"],
+                                       favorite_filters=["status", "periodo"], owner_user_id=101)
+check("create view -> favorite_filters round-trip",
+      _evf is None and _vf.get("favorite_filters") == ["status", "periodo"])
+_vf2, _evf2 = _alogic.update_kanban_view(_vf["id"], name="Favoritos v2")
+check("update sem favorite_filters -> preserva (_UNSET)",
+      _evf2 is None and _vf2.get("favorite_filters") == ["status", "periodo"])
+_vf3, _evf3 = _alogic.update_kanban_view(_vf["id"], favorite_filters=None)
+check("update favorite_filters=None -> limpa", _evf3 is None and _vf3.get("favorite_filters") is None)
+_alogic.delete_kanban_view(_vf["id"])
+_v2, _e2 = _alogic.create_kanban_view(name="Equipe vendas", scope="team", group_by="data",
+                                      group_date_mode="mes", owner_user_id=101)
+check("create view equipe -> ok", _e2 is None and bool(_v2 and _v2.get("id")))
+_, _ev_pf = _alogic.create_kanban_view(name="x", group_by="pfield",
+                                       group_field_scope="protocolo", group_attr_key="", owner_user_id=1)
+check("validação: pfield sem campo -> erro", _ev_pf is not None)
+_, _ev_pf2 = _alogic.create_kanban_view(name="x2", group_by="pfield",
+                                        group_field_scope="protocolo", group_attr_key="obs", owner_user_id=1)
+check("validação: pfield campo não-opção (obs) -> erro", _ev_pf2 is not None)
+_, _ev_date = _alogic.create_kanban_view(name="y", group_by="data", group_date_mode="bad", owner_user_id=1)
+check("validação: data mode inválido -> erro", _ev_date is not None)
+
+# 3b) Novos modos de data: "semana" e "personalizado" (janela de/até + granularidade).
+_vw, _ewk = _alogic.create_kanban_view(name="Por semana", scope="team", group_by="data",
+                                       group_date_mode="semana", owner_user_id=101)
+check("create view data 'semana' -> ok", _ewk is None and bool(_vw and _vw.get("id")))
+_vp, _epc = _alogic.create_kanban_view(name="Período custom", scope="team", group_by="data",
+                                       group_date_mode="personalizado", group_date_from="2026-06-01",
+                                       group_date_to="2026-06-30", group_date_grain="semana",
+                                       owner_user_id=101)
+check("create view data 'personalizado' -> ok", _epc is None and bool(_vp and _vp.get("id")))
+check("personalizado -> round-trip from/to/grain",
+      _vp and _vp.get("group_date_from") == "2026-06-01" and _vp.get("group_date_to") == "2026-06-30"
+      and _vp.get("group_date_grain") == "semana")
+_, _ep_range = _alogic.create_kanban_view(name="p-range", group_by="data",
+                                          group_date_mode="personalizado", group_date_from="2026-06-30",
+                                          group_date_to="2026-06-01", group_date_grain="dia", owner_user_id=1)
+check("validação: personalizado from > to -> erro", _ep_range is not None)
+_, _ep_grain = _alogic.create_kanban_view(name="p-grain", group_by="data",
+                                          group_date_mode="personalizado", group_date_from="2026-06-01",
+                                          group_date_to="2026-06-30", group_date_grain="ano", owner_user_id=1)
+check("validação: personalizado granularidade inválida -> erro", _ep_grain is not None)
+_, _ep_nodate = _alogic.create_kanban_view(name="p-nodate", group_by="data",
+                                           group_date_mode="personalizado", group_date_grain="dia", owner_user_id=1)
+check("validação: personalizado sem datas -> erro", _ep_nodate is not None)
+# Modo não-personalizado NÃO persiste janela (from/to/grain são limpos → NULL).
+_vn, _evn = _alogic.create_kanban_view(name="Só mês", scope="team", group_by="data",
+                                       group_date_mode="mes", group_date_from="2026-06-01",
+                                       group_date_to="2026-06-30", group_date_grain="dia", owner_user_id=101)
+check("modo não-personalizado -> janela ignorada (NULL)",
+      _evn is None and _vn and _vn.get("group_date_from") is None and _vn.get("group_date_grain") is None)
+# update de personalizado -> mês limpa a janela persistida.
+_vp2, _eup = _alogic.update_kanban_view(_vp["id"], group_date_mode="mes")
+check("update personalizado -> mês limpa janela",
+      _eup is None and _vp2 and _vp2.get("group_date_from") is None and _vp2.get("group_date_grain") is None)
+
+_, _ev_name = _alogic.create_kanban_view(name="   ", owner_user_id=1)
+check("validação: nome vazio -> erro", _ev_name is not None)
+
+# 4) list_kanban_views: pessoal do user + TODAS as de equipe.
+_ids101 = {v["id"] for v in _alogic.list_kanban_views(user_id=101)}
+_ids999 = {v["id"] for v in _alogic.list_kanban_views(user_id=999)}
+check("list user 101 -> vê pessoal + equipe", {_v1["id"], _v2["id"]} <= _ids101)
+check("list user 999 -> vê equipe, NÃO vê pessoal de 101",
+      _v2["id"] in _ids999 and _v1["id"] not in _ids999)
+
+# 5) update + delete.
+_vu, _eu = _alogic.update_kanban_view(_v1["id"], name="Por etapa v2")
+check("update view -> nome alterado", _eu is None and _vu and _vu.get("name") == "Por etapa v2")
+_okdel, _edel = _alogic.delete_kanban_view(_v1["id"])
+check("delete view -> ok e some", _okdel and _edel is None and _alogic.get_kanban_view(_v1["id"]) is None)
+
+# 6) set_protocolo_field: erros + gravação num campo de opção do protocolo (drag do Kanban).
+_, _esa = _alogic.set_protocolo_field(99999, "protocolo", "motivo_abertura", "Dúvida")
+check("set_protocolo_field -> protocolo inexistente -> erro", _esa is not None)
+_, _esa2 = _alogic.set_protocolo_field(99999, "protocolo", "obs", "x")
+check("set_protocolo_field -> campo não-opção -> erro", _esa2 is not None)
+_proto_sf = _alogic.ensure_protocolo_for_contact(70001, phone="5511999990001", name="Cliente Teste")
+_pw, _pwe = _alogic.set_protocolo_field(_proto_sf["id"], "protocolo", "motivo_abertura", "Dúvida")
+check("set_protocolo_field -> grava valor de opção",
+      _pwe is None and _pw and (_pw.get("fields") or {}).get("motivo_abertura") == "Dúvida")
+
+# 7) attr_filters namespaceados: pf:<scope>:<key> (campo de protocolo) + cattr:<key> (contato).
+_lf = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Dúvida"}, limit=50)
+check("list_protocolos(pf filter) -> acha o protocolo", any(a["id"] == _proto_sf["id"] for a in _lf["items"]))
+_lf2 = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Reclamação"}, limit=50)
+check("list_protocolos(pf filter) -> exclui valor diferente",
+      all(a["id"] != _proto_sf["id"] for a in _lf2["items"]))
+_lf3 = _alogic.list_protocolos(attr_filters={"cattr:qualquer": "x"}, limit=50)
+check("list_protocolos(cattr filter) -> envelope {items,total,has_more}",
+      isinstance(_lf3, dict) and isinstance(_lf3.get("items"), list)
+      and "total" in _lf3 and "has_more" in _lf3)
+# _row_matches_filter: cattr = substring case-insensitive (texto); pf = igualdade exata.
+check("cattr filter -> substring case-insensitive",
+      _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro Civil"}}, "cattr:profissao", "civil") is True
+      and _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro"}}, "cattr:profissao", "civil") is False)
+check("pf filter -> exato (não substring)",
+      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv") is False
+      and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolvido") is True)
+# pf de QUALQUER tipo: campo de OPÇÃO (em option_keys) casa EXATO; campo de TEXTO casa SUBSTRING.
+check("pf filter -> texto=substring, opção=exato (option_keys)",
+      _alogic._row_matches_filter({"fields": {"obs": "Cliente VIP retornou"}}, "pf:protocolo:obs", "vip", set()) is True
+      and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv",
+                                      {"protocolo:resultado"}) is False)
+
+# 7a-canal) Filtro por CANAL: resolve o canal da conversa MAIS RECENTE do protocolo
+# (protocolo → vínculo plugin → core atendimentos → inboxes → channels) e casa por igualdade
+# EXATA de channel_id. Ramo puro de _row_matches_filter (sem DB):
+check("canal filter -> igualdade exata de channel_id",
+      _alogic._row_matches_filter({"channel_id": "canal_teste_filtro"}, "canal", "canal_teste_filtro") is True
+      and _alogic._row_matches_filter({"channel_id": "outro"}, "canal", "canal_teste_filtro") is False
+      and _alogic._row_matches_filter({"channel_id": ""}, "canal", "canal_teste_filtro") is False)
+# list_channels(): reaproveita channel_repo.list_all (não-arquivados), shape {id,name,provider}.
+from db.repositories import (channel_repo as _chan_repo, inbox_repo as _inbox_repo,
+                             contact_inbox_repo as _ci_repo)
+_chan_repo.create(id="canal_teste_filtro", provider="test", display_name="Canal Filtro Teste")
+_chrow = next((c for c in _alogic.list_channels() if c["id"] == "canal_teste_filtro"), None)
+check("list_channels -> shape {id,name,provider}",
+      _chrow is not None and _chrow.get("name") == "Canal Filtro Teste" and _chrow.get("provider") == "test")
+# Seed REAL do encadeamento (channel→inbox→contact→contact_inbox→conversation→vínculo) p/
+# exercitar o JOIN de _attach_channels de ponta a ponta.
+_cinbox = _inbox_repo.get_or_create_for_channel("canal_teste_filtro", name="Canal Filtro Teste")
+_cct = _alogic.contact_repo.get_or_create("5511777770001")
+_cci = _ci_repo.get_or_create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
+                              source_id="5511777770001@s.whatsapp.net")
+_cconv = _alogic.conversation_repo.create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
+                                          contact_inbox_id=_cci["id"], origin="manual")
+_cproto = _alogic.ensure_protocolo_for_contact(_cct["id"], phone="5511777770001", name="Cliente Canal")
+_alogic.ensure_open_cycle(_cconv["id"], _cct["id"], _cproto["id"])
+_lc = _alogic.list_protocolos(attr_filters={"canal": "canal_teste_filtro"}, limit=200)
+check("list_protocolos(canal filter) -> acha o protocolo do canal",
+      any(a["id"] == _cproto["id"] for a in _lc["items"]))
+_lc2 = _alogic.list_protocolos(attr_filters={"canal": "canal_inexistente"}, limit=200)
+check("list_protocolos(canal filter) -> exclui canal diferente",
+      all(a["id"] != _cproto["id"] for a in _lc2["items"]))
+
+# 7c) BUSCA "Buscar cliente" (q → SQL) case- E acento-insensível (fix filtros protocolos).
+_proto_q = _alogic.ensure_protocolo_for_contact(70055, phone="5511960000055", name="João DA Silva")
+def _q_has(q):
+    return any(a["id"] == _proto_q["id"] for a in _alogic.list_protocolos(q=q, limit=200)["items"])
+check("q busca: 'joão' (exato) acha", _q_has("joão"))
+check("q busca: 'joao' (sem acento) acha", _q_has("joao"))          # acento-insensível
+check("q busca: 'JOAO' (maiúsc.) acha", _q_has("JOAO"))             # case-insensível (o bug)
+check("q busca: 'silva' (substring) acha", _q_has("silva"))
+check("q busca: 'da' (minúsc. do nome) acha", _q_has("da"))
+check("q busca: 'zzznaoexiste' NÃO acha", not _q_has("zzznaoexiste"))
+
+# 7d) Paginação (plano 50): envelope {items,total,has_more}, caminhada de cursor sem
+# dup/gap, e teto (clamp_limit/clamp_offset). Isola um conjunto próprio via um token
+# único no nome (q → caminho normal com LIMIT/OFFSET + COUNT no SQL).
+_PGN = 57  # > PAGE_LIST (50) → força múltiplas páginas
+_pgn_ids = set()
+for _i in range(_PGN):
+    _pph = f"55119{_i:07d}"
+    _pc = _alogic.contact_repo.get_or_create(_pph)
+    _pp = _alogic.ensure_protocolo_for_contact(_pc["id"], phone=_pph, name=f"ZPGNTEST Cliente {_i}")
+    _pgn_ids.add(_pp["id"])
+_pg1 = _alogic.list_protocolos(q="ZPGNTEST", limit=20, offset=0)
+check("paginação: envelope {items,total,has_more}",
+      isinstance(_pg1, dict) and isinstance(_pg1.get("items"), list)
+      and isinstance(_pg1.get("total"), int) and isinstance(_pg1.get("has_more"), bool))
+check("paginação: total isola o conjunto (== _PGN) e >= len(items)",
+      _pg1["total"] == _PGN and _pg1["total"] >= len(_pg1["items"]))
+check("paginação: página respeita o limit", len(_pg1["items"]) <= 20)
+check("paginação: 1ª página tem has_more (57 > 20)", _pg1["has_more"] is True)
+check("paginação: has_more coerente com offset+len < total",
+      _pg1["has_more"] == (0 + len(_pg1["items"]) < _pg1["total"]))
+# Caminhada de cursor por offset: cobre TODOS os ZPGNTEST sem duplicar/pular.
+_seen, _off = [], 0
+while True:
+    _pg = _alogic.list_protocolos(q="ZPGNTEST", limit=20, offset=_off)
+    _seen.extend(a["id"] for a in _pg["items"])
+    if not _pg["has_more"] or not _pg["items"]:
+        break
+    _off += len(_pg["items"])
+check("paginação: cursor-walk cobre todo o conjunto sem gap",
+      set(_seen) == _pgn_ids and len(_seen) == len(set(_seen)))
+check("paginação: última página has_more=False", _pg["has_more"] is False)
+# Teto: limit exagerado é capado por CAP_LIST (200); negativos saneados (página não-vazia).
+_cap = _alogic.list_protocolos(limit=99999, offset=0)
+check("paginação: limit=99999 capado em <= 200", len(_cap["items"]) <= 200)
+_neg = _alogic.list_protocolos(q="ZPGNTEST", limit=-5, offset=-10)
+check("paginação: limit/offset negativos saneados (>=1 item, offset→0)",
+      len(_neg["items"]) >= 1 and _neg["total"] == _PGN)
+
+# ── 7e) Kanban agrupado NO SERVIDOR: índice em cache + paginação POR COLUNA ──
+# O agrupamento saiu do navegador (grouping.py) e cada coluna pagina sozinha, então
+# nenhuma tela precisa baixar a coleção inteira para montar as colunas/contagens.
+_kanban = _il.import_module(f"{_APKG}.kanban_index")
+_grp = _il.import_module(f"{_APKG}.grouping")
+_kanban.invalidate()
+_gf = {"q": "ZPGNTEST"}          # isola o conjunto criado em 7d
+
+# (a) Classificador PURO e determinístico (tz + "agora" fixos), um modo por vez.
+import datetime as _dtm
+_tzt = _grp.resolve_tz("America/Sao_Paulo")
+_nowt = _dtm.datetime(2026, 7, 17, 15, 0, 0, tzinfo=_tzt).timestamp()
+_t_today = _dtm.datetime(2026, 7, 17, 9, 0, 0, tzinfo=_tzt).timestamp()
+_t_yest = _dtm.datetime(2026, 7, 16, 9, 0, 0, tzinfo=_tzt).timestamp()
+_t_old = _dtm.datetime(2025, 1, 1, 9, 0, 0, tzinfo=_tzt).timestamp()
+_g_st = _grp.build_grouping({"group_by": "status"})
+check("grouping status -> colunas aberto/fechado e classificação",
+      [c["id"] for c in _g_st.static_columns()] == ["aberto", "fechado"]
+      and _g_st.column_id_of({"status": "fechado"}) == "fechado"
+      and _g_st.column_id_of({"status": "aberto"}) == "aberto")
+_g_at = _grp.build_grouping({"group_by": "atendente"}, users=[{"id": 7, "name": "Ana"}])
+check("grouping atendente -> u:<id>/__none__ + rótulo de usuário fora da lista",
+      _g_at.column_id_of({"assignee_user_id": 7}) == "u:7"
+      and _g_at.column_id_of({"assignee_user_id": None}) == "__none__"
+      and _g_at.label_for("u:99") == "Usuário #99")
+_g_dt = _grp.build_grouping({"group_by": "data", "group_date_mode": "faixas"},
+                            now_epoch=_nowt, tz=_tzt)
+check("grouping data/faixas -> today/yesterday/older",
+      _g_dt.column_id_of({"opened_at": _t_today}) == "today"
+      and _g_dt.column_id_of({"opened_at": _t_yest}) == "yesterday"
+      and _g_dt.column_id_of({"opened_at": _t_old}) == "older")
+_g_dd = _grp.build_grouping({"group_by": "data", "group_date_mode": "dia"},
+                            now_epoch=_nowt, tz=_tzt)
+check("grouping data/dia -> bucket d:YYYY-MM-DD, sem data -> __nodate__",
+      _g_dd.column_id_of({"opened_at": _t_today}) == "d:2026-07-17"
+      and _g_dd.column_id_of({"opened_at": None}) == "__nodate__")
+check("grouping data/dia -> colunas dinâmicas desc + especial ao fim",
+      [c["id"] for c in _g_dd.build_dynamic_columns(
+          ["d:2026-07-16", "d:2026-07-17", "__nodate__"])]
+      == ["d:2026-07-17", "d:2026-07-16", "__nodate__"])
+_g_sem = _grp.build_grouping({"group_by": "data", "group_date_mode": "semana"},
+                             now_epoch=_nowt, tz=_tzt)
+_g_mes = _grp.build_grouping({"group_by": "data", "group_date_mode": "mes"},
+                             now_epoch=_nowt, tz=_tzt)
+check("grouping data/semana|mes -> chave da segunda-feira e do mês",
+      _g_sem.column_id_of({"opened_at": _t_today}) == "w:2026-07-13"
+      and _g_mes.column_id_of({"opened_at": _t_today}) == "m:2026-07")
+_g_pr = _grp.build_grouping(
+    {"group_by": "data", "group_date_mode": "personalizado", "group_date_grain": "dia",
+     "group_date_from": "2026-07-17", "group_date_to": "2026-07-17"},
+    now_epoch=_nowt, tz=_tzt)
+check("grouping data/personalizado -> dentro da janela vs __outofrange__",
+      _g_pr.column_id_of({"opened_at": _t_today}) == "d:2026-07-17"
+      and _g_pr.column_id_of({"opened_at": _t_yest}) == "__outofrange__")
+_g_pf = _grp.build_grouping(
+    {"group_by": "pfield", "group_field_scope": "protocolo", "group_attr_key": "motivo"},
+    option_def=lambda s, k: {"key": k, "options": ["Dúvida"], "label": "Motivo"})
+check("grouping pfield -> o:<valor>/__none__, lista pega o 1º, needs=extras",
+      _g_pf.column_id_of({"fields": {"motivo": "Dúvida"}}) == "o:Dúvida"
+      and _g_pf.column_id_of({"fields": {"motivo": ["Dúvida"]}}) == "o:Dúvida"
+      and _g_pf.column_id_of({"fields": {}}) == "__none__"
+      and "protocolo_extras" in _g_pf.needs)
+check("grouping pfield -> campo removido vira indisponível (1 coluna, só-leitura)",
+      _grp.build_grouping({"group_by": "pfield", "group_field_scope": "protocolo",
+                           "group_attr_key": "sumiu"}, option_def=lambda s, k: None).unavailable is True)
+
+# (b) Índice: colunas + contagem EXATA por coluna (os ZPGNTEST nascem todos abertos).
+_idx = _kanban.build_index({"group_by": "status"}, _gf)
+_icols = {c["id"]: c["total"] for c in _idx["columns"]}
+check("índice status -> aberto == _PGN, fechado == 0",
+      _icols.get("aberto") == _PGN and _icols.get("fechado") == 0)
+check("índice -> soma das colunas == total filtrado, sem truncar",
+      sum(c["total"] for c in _idx["columns"]) == _PGN and _idx["truncated"] is False)
+check("índice -> ids da coluna sem duplicata",
+      len(_idx["column_ids"]["aberto"]) == _PGN
+      and set(_idx["column_ids"]["aberto"]) == _pgn_ids)
+
+# (c) Paginação POR COLUNA: cursor-walk cobre a coluna sem dup/gap; teto respeitado.
+_seen_c, _offc = [], 0
+while True:
+    _pgc = _alogic.grouped_column_page({"group_by": "status"}, _gf, "aberto",
+                                       limit=20, offset=_offc)
+    _seen_c.extend(a["id"] for a in _pgc["items"])
+    if not _pgc["has_more"] or not _pgc["items"]:
+        break
+    _offc += len(_pgc["items"])
+check("coluna paginada -> cursor-walk cobre a coluna sem dup/gap",
+      len(_seen_c) == _PGN and len(set(_seen_c)) == _PGN and set(_seen_c) == _pgn_ids)
+check("coluna paginada -> total = tamanho da coluna e última página has_more=False",
+      _pgc["total"] == _PGN and _pgc["has_more"] is False)
+check("coluna paginada -> limit exagerado capado em <= 200",
+      len(_alogic.grouped_column_page({"group_by": "status"}, _gf, "aberto",
+                                      limit=99999)["items"]) <= 200)
+_pgz = _alogic.grouped_column_page({"group_by": "status"}, _gf, "fechado", limit=20)
+check("coluna vazia -> envelope zerado",
+      _pgz["items"] == [] and _pgz["total"] == 0 and _pgz["has_more"] is False)
+check("coluna inexistente -> envelope zerado (não estoura)",
+      _alogic.grouped_column_page({"group_by": "status"}, _gf, "nao_existe")["total"] == 0)
+
+# (d) grouped_columns (o que a rota serve) + agrupamento por atendente.
+_gcols = _alogic.grouped_columns({"group_by": "atendente"}, _gf)
+_nao = next((c for c in _gcols["columns"] if c["id"] == "__none__"), None)
+check("grouped_columns atendente -> 'Não atribuído' concentra os ZPGNTEST",
+      _nao is not None and _nao["total"] == _PGN)
+check("grouped_columns -> shape {columns,truncated,unavailable,read_only}",
+      all(k in _gcols for k in ("columns", "truncated", "unavailable", "read_only")))
+
+# (e) Cache/geração: o bump muda a chave ⇒ invalida em todas as réplicas.
+_ck1 = _kanban._cache_key({"group_by": "status"}, _gf, _kanban.generation(), "America/Sao_Paulo")
+_kanban.bump_generation()
+_ck2 = _kanban._cache_key({"group_by": "status"}, _gf, _kanban.generation(), "America/Sao_Paulo")
+check("geração -> bump muda a chave do cache (invalidação entre réplicas)", _ck1 != _ck2)
+check("q busca: por telefone (substring) acha", _q_has("960000055"))
+# Campo de OPÇÃO agora casa ignorando caixa E acento (antes: exato sensível).
+check("pf opção -> case-insensível",
+      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado",
+                                  "resolvido", {"protocolo:resultado"}) is True)
+check("pf opção -> acento-insensível",
+      _alogic._row_matches_filter({"fields": {"cidade": "São Paulo"}}, "pf:protocolo:cidade",
+                                  "sao paulo", {"protocolo:cidade"}) is True)
+check("pf opção -> ainda exclui valor diferente",
+      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado",
+                                  "pendente", {"protocolo:resultado"}) is False)
+check("cattr -> acento-insensível",
+      _alogic._row_matches_filter({"contact_attrs": {"cidade": "São Paulo"}}, "cattr:cidade", "sao") is True)
+
+# 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
+_p0 = _alogic.get_user_view_pref(_v2["id"], 101)
+check("pref ausente -> default equipe",
+      _p0 == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+_p1 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True,
+                                    personal_filters={"status": "fechado"})
+check("upsert pref -> retorna pessoal",
+      _p1 == {"use_personal": True, "personal_filters": {"status": "fechado"},
+              "personal_column_order": None})
+_p1r = _alogic.get_user_view_pref(_v2["id"], 101)
+check("pref persistida -> personal_filters round-trip",
+      _p1r["use_personal"] is True and _p1r["personal_filters"] == {"status": "fechado"})
+_p2 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=False)
+check("upsert parcial -> flip use_personal mantém filters",
+      _p2 == {"use_personal": False, "personal_filters": {"status": "fechado"},
+              "personal_column_order": None})
+_p999 = _alogic.get_user_view_pref(_v2["id"], 999)
+check("pref isolada por usuário", _p999 == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+_alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True)
+_lv101 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=101)}
+_lv999 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=999)}
+check("list anexa pref do chamador 101",
+      _lv101.get(_v2["id"], {}).get("use_personal") is True)
+check("list anexa pref default p/ 999",
+      _lv999.get(_v2["id"]) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+check("get_user_view_pref(uid=None) -> default equipe",
+      _alogic.get_user_view_pref(_v2["id"], None) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+_vp, _evp = _alogic.create_kanban_view(name="Equipe tmp", scope="team",
+                                       group_by="status", owner_user_id=101)
+_alogic.upsert_user_view_pref(_vp["id"], 101, use_personal=True, personal_filters={"q": "x"})
+_alogic.delete_kanban_view(_vp["id"])
+check("delete_kanban_view -> prefs limpas",
+      _alogic.get_user_view_pref(_vp["id"], 101) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+
+# 7c) available_filters: quais TIPOS de filtro a aba expõe (metadado da view, decidido no editor).
+check("view sem available_filters -> None (todos)", _v2.get("available_filters") is None)
+_va, _eva = _alogic.create_kanban_view(name="Só status+curso", scope="team", group_by="status",
+                                       available_filters=["status", "cattr:curso"], owner_user_id=101)
+check("create available_filters -> round-trip lista",
+      _eva is None and _va.get("available_filters") == ["status", "cattr:curso"])
+_vau, _ = _alogic.update_kanban_view(_va["id"], name="Só status+curso v2")
+check("update sem available_filters -> mantém lista (sentinela)",
+      _vau.get("available_filters") == ["status", "cattr:curso"])
+_vau2, _ = _alogic.update_kanban_view(_va["id"], available_filters=["periodo"])
+check("update com available_filters -> troca lista", _vau2.get("available_filters") == ["periodo"])
+_vau3, _ = _alogic.update_kanban_view(_va["id"], available_filters=None)
+check("update available_filters=None -> None (todos)", _vau3.get("available_filters") is None)
+_alogic.delete_kanban_view(_va["id"])
+
+# 7c-bis) column_order (EQUIPE, na view) + personal_column_order (PESSOAL, na pref): ordem das
+# colunas do Kanban. Mesma mecânica de available_filters (sentinela _UNSET no update, [] limpa).
+_vco, _evco = _alogic.create_kanban_view(name="Ordem colunas", scope="team", group_by="status",
+                                         column_order=["fechado", "aberto"], owner_user_id=101)
+check("create column_order -> round-trip lista",
+      _evco is None and _vco.get("column_order") == ["fechado", "aberto"])
+_vsem, _ = _alogic.create_kanban_view(name="Sem ordem", scope="team", group_by="status",
+                                      owner_user_id=101)
+check("view sem column_order -> None (ordem padrão)", _vsem.get("column_order") is None)
+_alogic.delete_kanban_view(_vsem["id"])
+_vcou, _ = _alogic.update_kanban_view(_vco["id"], name="Ordem colunas v2")
+check("update sem column_order -> mantém lista (sentinela)",
+      _vcou.get("column_order") == ["fechado", "aberto"])
+_vcou2, _ = _alogic.update_kanban_view(_vco["id"], column_order=["aberto", "fechado"])
+check("update com column_order -> troca lista", _vcou2.get("column_order") == ["aberto", "fechado"])
+_vcou3, _ = _alogic.update_kanban_view(_vco["id"], column_order=[])
+check("update column_order=[] -> None (ordem padrão)", _vcou3.get("column_order") is None)
+# personal_column_order via my-pref (preferência do PRÓPRIO usuário, gated só por `view`).
+_alogic.upsert_user_view_pref(_vco["id"], 202, personal_column_order=["fechado", "aberto"])
+check("personal_column_order -> round-trip",
+      _alogic.get_user_view_pref(_vco["id"], 202).get("personal_column_order") == ["fechado", "aberto"])
+_lv_pco = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=202)}
+check("list anexa personal_column_order do chamador",
+      _lv_pco.get(_vco["id"], {}).get("personal_column_order") == ["fechado", "aberto"])
+_alogic.upsert_user_view_pref(_vco["id"], 202, use_personal=True)  # merge parcial
+check("merge parcial (só use_personal) -> personal_column_order preservado",
+      _alogic.get_user_view_pref(_vco["id"], 202).get("personal_column_order") == ["fechado", "aberto"])
+check("get_user_view_pref(uid=None) -> personal_column_order None",
+      _alogic.get_user_view_pref(_vco["id"], None).get("personal_column_order") is None)
+_alogic.delete_kanban_view(_vco["id"])
+
+# 7d) ACL de visibilidade "Quem pode ver": grupos (roles) + usuários (incluir/excluir).
+_vacl, _eacl = _alogic.create_kanban_view(
+    name="Só atendentes", group_by="status",
+    visibility_roles=["atendente"], visibility_users_exclude=[500], owner_user_id=101)
+check("create ACL -> scope derivado team", _eacl is None and _vacl.get("scope") == "team")
+check("create ACL -> roles round-trip", _vacl.get("visibility_roles") == ["atendente"])
+check("create ACL -> exclude round-trip", _vacl.get("visibility_users_exclude") == [500])
+check("ACL: criador sempre vê", _alogic._view_visible(_vacl, 101, set()) is True)
+check("ACL: atendente (do grupo) vê", _alogic._view_visible(_vacl, 300, {"atendente"}) is True)
+check("ACL: atendente EXCLUÍDO não vê", _alogic._view_visible(_vacl, 500, {"atendente"}) is False)
+check("ACL: gestor (fora do grupo) não vê", _alogic._view_visible(_vacl, 300, {"gestor"}) is False)
+check("ACL: admin vê tudo", _alogic._view_visible(_vacl, 900, {"admin"}) is True)
+_vinc, _ = _alogic.create_kanban_view(name="Incluir fulano", group_by="status",
+                                      visibility_users_include=[700], owner_user_id=101)
+check("ACL: usuário incluído vê (sem papel)", _alogic._view_visible(_vinc, 700, set()) is True)
+check("ACL: não incluído/sem grupo não vê", _alogic._view_visible(_vinc, 701, set()) is False)
+_vp2, _ = _alogic.create_kanban_view(name="Priv", group_by="status", owner_user_id=101)
+check("sem ACL -> scope personal", _vp2.get("scope") == "personal")
+check("personal: outro não vê", _alogic._view_visible(_vp2, 800, {"atendente"}) is False)
+_ids_at = {v["id"] for v in _alogic.list_kanban_views(user_id=300, role_keys={"atendente"})}
+check("list(atendente) inclui view de atendentes", _vacl["id"] in _ids_at)
+_ids_ex = {v["id"] for v in _alogic.list_kanban_views(user_id=500, role_keys={"atendente"})}
+check("list(atendente excluído) não inclui", _vacl["id"] not in _ids_ex)
+_alogic.delete_kanban_view(_vacl["id"])
+_alogic.delete_kanban_view(_vinc["id"])
+_alogic.delete_kanban_view(_vp2["id"])
+
+# 8) Gate de EQUIPE (acheck) — o que a rota usa p/ criar/editar visualização de equipe.
+_rrepo.upsert_plugin_permission("plugin.protocolos.manage_team_views",
+                                "Criar/editar visualizações de EQUIPE no Kanban",
+                                "protocolos", "Protocolos")
+_tvu = _urepo.create(email="teamviews@test.com", name="TV",
+                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_tvu_id = _tvu["id"]
+_tv_req = _types.SimpleNamespace(
+    state=_types.SimpleNamespace(user={"id": _tvu_id}),
+    url=_types.SimpleNamespace(path="/api/plugins/protocolos/kanban-views"))
+check("manage_team_views -> user SEM perm negado",
+      _asyncio.run(_authz.acheck(_tv_req, "plugin.protocolos.manage_team_views")) is False)
+_urepo.set_custom_permissions(_tvu_id, ["plugin.protocolos.manage_team_views"])
+check("manage_team_views -> user COM perm permitido",
+      _asyncio.run(_authz.acheck(_tv_req, "plugin.protocolos.manage_team_views")) is True)
+_urepo.delete(_tvu_id)
+_rrepo.delete_plugin_permissions("protocolos")
+
+# 8b) Gate de CRIAÇÃO de visualizações (create_views) — a rota exige create_views OU
+# manage_team_views. Aqui validamos que a permissão está no catálogo RBAC (acheck).
+_rrepo.upsert_plugin_permission("plugin.protocolos.create_views",
+                                "Criar novas visualizações (agrupamentos) no Kanban",
+                                "protocolos", "Protocolos")
+_cvu = _urepo.create(email="createviews@test.com", name="CV",
+                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
+_cvu_id = _cvu["id"]
+_cv_req = _types.SimpleNamespace(
+    state=_types.SimpleNamespace(user={"id": _cvu_id}),
+    url=_types.SimpleNamespace(path="/api/plugins/protocolos/kanban-views"))
+check("create_views -> user SEM perm negado",
+      _asyncio.run(_authz.acheck(_cv_req, "plugin.protocolos.create_views")) is False)
+_urepo.set_custom_permissions(_cvu_id, ["plugin.protocolos.create_views"])
+check("create_views -> user COM perm permitido",
+      _asyncio.run(_authz.acheck(_cv_req, "plugin.protocolos.create_views")) is True)
+_urepo.delete(_cvu_id)
+_rrepo.delete_plugin_permissions("protocolos")
+
+# 9) Tipos de campo NOVOS: número, data, regex (text/textarea/number) e "caixa de seleção"
+# configurável única/múltipla. Testado direto na logic (scope protocolo não sincroniza core).
+_alogic.set_field_defs("protocolo", [
+    {"key": "idade", "label": "Idade", "type": "number"},
+    {"key": "nascimento", "label": "Nascimento", "type": "date"},
+    {"key": "cpf", "label": "CPF", "type": "text", "regex_pattern": r"^\d{11}$", "regex_cue": "11 dígitos"},
+    {"key": "cursos", "label": "Cursos", "type": "checkboxes", "options": ["A", "B", "C"], "multiple": True, "required": True},
+    {"key": "turno", "label": "Turno", "type": "checkboxes", "options": ["Manhã", "Tarde"], "multiple": False},
+])
+_pdefs = {d["key"]: d for d in _alogic.get_field_defs("protocolo")}
+check("field types -> número/data/checkboxes persistidos",
+      _pdefs.get("idade", {}).get("type") == "number"
+      and _pdefs.get("nascimento", {}).get("type") == "date"
+      and _pdefs.get("cursos", {}).get("type") == "checkboxes"
+      and _pdefs["cursos"].get("multiple") is True)
+check("field types -> regex_pattern/regex_cue persistidos",
+      _pdefs.get("cpf", {}).get("regex_pattern") == r"^\d{11}$"
+      and _pdefs["cpf"].get("regex_cue") == "11 dígitos")
+_, _en = _alogic.normalize_values("protocolo", {"idade": "abc", "cursos": ["A"]})
+check("número inválido -> erro", _en is not None and "número" in _en.lower())
+_cnv, _env = _alogic.normalize_values("protocolo", {"idade": "3,5", "cursos": ["A"]})
+check("número válido (vírgula) -> ok", _env is None)
+_, _ed = _alogic.normalize_values("protocolo", {"nascimento": "2020/01/01", "cursos": ["A"]})
+check("data inválida -> erro", _ed is not None)
+_cdv, _edv = _alogic.normalize_values("protocolo", {"nascimento": "2020-01-01", "cursos": ["A"]})
+check("data válida AAAA-MM-DD -> ok", _edv is None)
+_, _er = _alogic.normalize_values("protocolo", {"cpf": "123", "cursos": ["A"]})
+check("regex não casa -> erro com a dica", _er is not None and "11 dígitos" in _er)
+_, _erok = _alogic.normalize_values("protocolo", {"cpf": "12345678901", "cursos": ["A"]})
+check("regex casa -> ok", _erok is None)
+_cc, _ecc = _alogic.normalize_values("protocolo", {"cursos": ["A", "C"]})
+check("checkboxes múltiplo -> lista de opções", _ecc is None and _cc.get("cursos") == ["A", "C"])
+_, _eci = _alogic.normalize_values("protocolo", {"cursos": ["Z"]})
+check("checkboxes opção inválida -> erro", _eci is not None)
+_cs, _ecs = _alogic.normalize_values("protocolo", {"cursos": ["A"], "turno": ["Manhã", "Tarde"]})
+check("checkboxes single (multiple=False) -> corta p/ 1", _ecs is None and _cs.get("turno") == ["Manhã"])
+_, _ereq = _alogic.normalize_values("protocolo", {"cursos": []})
+check("checkboxes obrigatório vazio -> erro", _ereq is not None and "Cursos" in _ereq)
+check("_missing_required revalida tipo+required no fechamento",
+      _alogic._missing_required("protocolo", {"cursos": [], "obs": "", "atendente": 1}) is not None)
+check("_missing_required ok quando preenchido",
+      _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": "", "atendente": 1}) is None)
+
+# 9a-bis) Atendente é rótulo FIXO + OBRIGATÓRIO nos 2 escopos, não-criável/removível como extra.
+for _sc in ("protocolo", "atendimento"):
+    _ats = [d for d in _alogic.get_field_defs(_sc) if d.get("type") == "atendente"]
+    check(f"atendente fixo -> existe exatamente 1 em '{_sc}'", len(_ats) == 1)
+    check(f"atendente fixo -> fixed+obrigatório em '{_sc}'",
+          _ats and _ats[0].get("fixed") is True and _ats[0].get("required") is True
+          and _ats[0].get("key") == "atendente")
+# Tentar CRIAR um campo atendente extra é ignorado (não vira extra; segue só o fixo).
+_atend_defs_before = _alogic.get_extra_defs("atendimento")  # p/ restaurar ao fim
+_alogic.set_field_defs("atendimento", [
+    {"key": "resp", "label": "Responsável", "type": "atendente"},
+    {"key": "obs", "label": "Observações", "type": "textarea"},
+])
+_at_after = [d for d in _alogic.get_field_defs("atendimento") if d.get("type") == "atendente"]
+check("criar atendente extra -> ignorado (segue 1 só, fixo)",
+      len(_at_after) == 1 and _at_after[0].get("fixed") is True)
+check("criar atendente extra -> não persistiu como extra",
+      all(d.get("type") != "atendente" for d in _alogic.get_extra_defs("atendimento")))
+# normalize_values NÃO exige atendente (coerção ok sem ele); o required é gate de fechamento.
+_cae, _eae = _alogic.normalize_values("atendimento", {"obs": "x"})
+check("normalize_values -> não bloqueia por atendente ausente", _eae is None)
+# _missing_required exige atendente (sem assignee -> erro; com -> ok).
+check("_missing_required atendimento -> sem atendente bloqueia",
+      _alogic._missing_required("atendimento", {"obs": "x"}) is not None)
+check("_missing_required atendimento -> com atendente ok",
+      _alogic._missing_required("atendimento", {"obs": "x", "atendente": 1}) is None)
+# Restaura os defs de atendimento como estavam antes deste bloco.
+_alogic.set_field_defs("atendimento", _atend_defs_before)
+
+# 9b) "Lista de seleção" (type=select): `multiple` liga marcação de VÁRIAS → valor vira LISTA
+# (igual a checkboxes); single continua string. Radio saiu da UI (seed migrado p/ select).
+check("select múltiplo -> value_type list",
+      _alogic._extra_value_type({"type": "select", "multiple": True}) == "list")
+check("select single -> value_type string",
+      _alogic._extra_value_type({"type": "select"}) == "string")
+check("seed: nenhum campo default é radio (migrado p/ select)",
+      all(d.get("type") != "radio"
+          for defs in _alogic.DEFAULT_EXTRA_DEFS.values() for d in defs))
+_alogic.set_field_defs("protocolo", [
+    {"key": "origem", "label": "Origem", "type": "select", "options": ["Site", "Loja", "Telefone"]},
+    {"key": "motivos", "label": "Motivos", "type": "select", "options": ["A", "B", "C"], "multiple": True},
+])
+_psel = {d["key"]: d for d in _alogic.get_field_defs("protocolo")}
+check("select múltiplo -> multiple persistido", _psel.get("motivos", {}).get("multiple") is True)
+_cm, _ecm = _alogic.normalize_values("protocolo", {"motivos": ["A", "C"], "origem": "Site"})
+check("select múltiplo -> valor vira LISTA", _ecm is None and _cm.get("motivos") == ["A", "C"])
+check("select single -> valor string", _cm.get("origem") == "Site")
+_, _eminv = _alogic.normalize_values("protocolo", {"motivos": ["Z"]})
+check("select múltiplo -> opção inválida barrada", _eminv is not None)
+_alogic.set_field_defs("protocolo", [
+    {"key": "motivos", "label": "Motivos", "type": "select", "options": ["A", "B"],
+     "multiple": True, "required": True},
+])
+_, _emreq = _alogic.normalize_values("protocolo", {"motivos": []})
+check("select múltiplo obrigatório vazio -> erro", _emreq is not None and "Motivos" in _emreq)
+_cmr, _ecmr = _alogic.normalize_values("protocolo", {"motivos": ["A"]})
+check("select múltiplo obrigatório preenchido -> ok", _ecmr is None and _cmr.get("motivos") == ["A"])
+_alogic.set_field_defs("protocolo", [])  # limpa p/ não vazar estado a testes seguintes
+
+# ── Protocolos: Ignorar abertura por regex (direção) + pular avaliação por atributos ──
+section("Protocolos Ignorar abertura / Pular avaliação")
+
+class _CtxExtras:
+    def __init__(self, extras):
+        self.extras = extras
+
+def _msgs(user_text):  # lista estilo OpenAI (última msg = trigger do contato)
+    return [{"role": "system", "content": "sp"}, {"role": "user", "content": user_text}]
+
+# Feature 1 — regra "ignorar abertura" (config + matcher + before_reopen)
+_sk = _alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+check("skip-open round-trip", _sk == {"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+check("direção sent casa enviada", _alogic._skip_open_matches("PROT-9", "sent") is True)
+check("direção sent NÃO casa recebida", _alogic._skip_open_matches("PROT-9", "received") is False)
+# ENVIADA (operador) → before_reopen impede reabrir (mensagem ainda vai ao WhatsApp).
+check("before_reopen sent+casa -> False (não reabre)",
+      _alogic.before_reopen(_CtxExtras({"role": "assistant", "text": "PROT-1"}), True) is False)
+check("before_reopen user na direção sent -> não bloqueia",
+      _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-1"}), True) is True)
+# RECEBIDA (contato) → mensagem aparece (não dropa); só a resposta da IA é abortada via
+# suppress_ai_on_ignored (filter.llm.messages → None). Protocolo pulado em on_inbound.
+_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "received"})
+check("suppress_ai aborta IA p/ recebida que casa (received)",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-2")) is None)
+check("suppress_ai deixa IA rodar p/ recebida que NÃO casa",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("oi tudo bem")) == _msgs("oi tudo bem"))
+# notify_on_ignored: silencia (sem badge/som/alerta) a recebida que casa.
+check("notify_on_ignored: recebida que casa -> silenciosa (False)",
+      _alogic.notify_on_ignored(_CtxExtras({"text": "PROT-2"}), True) is False)
+check("notify_on_ignored: recebida que NÃO casa -> notifica (True)",
+      _alogic.notify_on_ignored(_CtxExtras({"text": "oi"}), True) is True)
+_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+check("notify_on_ignored NÃO silencia quando direção só sent",
+      _alogic.notify_on_ignored(_CtxExtras({"text": "PROT-3"}), True) is True)
+check("suppress_ai NÃO aborta quando direção só sent",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-3")) == _msgs("PROT-3"))
+_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "both"})
+check("suppress_ai aborta na direção both",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-4")) is None)
+check("both: before_reopen sent também bloqueia",
+      _alogic.before_reopen(_CtxExtras({"role": "assistant", "text": "PROT-4"}), True) is False)
+check("suppress_ai ignora value não-lista", _alogic.suppress_ai_on_ignored(_CtxExtras({}), "x") == "x")
+_alogic.set_skip_open_config({"enabled": False, "regex": r"PROT-\d", "direction": "both"})
+check("desligado -> suppress_ai deixa IA rodar",
+      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-5")) == _msgs("PROT-5"))
+check("direção inválida cai em sent",
+      _alogic.set_skip_open_config({"enabled": True, "regex": "x", "direction": "zzz"})["direction"] == "sent")
+_alogic.set_skip_open_config({"enabled": True, "regex": "[bad", "direction": "both"})
+check("regex inválida -> False sem exceção", _alogic._skip_open_matches("qq", "sent") is False)
+_alogic.set_skip_open_config({"enabled": False, "regex": r"PROT-\d", "direction": "both"})
+check("desligado -> matcher False", _alogic._skip_open_matches("PROT-3", "sent") is False)
+check("desligado -> before_reopen mantém value",
+      _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-3"}), True) is True)
+
+# Feature 2 — pular avaliação por atributos (contato + conversa)
+check("attr match string (case/trim)", _alogic._attr_value_matches("Não Possui", " não possui ") is True)
+check("attr match lista nativa", _alogic._attr_value_matches(["a", "não possui"], "não possui") is True)
+check("attr match multi vírgula", _alogic._attr_value_matches("a, não possui, b", "não possui") is True)
+check("attr no-match diferente", _alogic._attr_value_matches("possui", "não possui") is False)
+check("sanitize descarta scope inválido",
+      _alogic._sanitize_skip_attrs([{"key": "k", "scope": "x", "value": "v"}]) == [])
+
+from db.repositories import custom_attribute_repo as _ca_repo
+from db.repositories import conversation_repo as _sk_conv_repo
+from db.tables import contacts as _contacts_tbl, conversations as _conv_tbl
+_skc = contact_repo.get_or_create("5511900000042")
+_skcid = _skc["id"]
+_ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "não possui"})
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""},
+                             "skip_attrs": [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}]})
+check("skip_attrs round-trip na protocol-config",
+      _alogic.get_protocol_config().get("skip_attrs")
+      == [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}])
+check("skip avaliação por atributo de CONTATO -> True",
+      _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is True)
+_ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "engenharia"})
+check("valor diferente -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is False)
+_skconv = _sk_conv_repo.resolve_for_contact(_skcid, "5511900000042@s.whatsapp.net")
+_ca_repo.set_values(_conv_tbl, _skconv["id"], {"origem": "spam"})
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""},
+                             "skip_attrs": [{"key": "origem", "scope": "conversation", "value": "spam"}]})
+check("skip avaliação por atributo de CONVERSA -> True",
+      _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is True)
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""}, "skip_attrs": []})
+check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is False)
+
+# Escopo "protocolo": a regra também aceita um RÓTULO da aba Protocolo (sistema de
+# campos próprio do plugin), lido de ``at["fields"]`` — não é atributo do core.
+check("sanitize aceita scope protocolo",
+      _alogic._sanitize_skip_attrs([{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
+      == [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""},
+                             "skip_attrs": [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}]})
+check("skip avaliação por RÓTULO do protocolo -> True",
+      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": "Sem contato"}}, None) is True)
+check("rótulo do protocolo com outro valor -> não pula",
+      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": "vendeu"}}, None) is False)
+check("rótulo multi (checkboxes) casa por pertencimento",
+      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": ["x", "sem contato"]}}, None) is True)
+check("protocolo sem o rótulo preenchido -> não pula",
+      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {}}, None) is False)
+_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                             "privado": {"title": "", "link": ""}, "skip_attrs": []})
+_alogic.set_skip_open_config({"enabled": False, "regex": "", "direction": "sent"})  # limpa estado
+
+# Feature 3 — Resolver/Finalizar robusto a atendimento ÓRFÃO (ciclo sem conversa viva)
+from sqlalchemy import text as _sa_text
+from db.tables import messages as _msgs_t
+_rob_c = contact_repo.get_or_create("5511900000077")
+_rob_proto = _alogic.ensure_protocolo_for_contact(
+    _rob_c["id"], phone="5511900000077", name="Robustez")
+# atendente preenchido (rótulo fixo obrigatório) — replica o caso do print onde o protocolo
+# órfão já tinha atendente e finaliza sem pedir nada.
+with _get_engine().begin() as _rc:
+    _rc.execute(_sa_text("UPDATE plugin_protocolos_protocolos SET assignee_user_id=1, "
+                         "assignee_name='Admin' WHERE id=:i"), {"i": _rob_proto["id"]})
+# (a) ciclo ÓRFÃO (conversation_id inexistente no core) + required OK -> close auto-encerra
+#     o órfão e finaliza SEM travar com 'resolva-o antes'.
+_alogic._insert_cycle(999_000_111, _rob_c["id"], _rob_proto["id"])
+_rob_at, _rob_err = _alogic.close_protocolo(_rob_proto["id"], assignee_user_id=1, assignee_name="Admin")
+check("close: ciclo órfão NÃO bloqueia com 'resolva-o antes'",
+      not (_rob_err and "resolva-o antes" in _rob_err))
+check("close: protocolo órfão finaliza (status fechado)", _rob_err is None)
+check("close: ciclo órfão foi auto-encerrado",
+      _alogic._open_cycles_of_protocolo(_rob_proto["id"]) == [])
+# (a2) SEM required (sem atendente): retorna erro de obrigatório e NÃO deixa efeito colateral
+#      (o ciclo órfão continua ABERTO — validação ANTES de qualquer escrita).
+_rob_c2 = contact_repo.get_or_create("5511900000078")
+_rob_proto_nr = _alogic.ensure_protocolo_for_contact(
+    _rob_c2["id"], phone="5511900000078", name="Sem atendente")
+_alogic._insert_cycle(999_000_113, _rob_c2["id"], _rob_proto_nr["id"])
+_, _rob_err_nr = _alogic.close_protocolo(_rob_proto_nr["id"])  # sem assignee
+check("close sem required -> erro de obrigatório", bool(_rob_err_nr) and "brigat" in _rob_err_nr)
+check("close sem required -> ciclo órfão SEGUE aberto (sem efeito colateral)",
+      len(_alogic._open_cycles_of_protocolo(_rob_proto_nr["id"])) == 1)
+# (b) ciclo RESOLVÍVEL: conversa viva no core -> ainda bloqueia (comportamento inalterado).
+_rob_proto2 = _alogic.ensure_protocolo_for_contact(
+    _rob_c["id"], phone="5511900000077", name="Robustez")  # proto1 fechado -> novo protocolo aberto
+_rob_live = _sk_conv_repo.resolve_for_contact(_rob_c["id"], "5511900000077@s.whatsapp.net")
+_alogic._insert_cycle(_rob_live["id"], _rob_c["id"], _rob_proto2["id"])
+_, _rob_err2 = _alogic.close_protocolo(_rob_proto2["id"])
+check("close: ciclo com conversa viva ainda exige resolver antes",
+      bool(_rob_err2) and "resolva-o antes" in _rob_err2)
+check("close: conversa viva NÃO é encerrada (ciclo segue aberto)",
+      len(_alogic._open_cycles_of_protocolo(_rob_proto2["id"])) == 1)
+# (c) resolve_atendimento de conversa inexistente -> no-op gracioso (sem 'não encontrada').
+_res_link, _res_err = _alogic.resolve_atendimento(999_000_222, {})
+check("resolve_atendimento conversa inexistente -> gracioso (err None)", _res_err is None)
+# (d) _emit_proto_notice numa conversa deletada -> no-op limpo (sem exceção, sem row órfã).
+_alogic._emit_proto_notice("protocolo_closed", conversation_id=999_000_222, contact_id=_rob_c["id"])
+check("_emit_proto_notice em conversa inexistente -> não cria conversation_event",
+      _get_engine().connect().execute(_sa_select(_sa_func.count()).select_from(_msgs_t)
+          .where(_msgs_t.c.conversation_id == 999_000_222)).scalar() == 0)
+# (e) Opção B — avaliação PULADA em protocolo órfão (conversa do protocolo foi excluída).
+_orf_c = contact_repo.get_or_create("5511900000079")
+_orf_conv = _sk_conv_repo.resolve_for_contact(_orf_c["id"], "5511900000079@s.whatsapp.net")
+_orf_proto = _alogic.ensure_protocolo_for_contact(
+    _orf_c["id"], phone="5511900000079", name="Órfão aval")
+_alogic._insert_cycle(_orf_conv["id"], _orf_c["id"], _orf_proto["id"])
+check("_is_orphan_protocolo -> False com conversa viva",
+      _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is False)
+contact_repo.delete(_orf_c["id"])   # exclui contato -> cascade apaga a conversa -> protocolo órfão
+check("_is_orphan_protocolo -> True após conversa excluída",
+      _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is True)
+# send_protocol_on_close é best-effort e no harness get_deps()=None (sai cedo); a decisão
+# de pular está isolada em _is_orphan_protocolo (testada acima) — chamamos p/ garantir no-raise.
+_alogic.send_protocol_on_close(_alogic.get_protocolo(_orf_proto["id"]))
+check("send_protocol_on_close(órfão) não levanta", True)
+
+# ── "Aberto por" (opener) no protocolo e nos atendimentos (ciclos) ──
+# _resolve_opener é puro: mapeia a origem do evento/ação para {kind,user_id,name}.
+check("_resolve_opener(inbound) -> Contato",
+      _alogic._resolve_opener("inbound") == {"kind": "contact", "user_id": None, "name": "Contato"})
+check("_resolve_opener(ai) -> IA",
+      _alogic._resolve_opener("ai") == {"kind": "ia", "user_id": None, "name": "IA"})
+check("_resolve_opener(agent) -> usa nome do current_user",
+      _alogic._resolve_opener("agent", None, user_id=7, name="Fulano")
+      == {"kind": "agent", "user_id": 7, "name": "Fulano"})
+check("_resolve_opener(operator) sem conversa -> Atendente (best-effort vazio)",
+      _alogic._resolve_opener("operator", None)["name"] == "Atendente")
+check("_resolve_opener(desconhecido) -> cai em Contato",
+      _alogic._resolve_opener("")["kind"] == "contact")
+# Criação real GRAVA o opener; get_protocolo devolve as colunas via dict(row).
+_op_c = contact_repo.get_or_create("5511900000090")
+_op_proto = _alogic.ensure_protocolo_for_contact(
+    _op_c["id"], phone="5511900000090", name="Opener Teste",
+    opener=_alogic._resolve_opener("inbound"))
+_op_row = _alogic.get_protocolo(_op_proto["id"])
+check("ensure_protocolo grava opened_by (Contato)",
+      _op_row.get("opened_by_kind") == "contact" and _op_row.get("opened_by_name") == "Contato")
+# O ciclo carrega SEU próprio opener (aqui simulamos abertura pela IA).
+_op_conv = _sk_conv_repo.resolve_for_contact(_op_c["id"], "5511900000090@s.whatsapp.net")
+_op_cyc = _alogic._insert_cycle(_op_conv["id"], _op_c["id"], _op_proto["id"],
+                                opener=_alogic._resolve_opener("ai"))
+check("_insert_cycle grava opened_by no ciclo (IA)", _op_cyc.get("opened_by_name") == "IA")
+# list_atendimentos (usado pelo popup) expõe opened_by_name na linha.
+_op_list = _alogic.list_atendimentos(_op_proto["id"])
+check("list_atendimentos -> opened_by_name na linha",
+      any(a.get("opened_by_name") == "IA" for a in _op_list))
+# Registro SEM opener (histórico antigo) fica com '' -> a UI mostra '—'.
+_op_c2 = contact_repo.get_or_create("5511900000091")
+_op_proto2 = _alogic.ensure_protocolo_for_contact(
+    _op_c2["id"], phone="5511900000091", name="Sem opener")
+check("ensure_protocolo sem opener -> opened_by_name vazio (histórico)",
+      _alogic.get_protocolo(_op_proto2["id"]).get("opened_by_name") == "")
+
+# ── Religar IA ao fechar: setting (default ON) + helper best-effort ──
+check("get_reactivate_ai_on_close_setting -> default True",
+      _alogic.get_reactivate_ai_on_close_setting() is True)
+config_repo.set("plugin.protocolos.reactivate_ai_on_close", False)
+check("get_reactivate_ai_on_close_setting -> respeita override False",
+      _alogic.get_reactivate_ai_on_close_setting() is False)
+config_repo.set("plugin.protocolos.reactivate_ai_on_close", True)
+# Órfão: reactivate_ai_after_close pula (via _is_orphan_protocolo) e não levanta. No harness
+# get_deps()=None, então o caminho de religar propriamente é coberto pelo teste de core set_ai.
+_asyncio.run(_alogic.reactivate_ai_after_close(_alogic.get_protocolo(_orf_proto["id"])))
+check("reactivate_ai_after_close(órfão) não levanta", True)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
@@ -1518,6 +3389,9 @@ check("inbox default seeded (id=1)", _inbox_seeded == 1)
 _ci = _ci_repo.get_or_create(inbox_id=1, contact_id=_cid,
                              source_id=f"{_cid}@s.whatsapp.net")
 _conv1 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+# Índice parcial uq_atend_open_contact_inbox (migration 0036): no máximo UMA
+# conversa ABERTA por (contato, inbox) — fecha a 1ª antes de criar a 2ª.
+_conv_repo.set_status(_conv1["id"], "closed")
 _conv2 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
 check("conversation_repo.create -> display_id sequencial",
       _conv2["display_id"] == _conv1["display_id"] + 1)
@@ -1529,6 +3403,14 @@ check("GET /api/conversations -> 200", r.status_code == 200)
 _convs = r.json()["data"]["conversations"]
 check("list -> includes created convs + contact_name join",
       len(_convs) >= 2 and "contact_name" in _convs[0])
+
+# plano 50 F8 — o row enriquecido carrega tags + atributos + avatar do CONTATO, para o
+# sidebar conversa-first filtrar/renderizar sem um fetch de contatos à parte + has_more.
+check("F8: row enriquecido traz contact_tags", "contact_tags" in _convs[0])
+check("F8: row enriquecido traz contact_custom_attributes (dict)",
+      isinstance(_convs[0].get("contact_custom_attributes"), dict))
+check("F8: row enriquecido traz avatar_v", "avatar_v" in _convs[0])
+check("F8: lista de atendimentos devolve has_more", "has_more" in r.json()["data"])
 
 r = client.get(f"/api/conversations/{_conv1['id']}")
 check("GET /api/conversations/{id} -> 200", r.status_code == 200)
@@ -1587,6 +3469,10 @@ _imrepo.set_inboxes_for_user(_at["id"], [1])
 r = client.post(f"/api/contacts/{_scope_phone}/send",
                 json={"message": "oi agora vai", "conversation_id": _conv2["id"]}, headers=_h_att)
 check("send (membro da inbox) -> 200", r.status_code == 200)
+# Envio manual autenticado carimba o nome do operador (exibido no lugar de "Manual").
+_att_last = message_repo.get_last(_cid)
+check("send (autenticado) -> persiste sent_by_name do operador",
+      _att_last.get("sent_by_name") == "A2")
 # Sem read_all e membro só da inbox 1: enviar para conversa de OUTRA inbox bloqueia.
 from db.repositories import inbox_repo as _ibx_repo
 if _chrepo.get("scope_ch") is None:
@@ -1618,7 +3504,8 @@ check("GET /contacts/{phone} (inbox não-membro) -> 404", r.status_code == 404)
 _imrepo.set_inboxes_for_user(_at["id"], [])  # limpa para não afetar testes seguintes
 
 # ── plano 10 Onda 0: assign-me, ai, agent, info, contact→conversation ──
-# Usuário admin vivo (o _admin original foi deletado num teste anterior)
+# Segundo admin, com sessão própria (_mgrtok), para exercitar assign-me/ai como
+# um operador distinto do admin default da suíte.
 _mgr = _urepo2.create(email="mgr@test.com", name="Mgr",
                       password_hash=_hpa2("supersecret"), role_keys=["admin"])
 _mgrtok = client.post("/api/auth/login",
@@ -1627,7 +3514,7 @@ r = client.post(f"/api/conversations/{_conv2['id']}/assign-me",
                 headers={"Authorization": f"Bearer {_mgrtok}"})
 check("POST assign-me (admin) -> 200 + assignee=eu",
       r.status_code == 200 and r.json()["data"]["conversation"]["assignee_user_id"] == _mgr["id"])
-r = client.post(f"/api/conversations/{_conv2['id']}/assign-me")
+r = anon.post(f"/api/conversations/{_conv2['id']}/assign-me")
 check("POST assign-me sem auth -> 401", r.status_code == 401)
 
 # reopen: resolver limpa o assignee; reabrir (status=open) deixa a conversa SEM
@@ -1739,6 +3626,49 @@ check("private_note NÃO reabre conversa closed",
       _conv_repo.get(_live_conv["id"])["status"] == "closed")
 _conv_repo.set_status(_live_conv["id"], "open")  # restaura p/ os testes seguintes
 
+# ── Regra "ignorar abertura": contato NOVO que casa a regex NÃO abre atendimento ──
+# (create_closed): a conversa nasce FECHADA — mensagem salva/visível, sem atendimento
+# aberto nem card de sistema. reopen=None/True seguem criando ABERTA.
+_ci_new = _ci_repo.get_or_create(inbox_id=1, contact_id=_cid,
+                                 source_id=f"{_cid}@s.whatsapp.net")
+_jid_new = f"{_cid}@s.whatsapp.net"
+# fecha qualquer conversa aberta do par p/ o próximo resolve ver "nenhuma aberta"... na
+# verdade create só olha get_latest; usamos um contato NOVO dedicado p/ isolar o caso.
+_skc_new = contact_repo.get_or_create("5500011199999")  # contato novo, sem conversa
+_ci_skn = _ci_repo.get_or_create(inbox_id=1, contact_id=_skc_new["id"],
+                                 source_id=f"{_skc_new['id']}@s.whatsapp.net")
+_conv_closed, _ev_closed = _conv_repo.resolve_for_contact_ex(
+    _skc_new["id"], f"{_skc_new['id']}@s.whatsapp.net", create_closed=True)
+check("create_closed: contato novo -> conversa FECHADA", _conv_closed["status"] == "closed")
+check("create_closed: sem transição 'created' (sem card)", _ev_closed is None)
+# control: contato novo diferente sem create_closed -> ABERTA (comportamento inalterado)
+_skc_open = contact_repo.get_or_create("5500011188888")
+_conv_open, _ev_open = _conv_repo.resolve_for_contact_ex(
+    _skc_open["id"], f"{_skc_open['id']}@s.whatsapp.net", create_closed=False)
+check("control: sem create_closed -> conversa ABERTA", _conv_open["status"] == "open")
+check("control: transição 'created'", _ev_open == "created")
+# wiring via ContactMemory: ensure_conversation_live('user', reopen=False) -> fechada,
+# add_message('user', reopen=False) mantém fechada (batch re-resolve a MESMA thread).
+_cm_skip = _CM("5500011177777")  # contato novo
+_conv_id_skip = _cm_skip.ensure_conversation_live("user", False)
+check("ensure_conversation_live(reopen=False) -> cria conversa", _conv_id_skip is not None)
+check("ensure_conversation_live(reopen=False) -> FECHADA",
+      _conv_repo.get(_conv_id_skip)["status"] == "closed")
+_cm_skip.add_message("user", "não abrir proto", reopen=False)
+check("add_message(reopen=False) mantém a MESMA conversa fechada",
+      _conv_repo.get(_conv_id_skip)["status"] == "closed")
+with _get_engine().connect() as _conn:
+    _skip_msg = _conn.execute(
+        _sa_select(_msgs_t.c.conversation_id).where(_msgs_t.c.contact_id == _cm_skip.id)
+        .where(_msgs_t.c.role == "user").order_by(_msgs_t.c.id.desc()).limit(1)).scalar()
+check("mensagem ignorada fica salva e vinculada à conversa fechada",
+      _skip_msg == _conv_id_skip)
+# control via memória: contato novo, reopen=None (regra padrão) -> ABERTA
+_cm_norm = _CM("5500011166666")
+_conv_id_norm = _cm_norm.ensure_conversation_live("user", None)
+check("control memória: reopen=None -> conversa ABERTA",
+      _conv_repo.get(_conv_id_norm)["status"] == "open")
+
 # Fatia 2: gate ai_active por conversa
 from server.routes.webhook import _conversation_ai_active as _ai_gate
 check("gate ai_active default True (ai_active=1)", _ai_gate(_cm) is True)
@@ -1757,6 +3687,8 @@ section("Planos 16-20 (apagar, IA por conversa, atributos de sistema)")
 
 # ── P17: desligar IA entrega a conversa a quem desligou + zera agente; ligar
 #    rebinda o agente default e limpa o responsável humano (IA assume) ──
+# uq_atend_open_contact_inbox: fecha a conversa aberta do par antes de criar outra.
+_conv_repo.set_status(_conv2["id"], "closed")
 _p17 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
 _conv_repo.set_assignee(_p17["id"], _mgr["id"])  # responsável humano + agente default
 # Operador autenticado desliga a IA -> assume a conversa.
@@ -1772,12 +3704,260 @@ _d2 = r.json()["data"]["conversation"]
 check("P17 ai on -> ai_active=1", _d2["ai_active"] == 1)
 check("P17 ai on -> religa agente default", _d2["active_agent_key"] == "default")
 check("P17 ai on -> limpa responsável humano (IA assume)", _d2["assignee_user_id"] is None)
-# Legacy/open (sem identidade de operador) cai em "Não atribuídas".
+# Sem operador (automação / serviço interno) o "desligar IA" não tem a quem
+# atribuir → cai em "Não atribuídas". Via HTTP isso não é mais alcançável (o gate
+# has_users exige sessão de usuário — plano 48 F0), então exercemos a política de
+# transferência direto no serviço com actor_id=None.
+_conv_repo.set_status(_p17["id"], "closed")  # 1 aberta por (contato, inbox)
 _p17b = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
 _conv_repo.set_assignee(_p17b["id"], _mgr["id"])
-r = client.post(f"/api/conversations/{_p17b['id']}/ai", json={"active": False})
-_db17 = r.json()["data"]["conversation"]
-check("P17 ai off (sem auth) -> Não atribuídas", _db17["assignee_user_id"] is None)
+from app.services import conversation_service as _csvc_p17
+_db17 = _asyncio.run(_csvc_p17.set_ai(app.state.deps, _conv_repo.get(_p17b["id"]), 0,
+                                      actor_id=None, actor_name=None))
+check("P17 ai off (sem operador) -> Não atribuídas", _db17["assignee_user_id"] is None)
+
+# ── set_ai(clear_transfer_tag): religar a IA mantendo a tag (usado pelo fechar-
+#    protocolo). Default=True remove a tag; False preserva o rótulo. ──
+from app.services import conversation_service as _csvc
+from agent.tools.transfer_to_human import TRANSFER_TAG as _TT
+try:
+    tag_repo.create(_TT, "#ef4444")
+except Exception:  # noqa: BLE001 — tag pode já existir
+    pass
+# (a) clear_transfer_tag=False -> IA religa (agente default, assignee limpo) e a tag FICA.
+_conv_repo.set_status(_p17b["id"], "closed")  # 1 aberta por (contato, inbox)
+_ctk = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv_repo.set_assignee(_ctk["id"], _mgr["id"])  # humano assume
+_conv_repo.set_ai_active(_ctk["id"], 0)
+tag_repo.add_contact_tag(_cid, _TT)
+_ktag = _asyncio.run(_csvc.set_ai(
+    app.state.deps, _conv_repo.get(_ctk["id"]), 1, clear_transfer_tag=False))
+check("clear_transfer_tag=False -> ai_active=1", bool(_ktag) and _ktag["ai_active"] == 1)
+check("clear_transfer_tag=False -> agente default religado", _ktag["active_agent_key"] == "default")
+check("clear_transfer_tag=False -> assignee humano limpo", _ktag["assignee_user_id"] is None)
+check("clear_transfer_tag=False -> tag transferido_atendente PRESERVADA",
+      _TT in tag_repo.get_contact_tags(_cid))
+# (b) default (clear_transfer_tag=True) -> religa E remove a tag (regressão do plano 29 A5).
+_conv_repo.set_status(_ctk["id"], "closed")
+_ctk2 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv_repo.set_assignee(_ctk2["id"], _mgr["id"])
+_conv_repo.set_ai_active(_ctk2["id"], 0)
+tag_repo.add_contact_tag(_cid, _TT)
+_asyncio.run(_csvc.set_ai(app.state.deps, _conv_repo.get(_ctk2["id"]), 1))
+check("clear_transfer_tag default=True -> tag removida",
+      _TT not in tag_repo.get_contact_tags(_cid))
+
+# ── P66: o header "Atribuir a mim" / "Atribuída a você" roteia pelo toggle /ai
+#    (setConversationAi → set_ai). Assumir DESLIGA a IA e atribui ao operador;
+#    devolver RELIGA a IA, limpa o responsável e remove a tag de transferência. ──
+_conv_repo.set_status(_ctk2["id"], "closed")  # 1 aberta por (contato, inbox)
+_p66 = _conv_repo.create(inbox_id=1, contact_id=_cid, contact_inbox_id=_ci["id"])
+_conv_repo.set_ai_active(_p66["id"], 1)        # nasce com IA ligada, sem humano
+tag_repo.add_contact_tag(_cid, _TT)            # simula transferência prévia p/ humano
+# "Atribuir a mim" no header -> POST /ai {active:false} como o operador logado.
+r = client.post(f"/api/conversations/{_p66['id']}/ai", json={"active": False},
+                headers={"Authorization": f"Bearer {_mgrtok}"})
+check("P66 header assumir -> 200", r.status_code == 200)
+_h66 = r.json()["data"]["conversation"]
+check("P66 header assumir -> IA desligada", _h66["ai_active"] == 0)
+check("P66 header assumir -> conversa atribuída ao operador", _h66["assignee_user_id"] == _mgr["id"])
+check("P66 header assumir -> agente ativo limpo", not _h66["active_agent_key"])
+# "Atribuída a você" no header -> POST /ai {active:true} devolve à IA.
+r = client.post(f"/api/conversations/{_p66['id']}/ai", json={"active": True},
+                headers={"Authorization": f"Bearer {_mgrtok}"})
+check("P66 header devolver -> 200", r.status_code == 200)
+_h66b = r.json()["data"]["conversation"]
+check("P66 header devolver -> IA religada", _h66b["ai_active"] == 1)
+check("P66 header devolver -> responsável humano limpo", _h66b["assignee_user_id"] is None)
+check("P66 header devolver -> agente default re-vinculado", _h66b["active_agent_key"] == "default")
+check("P66 header devolver -> tag transferido_atendente removida",
+      _TT not in tag_repo.get_contact_tags(_cid))
+
+# ── A IA se auto-desligando (transfer_to_human) emite o card "SISTEMA pausou a IA" ──
+from server import system_notices as _sysn
+_txf_cm = _CM("5500011177777")
+_txf_conv = _txf_cm.ensure_conversation_live("user", None)
+_asyncio.run(app.state.deps.broadcast_tool_calls(
+    "5500011177777",
+    [{"tool": "transfer_to_human", "args": {"reason": "cliente pediu humano"}}],
+    channel_id="default"))
+check("transfer_to_human -> card ai_off emitido no fio",
+      _sysn.has_event(_txf_conv, "ai_off") is True)
+# Tool comum (sem transfer) NÃO cria card ai_off (guarda contra falso positivo).
+_txf_cm2 = _CM("5500011188888")
+_txf_conv2 = _txf_cm2.ensure_conversation_live("user", None)
+_asyncio.run(app.state.deps.broadcast_tool_calls(
+    "5500011188888", [{"tool": "save_contact_info", "args": {}}], channel_id="default"))
+check("tool comum (sem transfer) -> nenhum card ai_off",
+      _sysn.has_event(_txf_conv2, "ai_off") is False)
+# Autor do card: ação MANUAL (usuário) usa o nome; ação AUTOMÁTICA (sem actor) usa "SISTEMA".
+check("ai_on manual -> nome do usuário",
+      _sysn.FORMATTERS["ai_on"](actor="Fulano") == "🤖 Fulano reativou a IA.")
+check("ai_on automático -> SISTEMA",
+      _sysn.FORMATTERS["ai_on"](actor=None) == "🤖 SISTEMA reativou a IA.")
+check("ai_off manual -> nome do usuário",
+      _sysn.FORMATTERS["ai_off"](actor="Fulano") == "🤖 Fulano pausou a IA.")
+check("ai_off automático -> SISTEMA",
+      _sysn.FORMATTERS["ai_off"](actor=None) == "🤖 SISTEMA pausou a IA.")
+
+# ═══════════════════════════════════════════════════════════════════
+#  Atribuição de agente por mensagem ("IA - <NOME>" / "Ferramenta IA - <NOME>")
+# ═══════════════════════════════════════════════════════════════════
+section("Atribuição de agente nas mensagens")
+from db.repositories import agent_repo as _ar
+# (0) resolver agent_key -> display_name (com fallbacks)
+_ar.ensure("attr_ag", display_name="Agente Atributo")
+_ar.ensure("attr_ag_vazio", display_name="")
+check("display_name_for -> nome do agente",
+      _ar.display_name_for("attr_ag") == "Agente Atributo")
+check("display_name_for(display_name vazio) -> fallback para a chave",
+      _ar.display_name_for("attr_ag_vazio") == "attr_ag_vazio")
+check("display_name_for(inexistente) -> None",
+      _ar.display_name_for("nao_existe_xyz") is None)
+check("display_name_for(None) -> None", _ar.display_name_for(None) is None)
+
+# (1) message_repo.add persiste agent_key e _row_to_dict o expõe
+_attr_cm = _CM("5500019200001")
+_attr_conv = _attr_cm.ensure_conversation_live("user", None)
+_attr_msg = message_repo.add(_attr_cm.id, "assistant", "resposta da IA",
+                             conversation_id=_attr_conv, agent_key="attr_ag")
+check("message_repo.add -> retorna agent_key", _attr_msg.get("agent_key") == "attr_ag")
+_attr_rows = message_repo.get_by_conversation(_attr_conv)
+_attr_ai = [m for m in _attr_rows if m.get("role") == "assistant"]
+check("_row_to_dict expõe agent_key na mensagem persistida",
+      bool(_attr_ai) and _attr_ai[-1].get("agent_key") == "attr_ag")
+
+# (2) GET /messages enriquece com agent_name (display_name resolvido)
+r = client.get(f"/api/atendimentos/{_attr_conv}/messages")
+check("GET /messages -> 200", r.status_code == 200)
+_gm = [m for m in r.json()["data"]["messages"]
+       if m.get("role") == "assistant" and m.get("agent_key") == "attr_ag"]
+check("GET /messages -> assistant carrega agent_name resolvido",
+      bool(_gm) and _gm[-1].get("agent_name") == "Agente Atributo")
+
+# (3) broadcast_tool_calls carimba o agent_key no card de tool
+_attr_cm2 = _CM("5500019200002")
+_attr_conv2 = _attr_cm2.ensure_conversation_live("user", None)
+_asyncio.run(app.state.deps.broadcast_tool_calls(
+    "5500019200002", [{"tool": "save_contact_info", "args": {}}],
+    channel_id="default", agent_key="attr_ag"))
+_tc_rows = [m for m in message_repo.get_by_conversation(_attr_conv2)
+            if m.get("role") == "tool_call"]
+check("broadcast_tool_calls -> card tool_call carimbado com agent_key",
+      bool(_tc_rows) and _tc_rows[-1].get("agent_key") == "attr_ag")
+r = client.get(f"/api/atendimentos/{_attr_conv2}/messages")
+_gtc = [m for m in r.json()["data"]["messages"] if m.get("role") == "tool_call"]
+check("GET /messages -> tool_call carrega agent_name",
+      bool(_gtc) and _gtc[-1].get("agent_name") == "Agente Atributo")
+
+# (4) config show_agent_name: default True, exposto e gravável
+_cfg = client.get("/api/config").json()["data"]
+check("config expõe show_agent_name default True", _cfg.get("show_agent_name") is True)
+r = client.put("/api/config", json={"show_agent_name": False})
+check("PUT /config show_agent_name=False -> 200", r.status_code == 200)
+check("config show_agent_name persiste False",
+      client.get("/api/config").json()["data"].get("show_agent_name") is False)
+client.put("/api/config", json={"show_agent_name": True})  # restaura o default
+
+# ══════════════════════════════════════════════════════════════════════
+#  Caracterização do fluxo de chat (plano 50 F2) — fixa o comportamento
+#  ATUAL antes de paginar (F3/F4). O baseline "traz tudo" é a asserção que
+#  a F3 vai mudar de forma CONSCIENTE.
+# ══════════════════════════════════════════════════════════════════════
+section("Chat: caracterização pré-paginação (plano 50 F2)")
+
+from server.pagination import PAGE_MSGS as _PAGE_MSGS  # cap de página do chat (50)
+
+_pg_cm = _CM("5500050000001")
+_pg_conv = _pg_cm.ensure_conversation_live("user", None)
+# >120 mensagens nesta conversa (alterna user/assistant p/ ter ambos os papéis).
+# ts realista/crescente a partir de agora: em produção id e ts crescem juntos (msgs
+# inseridas em ordem temporal) — o keyset (cursor por id, order by ts,id) DEPENDE disso.
+_PG_TOTAL = 130
+_pg_base = time.time()
+for _i in range(_PG_TOTAL):
+    _role = "user" if _i % 2 == 0 else "assistant"
+    message_repo.add(_pg_cm.id, _role, f"msg-{_i:03d}",
+                     conversation_id=_pg_conv, ts=_pg_base + _i)
+# O repo com limit=None traz TUDO (caminho legado byte-idêntico p/ callers internos):
+# minhas 130 + o card conversation_event 'created' emitido na criação.
+_pg_rows = message_repo.get_by_conversation(_pg_conv)
+_pg_repo_total = len(_pg_rows)
+check("F2: repo com limit=None traz TUDO (caminho legado intacto)",
+      _pg_repo_total >= _PG_TOTAL, f"esperava >= {_PG_TOTAL}, veio {_pg_repo_total}")
+
+# F3: o ENDPOINT agora pagina — devolve a PÁGINA mais recente (PAGE_MSGS) + has_more.
+r = client.get(f"/api/atendimentos/{_pg_conv}/messages?mark_read=false")
+check("F3: GET /messages -> 200", r.status_code == 200)
+_pg_data = r.json()["data"]
+# Shape: `messages` na raiz do data + `has_more` (novo).
+check("F3: shape -> `messages` na raiz do data", isinstance(_pg_data.get("messages"), list))
+check("F3: shape -> `has_more` presente", "has_more" in _pg_data)
+_pg_msgs = _pg_data["messages"]
+check("F3: página recente tem PAGE_MSGS msgs (não a thread inteira)",
+      len(_pg_msgs) == _PAGE_MSGS, f"esperava {_PAGE_MSGS}, veio {len(_pg_msgs)}")
+check("F3: conversa longa -> has_more=True", _pg_data["has_more"] is True)
+# Ordem cronológica (ts crescente) DENTRO da página — invariante preservada.
+_pg_ts = [m.get("ts") or 0 for m in _pg_msgs]
+check("F3: página em ordem cronológica (ts crescente)", _pg_ts == sorted(_pg_ts))
+check("F3: session_open presente na resposta", "session_open" in _pg_data)
+
+# Caminhada keyset (F3 "Pronto quando"): before_id = menor id da página → anteriores.
+# Reconstrói a thread inteira sem duplicar nem pular.
+_pg_collected = list(_pg_msgs)
+_pg_before = min(m["_id"] for m in _pg_msgs)
+_pg_guard = 0
+# Guarda proporcional ao total (cada página traz >=1 msg): sobrevive a PAGE_MSGS pequeno
+# (ex.: valor de QA temporário) sem estourar antes de reconstruir a thread inteira.
+while _pg_data["has_more"] and _pg_guard < _pg_repo_total + 5:
+    _pg_guard += 1
+    r = client.get(f"/api/atendimentos/{_pg_conv}/messages"
+                   f"?mark_read=false&limit={_PAGE_MSGS}&before_id={_pg_before}")
+    _pg_data = r.json()["data"]
+    _page = _pg_data["messages"]
+    check(f"F3 keyset: página before_id={_pg_before} não-vazia", len(_page) > 0)
+    _pg_collected = _page + _pg_collected  # prepend (mais antigas na frente)
+    if _page:
+        _pg_before = min(m["_id"] for m in _page)
+_pg_ids = [m["_id"] for m in _pg_collected]
+check("F3 keyset: reconstruiu a thread inteira (sem dup/gap)",
+      len(_pg_ids) == _pg_repo_total and len(set(_pg_ids)) == _pg_repo_total,
+      f"coletado={len(_pg_ids)} unico={len(set(_pg_ids))} repo={_pg_repo_total}")
+check("F3 keyset: última página -> has_more=False", _pg_data["has_more"] is False)
+_pg_all_mine = [m["content"] for m in _pg_collected if str(m.get("content", "")).startswith("msg-")]
+check("F3 keyset: minhas 130 msgs todas presentes e em ordem",
+      _pg_all_mine == [f"msg-{i:03d}" for i in range(_PG_TOTAL)],
+      f"veio {len(_pg_all_mine)} msgs minhas")
+
+# Conversa CURTA (< PAGE_MSGS): devolve tudo + has_more=False. Nº de msgs proporcional
+# ao PAGE_MSGS (deixa folga p/ o card conversation_event caber na mesma página) —
+# robusto a um PAGE_MSGS pequeno (valor de QA temporário).
+_pg_short_n = max(1, _PAGE_MSGS - 2)
+_pg_short_cm = _CM("5500050000003")
+_pg_short_conv = _pg_short_cm.ensure_conversation_live("user", None)
+for _i in range(_pg_short_n):
+    message_repo.add(_pg_short_cm.id, "user", f"s-{_i}",
+                     conversation_id=_pg_short_conv, ts=time.time() + _i)
+_r_short = client.get(f"/api/atendimentos/{_pg_short_conv}/messages?mark_read=false").json()["data"]
+check("F3: conversa curta -> has_more=False", _r_short["has_more"] is False)
+check("F3: conversa curta -> devolve todas (<= PAGE_MSGS)",
+      len(_r_short["messages"]) <= _PAGE_MSGS and len(_r_short["messages"]) >= _pg_short_n)
+
+# Caminho legado GET /api/contacts/{phone} também pagina (all-channels merge).
+_r_cpath = client.get("/api/contacts/5500050000001?mark_read=false").json()["data"]
+check("F3: /api/contacts/{phone} pagina (página recente <= PAGE_MSGS)",
+      len(_r_cpath["messages"]) == _PAGE_MSGS)
+check("F3: /api/contacts/{phone} devolve has_more", _r_cpath.get("has_more") is True)
+
+# mark_read=false não zera o badge de não-lidas (comportamento preservado por F3).
+_pg_cm2 = _CM("5500050000002")
+_pg_conv2 = _pg_cm2.ensure_conversation_live("user", None)
+message_repo.add(_pg_cm2.id, "user", "oi", conversation_id=_pg_conv2, ts=2_000_000)
+_before = client.get(f"/api/atendimentos/{_pg_conv2}").json()["data"]["conversation"].get("unread_count", 0)
+client.get(f"/api/atendimentos/{_pg_conv2}/messages?mark_read=false")
+_after = client.get(f"/api/atendimentos/{_pg_conv2}").json()["data"]["conversation"].get("unread_count", 0)
+check("F2: mark_read=false NÃO altera unread_count", _before == _after,
+      f"antes={_before} depois={_after}")
 
 # ── P16: apagar conversa (mantém contato + outras conversas; some com as msgs) ──
 _cmdel = _CM("5500077766655")
@@ -1790,6 +3970,9 @@ with _get_engine().connect() as _conn:
         .order_by(_msgs_t.c.id.desc()).limit(1)).scalar()
 _ciB = _ci_repo.get_or_create(inbox_id=1, contact_id=_cmdel.id,
                               source_id=f"{_cmdel.id}@s.whatsapp.net")
+# A conversa A (aberta pelo add_message acima) e a B não podem estar abertas ao
+# mesmo tempo no mesmo par (uq_atend_open_contact_inbox) — fecha a A antes.
+_conv_repo.set_status(_convA_id, "closed")
 _convB = _conv_repo.create(inbox_id=1, contact_id=_cmdel.id, contact_inbox_id=_ciB["id"])
 r = client.delete(f"/api/conversations/{_convA_id}")
 check("P16 DELETE conversa -> 200", r.status_code == 200)
@@ -1806,46 +3989,125 @@ check("P16 DELETE -> contato preservado", _contact_left == _cmdel.id)
 r = client.delete("/api/conversations/999999")
 check("P16 DELETE conversa inexistente -> 404", r.status_code == 404)
 
-# ── P19: atributo de sistema (CPF) semeado, idempotente e protegido ──
+# ── P19: atributos padrão semeados (CPF/Email/Profissão/Empresa/Endereço) ──
+# Agora são seeds EDITÁVEIS e DELETÁVEIS (is_system=0): vêm por padrão mas o
+# usuário pode renomear/apagar. A trava is_system=1 ainda existe no código e é
+# coberta logo abaixo com um atributo sintético.
 from db.system_attributes import seed_system_attributes as _seed_sys
 from db.repositories import custom_attribute_repo as _cad_repo
 _seed_sys()
-_cpf = _cad_repo.get_definitions_map("contact").get("cpf")
-check("P19 seed -> CPF criado is_system=1", _cpf is not None and _cpf.get("is_system") == 1)
+_dmap = _cad_repo.get_definitions_map("contact")
+check("P19 seed -> CPF criado is_system=0 (editável/deletável)",
+      _dmap.get("cpf") is not None and _dmap["cpf"].get("is_system") == 0)
+check("P19 seed -> defaults Email/Profissão/Empresa/Endereço presentes",
+      {"email", "profession", "company", "address"} <= set(_dmap.keys()))
+_cpf = _dmap.get("cpf")
 _seed_sys()  # 2ª chamada deve ser no-op
 _cpf2 = _cad_repo.get_definitions_map("contact").get("cpf")
 check("P19 seed idempotente (mesmo id)", bool(_cpf2) and _cpf2["id"] == _cpf["id"])
-r = client.delete(f"/api/custom-attributes/{_cpf['id']}")
-check("P19 DELETE atributo de sistema -> 400", r.status_code == 400)
-# rename guard (plano 19 §5): mudar key/scope de um atributo de sistema -> 400
-r = client.put(f"/api/custom-attributes/{_cpf['id']}", json={"attribute_key": "cpf_novo"})
-check("P19 PUT renomear atributo de sistema -> 400", r.status_code == 400)
+# Default editável: renomear display_name -> 200; apagar -> 200 (não é protegido).
 r = client.put(f"/api/custom-attributes/{_cpf['id']}", json={"display_name": "CPF do cliente"})
+check("P19 PUT editar display_name de default -> 200", r.status_code == 200)
+r = client.delete(f"/api/custom-attributes/{_cpf['id']}")
+check("P19 DELETE default (CPF) -> 200 (deletável)", r.status_code == 200)
+
+# Trava is_system=1 ainda funciona: cria um atributo de sistema sintético e
+# confirma que DELETE e rename de key/scope são bloqueados (400).
+_locked = _cad_repo.create_definition(
+    attribute_key="sys_locked", display_name="Travado", applies_to="contact",
+    is_system=1)
+r = client.delete(f"/api/custom-attributes/{_locked['id']}")
+check("P19 DELETE atributo de sistema (is_system=1) -> 400", r.status_code == 400)
+r = client.put(f"/api/custom-attributes/{_locked['id']}", json={"attribute_key": "outro"})
+check("P19 PUT renomear atributo de sistema (is_system=1) -> 400", r.status_code == 400)
+r = client.put(f"/api/custom-attributes/{_locked['id']}", json={"display_name": "Travado 2"})
 check("P19 PUT editar display_name de atributo de sistema -> 200", r.status_code == 200)
 
 # ── P22: motor único (config-in-DB) — sem espelhamento, invariante do default ──
-from db.repositories import agent_repo as _agent_repo, prompt_repo as _prompt_repo
-from agent.agent_factory import DEFAULT_PROMPT_KEY as _DPK
+from db.repositories import agent_repo as _agent_repo
 _def_agent = _agent_repo.get("default")
 check("P22 agente 'default' semeado", _def_agent is not None)
 check("P22 default tem modelo não-vazio",
       bool(dict((_def_agent or {}).get("model_config") or {}).get("model")))
 check("P22 default usa todas as tools core (tool_names None)",
       (_def_agent or {}).get("tool_names") is None)
-# Editar agente/prompt default já NÃO espelha em config (config não tem mais essas chaves).
+check("P22 default tem prompt inline (semeado)",
+      bool((_def_agent or {}).get("prompt")))
+# Editar agente default já NÃO espelha em config (config não tem mais essas chaves).
+# O prompt agora é inline no próprio agente (sem tabela de prompts reutilizáveis).
 client.put("/api/ai/agents/default", json={
-    "display_name": "Agente padrão", "prompt_key": "default",
+    "display_name": "Agente padrão",
+    "prompt": "Prompt inline do agente default",
     "model_config": {"model": "anthropic/claude-sonnet-4-6"}})
+_saved = _agent_repo.get("default") or {}
 check("P22 default model salvo no DB",
-      dict((_agent_repo.get("default") or {}).get("model_config") or {}).get("model") == "anthropic/claude-sonnet-4-6")
+      dict(_saved.get("model_config") or {}).get("model") == "anthropic/claude-sonnet-4-6")
+check("P22 default prompt inline salvo no DB",
+      _saved.get("prompt") == "Prompt inline do agente default")
 check("P22 config NÃO ganha chave 'model'",
       "model" not in client.get("/api/config").json()["data"])
-client.put("/api/ai/prompts/default", json={"body": "Prompt via aba Prompts"})
-check("P22 prompt default salvo no DB",
-      (_prompt_repo.get(_DPK) or {}).get("body") == "Prompt via aba Prompts")
+# Patch dedicado de prompt (usado pelo wizard): grava o prompt e preserva os demais campos.
+client.put("/api/ai/agents/default/prompt", json={"prompt": "Prompt via wizard"})
+_after = _agent_repo.get("default") or {}
+check("P22 PUT /agents/default/prompt grava o prompt inline",
+      _after.get("prompt") == "Prompt via wizard")
+check("P22 PUT /agents/default/prompt preserva o modelo",
+      dict(_after.get("model_config") or {}).get("model") == "anthropic/claude-sonnet-4-6")
 check("P22 config NÃO ganha chave 'system_prompt'",
       "system_prompt" not in client.get("/api/config").json()["data"])
-# Invariante do agente default (Fase 5): não pode ser desativado nem excluído.
+# Plano 36: is_default (padrão de novas conversas) trafega pelo endpoint (save/get) e
+# é radio — marcar um novo rebaixa o anterior. O patch só-prompt preserva a flag.
+client.put("/api/ai/agents/p36e_a", json={
+    "display_name": "P36 A", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": True, "is_default": True})
+_p36 = {a["agent_key"]: a for a in client.get("/api/ai/agents").json()["data"]}
+check("P36 GET expõe is_default=True no agente marcado", _p36.get("p36e_a", {}).get("is_default") is True)
+client.put("/api/ai/agents/p36e_b", json={
+    "display_name": "P36 B", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": True, "is_default": True})
+_p36 = {a["agent_key"]: a for a in client.get("/api/ai/agents").json()["data"]}
+check("P36 marcar B como padrão rebaixa A (radio)", _p36.get("p36e_a", {}).get("is_default") is False)
+check("P36 B é o novo padrão", _p36.get("p36e_b", {}).get("is_default") is True)
+client.put("/api/ai/agents/p36e_b/prompt", json={"prompt": "novo prompt"})
+check("P36 patch só-prompt preserva is_default",
+      (_agent_repo.get("p36e_b") or {}).get("is_default") is True)
+client.delete("/api/ai/agents/p36e_a")
+# ── Fix agente-padrão (2026-07): a trava de excluir/desativar é SEMÂNTICA ──
+# O fallback atual do sistema (o is_default habilitado, ou o 'default' legado
+# sem marcação) é intocável; qualquer outro — inclusive o 'default' — sai.
+r = client.delete("/api/ai/agents/p36e_b")
+check("fix padrão: excluir o agente marcado (fallback atual) -> 400",
+      r.status_code == 400)
+r = client.put("/api/ai/agents/default", json={
+    "display_name": "Agente padrão", "prompt_key": "default",
+    "model_config": {"model": "anthropic/claude-sonnet-4-6"}, "enabled": False})
+check("fix padrão: desativar 'default' com outro padrão marcado -> 200",
+      r.status_code == 200)
+check("fix padrão: 'default' ficou desabilitado",
+      not (_agent_repo.get("default") or {}).get("enabled"))
+r = client.put("/api/ai/agents/p36e_tmp_off", json={
+    "display_name": "Tmp", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": False, "is_default": True})
+check("fix padrão: marcar is_default num agente desabilitado -> 400",
+      r.status_code == 400)
+# Desmarcar o padrão exige o piso legado vivo: com 'default' desabilitado -> 400.
+r = client.put("/api/ai/agents/p36e_b", json={
+    "display_name": "P36 B", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": True, "is_default": False})
+check("fix padrão: desmarcar sem piso legado habilitado -> 400",
+      r.status_code == 400)
+# Reabilita o 'default' → desmarcar passa a valer, e o ex-padrão vira excluível.
+client.put("/api/ai/agents/default", json={
+    "display_name": "Agente padrão", "prompt_key": "default",
+    "model_config": {"model": "anthropic/claude-sonnet-4-6"}, "enabled": True})
+r = client.put("/api/ai/agents/p36e_b", json={
+    "display_name": "P36 B", "model_config": {"model": "openai/gpt-4o-mini"},
+    "enabled": True, "is_default": False})
+check("fix padrão: desmarcar com piso legado vivo -> 200", r.status_code == 200)
+r = client.delete("/api/ai/agents/p36e_b")
+check("fix padrão: excluir o ex-padrão desmarcado -> 200", r.status_code == 200)
+# Invariante do agente default (Fase 5, agora semântico): sem nenhum is_default
+# marcado o 'default' legado É o fallback — não pode ser desativado nem excluído.
 r = client.put("/api/ai/agents/default", json={
     "display_name": "Agente padrão", "prompt_key": "default",
     "model_config": {"model": "anthropic/claude-sonnet-4-6"}, "enabled": False})
@@ -1859,6 +4121,31 @@ client.put("/api/ai/agents/p22_tmp", json={
     "model_config": {"model": "openai/gpt-4o-mini"}, "enabled": True})
 r = client.delete("/api/ai/agents/p22_tmp")
 check("P22 excluir agente não-default -> 200", r.status_code == 200)
+
+# ── P31 F6 (A1): backend valida o nome da variável (só {identificador} renderiza) ──
+r = client.put("/api/ai/variables/p31_nome_valido", json={"value": "acme"})
+check("P31 PUT variável válida -> 200", r.status_code == 200)
+# P31 F7 (A2): coluna morta 'category' removida de API/repo/schema (migration 0037).
+check("P31 resposta do PUT sem 'category'",
+      "category" not in (r.json().get("data") or {}))
+_v31 = next((v for v in client.get("/api/ai/variables").json()["data"]
+             if v["name"] == "p31_nome_valido"), None)
+check("P31 GET variables lista a criada", _v31 is not None)
+check("P31 GET variables sem campo 'category'",
+      _v31 is not None and "category" not in _v31)
+r = client.put("/api/ai/variables/nome-invalido", json={"value": "x"})
+check("P31 PUT variável com hífen -> 400", r.status_code == 400)
+r = client.put("/api/ai/variables/1comeca_numero", json={"value": "x"})
+check("P31 PUT variável começando por número -> 400", r.status_code == 400)
+r = client.put("/api/ai/variables/" + "a" * 65, json={"value": "x"})
+check("P31 PUT variável nome >64 chars -> 400", r.status_code == 400)
+r = client.put("/api/ai/variables/p31_x%0A", json={"value": "x"})
+check("P31 PUT variável com newline final (%0A) -> 400", r.status_code == 400)
+r = client.get("/api/ai/variables")
+check("P31 variável inválida não foi persistida",
+      not any(v["name"] == "nome-invalido" for v in r.json()["data"]))
+r = client.delete("/api/ai/variables/p31_nome_valido")
+check("P31 DELETE variável -> 200", r.status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15h-bis. Avisos de sistema no chat (plano 12)
@@ -1996,7 +4283,7 @@ _sn.emit_conversation_notice(event_type="ai_takeover", conversation_id=_snconv["
                              contact_id=_sncm.id, phone=_sn_phone)
 check("ai_takeover emitido -> has_event True", _sn.has_event(_snconv["id"], "ai_takeover") is True)
 check("ai_takeover -> card 'IA assumiu'",
-      any("IA assumiu o atendimento" in c for c in _notices(_snconv["id"])))
+      any("IA assumiu a conversa" in c for c in _notices(_snconv["id"])))
 
 # (l) exclusões: conversation_event fora do contexto do LLM
 _snctx = _sn_msg_repo.get_context(_sncm.id, 200)
@@ -2037,6 +4324,26 @@ _open_get = client.get("/api/conversations/filter?status=open").json()["data"]["
 r = client.post("/api/conversations/filter", json={
     "filters": [{"attribute_key": "status", "filter_operator": "equal_to", "values": ["open"]}]})
 check("POST filter (Chatwoot payload) == GET", r.json()["data"]["count"] == _open_get)
+
+# Paginação (plano 50 D) — o filtro devolve has_more e caminha por offset sem dup/gap.
+_all = client.get("/api/conversations/filter?limit=200").json()["data"]["conversations"]
+_all_ids = [c["id"] for c in _all]
+if 2 <= len(_all_ids) < 200:
+    _p1 = client.get("/api/conversations/filter?limit=1&offset=0").json()["data"]
+    check("filter?limit=1 -> has_more True", _p1.get("has_more") is True)
+    check("filter?limit=1 -> 1 item", len(_p1["conversations"]) == 1)
+    # Caminha todas as páginas de 1 em 1 e reconstrói o universo sem duplicar.
+    _walked, _off = [], 0
+    while True:
+        _pg = client.get(f"/api/conversations/filter?limit=1&offset={_off}").json()["data"]
+        _rows = _pg["conversations"]
+        _walked += [c["id"] for c in _rows]
+        if not _pg.get("has_more") or not _rows:
+            break
+        _off += len(_rows)
+    check("filter offset walk cobre o universo (ordem/sem dup)", _walked == _all_ids)
+_big = client.get("/api/conversations/filter?limit=99999").json()["data"]
+check("filter?limit=99999 -> capado (<=200)", len(_big["conversations"]) <= 200)
 
 # Adversariais → 400
 check("filter?drop_table=1 -> 400 (dim desconhecida)",
@@ -2090,7 +4397,6 @@ check("GET agent history -> 200", r.status_code == 200)
 _hist = r.json()["data"]
 check("agent history -> >=2 versões, mais nova primeiro",
       len(_hist) >= 2 and _hist[0]["version"] > _hist[1]["version"])
-_v_a = next(h["version"] for h in _hist if True)  # latest is 'Agente B'
 # rollback para a versão de "Agente A" (a penúltima salva)
 _target = sorted(h["version"] for h in _hist)[-2]
 r = client.post(f"/api/ai/agents/default/rollback/{_target}")
@@ -2134,6 +4440,110 @@ check("rollback restaura is_router", r.json()["data"]["is_router"] is True)
 check("rollback restaura routing_targets", r.json()["data"]["routing_targets"] == ["vendas"])
 check("rollback restaura hooks_config",
       r.json()["data"]["hooks_config"] == {"buscar_pedido": {"call_limit": 2}})
+
+# ═══════════════════════════════════════════════════════════════════
+#  15j-bis. AI Engine — dedicated prompt version trail (git-like)
+# ═══════════════════════════════════════════════════════════════════
+section("AI Engine prompt trail")
+
+_pk = "promptver"
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado", "prompt": "Linha 1\nLinha 2",
+    "model_config": {"model": "x"}, "enabled": True})
+check("create agent c/ prompt -> 200", r.status_code == 200)
+
+
+def _ptrail():
+    return client.get(f"/api/ai/agents/{_pk}/prompt/history").json()["data"]
+
+
+_t0 = _ptrail()
+check("prompt trail tem v1 inicial", len(_t0) >= 1)
+_base = len(_t0)
+
+# Muda só o display_name → trilha do prompt NÃO cresce (dedup do record)
+client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Linha 1\nLinha 2",
+    "model_config": {"model": "x"}, "enabled": True})
+check("save só display_name -> trilha do prompt não cresce", len(_ptrail()) == _base)
+
+# Save idêntico → dedup do agente (não bumpa versão) + trilha não cresce
+_vbefore = client.get(f"/api/ai/agents/{_pk}").json()["data"]["version"]
+client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Linha 1\nLinha 2",
+    "model_config": {"model": "x"}, "enabled": True})
+check("save idêntico -> agente não bumpa versão",
+      client.get(f"/api/ai/agents/{_pk}").json()["data"]["version"] == _vbefore)
+check("save idêntico -> trilha do prompt não cresce", len(_ptrail()) == _base)
+
+# Muda o prompt → cria versão na trilha, com change_note
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Linha 1\nLinha 2 alterada\nLinha 3",
+    "model_config": {"model": "x"}, "enabled": True, "change_note": "ajuste de tom"})
+check("save muda prompt -> 200", r.status_code == 200)
+_t1 = _ptrail()
+check("prompt trail cresceu", len(_t1) == _base + 1)
+check("trilha newest-first", _t1[0]["version"] > _t1[1]["version"])
+check("change_note gravado e exposto", _t1[0]["note"] == "ajuste de tom")
+check("history enriquecido (added/removed)",
+      "added_lines" in _t1[0] and "removed_lines" in _t1[0])
+
+_newv = _t1[0]["version"]
+_oldv = _t1[-1]["version"]
+r = client.get(f"/api/ai/agents/{_pk}/prompt/history/{_newv}")
+check("GET prompt version -> 200 c/ prompt completo",
+      r.status_code == 200 and "Linha 3" in r.json()["data"]["prompt"])
+r = client.get(f"/api/ai/agents/{_pk}/prompt/history/9999")
+check("GET prompt version inexistente -> 404", r.status_code == 404)
+
+r = client.get(f"/api/ai/agents/{_pk}/prompt/diff", params={"from": _oldv, "to": _newv})
+check("GET prompt diff -> 200", r.status_code == 200)
+_d = r.json()["data"]
+check("diff unified_diff não vazio", bool(_d["unified_diff"]))
+check("diff conta added_lines", _d["added_lines"] >= 1)
+check("diff tem lines estruturadas", isinstance(_d["lines"], list) and len(_d["lines"]) > 0)
+r = client.get(f"/api/ai/agents/{_pk}/prompt/diff", params={"from": _oldv, "to": 9999})
+check("diff versão inexistente -> 404", r.status_code == 404)
+
+r = client.post(f"/api/ai/agents/{_pk}/prompt/restore/{_oldv}")
+check("POST prompt restore -> 200", r.status_code == 200)
+check("restore restaura o prompt antigo",
+      client.get(f"/api/ai/agents/{_pk}").json()["data"]["prompt"] == "Linha 1\nLinha 2")
+check("restore cria nova versão na trilha", len(_ptrail()) == _base + 2)
+
+r = client.post(f"/api/ai/agents/{_pk}/prompt/restore/9999")
+check("restore versão inexistente -> 404", r.status_code == 404)
+
+# version_mode="amend" → sobrescreve a última versão da trilha (não cresce)
+_before_amend = _ptrail()
+_topv = _before_amend[0]["version"]
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Prompt sobrescrito",
+    "model_config": {"model": "x"}, "enabled": True,
+    "change_note": "amend nota", "version_mode": "amend"})
+check("amend -> 200", r.status_code == 200)
+_after_amend = _ptrail()
+check("amend não cria nova versão na trilha", len(_after_amend) == len(_before_amend))
+check("amend mantém o número da versão", _after_amend[0]["version"] == _topv)
+check("amend sobrescreve o prompt vivo",
+      client.get(f"/api/ai/agents/{_pk}").json()["data"]["prompt"] == "Prompt sobrescrito")
+r = client.get(f"/api/ai/agents/{_pk}/prompt/history/{_topv}")
+check("amend sobrescreve o texto da versão",
+      r.json()["data"]["prompt"] == "Prompt sobrescrito")
+check("amend grava a nova nota", r.json()["data"]["note"] == "amend nota")
+
+# version_mode="new" (default) → volta a criar nova versão
+_before_new = _ptrail()
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "Mais uma alteração",
+    "model_config": {"model": "x"}, "enabled": True, "version_mode": "new"})
+check("version_mode=new cria nova versão", len(_ptrail()) == len(_before_new) + 1)
+
+# version_mode inválido → 400
+r = client.put(f"/api/ai/agents/{_pk}", json={
+    "display_name": "Versionado 2", "prompt": "x",
+    "model_config": {"model": "x"}, "enabled": True, "version_mode": "zzz"})
+check("version_mode inválido -> ok=False", r.json()["ok"] is False)
 
 r = client.post(f"/api/conversations/{_live_conv['id']}/agent", json={"agent_key": "default"})
 check("POST /conversations/{id}/agent -> 200", r.status_code == 200)
@@ -2197,6 +4607,44 @@ check("GET /usage/contact -> has records", len(detail) >= 2)
 r = client.get("/api/usage/contact/0000000000")
 check("GET /usage/contact/0000 -> empty", r.json()["data"] == [])
 
+# plano 50 F9 — paginação de usage (envelope só com `limit`; sem ele = lista legada).
+r = client.get("/api/usage/by-contact?limit=1&offset=0")
+_ub = r.json()["data"]
+check("F9: by-contact?limit -> envelope {items,total,has_more}",
+      isinstance(_ub, dict) and "items" in _ub and "total" in _ub and "has_more" in _ub)
+check("F9: by-contact página respeita limit", len(_ub["items"]) <= 1)
+check("F9: by-contact ordenado por custo desc (top gastadores)",
+      _ub["total"] >= 1)
+# by_type da página vem preenchido (não perdido pela paginação).
+if _ub["items"]:
+    check("F9: by-contact item da página traz by_type", "by_type" in _ub["items"][0])
+# Caminhar as páginas cobre o total sem dup.
+_seen, _o, _g = set(), 0, 0
+while _g < 200:
+    _g += 1
+    _p = client.get(f"/api/usage/by-contact?limit=2&offset={_o}").json()["data"]
+    for _it in _p["items"]:
+        _seen.add(_it["phone"])
+    if not _p["has_more"]:
+        break
+    _o += 2
+check("F9: by-contact paginação cobre o total", len(_seen) == _p["total"],
+      f"vistos={len(_seen)} total={_p['total']}")
+# detail paginado
+r = client.get("/api/usage/contact/5511999990001?limit=1&offset=0")
+_ud = r.json()["data"]
+check("F9: contact/{phone}?limit -> envelope", isinstance(_ud, dict) and "items" in _ud)
+check("F9: contact detail respeita limit", len(_ud["items"]) <= 1)
+check("F9: contact detail total >= 2", _ud["total"] >= 2)
+# sem limit -> lista legada (retrocompat)
+check("F9: by-contact sem limit continua lista",
+      isinstance(client.get("/api/usage/by-contact").json()["data"], list))
+check("F9: contact detail sem limit continua lista",
+      isinstance(client.get("/api/usage/contact/5511999990001").json()["data"], list))
+# summary global intacto (não paginado)
+check("F9: summary segue com total_tokens (agregado intacto)",
+      "total_tokens" in client.get("/api/usage/summary").json()["data"])
+
 # Executions writer (Onda 0): agent_key/total_tokens/total_cost_usd were created
 # in migration 0007 but never populated. Verify the new writer accumulates them.
 _exec_id = execution_repo.create("5511999990001", "test")
@@ -2237,6 +4685,15 @@ r = client.get("/api/webhook-payloads")
 check("GET /api/webhook-payloads -> 200", r.status_code == 200)
 check("GET /api/webhook-payloads -> is list", isinstance(r.json()["data"], list))
 
+# plano 50 F1 — limit livre é capado por clamp_limit (?limit=99999 nunca > cap 200)
+r = client.get("/api/webhook-payloads?limit=99999")
+check("GET /api/webhook-payloads?limit=99999 -> 200", r.status_code == 200)
+check("GET /api/webhook-payloads?limit=99999 -> <= cap 200", len(r.json()["data"]) <= 200)
+r = client.get("/api/executions?limit=99999")
+check("GET /api/executions?limit=99999 -> 200", r.status_code == 200)
+check("GET /api/executions?limit=99999 -> items <= cap 200",
+      len(r.json()["data"]["items"]) <= 200)
+
 # ═══════════════════════════════════════════════════════════════════
 #  19. Webhook (incoming message simulation)
 # ═══════════════════════════════════════════════════════════════════
@@ -2268,6 +4725,36 @@ r = client.post("/api/webhook/gowa/default", json={
                 "receipt_type": "read"},
 })
 check("POST /webhook (ack) -> 200", r.status_code == 200)
+
+# Inbound edit (cliente edita a própria mensagem): reflete no DB + broadcast.
+_inb_cid = contact_repo.get_full_contact("5511999990001")["id"]
+message_repo.add(_inb_cid, "user", "texto do cliente", msg_id="WAMID_INB_EDIT_1")
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message.edited",
+    "payload": {
+        "id": "WAMID_INB_EDIT_1",
+        "original_message_id": "WAMID_INB_EDIT_1",
+        "from": "5511999990001@s.whatsapp.net",
+        "chat_id": "5511999990001@s.whatsapp.net",
+        "body": "texto editado pelo cliente",
+    },
+})
+check("POST /webhook (edited) -> 200", r.status_code == 200)
+_ie = message_repo.get_by_msg_id("WAMID_INB_EDIT_1")
+check("webhook edited -> content atualizado no DB",
+      bool(_ie) and _ie.get("content") == "texto editado pelo cliente")
+check("webhook edited -> edited_ts setado", bool(_ie) and _ie.get("edited_ts"))
+
+# Inbound revoke (cliente apaga pra todos): mensagem fica flagged revoked.
+message_repo.add(_inb_cid, "user", "vou apagar", msg_id="WAMID_INB_REV_1")
+r = client.post("/api/webhook/gowa/default", json={
+    "event": "message.revoked",
+    "payload": {"revoked_message_id": "WAMID_INB_REV_1",
+                "chat_id": "5511999990001@s.whatsapp.net"},
+})
+check("POST /webhook (revoked) -> 200", r.status_code == 200)
+_ir = message_repo.get_by_msg_id("WAMID_INB_REV_1")
+check("webhook revoked -> flagged revoked no DB", bool(_ir) and bool(_ir.get("revoked")))
 
 # Reply-quote extraction from inbound payloads (GOWA nests this inconsistently).
 from server.routes.webhook import _extract_reply_to as _ext_reply
@@ -2417,6 +4904,26 @@ check("inbox-por-canal: fake_ch ganha inbox própria",
       _fake_inbox["channel_id"] == "fake_ch" and _fake_inbox["id"] != 1)
 check("inbox_repo.get_by_channel(default) -> inbox 1",
       (_inbox11.get_by_channel("default") or {}).get("id") == 1)
+
+# plano 33: GET /api/channels/providers devolve DESCRIPTORS (não só nomes), só dos
+# providers registrados, com a forma que o frontend genérico consome.
+_pr = client.get("/api/channels/providers")
+check("GET /channels/providers -> 200", _pr.status_code == 200)
+_prov_list = _pr.json().get("data", {}).get("providers", [])
+_prov_by = {d.get("provider"): d for d in _prov_list if isinstance(d, dict)}
+check("providers -> lista de descriptors (dicts, não strings)",
+      bool(_prov_list) and all(isinstance(d, dict) for d in _prov_list))
+_test_desc = _prov_by.get("test")
+check("providers -> inclui o provider 'test' registrado", _test_desc is not None)
+check("descriptor 'test' tem a forma base (label + credential_fields + capabilities)",
+      _test_desc is not None
+      and "label" in _test_desc
+      and isinstance(_test_desc.get("credential_fields"), list)
+      and isinstance(_test_desc.get("capabilities"), dict))
+check("providers -> required_credentials é um dict por provider",
+      isinstance(_pr.json()["data"].get("required_credentials"), dict))
+check("providers -> provider NÃO registrado não aparece",
+      "provider_que_nao_existe" not in _prov_by)
 
 # OutboundRouter: capability gating + routing + missing channel
 check("router caps fake (media on, presence off)",
@@ -2621,6 +5128,26 @@ _tsm = _tg.send_media("555", "image", "https://x/y.jpg", caption="cap")
 check("telegram send_media(url) -> sendPhoto com link no campo photo",
       _tg_calls[-1][0] == "sendPhoto" and _tg_calls[-1][1].get("photo") == "https://x/y.jpg")
 
+# plano 64 — a zona "Arquivo" do drop tem de chegar como ARQUIVO no Telegram.
+# Sem `disable_content_type_detection`, o servidor do Telegram detecta o .mp4
+# e o exibe com player, tornando a zona indistinguível da de vídeo.
+_tg_mp4 = os.path.join(_tmpdir, "clipe_tg.mp4")
+with open(_tg_mp4, "wb") as _f:
+    _f.write(b"\x00\x00\x00\x18ftypmp42")
+_tg.send_media("555", "document", _tg_mp4, caption="cap", filename="clipe.mp4")
+check("telegram send_media(document) -> sendDocument",
+      _tg_calls[-1][0] == "sendDocument")
+check("telegram sendDocument -> desliga a detecção de tipo do servidor",
+      _tg_calls[-1][1].get("disable_content_type_detection") == "true")
+check("telegram sendDocument -> nome original preservado",
+      (_tg_calls[-1][2] or {}).get("document", (None,))[0] == "clipe.mp4")
+
+_tg.send_media("555", "video", _tg_mp4, caption="cap")
+check("telegram send_media(video) -> sendVideo (zona foto/vídeo intacta)",
+      _tg_calls[-1][0] == "sendVideo")
+check("telegram sendVideo -> NÃO manda o flag de documento",
+      "disable_content_type_detection" not in (_tg_calls[-1][1] or {}))
+
 # Token ausente -> erro limpo, sem rede (nunca derruba o core)
 _tg_noTok = _TelegramChannel("tg2")
 check("telegram sem token -> status missing_bot_token",
@@ -2724,7 +5251,29 @@ check("gowa parse: ack normalizado -> 1 receipt por id, status=read",
       len(_acks) == 2 and all(a.kind == "receipt" and a.media_extras.get("status") == "read" for a in _acks))
 check("gowa parse: revoked", _pgi({"event": "message.revoked", "payload": {
     "revoked_message_id": "v1", "chat_id": "5511@s.whatsapp.net"}})[0].kind == "revoked")
+_ged = _pgi({"event": "message.edited", "payload": {
+    "id": "e1", "original_message_id": "e1", "body": "novo texto",
+    "chat_id": "5511@s.whatsapp.net"}})[0]
+check("gowa parse: edited -> kind edited",
+      _ged.kind == "edited" and _ged.text == "novo texto"
+      and _ged.media_extras.get("original_message_id") == "e1")
 check("gowa parse: evento desconhecido -> []", _pgi({"event": "nope", "payload": {}}) == [])
+
+# Telegram: edited_message vira um evento "edited" (não uma msg nova).
+_tg_mod = _load_provider("tg_edit_test", "assets/plugin_examples/telegram/channels.py")
+_tg_ch = _tg_mod.TelegramChannel("t_edit", credentials={"bot_token": "1:x"})
+_tg_new = _tg_ch.parse_inbound({"message": {
+    "message_id": 55, "date": 1, "text": "original",
+    "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
+check("telegram parse: message normal -> kind message",
+      len(_tg_new) == 1 and _tg_new[0].kind == "message")
+_tg_ed = _tg_ch.parse_inbound({"edited_message": {
+    "message_id": 55, "date": 2, "text": "editado",
+    "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
+check("telegram parse: edited_message -> kind edited",
+      len(_tg_ed) == 1 and _tg_ed[0].kind == "edited"
+      and _tg_ed[0].text == "editado"
+      and _tg_ed[0].media_extras.get("original_message_id") == "55")
 
 # ── ingest_event honra os campos GOWA (via fake_ch, channel-agnostic) ──
 settings.set("message_batch_delay", 0)
@@ -2828,6 +5377,62 @@ check("HTTP gowa: reaction -> 200 + handled", r.status_code == 200
 check("HTTP gowa: canal inexistente -> 200 ignored",
       client.post("/api/webhook/gowa/nao_existe", json={"event": "message", "payload": {}}).status_code == 200)
 
+# ── Escopo do som de mensagem nova: o payload diz de QUEM é a conversa ─────────
+# O painel só toca (e só mostra o pop-up) quando a conversa é do atendente logado
+# ou não tem dono nenhum. A decisão é client-side (shouldNotifyNewMessage), mas
+# depende destes dois campos virem no broadcast do ingest — é o que se testa aqui.
+_deps_snd = app.state.deps
+_orig_snd_bcast = _deps_snd.ws_manager.broadcast
+_snd_msgs = []
+
+
+async def _capture_new_message(event, data):
+    if event == "new_message" and (data.get("message") or {}).get("role") == "user":
+        _snd_msgs.append(data["message"])
+    return await _orig_snd_bcast(event, data)
+
+
+def _inbound_capture(phone: str, msg_id: str):
+    """POST inbound pela rota real capturando os `new_message` de role user."""
+    _snd_msgs.clear()
+    _deps_snd.ws_manager.broadcast = _capture_new_message
+    try:
+        client.post("/api/webhook/gowa/default", json={
+            "event": "message", "payload": {
+                "from": f"{phone}@s.whatsapp.net", "id": msg_id, "body": "escopo do som",
+                "from_name": "Cliente Som"}})
+    finally:
+        _deps_snd.ws_manager.broadcast = _orig_snd_bcast
+    # O t=0 (não-autoritativo) é o que dispara som/pop-up no painel.
+    return next((m for m in _snd_msgs if not m.get("authoritative")), None)
+
+
+# `assignee_user_id` é NULLABLE e SEM FK (db/tables.py) — aqui basta um id qualquer:
+# o que se verifica é o campo chegar no payload, não a existência do usuário.
+_snd_uid = 4242
+_snd_phone = "5511707070055"
+_contact11.get_or_create(_snd_phone)
+_contact11.update(_contact11.get_by_phone(_snd_phone)["id"], ai_enabled=0)
+
+_m0 = _inbound_capture(_snd_phone, "gw_som_1")
+check("new_message (t=0) carrega assignee_user_id", _m0 is not None and "assignee_user_id" in _m0)
+check("new_message (t=0) carrega active_agent_key", _m0 is not None and "active_agent_key" in _m0)
+
+# Atribuída a alguém → o payload carrega o dono, e só ele toca no painel.
+_snd_conv = _conv11.get(_m0["conversation_id"]) if _m0 else None
+if _snd_conv:
+    _conv11.set_assignee(_snd_conv["id"], _snd_uid)
+_m1 = _inbound_capture(_snd_phone, "gw_som_2")
+check("new_message -> assignee_user_id reflete o atendente da conversa",
+      _m1 is not None and _m1.get("assignee_user_id") == _snd_uid)
+
+# Sem atendente → assignee nulo (o painel toca para todos, se também não houver IA).
+if _snd_conv:
+    _conv11.set_assignee(_snd_conv["id"], None)
+_m2 = _inbound_capture(_snd_phone, "gw_som_3")
+check("new_message -> sem atendente devolve assignee_user_id nulo",
+      _m2 is not None and _m2.get("assignee_user_id") is None)
+
 # ── Conversa-cêntrico (plano 11 D1): leitura + unread + saída POR CONVERSA ──
 section("Conversa-cêntrico (plano 11 D1)")
 
@@ -2889,6 +5494,33 @@ check("mark_conversation_read: zera só a conversa lida",
       (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) == 0)
 check("mark_conversation_read: NÃO zera a conversa do outro canal (D1)",
       (_conv11.get_with_channel(_cf["id"]) or {}).get("unread_count", 0) >= 1)
+
+# Plano 49 — "marcar como não lida" POR CONVERSA (simétrico ao read, isolado por canal).
+# _cd acabou de ser lido (unread_count==0); _cf segue não-lido. Marcar _cd como não lida
+# NÃO pode reacender/afetar _cf (o bug: os endpoints por-contato acendiam as duas).
+_run = client.post(f"/api/atendimentos/{_cd['id']}/unread")
+check("POST /api/atendimentos/{id}/unread -> 200", _run.status_code == 200)
+check("POST conv unread -> marked=True", (_run.json().get("data") or {}).get("marked") is True)
+check("mark_conversation_unread: reacende só a conversa marcada",
+      (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) >= 1)
+check("mark_conversation_unread: NÃO afeta a conversa do outro canal",
+      (_conv11.get_with_channel(_cf["id"]) or {}).get("unread_count", 0) >= 1)
+# Idempotente: 2ª chamada é no-op (unread_msg_ids não tem unique — não pode inflar/duplicar)
+_before_cnt = (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0)
+_run2 = client.post(f"/api/atendimentos/{_cd['id']}/unread")
+check("POST conv unread idempotente -> marked=False",
+      (_run2.json().get("data") or {}).get("marked") is False)
+check("mark_conversation_unread idempotente: contador por conversa não muda",
+      (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) == _before_cnt)
+# Endpoint de leitura por conversa (menu de contexto "marcar como lida")
+_rrd = client.post(f"/api/atendimentos/{_cd['id']}/read")
+check("POST /api/atendimentos/{id}/read -> 200", _rrd.status_code == 200)
+check("conv read endpoint: zera só a conversa lida",
+      (_conv11.get_with_channel(_cd["id"]) or {}).get("unread_count", 0) == 0)
+check("conv read endpoint: NÃO zera o outro canal (D1)",
+      (_conv11.get_with_channel(_cf["id"]) or {}).get("unread_count", 0) >= 1)
+check("POST conv unread -> 404 em conversa inexistente",
+      client.post("/api/atendimentos/99999/unread").status_code == 404)
 
 # Envio do operador é CHANNEL-AWARE (plano 11): conversation_id do canal → sai PELO
 # canal, não pelo GOWA — exatamente o 2º bug (responder numa conversa Cloud ia pelo GOWA).
@@ -3002,6 +5634,17 @@ check("POST /sandbox/send (no phone) -> 400", r.status_code == 400)
 r = client.post("/api/sandbox/send", json={"phone": "test", "message": ""})
 check("POST /sandbox/send (no msg) -> 400", r.status_code == 400)
 
+# Sandbox video (plano 65) — stored locally, agent reacts to the caption.
+with patch.object(agent_handler, "aprocess_message",
+                  new=AsyncMock(return_value=ProcessResult(
+                      reply="Vi o vídeo", tool_calls=[]))):
+    r = client.post(
+        "/api/sandbox/send-video",
+        files={"video": ("clip.mp4", io.BytesIO(fake_mp4), "video/mp4")},
+        data={"phone": "sandbox_test", "caption": "olha isso"},
+    )
+    check("POST /sandbox/send-video -> 200", r.status_code == 200)
+
 r = client.post("/api/sandbox/clear", json={"phone": "sandbox_test"})
 check("POST /sandbox/clear -> 200", r.status_code == 200)
 
@@ -3013,7 +5656,7 @@ check("POST /sandbox/clear (all) -> 200", r.status_code == 200)
 # ═══════════════════════════════════════════════════════════════════
 section("Frontend SPA Routes")
 
-for path in ["/", "/contacts", "/dashboard", "/attendances", "/audit", "/sandbox", "/costs",
+for path in ["/", "/contacts", "/dashboard", "/protocolos", "/attendances", "/audit", "/sandbox", "/costs",
              "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/ai"]:
     r = client.get(path)
     check(f"GET {path} -> 200", r.status_code == 200)
@@ -3048,62 +5691,55 @@ check("GET /quick-replies/%2Fsaud (SPA) -> 200",
 check("GET /users/roles != user_id (SPA) -> 200", client.get("/users/roles").status_code == 200)
 
 # ═══════════════════════════════════════════════════════════════════
-#  23. Auth with password
+#  23. Auth enforcement — o gate da API/WS fecha quando existe ≥1 usuário
+#      (plano 48 F0 — substitui a antiga "Senha do Painel", já aposentada)
 # ═══════════════════════════════════════════════════════════════════
-section("Auth — With Password")
+section("Auth — enforcement (has_users)")
+import json as _json23
 
-# Set a password
-r = client.put("/api/config", json={"web_password": "mysecret123"})
-check("SET password -> 200", r.status_code == 200)
+# A suíte já criou um admin (bootstrap acima), então existe ≥1 usuário → o gate da
+# API está FECHADO: um request sem sessão de usuário válida é recusado pelo
+# middleware com 401, independentemente de qualquer senha de painel (aposentada).
+# `anon` não carrega token; `client` carrega a sessão de admin default.
+check("GET /api/config (no token) -> 401", anon.get("/api/config").status_code == 401)
+check("GET /api/channels (no token) -> 401", anon.get("/api/channels").status_code == 401)
+check("GET /api/users (no token) -> 401", anon.get("/api/users").status_code == 401)
 
-# Now auth should be required
-r = client.get("/api/auth/check")
+# /api/auth/check é isento do middleware, mas o handler ainda responde 401 quando
+# exige sessão e nenhuma é apresentada; carrega has_users=True.
+r = anon.get("/api/auth/check")
 check("GET /auth/check (no token) -> 401", r.status_code == 401)
+check("GET /auth/check -> has_users=true", (r.json().get("data") or {}).get("has_users") is True)
 
-# Os prefixos de deep-link (SPA) ficam abertos mesmo com senha, para o reload de
-# uma URL de entidade servir o index.html — mas a API equivalente segue protegida.
+# Prefixos de deep-link (SPA) ficam abertos mesmo sem token (o reload de uma URL de
+# entidade serve o index.html) — mas o /api/* equivalente segue protegido.
 check("GET /channels/default (SPA, no token) -> 200",
-      client.get("/channels/default").status_code == 200)
+      anon.get("/channels/default").status_code == 200)
 check("GET /ai/agents/default (SPA, no token) -> 200",
-      client.get("/ai/agents/default").status_code == 200)
-check("GET /api/channels (no token) -> 401 (API ainda protegida)",
-      client.get("/api/channels").status_code == 401)
+      anon.get("/ai/agents/default").status_code == 200)
 
-# Login
-r = client.post("/api/auth/login", json={"password": "mysecret123"})
-check("POST /auth/login -> 200", r.status_code == 200)
-token = r.json()["data"]["token"]
-check("POST /auth/login -> has token", len(token) > 0)
+# Endpoints isentos funcionam sem token.
+check("POST /webhook (auth exempt, no token) -> 200",
+      anon.post("/api/webhook/gowa/default", json={"event": "unknown"}).status_code == 200)
+check("GET /health (auth exempt, no token) -> 200", anon.get("/health").status_code == 200)
 
-# Check with token
-r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {token}"})
-check("GET /auth/check (valid token) -> 200", r.status_code == 200)
-check("GET /auth/check -> authenticated", r.json()["data"]["authenticated"] is True)
+# Com sessão de admin válida, o gate deixa passar.
+check("GET /api/config (admin session) -> 200", client.get("/api/config").status_code == 200)
 
-# Wrong password
-r = client.post("/api/auth/login", json={"password": "wrong"})
-check("POST /auth/login (wrong) -> 401", r.status_code == 401)
+# O gate do WebSocket espelha o do HTTP (plano 48 F0): sem ?token= o servidor aceita
+# e fecha com 4401; com sessão de usuário válida conecta e envia o status inicial.
+try:
+    with anon.websocket_connect("/ws") as _ws_noauth:
+        _ws_noauth.receive_text()
+    check("WS sem token -> fechado (4401)", False)  # never reached: gate must close it
+except Exception as _ws_exc:
+    # Assert the ACTUAL close code is 4401 (not merely "some exception") — a
+    # different code (4403/1008) or an unrelated error must fail this.
+    check("WS sem token -> fechado (4401)", getattr(_ws_exc, "code", None) == 4401)
 
-# API endpoint without auth (should be blocked)
-r = client.get("/api/config")
-check("GET /api/config (no auth) -> 401", r.status_code == 401)
-
-# API endpoint with auth
-r = client.get("/api/config", headers={"Authorization": f"Bearer {token}"})
-check("GET /api/config (with auth) -> 200", r.status_code == 200)
-
-# Webhook should be exempt from auth (live generic route, exempt via the
-# ``/api/webhook/`` prefix — the legacy exact ``/api/webhook`` route is retired).
-r = client.post("/api/webhook/gowa/default", json={"event": "unknown"})
-check("POST /webhook (auth exempt) -> 200", r.status_code == 200)
-
-# Health should be exempt
-r = client.get("/health")
-check("GET /health (auth exempt) -> 200", r.status_code == 200)
-
-# Remove password to not affect other tests
-r = client.put("/api/config", json={"web_password": ""}, headers={"Authorization": f"Bearer {token}"})
-check("REMOVE password -> 200", r.status_code == 200)
+with client.websocket_connect(f"/ws?token={_suite_admin_tok}") as _ws_ok:
+    _ws_first = _json23.loads(_ws_ok.receive_text())
+    check("WS com sessão de admin -> conecta (status inicial)", _ws_first.get("event") == "status")
 
 # ═══════════════════════════════════════════════════════════════════
 #  Audit trail (plano 07)
@@ -3215,6 +5851,111 @@ check("assign-agent kind=user sem user_id -> 400", r.status_code == 400)
 r = client.post(f"/api/conversations/{_cid}/assign-agent", json={"kind": "bogus"})
 check("assign-agent kind inválido -> 400", r.status_code == 400)
 
+# ── Alerta sonoro de transferência ENTRE atendentes (agent_transfer_alert) ──────
+# O backend emite `agent_transfer_alert` numa reatribuição PARA OUTRO humano; o
+# frontend filtra pelo usuário logado para tocar só na aba de quem recebeu. Config
+# global própria (agent_transfer_alert_enabled/_duration), independente do
+# alerta IA→humano.
+_deps_ata = app.state.deps
+_orig_ata_bcast = _deps_ata.ws_manager.broadcast
+_ata_events = []
+async def _capture_ata(event, data):
+    if event == "agent_transfer_alert":
+        _ata_events.append(data)
+    return await _orig_ata_bcast(event, data)
+
+# GET /api/config expõe as duas chaves novas com defaults.
+_cfg_ata = client.get("/api/config").json()["data"]
+check("config -> agent_transfer_alert_enabled default True",
+      _cfg_ata.get("agent_transfer_alert_enabled") is True)
+check("config -> agent_transfer_alert_duration default 5",
+      _cfg_ata.get("agent_transfer_alert_duration") == 5)
+
+# Transferência para OUTRO atendente → dispara o alerta direcionado. Exercitada no
+# SERVIÇO (actor != assignee): pelo HTTP o cliente de teste está logado como o
+# próprio `_admin_id`, o que seria auto-atribuição e nunca soaria.
+from app.services import conversation_service as _conv_svc
+
+config_repo.set("agent_transfer_alert_enabled", True)
+config_repo.set("agent_transfer_alert_duration", 7)
+
+
+def _assign_via_service(actor_id=None):
+    """Reatribui a conversa `_cid` capturando os broadcasts de alerta."""
+    _ata_events.clear()
+    _conv_ata = conversation_repo.get(_cid)
+    _deps_ata.ws_manager.broadcast = _capture_ata
+    try:
+        _asyncio.run(_conv_svc.assign(_deps_ata, _conv_ata, _admin_id, actor_id=actor_id))
+    finally:
+        _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+
+
+r = client.post(f"/api/conversations/{_cid}/assign", json={"assignee_user_id": _admin_id})
+check("assign p/ outro atendente -> 200", r.status_code == 200)
+_assign_via_service()
+check("assign p/ outro atendente -> agent_transfer_alert emitido",
+      any(e.get("assignee_user_id") == _admin_id for e in _ata_events))
+check("agent_transfer_alert -> carrega duration da config global",
+      any(e.get("duration") == 7 for e in _ata_events))
+
+# Auto-atribuição NÃO dispara o alerta (não é "de um atendente para outro"). Testado
+# no serviço: (a) assign_me sempre é auto-atribuição; (b) assign com actor==assignee.
+_ata_events.clear()
+_deps_ata.ws_manager.broadcast = _capture_ata
+try:
+    _conv_me = conversation_repo.resolve_for_contact(_alice["id"], "5511999990001@s.whatsapp.net")
+    _asyncio.run(_conv_svc.assign_me(_deps_ata, _conv_me, _admin_id))
+    check("assign_me -> sem agent_transfer_alert", len(_ata_events) == 0)
+    _conv_self = conversation_repo.resolve_for_contact(_alice["id"], "5511999990001@s.whatsapp.net")
+    _asyncio.run(_conv_svc.assign(_deps_ata, _conv_self, _admin_id, actor_id=_admin_id))
+    check("assign com actor==assignee -> sem agent_transfer_alert", len(_ata_events) == 0)
+finally:
+    _deps_ata.ws_manager.broadcast = _orig_ata_bcast
+
+# Toggle desligado → nenhum alerta, mesmo transferindo para outro atendente.
+config_repo.set("agent_transfer_alert_enabled", False)
+_assign_via_service()
+check("agent_transfer_alert desligado -> sem broadcast", len(_ata_events) == 0)
+config_repo.set("agent_transfer_alert_enabled", True)
+
+# Padrão da equipe (sound_settings) tem precedência sobre as keys legadas: é lá
+# que a aba "Notificações e sons" grava ativação/duração dos alertas.
+config_repo.set("sound_settings", {
+    "master_enabled": True,
+    "events": {"assigned_to_me": {"enabled": True, "duration": 11}},
+})
+_assign_via_service()
+check("sound_settings duration vence a key legada",
+      any(e.get("duration") == 11 for e in _ata_events))
+
+config_repo.set("sound_settings", {
+    "master_enabled": True,
+    "events": {"assigned_to_me": {"enabled": False}},
+})
+_assign_via_service()
+check("sound_settings enabled=False silencia mesmo com key legada ligada",
+      len(_ata_events) == 0)
+config_repo.set("sound_settings", {
+    "master_enabled": True,
+    "events": {"new_message": {"enabled": True, "sound": "ding", "volume": 0.6}},
+})
+
+# event_gate puro: sem o evento no padrão da equipe, o piso é a key legada.
+from server import sound_catalog as _sc
+check("event_gate: cai no legado quando o padrão não define",
+      _sc.event_gate({"events": {}}, "ia_to_human",
+                     legacy_enabled=True, legacy_duration=9) == (True, 9))
+check("event_gate: padrão da equipe vence o legado",
+      _sc.event_gate({"events": {"ia_to_human": {"enabled": False, "duration": 12}}},
+                     "ia_to_human", legacy_enabled=True, legacy_duration=9) == (False, 12))
+check("event_gate: entrada corrompida cai no legado (fail-open)",
+      _sc.event_gate("lixo", "ia_to_human",
+                     legacy_enabled=False, legacy_duration=4) == (False, 4))
+from channels import ai_settings as _ai_settings_mod
+check("ia_to_human deixou de ser per-canal",
+      "transfer_alert_enabled" not in _ai_settings_mod.PER_CHANNEL_AI_KEYS)
+
 # The enriched contact list now reflects Alice's open conversation.
 _alice_row = next((c for c in client.get("/api/contacts").json()["data"]
                    if c["phone"] == "5511999990001"), None)
@@ -3258,6 +5999,34 @@ finally:
     _deps_pres.ws_manager.broadcast = _orig_bcast
 check("chat_presence broadcast -> conversation_id None p/ contato sem conversa",
       (_captured_pres[-1] if _captured_pres else {}).get("conversation_id") is None)
+
+# "Fulano está digitando…" entre ATENDENTES: a rota de presença do operador reemite
+# o mesmo sinal como `operator_typing`, carimbado com quem digita, para os outros
+# painéis logados. Efêmero (só WS) e escopado pela conversa — mesma chave que o
+# indicador do cliente usa na linha da sidebar.
+_captured_op = []
+async def _capture_op(event, data):
+    if event == "operator_typing":
+        _captured_op.append(data)
+    return await _orig_bcast(event, data)
+_deps_pres.ws_manager.broadcast = _capture_op
+try:
+    r = client.post("/api/contacts/5511999990001/presence",
+                    json={"action": "start", "conversation_id": _cid})
+    r_stop = client.post("/api/contacts/5511999990001/presence",
+                         json={"action": "stop", "conversation_id": _cid})
+finally:
+    _deps_pres.ws_manager.broadcast = _orig_bcast
+check("POST /presence (start) -> 200", r.status_code == 200)
+_op = _captured_op[0] if _captured_op else {}
+check("operator_typing emitido no start", _op.get("active") is True)
+check("operator_typing -> conversation_id da conversa", _op.get("conversation_id") == _cid)
+check("operator_typing -> phone do contato", _op.get("phone") == "5511999990001")
+check("operator_typing -> identifica o atendente logado",
+      _op.get("user_id") is not None and bool(_op.get("user_name")))
+check("POST /presence (stop) -> 200", r_stop.status_code == 200)
+check("operator_typing -> active False no stop",
+      len(_captured_op) == 2 and _captured_op[1].get("active") is False)
 
 # ═══════════════════════════════════════════════════════════════════
 #  Summary
@@ -3315,6 +6084,19 @@ check("PUT conv labels -> 200 + snapshot",
       r.status_code == 200 and set(r.json()["data"]["labels"]) == {"Urgente", "VIP"})
 r = client.get(f"/api/conversations/{_conv2['id']}/labels")
 check("GET conv labels -> 2 etiquetas", r.status_code == 200 and len(r.json()["data"]["labels"]) == 2)
+
+# plano 50 F13 — batch de etiquetas: UMA request cobre N conversas.
+r = client.post("/api/atendimentos/labels-batch", json={"ids": [_conv2["id"], 999999]})
+check("F13: labels-batch -> 200", r.status_code == 200)
+_lb = r.json()["data"]["labels_by_conv"]
+check("F13: labels-batch traz as etiquetas da conversa",
+      {l["name"] for l in _lb.get(str(_conv2["id"]), [])} == {"Urgente", "VIP"})
+check("F13: labels-batch ids desconhecidos -> lista vazia",
+      _lb.get(str(999999), []) == [])
+check("F13: labels-batch ids não-lista -> erro",
+      client.post("/api/atendimentos/labels-batch", json={"ids": "x"}).json().get("ok") is False)
+check("F13: labels-batch sem ids -> vazio ok",
+      client.post("/api/atendimentos/labels-batch", json={}).json().get("ok") is True)
 check("PUT conv labels remove p/ snapshot menor",
       client.put(f"/api/conversations/{_conv2['id']}/labels", json={"labels": ["VIP"]}).json()["data"]["labels"] == ["VIP"])
 check("PUT conv labels ignora nome inexistente",
@@ -3385,6 +6167,7 @@ class _FakeTplChannel(_Ch):
         self.sent = []
         self.created = None
         self.deleted = None
+        self.uploaded = None
         self._tpls = [{
             "name": "boas_vindas", "language": "pt_BR", "category": "MARKETING",
             "status": "APPROVED", "components": [
@@ -3414,11 +6197,18 @@ class _FakeTplChannel(_Ch):
 
     def create_template(self, name, *, category, language, body_text,
                         header_text=None, footer_text=None,
-                        body_examples=None, header_examples=None):
+                        body_examples=None, header_examples=None,
+                        header_format=None, header_handle=None, buttons=None):
         self.created = {"name": name, "category": category, "language": language,
                         "body_text": body_text, "header_text": header_text,
-                        "footer_text": footer_text, "body_examples": body_examples}
+                        "footer_text": footer_text, "body_examples": body_examples,
+                        "header_format": header_format,
+                        "header_handle": header_handle, "buttons": buttons}
         return {"ok": True, "id": "TPLNEW", "status": "PENDING", "category": category}
+
+    def upload_example(self, file_bytes, mime, filename):
+        self.uploaded = {"size": len(file_bytes), "mime": mime, "filename": filename}
+        return {"ok": True, "handle": "4:fakehandle=="}
 
     def delete_template(self, name):
         self.deleted = name
@@ -3500,6 +6290,83 @@ check("create template canal sem suporte -> 400",
       client.post(f"/api/conversations/{_conv2['id']}/templates",
                   json={"name": "ok", "body_text": "x"}).status_code == 400)
 
+check("create template só-texto -> não manda mídia/botões (regressão)",
+      _fake_ch.created.get("header_format") is None
+      and _fake_ch.created.get("header_handle") is None
+      and _fake_ch.created.get("buttons") is None)
+
+# ── Cabeçalho de mídia + botões (plano 73) ──────────────────────────────
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/templates", json={
+    "name": "promo_midia", "category": "UTILITY", "body_text": "Olá!",
+    "header_format": "IMAGE", "header_handle": "4:abc==",
+    "buttons": [
+        {"type": "QUICK_REPLY", "text": "Falar com atendente"},
+        {"type": "URL", "text": "Rastrear", "url": "https://x/{{1}}", "example": "https://x/12"},
+        {"type": "PHONE_NUMBER", "text": "Ligar", "phone_number": "+5511999999999"},
+        {"type": "COPY_CODE", "example": "PROMO2026"},
+    ]})
+check("POST create template com mídia+botões -> 200", r.status_code == 200)
+check("create template -> canal recebeu header de mídia",
+      _fake_ch.created["header_format"] == "IMAGE"
+      and _fake_ch.created["header_handle"] == "4:abc==")
+check("create template -> botões normalizados (4 tipos, chaves por tipo)",
+      [b["type"] for b in _fake_ch.created["buttons"]]
+      == ["QUICK_REPLY", "URL", "PHONE_NUMBER", "COPY_CODE"]
+      and _fake_ch.created["buttons"][1]["example"] == ["https://x/12"]
+      and "text" not in _fake_ch.created["buttons"][3])
+check("create template header_format sem handle -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y",
+                        "header_format": "IMAGE"}).status_code == 400)
+check("create template header_format inválido -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "header_format": "AUDIO",
+                        "header_handle": "4:z"}).status_code == 400)
+check("create template botão de tipo desconhecido -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y",
+                        "buttons": [{"type": "FLOW", "text": "a"}]}).status_code == 400)
+check("create template 3 botões URL -> 400 (limite de mistura)",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "buttons": [
+                      {"type": "URL", "text": "a", "url": "https://a"},
+                      {"type": "URL", "text": "b", "url": "https://b"},
+                      {"type": "URL", "text": "c", "url": "https://c"}]}).status_code == 400)
+check("create template botão URL com {{1}} sem exemplo -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "buttons": [
+                      {"type": "URL", "text": "a", "url": "https://a/{{1}}"}]}).status_code == 400)
+check("create template texto de botão > 25 chars -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "buttons": [
+                      {"type": "QUICK_REPLY", "text": "x" * 26}]}).status_code == 400)
+check("create template buttons não-lista -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates",
+                  json={"name": "x", "body_text": "y", "buttons": "nope"}).status_code == 400)
+
+# Upload do exemplo de mídia (handle da Meta)
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/templates/upload-example",
+                files={"file": ("foto.png", b"\x89PNG fake bytes", "image/png")})
+check("POST upload-example (conv) -> 200 + handle", r.status_code == 200
+      and r.json()["data"]["handle"] == "4:fakehandle==")
+check("upload-example -> canal recebeu bytes/mime",
+      _fake_ch.uploaded and _fake_ch.uploaded["mime"] == "image/png"
+      and _fake_ch.uploaded["size"] > 0)
+check("upload-example MIME fora da whitelist -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates/upload-example",
+                  files={"file": ("a.exe", b"MZ", "application/x-msdownload")}
+                  ).status_code == 400)
+check("upload-example arquivo > 16 MiB -> 400",
+      client.post(f"/api/conversations/{_tpl_conv['id']}/templates/upload-example",
+                  files={"file": ("big.png", b"x" * (16 * 1024 * 1024 + 1), "image/png")}
+                  ).status_code == 400)
+check("upload-example canal sem templates -> 400",
+      client.post(f"/api/conversations/{_conv2['id']}/templates/upload-example",
+                  files={"file": ("foto.png", b"abc", "image/png")}).status_code == 400)
+check("upload-example conversa inexistente -> 404",
+      client.post("/api/conversations/999999/templates/upload-example",
+                  files={"file": ("foto.png", b"abc", "image/png")}).status_code == 404)
+
 r = client.delete(f"/api/conversations/{_tpl_conv['id']}/templates/pedido_ok")
 check("DELETE template -> 200", r.status_code == 200)
 check("delete template -> canal recebeu name", _fake_ch.deleted == "pedido_ok")
@@ -3565,6 +6432,33 @@ check("channel send-template sem template_name -> 400",
 check("channel send-template canal sem suporte (gowa) -> 400",
       client.post("/api/channels/default/send-template",
                   json={"phone": "5511", "template_name": "x"}).status_code == 400)
+
+# Criação estendida + upload de exemplo pelo canal (plano 73).
+r = client.post("/api/channels/cloud_test/templates", json={
+    "name": "canal_midia", "category": "UTILITY", "body_text": "Oi",
+    "header_format": "DOCUMENT", "header_handle": "4:doc==",
+    "buttons": [{"type": "QUICK_REPLY", "text": "Ok"}]})
+check("channel create template com mídia+botões -> 200", r.status_code == 200)
+check("channel create template -> canal recebeu mídia/botões",
+      _fake_ch.created["header_format"] == "DOCUMENT"
+      and _fake_ch.created["buttons"] == [{"type": "QUICK_REPLY", "text": "Ok"}])
+check("channel create template header_format inválido -> 400",
+      client.post("/api/channels/cloud_test/templates",
+                  json={"name": "x", "body_text": "y", "header_format": "AUDIO",
+                        "header_handle": "4:z"}).status_code == 400)
+r = client.post("/api/channels/cloud_test/templates/upload-example",
+                files={"file": ("foto.jpg", b"\xff\xd8 fake", "image/jpeg")})
+check("channel upload-example -> 200 + handle", r.status_code == 200
+      and r.json()["data"]["handle"] == "4:fakehandle==")
+check("channel upload-example MIME inválido -> 400",
+      client.post("/api/channels/cloud_test/templates/upload-example",
+                  files={"file": ("a.txt", b"x", "text/plain")}).status_code == 400)
+check("channel upload-example canal sem templates -> 400",
+      client.post("/api/channels/default/templates/upload-example",
+                  files={"file": ("foto.png", b"x", "image/png")}).status_code == 400)
+check("channel upload-example canal inexistente -> 404",
+      client.post("/api/channels/nao_existe/templates/upload-example",
+                  files={"file": ("foto.png", b"x", "image/png")}).status_code == 404)
 
 # ── WhatsAppCloudChannel.list_templates parsing (mock Graph API) ──
 section("WhatsApp Cloud — list_templates parsing (Frente C)")
@@ -3798,6 +6692,327 @@ check("send (cloud com inbound recente) -> 200 dentro da janela", r.status_code 
 # GOWA (session_window_hours=0) is never gated.
 r = client.post("/api/contacts/5511999990001/send", json={"message": "gowa livre"})
 check("send (gowa) -> não bloqueado pela janela 24h", r.status_code == 200)
+
+# ═══════════════════════════════════════════════════════════════════
+#  Account-identity dedup (plano 32) — create/update 409 enforcement
+# ═══════════════════════════════════════════════════════════════════
+section("Account-identity dedup (plano 32)")
+
+# The cloud/telegram plugins are DISABLED in the hermetic test app, so their
+# provider classes aren't registered — register them into the live registry now
+# (as production does when they're enabled) to exercise the generic dedup
+# enforcement end to end. Appended at the very end so it can't affect earlier tests.
+import importlib.util as _p32_ilu
+import sys as _p32_sys
+import types as _p32_types
+
+
+def _p32_load_provider(prov, clsname):
+    # Carrega o channels.py do plugin como PACOTE (whatsbot_plugins.<prov>), igual
+    # ao runtime — necessário porque providers como facebook_messenger importam a
+    # base RELATIVAMENTE (plano 76·F9: `from .meta_graph import …`). Harmless para
+    # quem não usa import relativo (whatsapp_cloud/telegram).
+    plugin_dir = Path(__file__).resolve().parent.parent / "assets" / "plugin_examples" / prov
+    if "whatsbot_plugins" not in _p32_sys.modules:
+        _parent = _p32_types.ModuleType("whatsbot_plugins")
+        _parent.__path__ = []
+        _p32_sys.modules["whatsbot_plugins"] = _parent
+    pkg_name = f"whatsbot_plugins.{prov}"
+    if pkg_name not in _p32_sys.modules:
+        _pkg = _p32_types.ModuleType(pkg_name)
+        _pkg.__path__ = [str(plugin_dir)]
+        _p32_sys.modules[pkg_name] = _pkg
+    full = f"{pkg_name}.channels"
+    spec = _p32_ilu.spec_from_file_location(full, plugin_dir / "channels.py")
+    m = _p32_ilu.module_from_spec(spec)
+    _p32_sys.modules[full] = m
+    spec.loader.exec_module(m)
+    return getattr(m, clsname)
+
+
+_p32_reg = app.state.deps.channel_registry
+_p32_reg.register_provider(_p32_load_provider("whatsapp_cloud", "WhatsAppCloudChannel"))
+_p32_reg.register_provider(_p32_load_provider("telegram", "TelegramChannel"))
+
+# plano 33: os providers reais agora aparecem no endpoint com descriptor completo
+# (credential_fields + capabilities + post_create) — a base do form dinâmico.
+_pr33 = client.get("/api/channels/providers").json()["data"]
+_by33 = {d["provider"]: d for d in _pr33["providers"]}
+check("descriptor telegram registrado -> aparece com bot_token required",
+      "telegram" in _by33
+      and any(f["key"] == "bot_token" and f.get("required")
+              for f in _by33["telegram"]["credential_fields"])
+      and _by33["telegram"]["post_create"]["kind"] == "autoconfigure")
+check("descriptor whatsapp_cloud -> creds + templates + webhook_url pós-criação",
+      "whatsapp_cloud" in _by33
+      and {f["key"] for f in _by33["whatsapp_cloud"]["credential_fields"]}
+          >= {"access_token", "phone_number_id", "verify_token"}
+      and _by33["whatsapp_cloud"]["capabilities"]["templates"] is True
+      and _by33["whatsapp_cloud"]["post_create"]["kind"] == "webhook_url")
+check("required_credentials reflete o descriptor (cloud)",
+      set(_pr33["required_credentials"].get("whatsapp_cloud", []))
+      >= {"access_token", "phone_number_id", "verify_token"})
+
+# whatsapp_cloud: two channels with the same phone_number_id -> 409
+_p32_cloud = {"access_token": "tokA", "phone_number_id": "PN_DEDUP_1", "verify_token": "vtA"}
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_a", "provider": "whatsapp_cloud", "display_name": "Cloud A",
+    "credentials": _p32_cloud})
+check("dedup: 1º cloud (phone_number_id novo) -> 200", r.status_code == 200)
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_b", "provider": "whatsapp_cloud", "display_name": "Cloud B",
+    "credentials": {"access_token": "tokB", "phone_number_id": "PN_DEDUP_1", "verify_token": "vtB"}})
+check("dedup: 2º cloud mesmo phone_number_id -> 409", r.status_code == 409)
+
+# Different phone_number_id -> OK
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_c", "provider": "whatsapp_cloud", "display_name": "Cloud C",
+    "credentials": {"access_token": "tokC", "phone_number_id": "PN_DEDUP_2", "verify_token": "vtC"}})
+check("dedup: cloud phone_number_id diferente -> 200", r.status_code == 200)
+
+# telegram: same bot_id (parsed from {bot_id}:{hash}) -> 409
+r = client.post("/api/channels", json={
+    "id": "p32_tg_a", "provider": "telegram", "display_name": "TG A",
+    "credentials": {"bot_token": "700700:AAA"}})
+check("dedup: 1º telegram (bot novo) -> 200", r.status_code == 200)
+r = client.post("/api/channels", json={
+    "id": "p32_tg_b", "provider": "telegram", "display_name": "TG B",
+    "credentials": {"bot_token": "700700:BBB"}})  # same bot_id 700700
+check("dedup: 2º telegram mesmo bot_id -> 409", r.status_code == 409)
+
+# Same numeric value across DIFFERENT providers/kinds is NOT a duplicate.
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_num", "provider": "whatsapp_cloud", "display_name": "Cloud Num",
+    "credentials": {"access_token": "tokN", "phone_number_id": "700700", "verify_token": "vtN"}})
+check("dedup: mesmo valor em provider/kind diferente -> 200 (não é duplicata)",
+      r.status_code == 200)
+
+# PUT edit-to-collide: change Cloud C's phone_number_id to the one Cloud A owns -> 409
+r = client.put("/api/channels/p32_cloud_c",
+               json={"credentials": {"phone_number_id": "PN_DEDUP_1"}})
+check("dedup: PUT editar credencial para colidir -> 409", r.status_code == 409)
+
+# PUT an unrelated field (no credential change) -> not blocked
+r = client.put("/api/channels/p32_cloud_c", json={"display_name": "Cloud C renomeado"})
+check("dedup: PUT campo não-credencial -> 200", r.status_code == 200)
+
+# PUT to the channel's OWN identity is not a self-conflict
+r = client.put("/api/channels/p32_cloud_c",
+               json={"credentials": {"phone_number_id": "PN_DEDUP_2"}})
+check("dedup: PUT para a própria identidade -> 200", r.status_code == 200)
+
+
+# ── Menções em nota privada (colaboração estilo Chatwoot) ────────────────────────
+# @menção de atendente/time numa nota privada grava linhas em `mentions` (por-usuário),
+# emite `mention_created`, alimenta `has_user_mention` e a aba Menções. A partir do
+# bootstrap a suíte roda como admin (default header — plano 48 F0), então a nota é
+# autorada pelo admin; as peças por-usuário (has_user_mention, unread_count) são
+# checadas via repo com o user_id explícito (independem do current_user do request).
+section("Contacts — Private Note Mentions")
+from db.repositories import user_repo as _mrepo_users, mention_repo, inbox_member_repo, conversation_repo as _mrepo_conv
+
+_u_a = _mrepo_users.create(email="mention_a@test.com", name="Atendente A",
+                           password_hash="x", role_keys=["atendente"])
+_u_b = _mrepo_users.create(email="mention_b@test.com", name="Atendente B",
+                           password_hash="x", role_keys=["atendente"])
+_mn_phone = "5511999990088"
+_mentionee = _u_a["id"]
+_mentionee_before = mention_repo.unread_count(_mentionee)
+
+r = client.post(f"/api/contacts/{_mn_phone}/private-message",
+                json={"text": "por favor confirmar este caso", "mentions": [_mentionee]})
+check("POST /private-message com mentions -> 200", r.status_code == 200)
+_mn_conv = (r.json().get("data") or {}).get("conversation_id")
+check("private-message mentions -> devolve conversation_id", _mn_conv is not None)
+check("mention_repo.unread_count incrementa para o mencionado",
+      mention_repo.unread_count(_mentionee) == _mentionee_before + 1)
+
+_row_for_mentionee = _mrepo_conv.get_with_channel(_mn_conv, _mentionee)
+check("has_user_mention=True para o usuário mencionado",
+      bool((_row_for_mentionee or {}).get("has_user_mention")) is True)
+_row_for_none = _mrepo_conv.get_with_channel(_mn_conv, None)
+check("has_user_mention=False sem usuário (broadcast/anônimo)",
+      bool((_row_for_none or {}).get("has_user_mention")) is False)
+
+_cleared = mention_repo.mark_read(_mentionee, _mn_conv)
+check("mention_repo.mark_read limpa a menção", _cleared >= 1)
+check("unread_count volta ao baseline após ler",
+      mention_repo.unread_count(_mentionee) == _mentionee_before)
+_row_after = _mrepo_conv.get_with_channel(_mn_conv, _mentionee)
+check("has_user_mention=False após abrir/ler",
+      bool((_row_after or {}).get("has_user_mention")) is False)
+
+# @time = membros da caixa de entrada da conversa (uma menção por membro).
+_inbox_id = (_row_for_mentionee or {}).get("inbox_id")
+_team_ids = [_u_a["id"], _u_b["id"]]
+if _inbox_id is not None:
+    inbox_member_repo.set_members(_inbox_id, _team_ids)
+    _before_team = {uid: mention_repo.unread_count(uid) for uid in _team_ids}
+    r = client.post(f"/api/contacts/{_mn_phone}/private-message",
+                    json={"text": "time, olhem isso", "mention_inbox": True})
+    check("POST /private-message mention_inbox -> 200", r.status_code == 200)
+    check("mention_inbox gera menção para cada membro da caixa",
+          all(mention_repo.unread_count(uid) == _before_team[uid] + 1 for uid in _team_ids))
+
+# Anexos privados: imagem + documento viram nota privada (media_type/path), 200.
+_img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+r = client.post(f"/api/contacts/{_mn_phone}/private-image",
+                files={"image": ("nota.png", _img, "image/png")},
+                data={"caption": "print do erro"})
+check("POST /private-image -> 200", r.status_code == 200)
+check("private-image -> nota com media_type=image",
+      (r.json().get("data") or {}).get("media_type") == "image")
+
+r = client.post(f"/api/contacts/{_mn_phone}/private-document",
+                files={"document": ("relatorio.pdf", b"%PDF-1.4 fake", "application/pdf")},
+                data={"caption": ""})
+check("POST /private-document -> 200", r.status_code == 200)
+check("private-document -> nota com media_type=document",
+      (r.json().get("data") or {}).get("media_type") == "document")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Excluir o canal 'default' (plano exclui-default) — DESTRUTIVO, roda por ÚLTIMO:
+# arquiva/purga o default, zera a lista de canais e recria. Não deixar nada depois
+# que dependa do canal/inbox default.
+# ══════════════════════════════════════════════════════════════════════════════
+from db.repositories import channel_repo as _chrepo_x, inbox_repo as _ibxrepo_x
+from app.services.message_ingest_service import _read_gowa_allowed_jid_types as _read_jid_x
+from channels import jid as _jid_x
+from agent import memory as _mem_x
+
+# 1) Arquivar (soft-delete) o default: antes retornava 400 (protegido), agora 200.
+r = client.delete("/api/channels/default")
+check("DELETE /channels/default -> 200 (não mais protegido)", r.status_code == 200)
+check("DELETE /channels/default -> archived=True",
+      (r.json().get("data") or {}).get("archived") is True)
+_arch = client.get("/api/channels?archived=true").json()["data"]
+_arch_ids = {c["id"] for c in (_arch if isinstance(_arch, list) else _arch.get("channels", []))}
+check("default arquivado aparece em ?archived=true", "default" in _arch_ids)
+_live = client.get("/api/channels").json()["data"]
+_live_ids = {c["id"] for c in (_live if isinstance(_live, list) else _live.get("channels", []))}
+check("default arquivado some da lista viva", "default" not in _live_ids)
+r = client.post("/api/channels/default/restore")
+check("POST /channels/default/restore -> 200", r.status_code == 200)
+
+# 2) Purgar TODOS os canais restantes, incluindo o default → estado zero-canais.
+for _c in _chrepo_x.list_all(include_archived=True):
+    client.delete(f"/api/channels/{_c['id']}?purge=true")
+_live = client.get("/api/channels").json()["data"]
+_live_list = _live if isinstance(_live, list) else _live.get("channels", [])
+check("purge de todos -> GET /channels vazio", _live_list == [])
+check("purge do default -> sem inbox órfã 'default'",
+      _ibxrepo_x.get_by_channel("default") is None)
+
+# 3) Inbound com zero canais: degrada gracioso (200 ignored), sem inbox-fantasma.
+r = client.post("/api/webhook/gowa/default",
+                json={"from": "5511999990099@s.whatsapp.net", "message": {"text": "oi"}})
+check("webhook inbound zero-canais -> 200 (nunca 500)", r.status_code == 200)
+check("webhook inbound zero-canais -> status=ignored",
+      (r.json().get("data") or {}).get("status") == "ignored")
+check("webhook inbound zero-canais -> NÃO cria inbox 'default' (anti-fantasma)",
+      _ibxrepo_x.get_by_channel("default") is None)
+
+# 4) allowed_jid_types com o default removido -> default permissivo, sem crash.
+check("_read_gowa_allowed_jid_types cai no default permissivo",
+      _read_jid_x() == list(_jid_x.DEFAULT_ALLOWED_JID_TYPES))
+
+# 5) Recriar um canal após a exclusão: id gerado != 'default', inbox criada, resolve ok.
+# GOWA não exige credenciais (fluxo QR), então recria sem creds — como o default original.
+r = client.post("/api/channels",
+                json={"provider": "gowa", "display_name": "Novo Canal"})
+check("POST /channels após zero-canais -> 200", r.status_code == 200)
+_new_id = (r.json().get("data") or {}).get("id")
+check("canal recriado tem id gerado != 'default'", bool(_new_id) and _new_id != "default")
+_inbx = client.get("/api/inboxes").json()["data"]
+_inbx = _inbx if isinstance(_inbx, list) else _inbx.get("inboxes", [])
+check("canal recriado -> inbox existe", any(i["channel_id"] == _new_id for i in _inbx))
+_mem_x.invalidate_channel_caches(_new_id)
+check("resolve_inbox_id(novo canal) -> inbox do canal",
+      _mem_x.resolve_inbox_id(_new_id) is not None)
+
+
+# ── Plano 76 · F0/F5 — mascaramento de credencial na borda da API ────────────
+# CARACTERIZAÇÃO + contrato: o que é PÚBLICO sai em claro (o form de edição
+# precisa pré-preencher), o resto é mascarado. A regra deixou de ser a lista
+# NON_SECRET_CRED_KEYS e passou a ser o descriptor do provider
+# (credential_fields[].type == "text"), com uma GUARDA DE NOME que mascara
+# qualquer chave que "cheire" a segredo mesmo declarada como texto.
+_p76_reg = app.state.deps.channel_registry
+
+
+def _p76_creds(channel_id):
+    return (client.get(f"/api/channels/{channel_id}").json()["data"] or {}).get("credentials", {})
+
+
+r = client.post("/api/channels", json={
+    "id": "p76_cloud", "provider": "whatsapp_cloud", "display_name": "Cloud P76",
+    "credentials": {"access_token": "EAAsegredoLongo1234", "phone_number_id": "PN_P76",
+                    "waba_id": "WABA_P76", "verify_token": "vtok_p76"}})
+check("P76: cria canal cloud -> 200", r.status_code == 200)
+_c76 = _p76_creds("p76_cloud")
+check("P76: phone_number_id (type=text) em claro", _c76.get("phone_number_id") == "PN_P76")
+check("P76: waba_id (type=text) em claro", _c76.get("waba_id") == "WABA_P76")
+check("P76: access_token (type=secret) mascarado",
+      _c76.get("access_token", "").startswith("••••") and "segredo" not in _c76.get("access_token", ""))
+check("P76: verify_token (token_suggest) mascarado",
+      _c76.get("verify_token", "").startswith("••••"))
+
+# Messenger: page_id é identificador público (type=text); os dois segredos, não.
+_p76_fb = _p32_load_provider("facebook_messenger", "FacebookMessengerChannel")
+_p76_reg.register_provider(_p76_fb)
+r = client.post("/api/channels", json={
+    "id": "p76_fb", "provider": "facebook_messenger", "display_name": "Página P76",
+    "credentials": {"page_id": "PAGE_P76", "page_access_token": "EAApageSegredo987",
+                    "app_secret": "appsecret_p76", "verify_token": "vt_p76"}})
+check("P76: cria canal messenger -> 200", r.status_code == 200)
+_f76 = _p76_creds("p76_fb")
+check("P76: page_id (type=text) em claro", _f76.get("page_id") == "PAGE_P76")
+check("P76: page_access_token mascarado", _f76.get("page_access_token", "").startswith("••••"))
+check("P76: app_secret mascarado", _f76.get("app_secret", "").startswith("••••"))
+
+# Guarda de nome (F5 item 4): um provider fictício declara uma credencial
+# ``type: "text"`` cujo NOME cheira a segredo (api_token) — o core mascara mesmo
+# assim (um plugin de terceiro que erre o type não pode virar vazamento).
+class _P76GuardChannel(_Channel):
+    provider = "p76guard"
+
+    def __init__(self, channel_id, registry=None, credentials=None):
+        super().__init__(channel_id, _Caps(qr=False, templates=False, inbound_route="path"))
+
+    @classmethod
+    def provider_descriptor(cls):
+        return {
+            "provider": "p76guard", "label": "Guard P76", "color": "gray",
+            "credential_fields": [
+                {"key": "public_id", "label": "ID público", "type": "text", "required": True},
+                {"key": "api_token", "label": "Token (erro de type)", "type": "text", "required": True},
+            ],
+            "config_fields": [], "capabilities": {"needs_qr": False, "templates": False},
+        }
+
+    def status(self):
+        return {"connected": True, "logged_in": True, "needs_qr": False, "error": None}
+
+    def send_text(self, chat_id, text, *, reply_to=None, mentions=None):
+        return _SendResult(ok=True, external_msg_id="x")
+
+    def send_media(self, chat_id, kind, path_or_url, *, caption="", filename=None):
+        return _SendResult(ok=True, external_msg_id="x")
+
+    def parse_inbound(self, raw):
+        return []
+
+
+_p76_reg.register_provider(_P76GuardChannel)
+r = client.post("/api/channels", json={
+    "id": "p76_guard", "provider": "p76guard", "display_name": "Guard",
+    "credentials": {"public_id": "PUB_P76", "api_token": "segredo_vazando_123"}})
+check("P76 guarda: cria canal -> 200", r.status_code == 200)
+_g76 = _p76_creds("p76_guard")
+check("P76 guarda: public_id (type=text) em claro", _g76.get("public_id") == "PUB_P76")
+check("P76 guarda: api_token (type=text mas nome-segredo) MASCARADO",
+      _g76.get("api_token", "").startswith("••••") and "segredo" not in _g76.get("api_token", ""))
 
 print(f"\n{'='*60}")
 print(f"  RESULTS: {passed} passed, {failed} failed")

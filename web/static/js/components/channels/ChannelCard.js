@@ -6,15 +6,25 @@ import { h } from 'preact';
 import htm from 'htm';
 import { providerMeta, credLabel, missingCredsFor } from './constants.js';
 import { Dot } from './notices.js';
+import { Slot } from '../../plugins/Slot.js';
+import { CopyLinkButton } from '../../utils/copyDeepLink.js';
 
 const html = htm.bind(h);
 
-export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onEdit, busyId, requiredCreds }) {
-  const meta = providerMeta(channel.provider);
+export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, onConnect, onReconnect, onLogout, onEdit, busyId, requiredCreds, descriptorsById }) {
+  const descriptor = descriptorsById && descriptorsById[channel.provider];
+  const meta = providerMeta(channel.provider, descriptorsById);
   const cred = channel.credentials || {};
   const credEntries = Object.entries(cred);
   const busy = busyId === channel.id;
-  const canConnect = channel.provider === 'gowa' && !channel.logged_in;
+  // Session actions (QR/linked-device providers, capability-driven — plano 33):
+  // "Conectar" (read QR) when not logged in, "Reconectar" when paired but the
+  // socket is down, "Desconectar" whenever there's a session to drop. Gated by
+  // the descriptor's ``needs_qr`` capability, never by provider name.
+  const needsQr = !!(descriptor && descriptor.capabilities && descriptor.capabilities.needs_qr);
+  const canConnect = needsQr && !channel.logged_in;
+  const canReconnect = needsQr && channel.logged_in && !channel.connected;
+  const canLogout = needsQr && channel.logged_in;
   // Zombie-channel detection: required credentials this channel is missing
   // (capability-driven via the providers fetch, local fallback otherwise). A
   // credential-only provider missing these can never connect — flag it with a
@@ -48,6 +58,8 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
           ` : null}
         </div>
 
+        <${Slot} name="channel.card.rows" ctx=${{ channel, descriptor }} />
+
         ${credEntries.length ? html`
           <div class="text-[12px] text-wa-secondary mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
             ${credEntries.map(([k, v]) => html`
@@ -58,7 +70,7 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
 
         ${missingCreds.length ? html`
           <div class="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 mt-2 break-words">
-            ⚠️ Credenciais faltando: ${missingCreds.map(credLabel).join(', ')}.
+            ⚠️ Credenciais faltando: ${missingCreds.map((k) => credLabel(k, descriptor)).join(', ')}.
             Este canal não vai conectar até serem preenchidas —
             <button class="underline hover:no-underline font-medium"
               onClick=${() => onEdit(channel)}>editar agora</button>.
@@ -72,10 +84,20 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
         ` : null}
       </div>
 
-      <div class="flex gap-1 shrink-0 flex-wrap justify-end">
+      <div class="flex gap-1 shrink-0 flex-wrap justify-end items-center">
+        <${CopyLinkButton} path=${`/channels/${encodeURIComponent(channel.id)}`}
+          title="Copiar link deste canal" />
         ${canConnect ? html`
           <button class="px-2 py-1 rounded-md text-[13px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
             onClick=${() => onConnect(channel)} disabled=${busy}>Conectar</button>
+        ` : null}
+        ${canReconnect ? html`
+          <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
+            onClick=${() => onReconnect(channel)} disabled=${busy}>Reconectar</button>
+        ` : null}
+        ${canLogout ? html`
+          <button class="px-2 py-1 rounded-md text-[13px] text-red-500 hover:bg-wa-hover transition-colors disabled:opacity-50"
+            onClick=${() => onLogout(channel)} disabled=${busy}>Desconectar</button>
         ` : null}
         <button class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50"
           onClick=${() => onEdit(channel)} disabled=${busy}>Editar</button>

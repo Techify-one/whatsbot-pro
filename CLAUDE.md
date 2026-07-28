@@ -1,19 +1,18 @@
 # WhatsBot
 
-Bot de WhatsApp com IA para usuários finais, distribuído como EXE Windows.
+Bot de WhatsApp com IA para uso em servidor/cloud (Coolify/Docker) — **decisão de distribuição (plano 29 P1)**: o produto é server/cloud-first; o empacotamento EXE Windows ficou suspenso quando o banco virou Postgres-only (não há PG em máquina de usuário final). Os launchers dev de Windows/macOS continuam funcionando apontando para um Postgres remoto.
 
 ## Stack
 
 - **Python 3.11+** — linguagem principal
-- **SQLAlchemy 2.0 Core + Alembic** — camada de dados portável (Core, sem ORM declarativo)
-- **SQLite** — banco default (WAL mode, driver `sqlite3` da stdlib)
-- **PostgreSQL** — backend opcional via `psycopg[binary]`, configurável pela tela Settings → Banco
-- **GOWA** (go-whatsapp-web-multidevice v8.8.0) — bridge WhatsApp via REST, roda como subprocess
+- **SQLAlchemy 2.0 Core + Alembic** — camada de dados (Core, sem ORM declarativo)
+- **PostgreSQL** — banco único via `psycopg[binary]` (plano 29 Eixo C — Postgres-only). A env `DATABASE_URL` é obrigatória; sem ela o boot falha com erro acionável. SQLite foi removido
+- **GOWA** (go-whatsapp-web-multidevice v8.11.0) — bridge WhatsApp via REST, roda como subprocess
 - **Proxy LLM da Techify** (`https://llm.techify.one/api/v1`) — provider de LLM, API **compatível com OpenRouter/OpenAI**. Substituiu o OpenRouter direto: a chave é provisionada pelo wizard de 1ª execução e o crédito/recarga é gerido pela Techify. O base URL é configurável via env `LLM_API_BASE_URL`. A chave continua sendo persistida na config key `openrouter_api_key` (nome legado mantido por compatibilidade)
 - **AGNO** (`agno` 2.x) — framework de agentes usado como **motor de LLM** do agente. O loop de raciocínio + tool calling roda via `agno.agent.Agent`, apontado ao proxy Techify pelo model `OpenAILike`. Encapsulado em [agent/agno_engine.py](agent/agno_engine.py); o `AgentHandler` delega a ele preservando todos os hooks de plugin (filters/events), usage e execution tracking. Transcrição de áudio/descrição de imagem continuam em chamadas diretas ao cliente OpenAI (não são agênticas)
 - **FastAPI + uvicorn** — backend web (REST API + WebSocket)
 - **Preact + HTM + Tailwind CSS** — frontend web (sem build step, vendorizado local)
-- **PyInstaller** — empacotamento como EXE
+- **PyInstaller** — empacotamento como EXE (suspenso pós-Postgres-only — ver decisão de distribuição no topo; o tooling continua no repo)
 
 ## Arquitetura
 
@@ -24,19 +23,18 @@ gowa/manager.py      → lifecycle do subprocess GOWA (start/stop/watchdog)
 gowa/client.py       → HTTP client para REST API do GOWA (localhost:3000)
 agent/handler.py     → orquestra o processamento de mensagens (system prompt, filters/events, usage, save); delega o loop de LLM ao motor AGNO
 agent/agno_engine.py → motor AGNO: monta OpenAILike + Agent único, envolve cada tool em agno Function (filters/events preservados), extrai reply/usage
-agent/memory.py      → ContactMemory e TagRegistry (leitura/escrita no SQLite via repos)
+agent/memory.py      → ContactMemory e TagRegistry (leitura/escrita no banco via repos)
 agent/group_mentions.py → resolução de @menções em grupos (número ↔ nome, lista de membros, @todos)
 agent/tools/         → tools core do LLM (uma tool por arquivo, agregadas em CORE_TOOLS)
 config/settings.py   → load/save config + constantes do provider/Techify (LLM_API_BASE_URL, TECHIFY_*)
 server/avatars.py    → cache de fotos de perfil em disco (statics/avatars/<phone>.jpg) + broadcast avatar_updated
 server/balance_monitor.py → consulta saldo de crédito do proxy (/credits) e emite low_balance via WS
 db/                  → módulo de banco de dados (SQLAlchemy 2.0 Core)
-  engine.py          → factory do Engine, URL resolution (env > arquivo > sqlite default), PRAGMAs SQLite
+  engine.py          → factory do Engine; URL exclusivamente da env DATABASE_URL (fail-fast Postgres-only)
   tables.py          → MetaData + 20 Table objects (Core, sem mapper/Session): 13 core + 7 ai_* (motor AGNO)
-  upsert.py          → helper dialect-agnóstico (INSERT ... ON CONFLICT)
+  upsert.py          → helper de INSERT ... ON CONFLICT (dialect postgresql)
   connection.py      → init_db(): cria engine + roda Alembic upgrade
-  migration_postgres.py → migra dados SQLite → Postgres (usado pelo endpoint admin)
-  migrate_json.py    → migração one-time de JSON legado → banco
+  pg_maintenance.py  → repair_postgres_sequences (re-ancora sequences em MAX(pk))
   alembic/           → migrations Alembic (env.py + versions/)
   repositories/      → data access layer (um arquivo por domínio)
     config_repo.py   → get_all(), get(), set(), set_many(), delete_prefix()
@@ -83,6 +81,7 @@ Setup inicial (1ª vez no Linux):
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
+# criar o .env na raiz com DATABASE_URL=postgresql+psycopg://user:senha@host:5432/whatsbot
 ./linux_start.sh
 ```
 
@@ -92,55 +91,40 @@ O `windows_start.bat` e o `macos_start.command` fazem o setup sozinhos (baixam P
 
 A camada de dados usa **SQLAlchemy 2.0 Core** (sem ORM declarativo). Cada tabela é um `Table` em [db/tables.py](db/tables.py) e os repositórios constroem statements via `select()/insert()/update()/delete()`. Repos rodam síncronos e são chamados das rotas via `asyncio.to_thread`.
 
-### Escolha do backend
+### URL do banco (Postgres-only — plano 29)
 
-A URL é resolvida na ordem:
+O banco é **exclusivamente PostgreSQL** e a URL vem **exclusivamente da env `DATABASE_URL`** (`postgresql+psycopg://user:senha@host:5432/whatsbot`). Sem a env, ou com URL de outro dialeto, `resolve_database_url()` levanta `RuntimeError` com mensagem acionável no boot — não existe mais fallback SQLite nem o override `storages/database.json` (a tela Settings → Banco e o endpoint de migração SQLite→Postgres foram removidos).
 
-1. Variável de ambiente `DATABASE_URL` (cobre Docker/Coolify — `.env`).
-2. Arquivo local `storages/database.json` (Windows / EXE — gerenciado pela UI).
-3. Fallback: `sqlite:///storages/whatsbot.db`.
-
-Para trocar para Postgres no Windows: Settings → Banco → cola a URL `postgresql+psycopg://user:senha@host:5432/whatsbot` → "Migrar agora". O endpoint `POST /api/admin/migrate-to-postgres` recebe a URL, valida que o destino está vazio, aplica Alembic, copia tabela a tabela (incluindo `plugin_*`), grava em `database.json` e dispara restart. SQLite original fica preservado para rollback (basta apagar/editar `database.json` e reiniciar).
-
-Para Docker: setar `DATABASE_URL` no `.env` antes de subir o container — o arquivo `database.json` é ignorado quando a env está presente.
-
-**Docker Swarm com múltiplas réplicas (ou rolling update entre tasks): `DATABASE_URL` apontando para Postgres compartilhado é obrigatório.** Volumes nomeados em Swarm são locais por nó, não compartilhados entre réplicas — SQLite local resulta em DBs divergentes (escritas vão pra uma réplica, leituras vêm de outra). Coolify e single-container não sofrem disso.
+- **Dev local**: o `.env` na raiz (gitignored) define `DATABASE_URL`; `linux_start.sh` carrega automaticamente.
+- **Docker/Coolify**: setar `DATABASE_URL` nas envs do container.
+- O engine usa `pool_pre_ping=True` (sobrevive a quedas idle) e `prepare_threshold=None` no psycopg (compatível com PgBouncer em transaction mode — Neon/Supabase).
+- `POST /api/admin/repair-sequences` re-ancora as sequences em `MAX(pk)` (útil após import manual de dados).
 
 ### Tabelas
 
 | Tabela | Descrição |
 |--------|-----------|
 | `config` | Configurações do app (key-value, valores JSON-encoded). Configs de plugin usam prefixo `plugin.<id>.` |
-| `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags). Inclui `is_pinned` (fixar conversa no topo) e `has_unread_mention` (@menção não lida em grupo) |
+| `contacts` | Contatos/grupos (phone, name, email, profissão, empresa, flags). Inclui `is_pinned` (fixar conversa no topo), `has_unread_mention` (@menção não lida em grupo) e `contact_type` (tipo herdado do canal de origem — `whatsapp`/`telegram`/`outros`; ver "Tipo de contato por canal") |
 | `observations` | Notas/observações por contato (texto livre) |
-| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`) e `reply_to_msg_id` (msg_id GOWA da mensagem citada). Roles especiais painel-only (não vão ao WhatsApp, renderizam como card centralizado): `tool_call`, `system_notice`, `transcription`, `private_note`, `error`, `conversation_event` (avisos de ciclo de vida da conversa — plano 12) |
+| `messages` | Histórico completo de mensagens (role, content, ts, media). Inclui `revoked` (apagada pra todos), `reactions` (JSON `{emoji: [reactor,...]}`), `reply_to_msg_id` (msg_id GOWA da mensagem citada) e `edited_ts` (epoch da última edição de uma msg de saída; NULL = nunca editada → o painel mostra "editada"). Roles especiais painel-only (não vão ao WhatsApp, renderizam como card centralizado): `tool_call`, `system_notice`, `transcription`, `private_note`, `error`, `conversation_event` (avisos de ciclo de vida da conversa — plano 12) |
 | `usage` | Registros de uso da API (tokens, custo, modelo) |
 | `tags` | Tags globais (name, color) |
 | `contact_tags` | Relação N:N contato ↔ tag |
 | `unread_msg_ids` | IDs de mensagens não lidas por contato |
 | `executions` | Tracking de execuções (webhook → resposta). Inclui `agent_key`, `total_tokens`, `total_cost_usd` (populados pelo writer a cada chamada de LLM) |
 | `execution_steps` | Passos de cada execução (tool calls, llm_request, etc.) |
-| `ai_agents` / `ai_prompts` / `ai_variables` / `ai_tools` | Motor AGNO config-in-DB (flag `ai_engine_enabled`, default OFF): agente, prompt-template, variáveis e tools com código Python no banco. `ai_tools` só é instalada/executada com `ai_tools_code_enabled=True` (kill-switch P62, default OFF) |
-| `ai_agents_history` / `ai_prompts_history` / `ai_tools_history` | Snapshot por versão (save) de cada agente/prompt/tool |
+| `ai_agents` / `ai_variables` / `ai_tools` | Motor AGNO config-in-DB: agente, variáveis e tools com código Python no banco. O **prompt é inline em cada agente** (coluna `ai_agents.prompt`, texto livre próprio do agente — não reutilizável; `{placeholder}` resolvidos por `ai_variables`); editado no formulário do agente, não há mais aba/tabela de prompts compartilhados. `ai_tools` só é instalada/executada com `ai_tools_code_enabled=True` (kill-switch P62, default OFF) |
+| `ai_prompts` / `ai_prompts_history` | **Legado** — eram templates de prompt reutilizáveis referenciados por `ai_agents.prompt_key`. Não são mais lidas na resolução do agente (o prompt agora é inline). Mantidas (não destrutivo) por compat; os endpoints `/api/ai/prompts*` continuam existindo mas não alimentam o motor |
+| `ai_agents_history` / `ai_tools_history` | Snapshot por versão (save) de cada agente/tool. O snapshot do agente inclui o `prompt` inline, então Histórico/Reverter cobrem o prompt |
 | `plugins` | Plugins descobertos no filesystem (id, version, enabled, load_error) |
 | `plugin_migrations` | Versões de SQL migrations já aplicadas, por plugin |
 | `plugin_<id>_*` | Tabelas criadas por plugins via suas migrations (prefixo obrigatório) |
 | `tool_overrides` | Override por-tool (enabled, description, display_label). Row criada automaticamente para cada tool registrada (core + plugin) |
 
-### Configuração SQLite
-
-Quando o engine é SQLite (default), as PRAGMAs são aplicadas via `event.listens_for("connect")` em [db/engine.py](db/engine.py):
-
-- `PRAGMA journal_mode=WAL` — permite leituras concorrentes
-- `PRAGMA foreign_keys=ON` — integridade referencial
-- `PRAGMA busy_timeout=5000` — espera até 5s em lock contention
-- `connect_args={"check_same_thread": False}` — reuso entre threads compatível com `asyncio.to_thread`
-
-Em Postgres essas pragmas não se aplicam (são SQLite-only); o engine usa `pool_pre_ping=True` para sobreviver a quedas idle de conexão.
-
 ### Padrão de acesso
 
-Repos usam o padrão dialect-agnóstico baseado em `Table` objects:
+Repos usam o padrão baseado em `Table` objects:
 
 ```python
 from sqlalchemy import select
@@ -159,9 +143,9 @@ Regras:
 
 - Leitura: `with get_engine().connect() as conn:` (sem transação implícita).
 - Escrita: `with get_engine().begin() as conn:` (auto-commit no exit, rollback em exceção).
-- UPSERT: usar `db.upsert.upsert()` / `db.upsert.upsert_ignore()` — escolhe `sqlite.insert()` ou `postgresql.insert()` automaticamente.
+- UPSERT: usar `db.upsert.upsert()` / `db.upsert.upsert_ignore()` (`INSERT ... ON CONFLICT` do dialect postgresql).
 - Nunca usar `?` ou `%s` direto — bind params nomeados (`:phone`) via `sqlalchemy.text()` ou expressões Core.
-- Migrations: Alembic ([db/alembic/versions](db/alembic/versions)). Para um schema change, rode `alembic revision --autogenerate -m "msg"` e revise. `init_db()` aplica `alembic upgrade head` no boot; DBs legados sem `alembic_version` são automaticamente stampados em `0001_baseline` antes do upgrade.
+- Migrations: Alembic ([db/alembic/versions](db/alembic/versions)), sem batch-mode (Postgres tem `ALTER TABLE` completo). Para um schema change, rode `alembic revision --autogenerate -m "msg"` e revise. `init_db()` aplica `alembic upgrade head` no boot.
 
 `db.connection.get_db()` ainda existe como shim deprecated retornando `engine.raw_connection()`, mas é apenas para plugins de terceiros não migrados. Código novo (core ou plugin oficial) usa `get_engine()`.
 
@@ -183,6 +167,76 @@ Mensagens recebidas no WhatsApp são entregues em tempo real via webhook do GOWA
 O tipo de um chat do WhatsApp é definido pelo **sufixo do JID** (depois do `@`), não pelo número — o prefixo `120363…` é compartilhado por grupo, canal e comunidade. [channels/jid.py](channels/jid.py) (`classify_jid`) mapeia o sufixo para um tipo lógico: `person` (`@s.whatsapp.net`), `person_lid` (`@lid`), `group` (`@g.us`), `newsletter` (Canal, `@newsletter`), `broadcast` (Status/transmissão, `@broadcast`), `bot` (`@bot`), `unknown`.
 
 No webhook GOWA ([server/routes/webhook.py](server/routes/webhook.py)), logo após resolver o `chat_jid`, a mensagem é classificada e **descartada antes de materializar qualquer contato** se o tipo não estiver na lista permitida — corrige o bug em que tudo que não era `@g.us` caía no ramo "pessoa" (um post de Canal virava "contato fantasma"). A lista permitida vem de `config.allowed_jid_types` do canal GOWA (lida do canal `default`, que é single-channel no inbound; cache de 30s, invalidado ao editar a config do canal). **Default**: `person`, `person_lid`, `group` (descarta canal/status/bot). Tipos `unknown` nunca são bloqueados (preserva comportamento legado). A UI fica na criação/edição do canal GOWA em [web/static/js/components/ChannelsManager.js](web/static/js/components/ChannelsManager.js) (`JidTypePicker`) — o usuário escolhe pelos rótulos amigáveis, sem ver o JID. Vale **apenas para canais GOWA**.
+
+## Contrato de identidade de conta / dedup de canais (plano 32)
+
+Dois canais **do mesmo provider** não podem apontar para a **mesma conta** (o mesmo número no GOWA, o mesmo `phone_number_id` na Cloud API, o mesmo bot no Telegram). A prevenção é **na origem** (bloqueio, não aviso) e a arquitetura é **genérica no core, fina no provider** — igual ao precedente `required_credentials`: o **plugin declara a identidade**, o **core faz todo o dedup** (comparação, storage, índice único, enforcement). Adicionar um provider novo (Instagram, Messenger, widget…) = implementar 1–2 métodos; **o core não muda** e **nunca tem `if provider ==`**.
+
+- **Contrato** ([channels/base.py](channels/base.py)): `AccountIdentity(kind, value)` é a chave de dedup — `kind` = namespace (`phone`/`phone_number_id`/`bot_id`/…), `value` = forma **canônica** não-vazia. Três ganchos no `Channel` (todos default no-op, então `test`/providers que não aderem simplesmente não deduplicam):
+  - `identity_from_credentials(creds)` (classmethod) — identidade conhecível **no create** (está na credencial: Cloud `phone_number_id`, Telegram `bot_token`→`bot_id`). O core chama no create/update → **409** antes de persistir.
+  - `account_identity()` (instância) — identidade que só aparece **pós-conexão** (GOWA `own_phone` pós-QR). O sweep chama e, num conflito, recusa.
+  - `reject_duplicate()` — desfaz a conexão duplicada (default: `logout()`/`stop()`). O provider pode sobrescrever.
+  Um provider pode implementar os dois, mas **com `kind` consistente** (Telegram usa `bot_id` nos dois — derivado do token `{bot_id}:{hash}`, sem rede — pra deduplicarem entre si, plano 32 P1).
+- **Motor** ([channels/dedup.py](channels/dedup.py)): `same(a, b)` (igualdade exata de `kind`+`value`; `None`/`""` nunca casa) e `find_conflict(provider, identity, exclude_channel_id)` (varre `channel_repo.list_all()` — só `enabled=1`/`archived=0`, mesmo provider). Puro de rede (só DB).
+- **Storage** ([db/tables.py](db/tables.py) + migration `0038`): colunas `channels.account_identity` + `account_identity_kind` e o índice único parcial `ux_channels_account_identity (provider, account_identity) WHERE enabled=1 AND archived=0 AND account_identity IS NOT NULL AND <> ''` — cinto de segurança de banco (serializa 2 QRs simultâneos: o 2º leva `IntegrityError`).
+- **Enforcement** ([app/services/channel_service.py](app/services/channel_service.py)): create/update resolvem `identity_from_credentials` e, num conflito, levantam `DuplicateChannelError` → **409** (update escapa a própria row via `exclude_channel_id` e checa as creds **efetivas** = armazenadas + edição, barrando editar-pra-colidir).
+- **Sweep pós-conexão** ([app/services/channel_identity.py](app/services/channel_identity.py) + loop `channel_identity_sweep_loop` em [server/background.py](server/background.py), owner = plugin `gowa`): por canal vivo, lê `status()`+`account_identity()`, grava `own_phone`/`connected`/`logged_in`/`account_identity` **só quando muda**, e num conflito recusa via `reject_duplicate()` + `last_error` + `logged_in=0` (mantém `enabled=1` — não-destrutivo). Efeito colateral bom: persistir `own_phone` destrava o roteamento inbound `by_phone` (antes coluna morta).
+- **Regras**: mesma conta em **providers diferentes** NÃO é duplicata (canais separados — plano 11 D1/D2); arquivados/desabilitados **não** contam; identidade GOWA usa `get_own_number` **device-scoped** (plano 32 F1 — nunca o número de outro device) e canônico BR (12↔13 dígitos colapsam numa forma). Implementar um provider novo: só leia [channels/base.py](channels/base.py) + esta seção (ver `whatsapp_cloud`/`telegram`/`gowa` como exemplos).
+
+## Canais Meta (Messenger/Instagram) — assinatura, base Graph e URL pública (plano 46)
+
+Os canais da Meta que falam a **Messenger Platform** (Facebook Messenger, e o Instagram do sub-plano 03) compartilham uma base no core e uma costura de segurança no webhook. Mesmo padrão de sempre: **o provider declara, o core executa**, sem `if provider ==`.
+
+- **Assinatura `X-Hub-Signature-256`** (01-A): `Channel.verify_inbound_signature(raw_body, headers) -> bool` ([channels/base.py](channels/base.py), default `True`). O POST `/api/webhook/{provider}/{channel_id}` ([server/routes/channel_webhook.py](server/routes/channel_webhook.py)) lê `await request.body()` e deriva o dict com `json.loads` dos **mesmos bytes** (re-serializar quebraria o HMAC), chama o hook **antes** do `filter.webhook.payload` e dos buffers de debug, e num veredito negativo responde **200 `{"status":"bad_signature"}`** sem ingerir nada (um 4xx faria a Meta re-tentar em loop). GOWA/Telegram/Cloud herdam o default e ficam byte-idênticos. Canal Meta **sem `app_secret`** não é verificado (passa + WARNING) — não deixa a caixa muda enquanto o operador não colou o segredo.
+- **Base `MetaGraphChannel`** (**dentro do plugin** [assets/plugin_examples/facebook_messenger/meta_graph.py](assets/plugin_examples/facebook_messenger/meta_graph.py) — plano 76·F9; **não** mais no core): classe **abstrata** (não registra provider nenhum) com `_graph_base()` (host por subclasse: `graph.facebook.com` × `graph.instagram.com`), `_cred`/`_channel_config` (config do canal, cache 30s), `appsecret_proof` (`HMAC_SHA256(access_token, app_secret)` em toda chamada Graph), `_post_message` em `/me/messages`, `send_text`/`send_media`/`react`/`mark_read`/`send_presence`, `resolve_sender_name` (cache 6h), `download_media` e o `parse_inbound` de **`entry[].messaging[]`** (texto, anexos, `is_echo` → `direction="out"`, reaction, delivery/read, postback, location). O plugin a importa RELATIVAMENTE (`from .meta_graph import …`) — o loader resolve como `whatsbot_plugins.facebook_messenger.meta_graph`. **Quando o Instagram entrar, ele carrega a PRÓPRIA cópia** (D2·F9: dois canais Meta, duas cópias — preço do zip autossuficiente). ⚠️ NÃO confundir com o WhatsApp Cloud, que caminha `entry[].changes[].value` e sobe mídia em `/media`.
+- **Mídia por URL pública** (**dentro do plugin** [assets/plugin_examples/facebook_messenger/media_urls.py](assets/plugin_examples/facebook_messenger/media_urls.py) — plano 76·F9, irmão de `meta_graph`, importado `from .media_urls`; a config key global `public_base_url` continua no core, lida via `config_repo`): a Send API da Meta **busca** o arquivo numa URL — `public_media_url("statics/outbox/x.jpg")` ancora no componente `statics/` e prefixa a config global `public_base_url`. Sem ela (ou com o arquivo fora de `statics/`) o envio falha com mensagem acionável em vez de mandar link quebrado. Anexo **inbound** carrega a URL do CDN em `media_extras["media_id"]`, então o resolver de mídia do core baixa via `download_media` e a URL (que expira) nunca é persistida. O **tipo do anexo** (`image`/`video`/`audio`/`file`) sai do MIME real do arquivo (`attachment_type_for`), não do `kind` pedido pelo core: a Meta valida o tipo declarado contra o Content-Type que ela baixa e recusa um `.mp4` mandado como `file` (o mapeamento de "documento") com `(#100) … code 100/2018007`. Como a Meta baixa o arquivo DENTRO da chamada de envio, o POST de mídia usa `MEDIA_TIMEOUT` (120s) em vez dos 20s padrão.
+- **Janela de 24h + agente humano** (02.2): `ChannelCapabilities.human_window_hours` é a janela ESTENDIDA que vale **só para envio humano**; `OutboundRouter.session_open(..., by_human=True)` a considera e só as rotas de envio do OPERADOR passam esse flag (a resposta agêntica nunca). No Messenger, fora das 24h o provider reenvia UMA vez como `messaging_type=MESSAGE_TAG` + `tag=HUMAN_AGENT` **apenas** se o toggle `human_agent_tag` do canal estiver ligado E a conversa estiver com humano (tag `transferido_atendente`) — usar a tag pela IA é tripwire de compliance da Meta.
+- **Refresh de token** (01-C/D8): `ChannelCapabilities.token_refresh` + `Channel.refresh_token_if_needed()` (no-op). O core **não** agenda nada: o plugin que precisa registra `ctx.spawn_task("token_refresh", loop)` no `lifecycle.setup(ctx)` e o supervisor cancela no disable. Consumidor: Instagram (token de 60 dias que morre em silêncio).
+- **Plugin `facebook_messenger`** ([assets/plugin_examples/facebook_messenger/](assets/plugin_examples/facebook_messenger/)): importável por zip (`assets/channel_plugins/facebook_messenger-plugin.zip`, D10 — não auto-instalado). Credenciais `page_id`/`page_access_token`/`app_secret`/`verify_token`; configs `graph_api_version` (v25.0) e `human_agent_tag`; dedup por `page_id`; `contact_type` = `facebook`; screen `config:true` para copiar a URL de callback e assinar o webhook da Página (`POST /{page_id}/subscribed_apps`). Identidade do contato = **PSID page-scoped** (a chave `(channel_id, phone)` do core já cobre).
+
+## Provider de canal (plugin) — canais 100% plugáveis (plano 33)
+
+Canais são **plugins de 1ª classe**: cada provider **se autodescreve** e o core (backend + frontend) **nunca o conhece por nome** — não há `if provider ==` na oferta, no formulário, no pós-criação, nos chips/filtros das telas (catálogo único, plano 76), no card (slot `channel.card.rows`) nem no mascaramento de credencial. Adicionar um provider = shipar um plugin cuja subclasse de `Channel` implementa 1–2 hooks; o core não muda. Só **GOWA** vem auto-instalado; telegram/whatsapp_cloud/facebook_messenger/website são **importáveis** (zip em [assets/channel_plugins/](assets/channel_plugins/)).
+
+- **Descriptor** ([channels/base.py](channels/base.py) `provider_descriptor()`, classmethod): a fonte única do que o core precisa pra **oferecer + renderizar** o provider. Forma: `{provider, label, color, credential_fields:[{key,label,type,required,placeholder?,help?}], config_fields:[{key,label,type,options?,default?,...}], capabilities:{needs_qr,templates}, ai_sequential_default, contact_type, post_create, form_component}` (`contact_type` = o tipo que o canal marca nos contatos — garantido pelo `channel_service` mesmo se o provider sobrescrever o descriptor sem re-adicionar a chave; ver "Tipo de contato por canal"). Tipos de campo que o form genérico entende: `text`, `secret`, `token_suggest` (input + botão "Sugerir"), `multiselect` (checkbox group sobre `options`, seed de `default`), `generated` (read-only auto-preenchido por `prefix`). O default da base deriva um descriptor mínimo; os providers sobrescrevem ([gowa_channel.py](channels/providers/gowa_channel.py), [telegram](assets/plugin_examples/telegram/channels.py), [whatsapp_cloud](assets/plugin_examples/whatsapp_cloud/channels.py), [facebook_messenger](assets/plugin_examples/facebook_messenger/channels.py), [website](assets/plugin_examples/website/channels.py)). O JID-type catalog (que era hardcoded no frontend) agora é um `multiselect` no descriptor do GOWA — o provider é dono dele.
+- **Endpoint** ([channel_service.py](app/services/channel_service.py) `providers()` + `provider_descriptor(deps, p)`): `GET /api/channels/providers` devolve `{providers:[descriptor,...], required_credentials:{provider:[key,...]}}` só dos providers **registrados** (plugin ativo). O serviço reconcilia os `credential_fields` com `ChannelCapabilities.required_credentials` (garante que todo campo required apareça). Oferta = instalado; `ALLOWED_PROVIDERS` deixou de ser o gate (sobra só como allow-list de compat no create). Criar canal em `server/routes/channels.py` valida `provider ∈ (registrados ∪ ALLOWED_PROVIDERS)`.
+- **Mascaramento de credencial derivado do descriptor (plano 76 · H4/V9)** ([channel_service.py](app/services/channel_service.py) `serialize`/`_public_cred_keys`): na borda da API, credencial sai em CLARO **só** se o provider a declarou `type: "text"` (identificador público — ex.: `phone_number_id`, `waba_id`, `page_id`), o resto é mascarado (`••••` + últimos 4). Sem a antiga lista `NON_SECRET_CRED_KEYS`. **Guarda de nome obrigatória**: mesmo `type:text`, uma chave cujo nome case `/(token|secret|password|senha|key)/i` é mascarada (+ WARNING) — um plugin que erre o `type` não vira vazamento. Default (provider não registrado / descriptor quebrado) = tudo mascarado.
+- **Frontend genérico** ([web/static/js/components/channels/](web/static/js/components/channels/)): `constants.js` tem os builders **puros** `buildCreatePayload`/`buildEditPayload` (montam credentials/config a partir do descriptor + valores coletados, sem branch de provider), `providerMeta`/`tintForColor` (badge por `color`), `initialConfigValues`, `missingCredsFor`, `buildEmbedSnippet` (interpolação PURA do `post_create.snippet_template`). `DescriptorFields.js` renderiza `CredentialFields`/`ConfigFields`/`MultiSelect` por `type`, e `FormComponentLoader` importa um `form_component` opcional via `import()` (seam pra provider rico; nenhum built-in usa). `ChannelForm`/`ChannelEditForm` são inteiramente dirigidos pelo descriptor. Testes puros: [constants.test.js](web/static/js/components/channels/constants.test.js) (`node --test`).
+- **Catálogo único de providers no cliente (plano 76 · H1)** ([web/static/js/services/providerCatalog.js](web/static/js/services/providerCatalog.js)): a FONTE ÚNICA de "rótulo, cor, tint, bolinha e tipo de contato" de um provider fora da tela Canais. Faz UM fetch de `GET /api/channels/providers`, cacheia, e expõe `providerLabel/Color/Tint/Dot(p)`, `channelPickerMeta(p)`, `contactTypeFor(p)`, `contactTypeColorTokens()`, `fetchedProviders()`/`requiredCredentials()` (usados pelo `ChannelsManager` — sem fetch próprio) e `subscribe()`. Fallback estático mínimo (`gowa`/`test`) até o fetch chegar; provider desconhecido degrada para o próprio id em cinza (D3). Componentes re-renderizam via o hook [useProviderCatalog.js](web/static/js/hooks/useProviderCatalog.js). **Substituiu os 5 mapas estáticos** (ChannelChip `CHANNEL_META`, ConversationInfoPanel `PROVIDER_LABELS`, ChannelPickerModal/NewConversationModal `PROVIDER_META`, contactTypes `CONTACT_TYPE_META` — este virou base curada + descoberta do catálogo). Regra: **nenhuma tela do core mapeia nome de provider → rótulo/cor**; tudo vem do descriptor.
+- **Pós-criação dirigido pelo descriptor** ([ChannelsManager.js](web/static/js/components/ChannelsManager.js)): `capabilities.needs_qr` → abre o QR ([QRConnect.js](web/static/js/components/channels/QRConnect.js), genérico); `post_create.kind == "webhook_url"` → `WebhookNotice` com a URL de callback (`post_create.path` com `{channel_id}` substituído); `post_create.kind == "autoconfigure"` → POST em `post_create.endpoint` (`providerPostCreateAction`) e `AutoconfigureNotice` com o resultado (fallback long-poll via `webhook_path`); `post_create.kind == "embed_snippet"` → `EmbedSnippetNotice` com o snippet montado do `post_create.snippet_template` (o core interpola `{base_url}`/`{token}`; a chave do token vem de `token_config_key` — o core não conhece o path `/plugins/website/`). As ações de sessão do card (Conectar/Reconectar/Desconectar) são gated por `needs_qr`, não por nome. As flags de deep-link de modal são `?connect|?webhook|?autoconfig` (capability/post_create, nunca nome de provider).
+- **Slot `channel.card.rows` (plano 76 · H2)** ([registry.js](web/static/js/plugins/registry.js)): ponto de extensão aditivo no corpo do card de canal ([ChannelCard.js](web/static/js/components/channels/ChannelCard.js), ctx `{channel, descriptor}`). O provider injeta a própria linha via `frontend_extends` — o `whatsapp_cloud` registra aqui o `WebhookHealthRow` (que vive no PLUGIN, em `assets/plugin_examples/whatsapp_cloud/static/`, e filtra por `ctx.channel.provider` internamente); usa o `http` de `buildPluginHttp` (o core não chama mais endpoint de plugin). Vazio ⇒ card byte-idêntico; desabilitar o plugin some a linha sem erro.
+- **Bundling** ([plugins/bootstrap.py](plugins/bootstrap.py) `BUNDLED_AUTO_INSTALL = ("gowa",)`): fresh install (storages vazio) copia **só GOWA**. telegram/whatsapp_cloud ficam em `assets/plugin_examples/` (fonte pra tests + zips) e são **importáveis** via `assets/channel_plugins/<id>-plugin.zip` (Importar `.zip` na tela Plugins). Instalações existentes com eles em `storages/plugins/` ficam intactas (bootstrap só roda com pasta vazia).
+- **Config do provider mora no plugin**: status/config específicos (ex: webhook vs long-poll do Telegram) vivem na screen `config:true` do próprio plugin (`/telegram/config`), NÃO no form de edição do core — o core edita só nome + campos do descriptor + IA + agentes.
+- **Comando**: `/new-channel` ([.claude/commands/new-channel.md](.claude/commands/new-channel.md)) gera um provider correto por construção — subclasse `Channel` + capabilities + ganchos de identidade (plano 32) + `provider_descriptor()` + `contact_type()` (tipo do contato, ver "Tipo de contato por canal") + `entry.channels` + stubs `status`/`send`/`parse_inbound` (+ `lifecycle`/`routes`/`form_component` quando aplicável), sem tocar no core.
+
+## Proxy de saída por número (plano 52)
+
+Cada **canal GOWA** pode rotear a conexão do WhatsApp por um proxy de saída próprio (1 IP por número — ex.: IPs dedicados do webshare.io). O campo "Proxy de saída (opcional)" fica no form do canal (credencial `proxy_url`, tipo `secret` — mascarada na borda da API; formatos `socks5://user:pass@ip:porta` ou `http(s)://…`). **Arquitetura híbrida**: canal SEM proxy segue no processo GOWA compartilhado (inalterado); canal COM proxy ganha um **processo GOWA dedicado** — porta própria (persistida em `config.gowa_dedicated_port`), `cwd` próprio em `storages/gowa_ch_<id>/` (isola `whatsapp.db`/`chatstorage.db`; um symlink `statics` aponta de volta pra raiz pra mídia continuar servível), env **`WHATSAPP_PROXY`** (nunca argv — o cmd é logado/visível em `ps`) e webhook próprio em `/api/webhook/gowa/<id>`. O canal `default` (singleton legado) nunca é dedicado.
+
+- **Orquestração** ([storages/plugins/gowa/processes.py](assets/plugin_examples/gowa/processes.py), fonte em `assets/`): reconcile loop declarativo (task `gowa:process_reconcile`, ~15s) — `plan_reconcile` (puro) diffa desejado×rodando e aplica spawn/stop/restart; auto-cura claims órfãos (proxy removido com o servidor desligado). Transições: **ligar** proxy = evict do device no processo compartilhado (`logout` + `DELETE /devices/{id}`) ANTES do spawn dedicado → **re-parear por QR** (esperado, avisado no help do campo); **desligar** = para o processo, limpa porta/`gowa_isolation`, volta ao compartilhado (novo QR). `storages/gowa_ch_<id>/` é preservado ao desligar (a sessão sobrevive a um re-enable). Proxy inválido/proxy no `default` ⇒ `last_error` no canal, processo não sobe.
+- **`channels.gowa_isolation`** (`shared|dedicated_process`, coluna da migration 0011) é atualizada pelo reconcile — observabilidade; a fonte de decisão é a credencial `proxy_url`.
+- **Upgrade do plugin bundled** (P7): `bootstrap_gowa_upgrade` ([plugins/bootstrap.py](plugins/bootstrap.py)) é **version-aware** — quando a versão do `plugin.yaml` bundled em `assets/` é MAIOR que a instalada em `storages/plugins/gowa`, o boot substitui a cópia instalada (swap atômico via temp+rename; tombstone de uninstall respeitado; nunca re-habilita plugin desabilitado; instalado mais NOVO que o bundled é deixado em paz). Edições manuais na cópia instalada são perdidas no bump (logado alto).
+- **Recomendação de proxy**: IP **fixo e dedicado** por número (datacenter dedicado ou static residential) — NUNCA endpoint rotativo (IP muda por conexão = padrão de ban).
+
+## Limites de mídia por canal (anexo incompatível é bloqueado, não falha)
+
+Anexo (imagem/áudio/documento/vídeo) que não atende às regras do canal é **bloqueado no compositor com um popup** antes do envio — em vez de virar uma bolha "falhou" depois que o provedor recusa. Mesmo padrão policy-vs-mechanism dos outros ganchos: **o provider declara os números, o core só avalia**, sem `if provider ==`.
+
+- **Contrato** ([channels/base.py](channels/base.py)): `MediaLimits(max_bytes, extensions)` — o irmão genérico de `VideoLimits` (que ainda acrescenta regras de codec). Declarados em `ChannelCapabilities.media_limits` como `{kind: limits}` (`image`/`audio`/`document`/`video`/`sticker`). Kind sem declaração = nunca bloqueia (GOWA/Telegram).
+- **Números da Meta moram no plugin** ([assets/plugin_examples/whatsapp_cloud/channels.py](assets/plugin_examples/whatsapp_cloud/channels.py) `_MEDIA_LIMITS`): imagem 5 MB JPEG/PNG · áudio 16 MB AAC/AMR/MP3/M4A/OGG · vídeo 16 MB MP4/3GP H.264+AAC · documento 100 MB PDF/TXT/DOC(X)/XLS(X)/PPT(X) · figurinha 500 KB WebP. Import defensivo (core antigo sem `MediaLimits` continua carregando o plugin).
+- **Core** ([channels/media_limits.py](channels/media_limits.py)): `limits_for(caps, kind)`, `validate_upload(filename, size, caps, kind)` → `MediaVerdict(reason ∈ ok/too_big/bad_format, message PT-BR)` e `describe(caps, video_transcode_available=…)` → o dict JSON que vai pro painel. O fallback legado de VÍDEO segue em [channels/video_validate.py](channels/video_validate.py) (plugins anteriores ao plano 65).
+- **Backend**: as rotas `/send-image`, `/send-audio` e `/send-document` chamam `_media_limits_block` **antes de gravar o upload** (413 `too_big` / 415 `bad_format`, sem arquivo órfão); `/send-video` mantém o caminho próprio (valida codec → recomprime com ffmpeg → só então bloqueia). O payload de conversa/contato carrega `media_limits` ao lado de `revoke_supported`/`edit_supported`.
+- **Painel**: [web/static/js/services/mediaLimits.js](web/static/js/services/mediaLimits.js) (`checkMediaFile`, puro, espelha o backend; testes `node --test`) roda na SELEÇÃO do arquivo; recusado ⇒ [MediaRejectedModal.js](web/static/js/components/contacts/MediaRejectedModal.js) e o anexo nem entra na fila. Vídeo com `transcode: true` (ffmpeg presente no servidor) NÃO é bloqueado no cliente — o servidor recomprime; sobra só o teto de entrada de 200 MB. Recusa que só aparece no servidor (codec) remove a bolha otimista e abre o mesmo popup. Sandbox e nota privada não são validados (não saem para o provedor).
+
+## Tipo de contato por canal (plano tipos-de-contato)
+
+Cada contato registra o **tipo herdado do canal que o materializou**, gravado em `contacts.contact_type` (migration 0050, `server_default='outros'`; rows legadas foram backfilladas para `whatsapp` porque antecedem o Telegram). O **provider declara** o tipo, o **core grava e exibe** — mesmo padrão genérico dos outros hooks de canal (nenhum `if provider ==` no core).
+
+- **Contrato** ([channels/base.py](channels/base.py)): `Channel.contact_type()` (classmethod, default `"outros"`). GOWA ([gowa_channel.py](channels/providers/gowa_channel.py)) e WhatsApp Cloud ([whatsapp_cloud/channels.py](assets/plugin_examples/whatsapp_cloud/channels.py)) retornam `"whatsapp"` (mesmo tipo); Telegram ([telegram/channels.py](assets/plugin_examples/telegram/channels.py)) retorna `"telegram"` (não guarda telefone — o `phone` é o chat_id numérico do Telegram). O descriptor (`provider_descriptor`) também expõe `contact_type`.
+- **Gravação**: só no INSERT do contato. `ContactMemory._resolve_contact_type()` ([agent/memory.py](agent/memory.py)) resolve a classe do provider do canal (via `_resolve_provider_class`, mesmo helper do source_id) e passa a `contact_repo.get_or_create(..., contact_type=...)`. Fail-open para `"outros"` quando o provider não resolve (registry não cabeado em testes, canal sem provider). Um contato já existente **não** é re-tipado (o tipo é do 1º canal que o criou).
+- **Exibição**: marca (chip colorido) abaixo do nome/telefone no painel do contato ([ContactInfoPanel.js](web/static/js/components/contacts/ContactInfoPanel.js)) e em cada linha da tela Contatos ([ContactsListScreen.js](web/static/js/components/ContactsListScreen.js)). O catálogo de rótulo/cor por tipo mora em [web/static/js/services/contactTypes.js](web/static/js/services/contactTypes.js) (`contactTypeMeta`), tolerante a tipos novos/desconhecidos.
+- **Filtro**: dimensão `contact_type` ("Tipo de contato", multi-select eq/ne) nos dois construtores de filtro — [ConversationFilterDialog.js](web/static/js/components/contacts/ConversationFilterDialog.js) (hub de atendimentos) e [ContactFilterDialog.js](web/static/js/components/contacts/ContactFilterDialog.js) (tela Contatos). Avaliação client-side via `clauseMatches` ([conversationRows.js](web/static/js/services/conversationRows.js)) sobre as rows já carregadas (o campo `contact_type` vem no payload de `list_contacts` e no detalhe).
+- **Provider novo**: implemente `contact_type()` (ver `/new-channel`); sem override os contatos herdam `"outros"`.
 
 ## Configuração de IA por canal (plano 21)
 
@@ -207,6 +261,13 @@ Cada contato é armazenado na tabela `contacts` com campos normalizados:
 
 Info é salva automaticamente via tool calling do LLM e injetada no system prompt. Histórico persiste entre reinícios do app.
 
+### Filtro de histórico por regex (lista-negra — plano 43)
+
+Além da lista-negra de ROLES fixa do repo (`transcription`, `tool_call`, `system_notice`, `conversation_event`, `system`, `error` + `status='failed'`), há um **filtro genérico por regex** que corta linhas do histórico ANTES de virarem contexto do LLM. É uma **lista GLOBAL** de padrões na config key `ai_history_exclude_patterns` (default `[]` = nada cortado, retrocompatível), editável em **Configurações → IA** (textarea, uma regex por linha). Cada mensagem é testada como `f"{role}\t{content}"` com `re.search` — ancora por tipo (`^private_note\t`), por conteúdo (`Protocolo aberto`, `PROT-\d{8}`) ou ambos. Uso típico: cortar notas de automação (ex.: `🔖 Protocolo aberto · PROT-…` gravadas por plugins como `protocolos`) que senão entram no contexto e duplicam com o bloco `tool_memory`.
+
+- **Módulo**: [agent/history_filter.py](agent/history_filter.py) — `load_compiled()` (lê a config, compila, cache TTL 30s), `matches()`, `filter_rows()`. **Fail-open** em todo nível (config ruim, regex inválida, erro no filtro ⇒ histórico passa intacto; regex inválida individual é ignorada + logada). O PUT `/api/config` reseta o cache ao salvar a chave (edição vale na hora).
+- **Hook no repo**: `message_repo.get_context(..., *, exclude=None)` e `get_context_by_conversation(..., *, exclude=None)`. Com `exclude` setado, faz **over-fetch** (até `HISTORY_FETCH_CAP=200` linhas), filtra em Python e devolve as N mais recentes sobreviventes — cortar linhas **não encolhe** a janela abaixo de `max_context_messages`. `exclude=None`/`[]` ⇒ caminho byte-idêntico ao antigo (SQL `LIMIT N`). O motor de IA passa `exclude` via `memory.get_context_messages`; a análise "Gerar melhoria" ([improvement_service.py](app/services/improvement_service.py)) aplica o mesmo corte **preservando a resposta-alvo marcada** (nunca cortada, mesmo se casar um padrão).
+
 ## Avisos de sistema no chat (plano 12)
 
 Eventos do ciclo de vida do atendimento são registrados **no fio da conversa** como um card centralizado painel-only — role **`conversation_event`** — igual aos `tool_call`/`system_notice`. Cobre: atribuir/assumir/remover atribuição, adicionar/remover tag, resolver/reabrir/arquivar, ligar/desligar IA (conversa **e** contato), trocar agente ativo, definir atributo — e as transições **automáticas** (cliente reabre conversa fechada ao mandar mensagem → `status_reopened_auto`; conversa nova → `created`; 1ª resposta da IA numa conversa → `ai_takeover`, 1×/conversa via dedupe).
@@ -215,6 +276,30 @@ Eventos do ciclo de vida do atendimento são registrados **no fio da conversa** 
 - **Gate GLOBAL por grupo** (config, default ON): `system_notice_assignment`, `system_notice_tags`, `system_notice_status`, `system_notice_ai`. Grupo desligado ⇒ o aviso **não é gerado** (nada grava, nada emite). Toggles na seção "Avisos de sistema no chat" em Configurações.
 - **Call sites**: rotas de conversa via `_emit_notice` em [server/routes/conversations.py](server/routes/conversations.py) (resolve o autor do `current_user`); tags em [server/routes/tags.py](server/routes/tags.py); toggle-ai por contato em [server/routes/contacts.py](server/routes/contacts.py); automáticos no `add_message` ([agent/memory.py](agent/memory.py), via `conversation_repo.resolve_for_contact_ex` que sinaliza `created`/`reopened`) e no envio da resposta da IA ([server/routes/webhook.py](server/routes/webhook.py), `_maybe_emit_ai_takeover`).
 - **Painel-only**: `conversation_event` é excluído do contexto do LLM ([message_repo.py](db/repositories/message_repo.py)), do preview/última-mensagem da sidebar ([contact_repo.py](db/repositories/contact_repo.py) e [conversation_repo.py](db/repositories/conversation_repo.py) `_PREVIEW_EXCLUDED`) e não conta como não-lida (não entra em `unread_msg_ids`). Render como chip centralizado em [ContactDetail.js](web/static/js/components/contacts/ContactDetail.js); skip de preview em [Contacts.js](web/static/js/components/contacts/Contacts.js).
+
+## Rascunho de mensagem por conversa (compositor)
+
+O texto digitado no compositor **pertence à conversa** e sobrevive à troca de conversa, como no WhatsApp/Chatwoot: digitou "Oi" na `/conversations/123`, foi atender a `/124` e voltou → o "Oi" continua lá. É **pessoal e por-dispositivo**: nada vai para o servidor.
+
+**A conversa ABERTA é a exceção de tudo**: enquanto o chat está na tela, a linha dela segue normal (preview da última mensagem) e **não muda de lugar** — o operador já vê o que escreveu no compositor, e a lista não pode reorganizar embaixo do cursor a cada tecla. Ao **sair** deixando texto, a linha passa a mostrar **"Rascunho: …"** e a conversa **sobe na lista** (o rascunho conta como atividade recente). Reabrir não a faz despencar de volta: a posição da conversa aberta é a congelada na abertura (`frozenOpenRef`).
+
+- **Store** ([web/static/js/services/drafts.js](web/static/js/services/drafts.js)): módulo PURO (sem preact, testado em `node --test` — [drafts.test.js](web/static/js/services/drafts.test.js)). Mapa no localStorage namespaceado pelo usuário logado (`whatsbot_drafts_v1:<userId>`, ou `:anon` no modo aberto), então dois operadores no MESMO navegador não veem o rascunho um do outro e o logout não vaza para o próximo login. `setDraftUser(id)` troca o namespace (chamado pelo [AuthGate.js](web/static/js/components/shell/AuthGate.js) a cada mudança de sessão; o namespace inicial sai do `whatsbot_user` já guardado, para o F5 achar os rascunhos antes do shell montar). Escrita e notificação são debounced (400ms) para digitar não re-renderizar a sidebar a cada tecla; `flushDrafts()` no `beforeunload` e no envio. Cap de 300 rascunhos por usuário (cai o escrito há mais tempo — a ordem de inserção do mapa É a ordem de escrita). Evento `storage` sincroniza abas.
+- **Chave** = `draftKeyFor({conversationId, phone})`, idêntica ao `rowKeyFor` da sidebar (`conv:<id>`, ou `phone:<n>` para linha sem atendimento). Conversa que nasce migra sozinha `phone:` → `conv:` no 1º envio (`migrateDraft`) em vez de perder o texto.
+- **Compositor** ([useComposer.js](web/static/js/components/contacts/hooks/useComposer.js)): o efeito de troca de conversa **hidrata** o input do rascunho (era `setInput('')`); todo caminho que muda o texto (digitação, emoji, @menção, /atalho) passa pelo `setInput` do hook, que salva. O envio limpa (`clearDraft`) — mídia e nota privada não mexem no rascunho de texto. **Sandbox não guarda rascunho** (tela de teste, sem linha na sidebar).
+- **Sidebar** ([ContactList.js](web/static/js/components/contacts/ContactList.js)): o hook [useDrafts.js](web/static/js/hooks/useDrafts.js) re-renderiza a lista quando o mapa muda — recebe a chave da conversa aberta e **ignora** as mudanças dela (digitar no chat aberto não re-renderiza a sidebar a cada 400ms; o `subscribe` entrega as chaves alteradas). Precedência do preview: "IA respondendo…" → "digitando…" → trecho da busca → **rascunho** → última mensagem.
+- **Ordem** ([conversationRows.js](web/static/js/services/conversationRows.js) `sortContactsBy(list, sortBy, draftTsFor)`): o 3º parâmetro (opcional, mantém a função pura) devolve em SEGUNDOS quando o rascunho foi escrito, e a ordenação usa `max(last_message_ts, rascunho)`. Quem o fornece é [useConversationFilters.js](web/static/js/components/contacts/hooks/useConversationFilters.js), que devolve 0 para a conversa aberta. A **hora exibida** na linha continua sendo a da última mensagem — só a ordenação olha o rascunho. Em `serverMode` reordena só a página carregada (o rascunho é local; o servidor não sabe dele).
+- **Cor**: o rótulo usa o token próprio `--wa-draft` (vermelho escuro no claro, red-300 no escuro) — nenhum acento existente passava no piso de 4,5:1 nos DOIS temas sobre `--wa-selected` (a linha da conversa aberta, verde no escuro, é justamente a que costuma ter rascunho). Travado por regra em [themeContrast.js](web/static/js/services/themeContrast.js).
+
+## Indicador de digitação entre atendentes (multi-operador)
+
+Com dois atendentes logados (ex.: Luisa e Teste), cada um vê na **linha da conversa** quando o OUTRO está digitando ali — "**Teste está digitando…**" — para não responderem por cima um do outro. É o terceiro indicador da sidebar, ao lado de "IA respondendo…" (a IA) e "digitando…" (o cliente).
+
+- **Sinal reaproveitado, nada novo no banco**: o compositor já mandava presença ao provedor a cada digitação (`POST /api/contacts/{phone}/presence`). A rota ([server/routes/contacts.py](server/routes/contacts.py)) agora reemite esse mesmo sinal como o broadcast WS **`operator_typing`** `{phone, channel_id, conversation_id, user_id, user_name, active}`, carimbado com o `current_user`. Emitido **antes** da ida ao provedor (canal offline ou sem capability de presence não pode calar o aviso interno) e **só com identidade de usuário** — em instalação aberta (sem login) o painel não teria como filtrar o próprio autor. Efêmero: nada é persistido.
+- **Heartbeat** ([useComposer.js](web/static/js/components/contacts/hooks/useComposer.js) `PRESENCE_REFRESH_MS = 10s`): o `start` é reemitido a cada 10s enquanto o texto continua (antes ia UM só por rajada de digitação, e o indicador dos outros expiraria no meio de um texto longo). O `stop` continua no debounce de 3s de inatividade e no envio.
+- **Cliente** ([useConversationWsEvents.js](web/static/js/components/contacts/hooks/useConversationWsEvents.js)): `operatorTypingState` `{chave: {userId, name}}` na MESMA `typingKey` da presença do cliente (`conv:<id>`, ou `canal::telefone` sem conversa). Ignora o **próprio** `user_id` (duas abas do mesmo login não acusam a si mesmas) e auto-limpa em **15s** (> heartbeat) caso o `stop` nunca chegue (aba fechada, queda de rede).
+- **Sidebar** ([ContactList.js](web/static/js/components/contacts/ContactList.js)): precedência do preview — "IA respondendo…" → "digitando…" (cliente) → **"Fulano está digitando…"** → trecho da busca → rascunho → última mensagem.
+- **Balão no chat aberto** ([ContactDetail.js](web/static/js/components/contacts/ContactDetail.js)): chip flutuante estilo Chatwoot (nome + três pontinhos pulsando) logo acima do compositor, só quando a conversa está ABERTA e o colega está digitando nela. Container de altura zero + `absolute` (`pointer-events-none`): flutua sobre o fim da conversa sem empurrar a rolagem nem o compositor.
+- **Cor**: nome em `wa-text`, resto em `wa-secondary` — nas DUAS superfícies. `wa-teal` (o acento do "digitando" do cliente) mede **2,3:1** sobre `--wa-selected` no tema escuro, e a conversa aberta é justamente a que costuma ter um colega digitando; ver [themeContrast.js](web/static/js/services/themeContrast.js).
 
 ## Provider de LLM e onboarding (Techify)
 
@@ -242,7 +327,18 @@ Pontos-chave da integração:
 - **Reply**: `_extract_reply` pega a ÚLTIMA mensagem `assistant` sem tool calls de `run_output.messages` (fallback: `run_output.content`). Isso evita que o AGNO concatene um "chatter" pré-tool com a resposta final — crítico com `split_messages` (saída JSON array) ligado.
 - **Transcrição/descrição de mídia** continuam em chamadas diretas ao cliente OpenAI no handler (não são agênticas) — o cliente OpenAI segue vivo só para isso e para `test_api_key`.
 
-O motor roda **sempre um `Agent` único**. A base extensível para configurar agentes via banco (prompt/modelo/tools lidos do DB) é a infra `ai_agents` + [agent/agent_factory.py](agent/agent_factory.py), ligada por `ai_engine_enabled` — também single-agent.
+O motor roda **sempre um `Agent` único**. A base extensível para configurar agentes via banco (prompt/modelo/tools lidos do DB) é a infra `ai_agents` + [agent/agent_factory.py](agent/agent_factory.py) — também single-agent. O **prompt de cada agente é inline** (coluna `ai_agents.prompt`): cada agente escreve o próprio prompt no formulário do agente (tela Configurações de IA → Agentes), sem seleção de template compartilhado. `build_for_contact` lê `agent["prompt"]` direto (fallback para o seed `DEFAULT_SYSTEM_PROMPT` quando vazio) e resolve `{placeholder}` via `ai_variables`. A coluna `prompt_key` e a tabela `ai_prompts` são legado e não participam mais da resolução.
+
+**Agente padrão / fallback unificado (fix 2026-07)**: a marcação "Padrão para novas conversas" (`ai_agents.is_default`, radio — plano 36) é TAMBÉM o fallback de runtime. `agent_repo.get_default()` resolve: `is_default` habilitado → agente de chave literal `default` (piso legado) → `None` (piso de emergência in-code do plano 34). Vale para o carimbo de criação (`default_agent_key_for_inbox`), o religar da IA (`set_ai` ON) e a cascata `build_for_contact` — uma conversa sem `active_agent_key` (ex.: pós fechar→reabrir automático, que limpa o vínculo e não re-vincula) cai no agente MARCADO, não mais na chave `default` hardcoded (era o bug: fechar+reabrir voltava ao "Agente padrão" ignorando a marcação). Guards de exclusão/desativação são **semânticos** (`agent_repo.get_fallback_key()`), não por nome: o fallback ATUAL não pode ser excluído nem desativado; o `default` legado É excluível/desativável quando outro agente carrega a marcação, e a exclusão limpa os vínculos (`atendimentos.active_agent_key`/`inboxes.default_agent_key` → NULL, mesma transação). O seed do boot só cria o `default` em instalação nova (tabela `ai_agents` vazia — gate em `server/app.py`); um `default` excluído não ressuscita. Migration `0055` desvinculou conversas presas na chave `default`. **Nascimento com IA desligada** (fix atribuição-IA-off, 2026-07): o carimbo do agente na criação segue o mesmo princípio do gate global `auto_reply` — uma conversa que nasce `ai_active=0` NÃO carimba agente (fica de fato "Não atribuída": sem humano e sem agente); religar a IA da conversa re-vincula o padrão. O seed do `ai_active` é resolvido na HORA do create ([agent/memory.py](agent/memory.py) `_resolve_ai_seed`, cache 30s do `ai_settings` — não mais congelado no construtor) e exige o master do canal (`ai_enabled`) E o `default_ai_enabled` per-canal. Migration `0056` desvinculou as rows já inconsistentes (IA off + sem humano + agente).
+
+### Guardrails e routing hub-and-spoke (plano 29 Eixo A/B)
+
+Multi-agente segue o padrão **hub-and-spoke** (portado do nexus `gerenciamento-ia`): **um único roteador** (`is_router`, enforced por semântica radio em `agent_repo.save` + índice único parcial `ux_ai_agents_single_router`, migration 0035) roteia via `transferir_agente`; spokes devolvem ao roteador com motivo; **só o roteador tem `transfer_to_human`** (convenção via `tool_names`, com aviso na UI quando um spoke a seleciona).
+
+- **Routing within-turn** ([ai_engine/routing.py](ai_engine/routing.py)): `run_with_routing` é puro (sem DB) e retorna `(result, steps, halted)`. `steps` = `{from, to, depth, reason}` — o `reason` é o motivo real da `transferir_agente`, threadado ao próximo hop como msg sintética `[REDIRECIONAMENTO de {agente}]\nMotivo: …` ([app/services/agent_run_service.py](app/services/agent_run_service.py)). **Revisita é permitida** (`roteador→comercial→roteador` no mesmo turno; `is_reinvoke` sinaliza re-invocação), barrando só `A→A` imediato; profundidade limitada por `ai_max_route_depth` (config, default 5). Cap estourado com handoff pendente → o caller força `transfer_to_human` (motivo "Limite de roteamento atingido…") + `track_step("routing_halted")`.
+- **Guardrails de tool** ([ai_engine/hooks.py](ai_engine/hooks.py)): `requires_prior_call` (str ou lista) é **success-aware** — prior que retornou falha (`_FAILURE_MARKERS`/prefixo "erro") não libera; mensagens de bloqueio citam a rota de escape (`transferir_agente`); `ai_tool_call_limit_per_tool` (config, 0=off) aplica um `call_limit` default a toda tool sem limite próprio.
+- **Teto global**: `Agent(tool_call_limit=…)` do AGNO (overflow gracioso) — env `WHATSBOT_TOOL_CALL_LIMIT` > config `ai_tool_call_limit_total` (default 25; 0 desliga).
+- **Gate de humano** ([app/services/messaging_service.py](app/services/messaging_service.py) `_conversation_ai_active`): a IA cala quando `ai_active=0`, OU a conversa tem `assignee_user_id` humano sem `active_agent_key`, OU o contato tem a tag `transferido_atendente` (`TRANSFER_TAG`). Reabrir com IA ligada / toggle-ai enable limpa a tag (`_clear_transfer_tag` em `conversation_service`).
 
 ## Fotos de perfil (avatars)
 
@@ -263,7 +359,7 @@ Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos
 |--------|----------|-----------|
 | GET | `/` | Serve o frontend (web/index.html) |
 | GET | `/wizard` | Serve o frontend forçando o wizard de 1ª execução (onboarding) |
-| GET | `/api/config` | Retorna config (API key mascarada) + `account_url` |
+| GET | `/api/config` | Retorna config (API key mascarada) + `account_url` + `public_base_url`. **Efeito colateral**: captura e persiste `public_base_url` (config key global — a URL que o operador usa pra acessar o painel, honrando headers de proxy reverso) no 1º acesso, com self-heal se o salvo era localhost. Variável reutilizável por qualquer feature (ex.: o alerta de desconexão do plugin gowa monta o link de reconexão a partir dela) |
 | PUT | `/api/config` | Salva config + atualiza AgentHandler |
 | POST | `/api/config/test-key` | Testa API key no proxy Techify (compatível OpenRouter); auto-salva se válida |
 | POST | `/api/config/request-apikey` | Provisiona uma chave via Techify (manda msg ao número de provisionamento; usado pelo wizard) |
@@ -281,7 +377,8 @@ Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos
 | POST | `/api/contacts/mark-all-read` | Zera não lidas de todas as conversas |
 | POST | `/api/contacts/mark-all-unread` | Marca todas as conversas como não lidas |
 | POST | `/api/contacts/{phone}/messages/react` | Reage a uma mensagem com emoji (string vazia remove). WS `message_reaction` |
-| POST | `/api/contacts/{phone}/messages/delete` | Apaga mensagem (revoke pra todos). WS `message_revoked`/`message_deleted` |
+| POST | `/api/contacts/{phone}/messages/delete` | Apaga mensagem (revoke pra todos). WS `message_revoked`/`message_deleted`. Só aparece na UI em canais com a capability `revoke` (GOWA + Telegram sim; WhatsApp Cloud não) |
+| POST | `/api/contacts/{phone}/messages/edit` | Edita o texto de uma mensagem de SAÍDA (operador/IA) já enviada. Body `{msg_id, text, conversation_id?}`. Só texto, roteado pelo canal via `outbound.edit_text` (capability `edit_message`); grava `edited_ts` + WS `message_edited`. Suportado em GOWA (`/message/{id}/update`) + Telegram (`editMessageText`); **WhatsApp Cloud NÃO** edita nem apaga (ambas as capabilities off — único canal sem as duas opções no menu) |
 | GET | `/api/contacts/{phone}/members` | Lista participantes do grupo com nomes resolvidos (autocomplete de @menção) |
 | GET | `/api/webhook-payloads?limit=N` | Últimos N payloads raw do webhook (debug, max 50) |
 | GET | `/api/gowa-logs?limit=N` | Tail do `logs/gowa.log` (stdout/stderr do subprocess GOWA, só populado com `WHATSBOT_GOWA_DEBUG=1`) |
@@ -298,17 +395,16 @@ Nomes não vêm do GOWA (`DisplayName` volta vazio): são resolvidos de contatos
 | POST | `/api/plugins/restart` | Restart manual do servidor |
 | `*` | `/api/plugins/{id}/*` | Endpoints REST mountados pelo plugin (router próprio) |
 | GET | `/api/admin/database` | Info do backend atual (dialect, URL redacted, caminho do config) |
-| POST | `/api/admin/migrate-to-postgres` | Inicia migração SQLite → Postgres. Body: `{postgres_url}`. Status via WS `db_migration_progress` |
-| GET | `/api/admin/migrate-to-postgres/status` | Snapshot polling do estado da migração |
+| POST | `/api/admin/repair-sequences` | Re-ancora as sequences do Postgres em MAX(pk) (recovery pós-import manual) |
 | WS | `/ws` | WebSocket para eventos real-time |
 
 Formato de resposta REST: `{"ok": bool, "data": ..., "error": ...}`
 
-Eventos WebSocket (frontend): `{"event": "...", "data": {...}}` — inclui `status`, `qr_update`, `gowa_status`, `config_saved`, `new_message`, `message_reaction`, `message_revoked`, `message_deleted`, `contact_pinned`, `group_participants_changed`, `avatar_updated` (`{phone, v}` — `v` = mtime do arquivo, usado pra cache-bust da foto), `low_balance` (saldo abaixo do threshold → abre o modal de recarga), `ai_typing` (`{phone, channel_id, active}` — a IA está processando uma resposta para a conversa; o painel mostra "IA respondendo…" no header para o operador não responder por cima).
+Eventos WebSocket (frontend): `{"event": "...", "data": {...}}` — inclui `status`, `qr_update`, `gowa_status`, `config_saved`, `new_message`, `message_reaction`, `message_revoked`, `message_deleted`, `message_edited` (`{phone, msg_id, db_id, content, edited_ts}` — mensagem editada, seja de SAÍDA pelo operador/IA OU INBOUND quando o cliente edita a própria mensagem no WhatsApp/Telegram; o painel troca o conteúdo in-place e mostra "editada". WhatsApp Cloud não emite edição inbound), `contact_pinned`, `group_participants_changed`, `avatar_updated` (`{phone, v}` — `v` = mtime do arquivo, usado pra cache-bust da foto), `low_balance` (saldo abaixo do threshold → abre o modal de recarga), `ai_typing` (`{phone, channel_id, active}` — a IA está processando uma resposta para a conversa; o painel mostra "IA respondendo…" no header para o operador não responder por cima), `operator_typing` (`{phone, channel_id, conversation_id, user_id, user_name, active}` — OUTRO atendente está digitando naquela conversa; a linha da sidebar mostra "Fulano está digitando…" para os demais operadores logados. Ver "Indicador de digitação entre atendentes").
 
-## GOWA REST API (endpoints reais — v8.8.0 multi-device)
+## GOWA REST API (endpoints reais — v8.11.0 multi-device)
 
-IMPORTANTE: O GOWA v8.8.0 é multi-device. Antes de usar qualquer endpoint, é necessário criar um device via `POST /devices`. Após criação, todas as requests (exceto `/devices`) exigem header `X-Device-Id`.
+IMPORTANTE: O GOWA v8.11.0 é multi-device. Antes de usar qualquer endpoint, é necessário criar um device via `POST /devices`. Após criação, todas as requests (exceto `/devices`) exigem header `X-Device-Id`.
 
 | Operação | Método | Endpoint | Notas |
 |---|---|---|---|
@@ -336,7 +432,7 @@ Campos do payload do webhook GOWA: `body`, `from`, `sender_jid`, `chat_id`, `id`
 
 - Python com type hints nas assinaturas de função
 - Logging via `logging` stdlib (nunca print)
-- Operações bloqueantes (GOWA, LLM/proxy Techify, SQLite) usam `asyncio.to_thread()` no backend FastAPI
+- Operações bloqueantes (GOWA, LLM/proxy Techify, banco) usam `asyncio.to_thread()` no backend FastAPI
 - Nomes de variáveis e comentários em inglês; textos exibidos ao usuário em português BR
 - Tratar respostas da API GOWA com fallback para nomes de campo alternativos (a API não é 100% consistente nos nomes)
 - Frontend: ES modules, componentes Preact em PascalCase, services/hooks em camelCase
@@ -362,12 +458,10 @@ Telas de plugin (`storages/plugins/<id>/static/*.js`) seguem as MESMAS regras �
 
 ## Dados do projeto
 
-Tudo salvo na pasta raiz do projeto (dev) ou junto ao EXE (PyInstaller):
-- `storages/whatsbot.db` — banco SQLite (default; configs, contatos, mensagens, usage, tags)
-- `storages/database.json` — override do backend (`{"url": "postgresql+psycopg://..."}`); ausente = SQLite
-- `storages/` — dados do GOWA (sessão WhatsApp) + banco de dados da aplicação
+Dados de banco vivem no Postgres apontado por `DATABASE_URL`; no filesystem (raiz do projeto em dev, bind mounts no Docker) ficam:
+- `storages/` — dados do GOWA (sessão WhatsApp) + plugins do usuário
 - `logs/` — logs com rotação
-- `statics/senditems/` — mídia enviada pelo operador
+- `statics/outbox/` — mídia enviada pelo operador
 - **Webhook payloads (debug)**: últimos 50 payloads raw do GOWA em memória, acessíveis via `GET /api/webhook-payloads`
 - **Contatos arquivados**: ao receber mensagem de um contato, o webhook consulta `gowa_client.is_chat_archived(jid)` e persiste `is_archived` na tabela `contacts`. A sidebar filtra por `?archived=true/false`. O status de archive é atualizado on-demand (não por polling)
 
@@ -422,7 +516,7 @@ Há dois jeitos (escolha um, ou combine) de preencher o modal "Configurar":
 1. **Settings declarativas** (`settings.py` → `class Settings(BaseModel)`): form auto-gerado pelo `PluginSettingsForm`. Use quando as opções são campos simples (string/int/float/bool/enum) persistidos no servidor (`plugin.<id>.<field>`).
 2. **Tela de configuração custom** (`screen` com `config: true`): um componente Preact próprio, renderizado dentro do mesmo modal "Configurar" via `PluginScreen`. Use quando precisa de UI rica (toggles que aplicam na hora, preferências em `localStorage` per-device, upload, preview de som, etc.). Quando o plugin tem uma screen `config: true`, o modal renderiza ela **no lugar** do form declarativo.
 
-Referências (na Loja de Plugins, ver "Plugins de exemplo"): `auto_signature` (settings declarativas), `custom_sounds` e `notifications` (screen `config: true`).
+Referências (na Loja de Plugins — repo *community*, ver "Plugins de exemplo"): `auto_signature` (settings declarativas), `custom_sounds` e `notifications` (screen `config: true`).
 
 ### Frontend dinâmico
 
@@ -442,10 +536,30 @@ Referências (na Loja de Plugins, ver "Plugins de exemplo"): `auto_signature` (s
 - **Configuração no próprio plugin**: opções de um plugin vão SEMPRE na aba de configuração dele (settings declarativas e/ou screen `config: true`), NUNCA numa aba nova do painel de Configurações do core. Ver "Onde fica a configuração de um plugin".
 - **Settings**: chaves persistem com prefixo `plugin.<id>.`. Plugin nunca grava direto na tabela `config` sem esse prefixo.
 - **Cores / modo escuro**: a tela do plugin (`static/<id>.js`) DEVE ser legível no tema escuro. Use as classes semânticas `wa-*` (`bg-wa-bg`, `bg-wa-panel`, `text-wa-text`, `border-wa-border`, …) e `.wa-field` em inputs. Cores cruas (`bg-white`, `bg-green-50`, …) têm fallback no `custom.css`, mas hex inline e cores fora da lista coberta NÃO — teste com o modo escuro ligado. Ver "Tema e modo escuro (legibilidade)".
+- **Auditoria**: toda rota do plugin que MUDA configuração ou estado com dono chama `plugins.context.audit(...)`. Ver "Auditoria de plugins" abaixo e o guia [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md).
+
+### Auditoria de plugins
+
+A trilha (`audit_log`, tela `/audit`) é dirigida pelo bus: o listener `*` ([server/audit_listener.py](server/audit_listener.py)) confere cada evento contra a allowlist `AUDITABLE_EVENTS` ([db/audit_actions.py](db/audit_actions.py)). Essa allowlist é a **vocabulário do CORE** — plugin não a edita (o core não conhece plugin por nome, mesmo princípio dos canais/RBAC). O plugin registra as próprias ações pelo seam `audit()`:
+
+```python
+from plugins.context import audit
+audit("protocolos", "config.geral", before=antes, after=depois)
+# → ação  protocolos.config.geral   recurso  plugin:protocolos   ator: usuário logado
+```
+
+- **Contrato** ([plugins/context.py](plugins/context.py) `audit()`): a ação é namespaceada com o id do plugin (`namespaced_action`) e validada contra `PLUGIN_ACTION_RE` (`<plugin_id>.<recurso>.<verbo>`; fora do formato ⇒ WARNING e a linha é descartada, a rota segue). `resource_type` default `"plugin"`, `resource_id` default = id do plugin (o filtro "ID do recurso" lista tudo daquele plugin). Fire-and-forget, nunca levanta, respeita o master `audit_enabled`. O ator sai do `ContextVar` da request (o usuário logado) — `actor_type="ai"/"system"` só para autor não-humano (executor externo, job).
+- **Write path** ([server/audit_listener.py](server/audit_listener.py) `record()`): o ÚNICO caminho de escrita fora do listener. Aplica o gate global + resolução de ator; um ator forçado (`ai`) não herda id/rótulo do humano da request.
+- **Segredo nunca entra**: o `audit_repo` mascara por NOME de chave (rede de segurança, não licença) — o plugin registra `{"secret_definido": True}`, não o valor. Conteúdo já versionado (prompt de agente, código de tool) entra como PONTEIRO (`{key, version}`), não como cópia.
+- **Plugin de CANAL grava no CANAL**: um provider (gowa/telegram/whatsapp_cloud/website/facebook_messenger/instagram) passa `resource_type="channel", resource_id=<channel_id>` — as ações dele são sobre um canal, e assim caem no MESMO recurso dos eventos `channel.*` do core: **um filtro por canal devolve a história inteira** (criado/editado/desconectado pelo core + webhook redirecionado/Página assinada pelo plugin). Config que não é por canal (ex.: o alerta de desconexão do `gowa`, global) mantém o default `plugin:<id>`.
+- **Settings declarativas já são auditadas** pelo core (`plugin.settings.changed` → `plugin.settings_update`, com diff): plugin que só tem `settings.py` (ex.: `guarda_ia`) não precisa de nada.
+- **O que auditar**: configuração, mudança de estado com dono (fechar/atribuir/aprovar), escrita em recurso do core, ação com efeito externo. **O que não**: GET/listagem, teste de conexão, preferência pessoal por-usuário, evento de alto volume.
+- **CONVERSA NUNCA ENTRA NA TRILHA** (regra dura): enviar/receber mensagem num canal não gera linha nenhuma — nem envio do operador, nem resposta da IA, nem inbound do cliente, nem reação/edição/recibo/presença. O histórico de `messages` já é esse registro. Ficam fora da allowlist de propósito: `message.*`, `presence.changed`, `receipt.changed` e `channel.status_changed` (read que roda a cada poll). Travado por `test_audit_ignores_message_traffic` (webhook inbound + envio do operador ⇒ `audit_log` intacta) e `test_audit_message_events_stay_out_of_allowlist`.
+- Guia completo + checklist: [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md). Plugins que já usam: `protocolos` (config + operação), `melhorias` (aprovações + executor com ator `ai`), `vendas_ia` (`/seed`), e os 6 providers de canal (`gowa` alerta de desconexão; `telegram`/`whatsapp_cloud`/`facebook_messenger`/`instagram` webhook+assinatura; `website` revelação do segredo HMAC).
 
 ### RBAC de plugins
 
-Um plugin declara permissões de usuário no bloco `rbac:` do `plugin.yaml` (distinto do `permissions:` de capability `llm.tool`/`db.write`). Cada permissão vira a chave `plugin.<id>.<key>` registrada (upsert) na tabela `permissions` no load do plugin ([plugins/rbac.py](plugins/rbac.py)), aparecendo automaticamente no `PermissionPicker` agrupada por "Plugin: \<label\>" (`rbac.group`, default = nome do plugin). Convenção forte de chaves: `view`/`edit`/`delete` (chaves livres são aceitas — regex `^[a-z][a-z0-9_.]{0,48}$`).
+Um plugin declara permissões de usuário no bloco `rbac:` do `plugin.yaml` (distinto do `permissions:` de capability `llm.tool`/`db.write`). Cada permissão vira a chave `plugin.<id>.<key>` registrada (upsert) na tabela `permissions` no load do plugin ([plugins/rbac.py](plugins/rbac.py)), aparecendo no `PermissionPicker` na área **Plugins** agrupada por `rbac.group` (default = nome do plugin) **enquanto o plugin estiver ativo** (desativar esconde do picker; ver "Disable" abaixo). Convenção forte de chaves: `view`/`edit`/`delete` (chaves livres são aceitas — regex `^[a-z][a-z0-9_.]{0,48}$`).
 
 ```yaml
 rbac:
@@ -455,7 +569,7 @@ rbac:
     - { key: delete, label: "Excluir lembretes" }
 ```
 
-- **Enforce nas rotas** com a dependency `plugin_permission("<key>")` ([plugins/context.py](plugins/context.py)): infere o `<id>` do path `/api/plugins/<id>/...`, monta `plugin.<id>.<key>` e retorna 403 quando o usuário logado não tem a permissão. **Default-allow** quando legado/open (sem identidade de usuário) ou RBAC desligado — não quebra single-password. Nunca cheque permissão na mão; use a dependency.
+- **Enforce nas rotas** com a dependency `plugin_permission("<key>")` ([plugins/context.py](plugins/context.py)): infere o `<id>` do path `/api/plugins/<id>/...`, monta `plugin.<id>.<key>` e retorna 403 quando o usuário logado não tem a permissão. **Default-allow** quando open (sem identidade de usuário, instalação sem admin ainda) — não quebra o modo aberto. Nunca cheque permissão na mão; use a dependency.
   ```python
   from plugins.context import plugin_permission
   @router.delete("/items/{id}", dependencies=[plugin_permission("delete")])
@@ -463,8 +577,8 @@ rbac:
   ```
 - **Esconda a screen** sem permissão com `requires: <key>` no manifest da screen (`screens[].requires`) — o GearMenu filtra (padrão "hide, don't disable"). O componente da screen recebe a prop `can(key)` (= `hasPermission(user, 'plugin.<id>.<key>')`).
 - **Decisão central**: [server/authz.py](server/authz.py) `check()`/`acheck()` resolvem RBAC e então aplicam o seam ABAC `filter.authz.decision` (`{user, permission_key, allow}` → pode rebaixar allow→deny). **Nenhum avaliador é embarcado no core (v1)** — regras por atributo (ex: horário) viram um plugin de filtro depois, sem tocar nos call sites.
-- **Catálogo**: `rbac_repo.list_catalog()` = core (`PERMISSION_CATALOG` estático) + linhas com `plugin_id IS NOT NULL`. `/api/roles` e a validação de criação de role/usuário usam o catálogo efetivo.
-- **Disable** mantém as linhas (atribuições sobrevivem ao toggle); **delete** do plugin remove `WHERE plugin_id = <id>` (grants em `role_permissions`/`user_permissions` caem por FK cascade).
+- **Catálogo**: `rbac_repo.list_catalog()` = core (`PERMISSION_CATALOG` estático, com `tier`/`group` de exibição via `domain.permission_catalog.PERMISSION_GROUPS`) + linhas de plugins **ATIVOS** (`plugin_id IS NOT NULL` ∧ `plugins.enabled=1`). O `PermissionPicker` renderiza dois tiers (**Sistema** × **Plugins**). `/api/roles` e a validação de criação de role/usuário usam o catálogo/keys efetivos.
+- **Disable** mantém as linhas mas as **ESCONDE do picker** (`list_catalog` filtra por plugin ativo); os grants sobrevivem ao toggle e voltam a aparecer ao reativar. Para não perder um grant escondido ao editar cargo/usuário com o plugin off, `_replace_role_permissions`/`set_custom_permissions` **preservam** as chaves em `hidden_plugin_permission_keys()`. **Delete** do plugin remove `WHERE plugin_id = <id>` (grants em `role_permissions`/`user_permissions` caem por FK cascade).
 
 ### Events e Filters (bus do plugin)
 
@@ -484,11 +598,12 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | `message.sent` | Resposta IA, operator send, image/audio panel, retry, private @ia, echo do próprio celular | `phone, text, msg_id, media_type, media_path, media_extras, source, status` — `source ∈ {ai, operator, private_ai, retry, echo}` |
 | `message.any` *(alias)* | Re-dispatch de `received` + `sent` com `direction: "in"\|"out"` | igual ao original + `direction` |
 | `message.reaction` | Reação emoji em mensagem | `id, phone, reaction, reacted_message_id, is_from_me` |
-| `message.edited` | Mensagem editada | `id, phone, original_message_id, body` |
+| `message.edited` | Mensagem editada (inbound: cliente editou a própria) — o core JÁ atualiza `messages.content` + `edited_ts` e faz broadcast `message_edited` (GOWA/Telegram; Cloud não emite) | `id, phone, original_message_id, body` |
 | `message.revoked` | Mensagem apagada pra todos | `id, phone, revoked_message_id, revoked_from_me, revoked_chat` |
 | `message.deleted` | Mensagem deletada do histórico | `deleted_message_id, original_content, original_sender, was_from_me` |
+| `message.failed` | **NOVO (plano 75)** — o provedor avisou que NÃO entregou a mensagem (`statuses[].status = "failed"` da Meta). O core já marcou a msg como `failed` e fez broadcast `message_status`. `is_new=False` ⇒ é reentrega do mesmo webhook (a Meta reentrega de rotina) — use como guard de dedupe | `phone, channel_id, msg_id, error_code, error_title, error_details, conversation_id, is_new, ts, raw` |
 | `presence.changed` | Digitando / gravando | `phone, state` (`composing`/`paused`), `media` (`text`/`audio`) |
-| `receipt.changed` | Ack delivered/read | `phone, msg_ids, status` |
+| `receipt.changed` | Ack de entrega — **desde o plano 75 cobre TODOS os status** (`sent`, `delivered`, `read`, `failed`, `played`), não só `delivered`/`read`; o emit saiu de dentro do `if`. Sempre emitido DEPOIS da escrita no banco | `phone, msg_ids, status, errors, channel_id, ts` (`errors` = array cru do provedor, só em `failed`) |
 | `group.participants_changed` | Join/leave/promote/demote | `chat_id, phone, type, jids` |
 | `group.joined` | Bot adicionado ao grupo | `chat_id, phone` |
 | `call.received` | Chamada recebida (offer) | `call_id, phone, auto_rejected` |
@@ -511,6 +626,12 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | `config.changed` | PUT `/api/config` (com `keys_changed`) |
 | `tool_override.changed` | PUT `/api/tools/{name}` |
 | `plugin.loaded` / `plugin.enabled` / `plugin.disabled` / `plugin.settings.changed` | lifecycle do plugin |
+| `plugin.imported` / `plugin.deleted` | POST `/api/plugins/import` (upload de `.zip`) e DELETE `/api/plugins/{id}` — auditados como `plugin.install`/`plugin.uninstall` |
+| `channel.created` / `channel.updated` / `channel.deleted` / `channel.restored` | `channel_service` create/update/delete/restore. `updated` cobre TODOS os campos editáveis (nome, enabled, config incl. IA por canal, credenciais) — antes valia só para `config`; payload `{channel_id, provider, keys_changed, credential_keys_changed, ts}` |
+| `channel.members_changed` | PUT `/api/channels/{id}/members` (`before/after` = ids dos membros do inbox) |
+| `channel.session_action` | POST `/api/channels/{id}/reconnect` \| `/logout` (só quando a ação de fato rodou — sentinelas `not_gowa`/`unavailable` não emitem) |
+| `channel.duplicate_refused` | sweep de identidade recusou um canal duplicado ([channel_identity.py](app/services/channel_identity.py)) — ator `system` |
+| `channel.status_changed` | leitura de status ao vivo. **Fora da auditoria de propósito** (é read, roda a cada poll) |
 | `app.startup` / `app.shutdown` | lifespan do server |
 
 Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo evento emitido (após os subscribers específicos). `ctx.event_name` traz o nome real.
@@ -536,6 +657,7 @@ Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo e
 | `filter.reply.parts` | depois do split | `list[str]` | Nada é enviado | `phone` |
 | `filter.reply.part` | cada parte antes do GOWA (vale pra send manual também) | `str` | Aquela parte é pulada | `phone` |
 | `filter.authz.decision` | `authz.check`/`acheck` DEPOIS do RBAC | `dict {user, permission_key, allow}` | trata como `allow=False` (nega) | `permission_key` |
+| `filter.conversation.clear_assignee_on_close` | **NOVO (plano 67)** — `conversation_service.set_status` no fechamento, DEPOIS do `before_status` | `bool` (default `True` = limpar o atendente humano) | `None`/ausente ⇒ default seguro (limpa) | `conversation_id, user_id` |
 
 **Lifecycle events bypassam `filter.event.before_emit`** — `plugin.loaded/enabled/disabled/settings.changed` e `app.startup/shutdown` chamam `emit()` direto. Plugin não pode bloquear seu próprio carregamento.
 
@@ -565,7 +687,7 @@ FILTERS = {
 - **Observador / auditor / analytics** — `EVENT_HANDLERS = {"*": log_handler}` ou eventos específicos.
 - **Anonimizar / traduzir / sanitizar inbound** — `FILTERS = {"filter.message.before_save": fn}` modifica o dict.
 - **Adicionar assinatura / formatar / mascarar PII na saída** — `FILTERS = {"filter.reply.part": fn}` modifica cada parte.
-- **Bloquear contato / palavra-chave / horário** — qualquer filter retornando `None`. Veja o plugin `blacklist` na Loja de Plugins.
+- **Bloquear contato / palavra-chave / horário** — qualquer filter retornando `None`. Veja o plugin `blacklist` na Loja de Plugins (repo *community*).
 - **Injetar contexto extra no LLM** — `FILTERS = {"filter.system_prompt": fn}` ou `filter.llm.messages` pra reescrever o histórico antes do call.
 - **Reagir a tool call específica** — `EVENT_HANDLERS = {"tool.after": fn}` com `if payload["tool_name"] == "x"`.
 - **Push em tempo real pra tela do plugin** — `plugins.context.broadcast("evento", {...})` do dentro do handler.
@@ -581,9 +703,22 @@ FILTERS = {
 - `payload["raw"]` carrega o payload bruto do GOWA (potencialmente grande, com base64 de áudio). Plugins que logam tudo devem cortar `raw` antes de serializar.
 - Restart obrigatório no toggle do plugin: `plugin.enabled`/`plugin.disabled` emitem ANTES do `os._exit`; o novo processo emite `plugin.loaded` no boot.
 
-Plugins bundled em `assets/plugin_examples/` (copiados na 1ª execução): apenas os **providers de canal nativos da UI** — `gowa` (canal WhatsApp via GOWA), `telegram` (canal completo via Bot API — channels + lifecycle long-poll + routes + screen `config:true`; recebe por long-poll ou webhook, com `/autoconfigure` que detecta domínio público HTTPS ao criar o canal) e `whatsapp_cloud` (canal via WhatsApp Cloud API da Meta). Os três são bundled porque o frontend do core depende deles: [web/static/js/components/ChannelsManager.js](web/static/js/components/ChannelsManager.js) os oferece como providers e chama suas rotas (ex: `/api/plugins/telegram/autoconfigure` e `/status`), e `server/routes/channels.py` lista `{gowa, whatsapp_cloud, telegram, test}` como providers válidos montados a partir da classe do plugin — mantê-los no repo evita que plugin e core saiam de sincronia. Os demais plugins de exemplo (`channel_test`, `lembretes`, `runtime_probe`) foram movidos para o repositório de versionamento `whatsbot-pro-plugins` (`/home/luisa/opt/whatsbot-pro-plugins`), onde cada um vive em `plugins/<id>/` com um `.zip` importável + um `.json` de metadados, e são instalados sob demanda via `Importar (.zip)` na tela Gerenciar Plugins.
+Plugin **auto-instalado** no fresh install (plano 33 D3, [plugins/bootstrap.py](plugins/bootstrap.py) `BUNDLED_AUTO_INSTALL`): **apenas `gowa`** (canal WhatsApp via GOWA, ATIVO por padrão). Os outros providers de canal — `telegram` (Bot API — channels + lifecycle long-poll + routes + screen `config:true`; recebe por long-poll ou webhook, com `/autoconfigure`) e `whatsapp_cloud` (WhatsApp Cloud API da Meta) — não são mais copiados no boot: viram **importáveis** via `assets/channel_plugins/<id>-plugin.zip` (Importar `.zip` na tela Plugins). Como o frontend do core não conhece mais provider nenhum (o descriptor de cada um é servido por `GET /api/channels/providers` e a tela Canais o renderiza dinamicamente — plano 33), plugin e core não saem de sincronia. A **fonte** de telegram/whatsapp_cloud continua em `assets/plugin_examples/<id>/` (usada pelos testes e pra gerar os zips). Os demais plugins de exemplo (`channel_test`, `lembretes`, `runtime_probe`) foram movidos para o **repositório de plugins do Pro** (`whatsbot-pro-plugins`), cada um em `plugins/<id>/` com `.zip` importável + `.json` de metadados, instalados sob demanda via `Importar (.zip)`.
 
-Os demais plugins de exemplo foram movidos para a **Loja de Plugins** (repositório [Techify-one/whatsbot-plugins](https://github.com/Techify-one/whatsbot-plugins), publicado em https://whatsbot.techify.one/plugins) e são instalados via `Importar (.zip)` na tela Gerenciar Plugins: `event_logger` (assina `*`), `auto_signature` (`filter.reply.part`), `blacklist` (`filter.message.before_save` → `None`), `transcricao_grupos` (`filter.transcription.should_run` — controle de transcrição por grupo via UI + DB), `horario_funcionamento` (settings declarativas + `filter.system_prompt`/`filter.llm.tools`/`filter.llm.messages` + migrations — horário de funcionamento por dia da semana, com mensagem de ausência fora do expediente e cooldown por contato), `custom_sounds` (screen `config: true` + routes/migrations — biblioteca de sons), `notifications` (screen `config: true` somente-UI — preferências de notificação per-device em `localStorage`).
+### Onde vive o código de um plugin (4 lugares — NÃO confundir)
+
+Nada sincroniza estes pontos automaticamente. Um mesmo plugin pode ter conteúdos diferentes em cada um, inclusive **com o mesmo número de versão** — já aconteceu com o `protocolos` (duas cópias distintas ambas marcadas `1.17.0`). Ao comparar versões, compare o CONTEÚDO, nunca só o número.
+
+| # | Lugar | O que é | Como o código chega/sai |
+|---|---|---|---|
+| 1 | `assets/plugin_examples/<id>/` | Fonte versionada **no git deste repo** dos plugins que o core embarca (`gowa`, `telegram`, `whatsapp_cloud`, `website`, `protocolos`, `melhorias`). Usada pelos testes e pra gerar os zips | commit neste repo |
+| 2 | `storages/plugins/<id>/` | Cópia **instalada e rodando** (gitignored). Em dev é onde se testa/desenvolve | `Importar (.zip)` na UI, bootstrap, ou edição direta |
+| 3 | **Repositório de plugins do Pro** — [Techify-one/whatsbot-pro-plugins](https://github.com/Techify-one/whatsbot-pro-plugins) (privado, branch `master`) | Versionamento/distribuição dos plugins do **WhatsBot Pro**: `plugins/<id>/<id>.zip` + `<id>.json` + `catalog.json` na raiz | commit/push manual; instalação por `Importar (.zip)` |
+| 4 | Instância de **produção** | O que roda no cliente/empresa | `Importar (.zip)` manual pela tela Plugins — **não há import automático** |
+
+**Cuidado com o termo "Loja de Plugins"**: ele designa EXCLUSIVAMENTE o repositório **community** [Techify-one/whatsbot-plugins](https://github.com/Techify-one/whatsbot-plugins) (publicado em https://whatsbot.techify.one/plugins) — outro repositório, outro produto. **Não** é o repositório de plugins do Pro (#3 acima). Não use "loja" para se referir ao `whatsbot-pro-plugins`.
+
+Os plugins de exemplo abaixo vivem na **Loja de Plugins** (o repo community, não o do Pro) e são instalados via `Importar (.zip)` na tela Gerenciar Plugins: `event_logger` (assina `*`), `auto_signature` (`filter.reply.part`), `blacklist` (`filter.message.before_save` → `None`), `transcricao_grupos` (`filter.transcription.should_run` — controle de transcrição por grupo via UI + DB), `horario_funcionamento` (settings declarativas + `filter.system_prompt`/`filter.llm.tools`/`filter.llm.messages` + migrations — horário de funcionamento por dia da semana, com mensagem de ausência fora do expediente e cooldown por contato), `custom_sounds` (screen `config: true` + routes/migrations — biblioteca de sons), `notifications` (screen `config: true` somente-UI — preferências de notificação per-device em `localStorage`).
 
 ### Media types suportados
 
@@ -616,21 +751,17 @@ Use o slash command `/new-plugin` no Claude Code. O comando lê os arquivos de r
 - Export: `GET /api/plugins/<id>/export` retorna um `.zip` da pasta (excluindo `__pycache__/` e arquivos `.db`).
 - Import: `POST /api/plugins/import` (multipart) valida o `plugin.yaml` na raiz, checa colisão de `id` e path traversal, extrai em `storages/plugins/<id>/`. Plugin importado fica `enabled=0` — usuário ativa pela UI.
 
-## Migração de dados legados
-
-Para instalações que usavam a versão anterior (armazenamento em JSON), o sistema detecta automaticamente na inicialização se o banco está vazio e existem arquivos JSON legados (`contacts/*.json`, `config.json`). Nesse caso, executa a migração via `db/migrate_json.py`. Os arquivos JSON originais não são deletados.
-
 ## Testes automatizados
 
-Testes de endpoint em `tests/test_endpoints.py` — cobrem todos os endpoints da API usando FastAPI TestClient com banco SQLite temporário. GOWA e o LLM (proxy Techify) são mockados.
+Testes de endpoint em `tests/test_endpoints.py` — cobrem todos os endpoints da API usando FastAPI TestClient. GOWA e o LLM (proxy Techify) são mockados. A suíte roda **contra um Postgres de teste** (plano 29 C3): a URL vem de `WHATSBOT_TEST_DB_URL` (env, ou a linha correspondente no `.env` da raiz) e o helper central [tests/pg.py](tests/pg.py) recria o schema (`DROP SCHEMA public CASCADE` + `alembic upgrade head`) uma vez por processo. **Trava de segurança**: o nome do banco precisa conter `test` (ex.: `whatsbot_test`) — impossível apontar a suíte pro banco vivo por engano (`WHATSBOT_TEST_DB_ALLOW_ANY=1` desliga a trava).
 
 ```bash
-# Rodar testes (não precisa de servidor rodando)
-source venv/Scripts/activate
-python tests/test_endpoints.py
+# Rodar testes (não precisa de servidor rodando; precisa de WHATSBOT_TEST_DB_URL)
+venv/bin/python -m pytest tests/ -q
+venv/bin/python tests/test_endpoints.py
 ```
 
-Os testes criam um banco temporário (SQLite por default; setar `WHATSBOT_TEST_DB_URL=postgresql+psycopg://...` para rodar contra Postgres), inserem dados de teste (contatos, mensagens, tags, usage), e validam ~196 checagens (helper `check(...)`) cobrindo:
+Os testes inserem dados de teste (contatos, mensagens, tags, usage) e validam ~990 checagens (helper `check(...)`) cobrindo:
 - Health, Auth (com e sem senha), Config (GET/PUT/test-key, `group_reply_mode`), Status, Balance
 - Contacts (list, detail, search, archived, send, retry, image, audio, presence, read, toggle-ai, update info, **pin/unpin**, **unread/mark-all-read/mark-all-unread**, **unread-count**, **@menção em grupo / has_unread_mention**, **react/delete de mensagem**, **members** de grupo)
 - Tags (CRUD + contact tags)
@@ -700,10 +831,9 @@ python -c "import uvicorn; from server.dev import app; uvicorn.run(app, host='12
 - **Archive status é chat-level**: o webhook do GOWA **não** inclui campo de archive no payload. Para saber se um chat é arquivado, consultar `GET /chats` e verificar o campo `archived` no item com o `jid` correspondente
 - **Debug do subprocess GOWA**: por padrão o stdout/stderr do GOWA vão para `DEVNULL` (sem custo). Para diagnosticar mensagens descartadas (payloads vazios, tipos não decodificados, templates HSM da Cloud API, etc.), setar a env `WHATSBOT_GOWA_DEBUG=1` (no Coolify ou outro ambiente) e reiniciar o container. Com a flag ativa, o GOWA é iniciado com `--debug=true` e os logs são gravados em `logs/gowa.log` (truncado quando passa de ~10 MB). Acessível via `GET /api/gowa-logs?limit=N` (default 500, max 5000). A resposta inclui `debug_enabled`, `log_path`, `size` e `lines[]`. Desligar setando `WHATSBOT_GOWA_DEBUG=0` ou removendo a variável + reiniciando
 - **Mensagens HSM via Cloud API (linked device limitation)**: contas Business via WhatsApp Cloud API enviam mensagens template (`<hsm tag="..."/>`, ex: Mercado Livre, OTP, notificações). Por design do WhatsApp, esses templates **não são entregues com conteúdo para linked devices** — só para o device primário. O GOWA recebe um `placeholderMessage` com `type: MASK_LINKED_DEVICES` (sem body/media), e o webhook chega só com metadata (`chat_id`, `from`, `id`, `timestamp`). Não é bug — é limitação estrutural. Para confirmar, ativar `WHATSBOT_GOWA_DEBUG=1` e procurar `placeholderMessage` ou `<hsm tag=` em `/api/gowa-logs`
-- **SQLite WAL files**: `whatsbot.db-wal` e `whatsbot.db-shm` são criados automaticamente pelo SQLite no modo WAL. Não deletar enquanto o servidor estiver rodando. São limpos automaticamente quando todas as conexões fecham
-- **Auto-criação do banco**: na inicialização, `init_db()` resolve a URL (env > `storages/database.json` > sqlite default), cria o engine e roda `alembic upgrade head`. SQLite vazio é criado do zero; DBs SQLite legados (sem `alembic_version`) são automaticamente stampados no baseline antes do upgrade — não há recriação destrutiva
-- **`statics/` precisa de pasta persistente no deploy (estilo Chatwoot)**: `statics/` está no `.gitignore` E `.dockerignore`, e é criada vazia em runtime dentro do container. A mídia enviada pelo operador (`statics/senditems/`) e o cache de avatares (`statics/avatars/`) vivem no **disco local da instância** — não no banco. Por isso o [Dockerfile](Dockerfile) **NÃO** declara `VOLUME` (um `VOLUME` no Dockerfile cria volume **anônimo**, que o Coolify/`docker run` sem `-v` **descarta ao recriar o container num redeploy** — daria 404 `{"detail":"Not Found"}` nas imagens já enviadas, e a leitura "parece persistente" engana). A persistência é feita por **bind mount de pasta real da instalação**: `docker-compose.yaml` mapeia `./data/{storages,statics,logs}` → `/app/...` (pastas visíveis no host, pré-criadas pelo `docker_start.sh`); no **Coolify**, configurar **Persistent Storage** mapeando `/app/storages` e `/app/statics` (ou ao menos `/app/statics/senditems`) para host path/volume. Em dev (`linux_start.sh`, processo direto, sem container) os arquivos já ficam em `statics/` da raiz do checkout. Avatares são cache auto-recuperável (re-baixados do GOWA), então o painel cai num placeholder 200 em vez de 404 (rota `GET /statics/avatars/{name}` em [server/app.py](server/app.py)); imagem perdida no chat renderiza placeholder "indisponível". **Atenção (DB compartilhado + disco local):** se duas instâncias dividem o MESMO banco (ex.: Postgres remoto) mas têm `statics/` separados, a mídia enviada por uma não aparece na outra (o `media_path` está no banco compartilhado, mas o arquivo só existe no disco de quem enviou) → "Imagem indisponível". Storage de mídia é **per-instância** por design; multi-réplica com mídia compartilhada exigiria storage de rede de verdade (volume por-nó não basta)
-- **Bootstrap de plugins**: os plugins de referência vivem em `assets/plugin_examples/<id>/` (trackeados no git) e são copiados para `storages/plugins/<id>/` apenas na 1ª execução, quando `storages/plugins/` está vazio. Atualizar o core nunca sobrescreve plugins do usuário. Se o usuário deletar um plugin de referência pela UI, ele NÃO volta no próximo boot — a flag de "primeira execução" é "tem alguma subpasta?". Bundled hoje: `gowa`, `telegram` e `whatsapp_cloud` (os três providers de canal nativos da UI — seus frontends são parte do core e não podem divergir). Os demais plugins de exemplo (`channel_test`, `lembretes`, `runtime_probe`) foram movidos para o repositório de versionamento `whatsbot-pro-plugins` (cada um em `plugins/<id>/` com `.zip` + `.json`) e são instalados via `Importar (.zip)`. Instalações que já tinham `storages/plugins/` populado NÃO recebem plugins novos automaticamente — importar via `POST /api/plugins/import` (zip gerado por `GET /api/plugins/<id>/export`) ou esvaziar a pasta antes do próximo boot.
+- **Bootstrap do banco**: na inicialização, `init_db()` exige `DATABASE_URL` Postgres na env (fail-fast com mensagem acionável se ausente/inválida), cria o engine e roda `alembic upgrade head`. Banco vazio nasce direto via Alembic — não há recriação destrutiva
+- **`statics/` precisa de pasta persistente no deploy (estilo Chatwoot)**: `statics/` está no `.gitignore` E `.dockerignore`, e é criada vazia em runtime dentro do container. A mídia enviada pelo operador (`statics/outbox/`), o cache de avatares (`statics/avatars/`) e os sons importados na aba "Sons" (`statics/sounds/`, cuja linha em `custom_sounds` sobrevive no Postgres mesmo se o arquivo sumir) vivem no **disco local da instância** — não no banco. Por isso o [Dockerfile](Dockerfile) **NÃO** declara `VOLUME` (um `VOLUME` no Dockerfile cria volume **anônimo**, que o Coolify/`docker run` sem `-v` **descarta ao recriar o container num redeploy** — daria 404 `{"detail":"Not Found"}` nas imagens já enviadas, e a leitura "parece persistente" engana). A persistência é feita por **bind mount de pasta real da instalação**: `docker-compose.yaml` mapeia `./data/{storages,statics,logs}` → `/app/...` (pastas visíveis no host, pré-criadas pelo `docker_start.sh`); no **Coolify**, configurar **Persistent Storage** mapeando `/app/storages` e `/app/statics` (ou ao menos `/app/statics/outbox`) para host path/volume. Em dev (`linux_start.sh`, processo direto, sem container) os arquivos já ficam em `statics/` da raiz do checkout. Avatares são cache auto-recuperável (re-baixados do GOWA), então o painel cai num placeholder 200 em vez de 404 (rota `GET /statics/avatars/{name}` em [server/app.py](server/app.py)); imagem perdida no chat renderiza placeholder "indisponível". **Atenção (DB compartilhado + disco local):** se duas instâncias dividem o MESMO banco (ex.: Postgres remoto) mas têm `statics/` separados, a mídia enviada por uma não aparece na outra (o `media_path` está no banco compartilhado, mas o arquivo só existe no disco de quem enviou) → "Imagem indisponível". Storage de mídia é **per-instância** por design; multi-réplica com mídia compartilhada exigiria storage de rede de verdade (volume por-nó não basta). **O mesmo vale para `storages/`** (código dos plugins em `storages/plugins/` + sessão do WhatsApp/GOWA): sem Persistent Storage em `/app/storages` no Coolify, um redeploy zera o disco e **os plugins somem da interface** (a listagem varre o disco; só `gowa` é re-semeado) — mas as configs (`config` `plugin.<id>.*`), dados (`plugin_<id>_*`) e migrations sobrevivem no Postgres, então re-importar o mesmo `.zip` recupera tudo. Uma **salvaguarda de boot** ([server/persistence_check.py](server/persistence_check.py), chamada em `create_app`) detecta esse disco-zerado-banco-vivo via token-sentinela (arquivo em `storages/` vs. config key `storages_persistence_token`) e grita no log (`persistence-check: storages/ NÃO é persistente!`); o veredito também aparece em `GET /api/admin/database` (`storage_persistent`). Passo a passo em [docs/DEPLOY_COOLIFY.md](docs/DEPLOY_COOLIFY.md)
+- **Bootstrap de plugins**: os plugins de referência vivem em `assets/plugin_examples/<id>/` (trackeados no git) e são copiados para `storages/plugins/<id>/` apenas na 1ª execução, quando `storages/plugins/` está vazio. Atualizar o core nunca sobrescreve plugins do usuário. Se o usuário deletar um plugin de referência pela UI, ele NÃO volta no próximo boot — a flag de "primeira execução" é "tem alguma subpasta?". Auto-instalado hoje: **só `gowa`** (plano 33 D3 — `BUNDLED_AUTO_INSTALL`); `telegram`/`whatsapp_cloud` viraram import-only (zip em `assets/channel_plugins/`, fonte em `assets/plugin_examples/`). Os demais plugins de exemplo (`channel_test`, `lembretes`, `runtime_probe`) foram movidos para o **repositório de plugins do Pro** (`whatsbot-pro-plugins`; cada um em `plugins/<id>/` com `.zip` + `.json`) e são instalados via `Importar (.zip)`. Instalações que já tinham `storages/plugins/` populado NÃO recebem plugins novos automaticamente — importar via `POST /api/plugins/import` (zip gerado por `GET /api/plugins/<id>/export`) ou esvaziar a pasta antes do próximo boot. **Exceção (plano 52)**: o plugin `gowa` bundled tem upgrade **version-aware** — se a versão em `assets/plugin_examples/gowa/plugin.yaml` for maior que a instalada, o boot substitui `storages/plugins/gowa/` pela cópia bundled (edições manuais nessa pasta são perdidas; logado como warning).
 - **Restart de plugin requer supervisor**: `enable`/`disable` chama `os._exit(0)` após um delay curto. Em Docker, `restart: unless-stopped` (compose) faz o container relançar; em dev, `restart.py` toca `server/_reload_trigger.py` (`.py` dentro de um `--reload-dir`, casa com o include default `*.py` do uvicorn) — o watchfiles reinicia o worker antes do `os._exit` rodar. O arquivo é regenerado em runtime e está no `.gitignore`. Em EXE Windows, o `update.py` relança. Sem supervisor, o servidor cai e não volta sozinho.
 - **Prefixo de tabela enforced**: o migrator usa regex em `CREATE TABLE`/`ALTER TABLE`/`CREATE INDEX`/`DROP TABLE`/`DROP INDEX` e RECUSA migration que tente criar objeto fora do prefixo `plugin_<id>_`. Erro mostra qual nome violou. Usar comentários SQL `--` ou `/* */` é OK; o migrator os strip-a antes da validação.
 - **Tool name é global**: se um plugin registra uma tool com nome já existente (core ou outro plugin), o registry loga warning e ignora a duplicata. Convenção: nomes específicos como `<id>_<verbo>` (ex: `orders_create`).

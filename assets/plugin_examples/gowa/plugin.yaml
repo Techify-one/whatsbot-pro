@@ -1,6 +1,6 @@
 id: gowa
 name: WhatsApp (GOWA)
-version: 1.0.0
+version: 1.3.1
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Caixa de entrada WhatsApp via GOWA (go-whatsapp-web-multidevice), conectada por
@@ -8,10 +8,14 @@ description: >-
   desativar ou desinstalar derruba a conexão e o sistema segue rodando com as
   caixas de entrada restantes. Vem incluso e ATIVO por padrão; desinstalável pela
   tela de Plugins.
+short_description: >-
+  Caixa de entrada do WhatsApp via GOWA, conectada por QR. Vem inclusa e ativa por padrao; desativar ou desinstalar derruba a conexao, e o sistema segue com as caixas restantes.
 author: WhatsBot
 entry:
   channels: channels
   lifecycle: lifecycle
+  routes: routes
+migrations: migrations
 screens:
   - id: gowa-config
     title: WhatsApp (GOWA)

@@ -1,8 +1,13 @@
 import { h } from 'preact';
+import { useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { SendIcon, EmojiIcon, AttachIcon, MicIcon, StopIcon, TemplateIcon } from './icons.js';
-import { AudioPlayer } from './AudioPlayer.js';
+import { MediaQueuePreview } from './MediaQueuePreview.js';
 import { EmojiPicker } from './EmojiPicker.js';
+import { MediaRejectedModal } from './MediaRejectedModal.js';
+import { hasPermission } from '../../utils/permissions.js';
+import { highlightComposerMarkup } from '../../utils/formatWhatsApp.js';
+import { syncMirror } from '../../utils/composerMirror.js';
 
 const html = htm.bind(h);
 
@@ -25,7 +30,10 @@ function formatRecordTime(secs) {
 export function Composer({
   sandbox, canSend, templatesSupported, sessionClosed,
   composer, autocomplete, media, audio, quotedInfo, openTemplatePicker, handleKeyDown,
+  currentUser = null,
 }) {
+  // P48: the /atalho quick-reply picker only shows for users who can manage them.
+  const canQuickReply = sandbox || hasPermission(currentUser, 'quickreply.manage');
   const {
     input, mode, setMode, aiReadPrivate, setAiReadPrivate, aiReplyInChat, setAiReplyInChat,
     replyingTo, setReplyingTo, emojiOpen, setEmojiOpen, inputRef, emojiRef,
@@ -36,12 +44,32 @@ export function Composer({
     mentionLabel, applyMention, applyQuickReply,
   } = autocomplete;
   const {
-    attachMenuOpen, attachMenuRef, pendingMedia, mediaCaption, setMediaCaption,
-    fileInputRef, docInputRef, sending,
-    handleAttachClick, pickImage, pickDocument, handleFileSelected, handleDocSelected,
+    attachMenuOpen, attachMenuRef, pendingQueue, mediaCaption, setMediaCaption,
+    fileInputRef, docInputRef, videoInputRef, sending, sendProgressLabel, removePendingItem,
+    handleAttachClick, pickImage, pickDocument, pickVideo,
+    handleFileSelected, handleDocSelected, handleVideoSelected,
     handlePaste, cancelPendingMedia, confirmPendingMedia,
+    rejection, dismissRejection,
   } = media;
+  const hasPending = pendingQueue.length > 0;
   const { recording, recordDuration, handleMicClick } = audio;
+
+  // Highlight overlay (WYSIWYG-in-place): a mirror <div> renders the typed text
+  // with real bold/italic/strike/mono styling behind a transparent-text
+  // textarea. Keep the mirror scrolled AND as wide as the textarea's content
+  // box so long messages (past the 6-line cap, quando a barra de rolagem
+  // aparece e rouba 6px) quebrem as linhas no mesmo ponto — senão o cursor
+  // desencontra do fim do texto visível.
+  const mirrorRef = useRef(null);
+  useEffect(() => {
+    const sync = () => syncMirror(inputRef.current, mirrorRef.current);
+    sync();
+    // O auto-resize do textarea vive num effect do componente PAI (useComposer),
+    // que roda depois deste — remede na frame seguinte, já com a altura final
+    // (é o instante em que a barra de rolagem nasce).
+    const raf = requestAnimationFrame(sync);
+    return () => cancelAnimationFrame(raf);
+  }, [input]);
 
   const hasText = input.trim().length > 0;
 
@@ -51,54 +79,53 @@ export function Composer({
       ref=${fileInputRef}
       type="file"
       accept="image/*"
+      multiple
       class="hidden"
       onChange=${handleFileSelected}
     />
     <input
       ref=${docInputRef}
       type="file"
+      multiple
       class="hidden"
       onChange=${handleDocSelected}
     />
+    <input
+      ref=${videoInputRef}
+      type="file"
+      accept="video/*"
+      class="hidden"
+      onChange=${handleVideoSelected}
+    />
 
-    <!-- Media confirmation overlay -->
-    ${pendingMedia && canSend ? html`
-      <div class="flex flex-col items-center bg-wa-panel border-t border-wa-border px-[16px] py-[12px] shrink-0 gap-[10px]">
-        ${pendingMedia.type === 'image' ? html`
-          <img src=${pendingMedia.previewUrl} class="max-h-[200px] max-w-full rounded-[8px] object-contain" />
-        ` : pendingMedia.type === 'document' ? html`
-          <div class="flex items-center gap-[8px] bg-wa-inputBg border border-wa-border rounded-[8px] px-[14px] py-[10px] max-w-full">
-            <span class="text-[22px]">📄</span>
-            <span class="text-[14px] text-wa-text break-all">${pendingMedia.filename}</span>
-          </div>
-        ` : html`
-          <div class="w-full max-w-[320px]">
-            <${AudioPlayer} src=${pendingMedia.previewUrl} isLocalBlob=${true} />
-          </div>
-        `}
-        ${pendingMedia.type !== 'audio' ? html`
-          <input
-            type="text"
-            class="wa-field w-full max-w-[420px] rounded-[8px] px-[12px] py-[8px] text-[14px] border border-wa-border"
-            placeholder="Adicionar uma legenda (opcional)"
-            value=${mediaCaption}
-            onInput=${(e) => setMediaCaption(e.target.value)}
-            onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmPendingMedia(); } }}
-          />
-        ` : ''}
-        <div class="flex gap-[12px]">
-          <button
-            type="button"
-            onClick=${cancelPendingMedia}
-            class="px-[16px] py-[6px] rounded-[8px] text-[13px] bg-wa-hover text-wa-text border border-wa-border hover:bg-wa-inputBg transition-colors"
-          >Cancelar</button>
-          <button
-            type="button"
-            onClick=${confirmPendingMedia}
-            disabled=${sending}
-            class="px-[16px] py-[6px] rounded-[8px] text-[13px] bg-wa-outgoing text-wa-text border border-wa-border hover:opacity-90 transition-colors disabled:opacity-50 flex items-center gap-[6px]"
-          ><${SendIcon} /> Enviar</button>
-        </div>
+    <!-- Anexo recusado pelas regras do canal (tamanho/formato) -->
+    <${MediaRejectedModal} rejection=${rejection} onClose=${dismissRejection} />
+
+    <!-- Prévia da fila de mídia (plano 64 · F7) -->
+    ${hasPending && canSend ? html`
+      <${MediaQueuePreview}
+        queue=${pendingQueue}
+        caption=${mediaCaption}
+        setCaption=${setMediaCaption}
+        onRemove=${removePendingItem}
+        onCancel=${cancelPendingMedia}
+        onConfirm=${confirmPendingMedia}
+        sending=${sending}
+        progressLabel=${sendProgressLabel}
+        mode=${mode}
+        aiReadPrivate=${aiReadPrivate}
+        setAiReadPrivate=${setAiReadPrivate}
+        aiReplyInChat=${aiReplyInChat}
+        setAiReplyInChat=${setAiReplyInChat}
+      />
+    ` : ''}
+
+    <!-- Progresso do lote em voo (plano 64 · F5). A fila some ao confirmar (as
+         bolhas óticas já apareceram no fio), então o "N de M" vive aqui. -->
+    ${sending && sendProgressLabel ? html`
+      <div class="flex items-center justify-center gap-[8px] bg-wa-panel border-t border-wa-border px-[16px] py-[7px] shrink-0">
+        <span class="w-[8px] h-[8px] rounded-full bg-wa-teal animate-pulse"></span>
+        <span class="text-[12px] text-wa-secondary">${sendProgressLabel}</span>
       </div>
     ` : ''}
 
@@ -112,7 +139,7 @@ export function Composer({
           Você não pode enviar mensagens neste grupo
         </span>
       </div>
-    ` : pendingMedia ? '' : recording ? html`
+    ` : hasPending ? '' : recording ? html`
       <div class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
         <div class="flex-1 flex items-center gap-3 mx-[5px]">
           <span class="w-[10px] h-[10px] rounded-full bg-red-500 animate-pulse shrink-0"></span>
@@ -178,7 +205,7 @@ export function Composer({
         const accent = q ? q.senderColor : '#8696a0';
         return html`
           <div class="px-[14px] pt-[6px] bg-wa-panel shrink-0">
-            <div class="flex items-stretch rounded-[6px] overflow-hidden" style="background:#1f2c33;">
+            <div class="flex items-stretch rounded-[6px] overflow-hidden" style="background:rgb(var(--wa-replyPreviewBg));">
               <div class="w-[4px] shrink-0" style="background:${accent};"></div>
               <div class="px-[10px] py-[5px] min-w-0 flex-1">
                 <div class="text-[12.5px] font-semibold leading-[16px] truncate" style="color:${accent};">${q ? q.senderLabel : 'Mensagem'}</div>
@@ -219,10 +246,11 @@ export function Composer({
             </div>
           ` : ''}
         </div>
-        ${mode === 'private' ? '' : html`
+        ${html`
           <div ref=${attachMenuRef} class="relative shrink-0">
-            <button type="button" class="p-[8px] ${sessionClosed ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
-              disabled=${sessionClosed} onClick=${handleAttachClick}>
+            <button type="button" class="p-[8px] ${(sessionClosed && mode !== 'private') ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
+              disabled=${sessionClosed && mode !== 'private'} onClick=${handleAttachClick}
+              title=${mode === 'private' ? 'Anexar à nota privada' : 'Anexar'}>
               <${AttachIcon} />
             </button>
             ${attachMenuOpen ? html`
@@ -230,6 +258,10 @@ export function Composer({
                 <button type="button" onClick=${pickImage}
                   class="w-full text-left px-[14px] py-[8px] text-[14px] text-wa-text hover:bg-wa-hover flex items-center gap-[8px]">
                   <span class="text-[16px]">🖼️</span> Imagem
+                </button>
+                <button type="button" onClick=${pickVideo}
+                  class="w-full text-left px-[14px] py-[8px] text-[14px] text-wa-text hover:bg-wa-hover flex items-center gap-[8px]">
+                  <span class="text-[16px]">🎬</span> Vídeo
                 </button>
                 <button type="button" onClick=${pickDocument}
                   class="w-full text-left px-[14px] py-[8px] text-[14px] text-wa-text hover:bg-wa-hover flex items-center gap-[8px]">
@@ -257,26 +289,35 @@ export function Composer({
             const sel = Math.min(mentionMenu.index || 0, cands.length - 1);
             return html`
               <div class="absolute left-0 right-0 bottom-[calc(100%+6px)] max-h-[210px] overflow-y-auto bg-wa-panel border border-wa-border rounded-[8px] shadow-lg py-[4px] z-30 wa-scrollbar">
-                ${cands.map((c, i) => html`
+                ${cands.map((c, i) => {
+                  const isSpecial = c.special || c.team;
+                  const dispName = c.name || mentionLabel(c);
+                  const key = c.team ? '@time' : c.special ? '@todos'
+                    : c.internal ? ('u' + c.user_id) : c.phone;
+                  const avatar = isSpecial ? (c.team ? '👥' : '@') : ((dispName || '?').slice(0, 1).toUpperCase());
+                  const fullLabel = c.team ? 'Time — todos da caixa'
+                    : c.special ? 'todos — todos os membros' : dispName;
+                  return html`
                   <button
                     type="button"
-                    key=${c.special ? '@todos' : c.phone}
+                    key=${key}
                     onMouseDown=${(ev) => { ev.preventDefault(); applyMention(c); }}
                     class="w-full text-left px-[12px] py-[7px] text-[14px] flex items-center gap-[8px] ${i === sel ? 'bg-wa-hover' : ''} hover:bg-wa-hover"
                   >
-                    <span class="w-[26px] h-[26px] rounded-full flex items-center justify-center text-[12px] shrink-0 ${c.special ? 'bg-wa-teal text-white' : 'bg-wa-border text-wa-text'}">
-                      ${c.special ? '@' : (mentionLabel(c) || '?').slice(0, 1).toUpperCase()}
+                    <span class="w-[26px] h-[26px] rounded-full flex items-center justify-center text-[12px] shrink-0 ${isSpecial ? 'bg-wa-teal text-white' : 'bg-wa-border text-wa-text'}">
+                      ${avatar}
                     </span>
                     <span class="text-wa-text truncate">
-                      ${c.special ? 'todos — todos os membros' : mentionLabel(c)}
-                      ${(!c.special && c.is_admin) ? html`<span class="ml-[6px] text-[11px] text-wa-secondary">admin</span>` : ''}
+                      ${fullLabel}
+                      ${(!isSpecial && c.is_admin) ? html`<span class="ml-[6px] text-[11px] text-wa-secondary">admin</span>` : ''}
                     </span>
                   </button>
-                `)}
+                `;
+                })}
               </div>
             `;
           })() : ''}
-          ${quickReplyMenu ? (() => {
+          ${quickReplyMenu && canQuickReply ? (() => {
             const cands = getQuickReplyCandidates(quickReplyMenu.query);
             if (!cands.length) return '';
             const sel = Math.min(quickReplyMenu.index || 0, cands.length - 1);
@@ -296,6 +337,12 @@ export function Composer({
               </div>
             `;
           })() : ''}
+          <div
+            ref=${mirrorRef}
+            aria-hidden="true"
+            class="pointer-events-none absolute inset-0 z-0 overflow-hidden box-border rounded-[8px] px-[12px] py-[9px] border border-transparent text-[15px] leading-[20px] whitespace-pre-wrap break-words bg-wa-inputBg text-wa-text"
+            dangerouslySetInnerHTML=${{ __html: highlightComposerMarkup(input) }}
+          ></div>
           <textarea
             ref=${inputRef}
             rows="1"
@@ -303,8 +350,10 @@ export function Composer({
             onInput=${handleInputChange}
             onKeyDown=${handleKeyDown}
             onPaste=${handlePaste}
+            onScroll=${(e) => syncMirror(e.target, mirrorRef.current)}
             placeholder=${mode === 'private' ? 'Mensagem privada' : 'Digite uma mensagem'}
-            class="w-full block bg-wa-inputBg text-wa-text text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px]"
+            style="caret-color: rgb(var(--wa-text));"
+            class="relative z-[1] box-border w-full block bg-transparent text-transparent text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px]"
           ></textarea>
         </div>
         ${hasText ? html`
@@ -315,9 +364,11 @@ export function Composer({
           >
             <${SendIcon} />
           </button>
-        ` : mode === 'private' ? '' : html`
-          <button type="button" class="p-[8px] shrink-0 text-wa-icon ${sessionClosed ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
-            disabled=${sessionClosed} onClick=${handleMicClick}>
+        ` : html`
+          <button type="button"
+            title=${mode === 'private' ? 'Gravar áudio privado (só no painel)' : 'Gravar áudio'}
+            class="p-[8px] shrink-0 ${mode === 'private' ? 'text-violet-400' : 'text-wa-icon'} ${(sessionClosed && mode !== 'private') ? 'opacity-40 cursor-not-allowed' : ''}" tabindex="-1"
+            disabled=${sessionClosed && mode !== 'private'} onClick=${handleMicClick}>
             <${MicIcon} />
           </button>
         `}

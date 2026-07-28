@@ -1,14 +1,13 @@
 import { h } from 'preact';
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { markAllUnread, markAllRead } from '../services/api.js';
-import { DatabaseSettings } from './DatabaseSettings.js';
+import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
-function Section({ title, children }) {
+function Section({ title, id, children }) {
   return html`
-    <div class="bg-wa-bg rounded-xl p-5 border border-wa-border shadow-sm">
+    <div id=${id} class="bg-wa-bg rounded-xl p-5 border border-wa-border shadow-sm scroll-mt-4">
       ${title ? html`
         <h3 class="text-xs font-semibold text-wa-secondary uppercase tracking-wider mb-4">${title}</h3>
       ` : null}
@@ -19,7 +18,21 @@ function Section({ title, children }) {
   `;
 }
 
-export function ConfigPanel({ config, saving, onSave, onNotify }) {
+// `sections`: quais seções renderizar (e, portanto, quais chaves o Salvar manda).
+// Cada aba de Configurações Gerais monta o painel com a sua fatia — "avisos" na
+// aba Geral, "avancado" na aba Avançado. Sem a prop, renderiza todas.
+export function ConfigPanel({ config, saving, onSave, onNotify, currentUser, sections }) {
+  const show = (id) => !sections || sections.includes(id);
+  // Avisos de sistema, execuções salvas, retenção de auditoria e a senha do
+  // painel vivem no PUT /api/config (gated settings.manage). Sem essa permissão
+  // esses campos NÃO aparecem — só a seção "Marcar conversas" (endpoints próprios).
+  // Gate POR SEÇÃO: cada aba de Configurações Gerais tem a sua permissão;
+  // `settings.manage` é o super-conjunto que libera todas (e é o que gateia a
+  // escrita no PUT /api/config junto com a granular da chave).
+  const canAllSettings = hasPermission(currentUser, 'settings.manage');
+  const canSection = (id) => canAllSettings || hasPermission(
+    currentUser, id === 'avancado' ? 'settings.advanced' : 'settings.general');
+  const canSettings = canSection('avisos') || canSection('avancado');
   // Avisos de sistema no chat (plano 12) — toggles globais por grupo de evento.
   const [systemNoticeAssignment, setSystemNoticeAssignment] = useState(true);
   const [systemNoticeTags, setSystemNoticeTags] = useState(true);
@@ -28,15 +41,26 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   const [systemNoticeAi, setSystemNoticeAi] = useState(true);
   const [maxExecutions, setMaxExecutions] = useState(200);
   const [auditRetentionDays, setAuditRetentionDays] = useState(365);
-  const [confirmUnreadAll, setConfirmUnreadAll] = useState(false);
-  const [markingAllUnread, setMarkingAllUnread] = useState(false);
-  const [confirmReadAll, setConfirmReadAll] = useState(false);
-  const [markingAllRead, setMarkingAllRead] = useState(false);
-  const [webPassword, setWebPassword] = useState('');
-  const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
-  const [removePassword, setRemovePassword] = useState(false);
+  // URL pública base do painel (domínio real) — usada por links externos (ex.: link
+  // do painel de melhorias). Auto-detectada; editável aqui para correção manual.
+  const [publicBaseUrl, setPublicBaseUrl] = useState('');
 
   const [saveSuccess, setSaveSuccess] = useState(false);
+  // Deep-link de seção (Plano 24): ?section=<id> rola até a seção ao abrir
+  // (avisos | avancado). Roda uma vez, quando o
+  // conteúdo já montou (config carregada).
+  const sectionScrolledRef = useRef(false);
+  useEffect(() => {
+    if (!config || sectionScrolledRef.current) return;
+    sectionScrolledRef.current = true;
+    let section = null;
+    try { section = new URLSearchParams(window.location.search).get('section'); } catch {}
+    if (!section) return;
+    requestAnimationFrame(() => {
+      const el = document.getElementById(section);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, [config]);
 
   // Populate form when config loads
   useEffect(() => {
@@ -48,70 +72,29 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
       setSystemNoticeAi(config.system_notice_ai ?? true);
       setMaxExecutions(config.max_executions ?? 200);
       setAuditRetentionDays(config.audit_retention_days ?? 365);
+      setPublicBaseUrl(config.public_base_url ?? '');
     }
   }, [config]);
 
-  async function handleMarkAllUnread() {
-    setMarkingAllUnread(true);
-    try {
-      const res = await markAllUnread();
-      if (res.ok) {
-        onNotify(`${res.data?.count ?? 0} conversa(s) marcada(s) como não lida(s).`);
-      } else {
-        onNotify(res.error || 'Erro ao marcar conversas.');
-      }
-    } catch (e) {
-      onNotify('Erro de conexão ao marcar conversas.');
-    } finally {
-      setMarkingAllUnread(false);
-      setConfirmUnreadAll(false);
-    }
-  }
-
-  async function handleMarkAllRead() {
-    setMarkingAllRead(true);
-    try {
-      const res = await markAllRead();
-      if (res.ok) {
-        onNotify(`${res.data?.count ?? 0} conversa(s) marcada(s) como lida(s).`);
-      } else {
-        onNotify(res.error || 'Erro ao marcar conversas.');
-      }
-    } catch (e) {
-      onNotify('Erro de conexão ao marcar conversas.');
-    } finally {
-      setMarkingAllRead(false);
-      setConfirmReadAll(false);
-    }
-  }
-
   async function handleSave() {
     const data = {
-      system_notice_assignment: systemNoticeAssignment,
-      system_notice_tags: systemNoticeTags,
-      system_notice_conv_labels: systemNoticeConvLabels,
-      system_notice_status: systemNoticeStatus,
-      system_notice_ai: systemNoticeAi,
-      max_executions: parseInt(maxExecutions, 10) || 200,
-      audit_retention_days: parseInt(auditRetentionDays, 10) || 365,
+      ...(show('avisos') ? {
+        system_notice_assignment: systemNoticeAssignment,
+        system_notice_tags: systemNoticeTags,
+        system_notice_conv_labels: systemNoticeConvLabels,
+        system_notice_status: systemNoticeStatus,
+        system_notice_ai: systemNoticeAi,
+      } : {}),
+      ...(show('avancado') ? {
+        max_executions: parseInt(maxExecutions, 10) || 200,
+        audit_retention_days: parseInt(auditRetentionDays, 10) || 365,
+        public_base_url: (publicBaseUrl || '').trim().replace(/\/+$/, ''),
+      } : {}),
     };
-    // Handle password change/removal
-    if (removePassword) {
-      data.web_password = '';
-    } else if (webPassword.trim()) {
-      if (webPassword !== webPasswordConfirm) {
-        onNotify('As senhas não coincidem.');
-        return;
-      }
-      data.web_password = webPassword;
-    }
     setSaveSuccess(false);
     const result = await onSave(data);
     if (result !== false) {
       setSaveSuccess(true);
-      setWebPassword('');
-      setWebPasswordConfirm('');
-      setRemovePassword(false);
       setTimeout(() => setSaveSuccess(false), 3000);
     }
   }
@@ -123,70 +106,11 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
   return html`
     <div class="flex flex-col gap-4 flex-1">
 
-      <!-- Section: Marcar conversas -->
-      <${Section} title="Marcar conversas">
-        <!-- Mark all read / unread -->
-        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <span class="text-xs text-wa-secondary">Reacende ou limpa o indicador verde de não lido no painel. Para uma conversa específica, use o botão direito sobre o contato na lista.</span>
-          ${confirmUnreadAll ? html`
-            <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODAS as conversas como não lidas?</span>
-              <span class="text-xs text-amber-700">Reacende o indicador verde em todos os contatos do painel. Não afeta o WhatsApp do celular.</span>
-              <div class="flex gap-2 mt-1">
-                <button
-                  type="button"
-                  disabled=${markingAllUnread}
-                  onClick=${handleMarkAllUnread}
-                  class="px-4 py-2 rounded-lg text-sm font-medium bg-amber-600 text-white hover:opacity-90 disabled:opacity-50 transition-opacity"
-                >${markingAllUnread ? 'Marcando...' : 'Confirmar'}</button>
-                <button
-                  type="button"
-                  disabled=${markingAllUnread}
-                  onClick=${() => setConfirmUnreadAll(false)}
-                  class="px-4 py-2 rounded-lg text-sm font-medium bg-wa-bg text-wa-text border border-wa-border hover:bg-wa-hover disabled:opacity-50 transition-colors"
-                >Cancelar</button>
-              </div>
-            </div>
-          ` : confirmReadAll ? html`
-            <div class="mt-1 flex flex-col gap-2 p-3 rounded-lg bg-amber-50 border border-amber-300">
-              <span class="text-sm font-medium text-amber-800">Marcar TODAS as conversas como lidas?</span>
-              <span class="text-xs text-amber-700">Remove o indicador verde de não lido de todos os contatos do painel.</span>
-              <div class="flex gap-2 mt-1">
-                <button
-                  type="button"
-                  disabled=${markingAllRead}
-                  onClick=${handleMarkAllRead}
-                  class="px-4 py-2 rounded-lg text-sm font-medium bg-amber-600 text-white hover:opacity-90 disabled:opacity-50 transition-opacity"
-                >${markingAllRead ? 'Marcando...' : 'Confirmar'}</button>
-                <button
-                  type="button"
-                  disabled=${markingAllRead}
-                  onClick=${() => setConfirmReadAll(false)}
-                  class="px-4 py-2 rounded-lg text-sm font-medium bg-wa-bg text-wa-text border border-wa-border hover:bg-wa-hover disabled:opacity-50 transition-colors"
-                >Cancelar</button>
-              </div>
-            </div>
-          ` : html`
-            <div class="flex flex-wrap gap-2 mt-1">
-              <button
-                type="button"
-                onClick=${() => { setConfirmReadAll(false); setConfirmUnreadAll(true); }}
-                class="px-4 py-2 rounded-lg text-sm font-medium bg-wa-teal text-white hover:opacity-90 transition-opacity"
-              >Marcar todas como não lidas</button>
-              <button
-                type="button"
-                onClick=${() => { setConfirmUnreadAll(false); setConfirmReadAll(true); }}
-                class="px-4 py-2 rounded-lg text-sm font-medium bg-wa-bg text-wa-text border border-wa-border hover:bg-wa-hover transition-colors"
-              >Marcar todas como lidas</button>
-            </div>
-          `}
-        </div>
-      <//>
-
+      ${canSection('avisos') && show('avisos') ? html`
       <!-- Section: Avisos de sistema no chat (plano 12) -->
-      <${Section} title="Avisos de sistema no chat">
+      <${Section} id="avisos" title="Avisos de sistema no chat">
         <span class="text-xs text-wa-secondary -mt-1">
-          Registra no fio da conversa, como uma mensagem de sistema, os eventos do atendimento (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas as conversas — nada é gravado nem exibido.
+          Registra no fio da conversa, como uma mensagem de sistema, os eventos da conversa (atribuição, tags, status, IA). Desligar um grupo impede a geração do aviso para todas as conversas — nada é gravado nem exibido.
         </span>
         <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
           <label class="flex items-center gap-2 text-sm font-semibold text-wa-text cursor-pointer">
@@ -246,12 +170,28 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
             />
             IA e atributos
           </label>
-          <span class="text-xs text-wa-secondary">Ligar/desligar a IA, "a IA assumiu o atendimento", trocar o agente ativo e definir atributos.</span>
+          <span class="text-xs text-wa-secondary">Ligar/desligar a IA, "a IA assumiu a conversa", trocar o agente ativo e definir atributos.</span>
         </div>
       <//>
 
+      ` : null}
+
+      ${canSection('avancado') && show('avancado') ? html`
       <!-- Section: Avancado -->
-      <${Section} title="Avançado">
+      <${Section} id="avancado" title="Avançado">
+        <!-- Domínio público (URL base) -->
+        <div>
+          <label class="block text-sm font-semibold text-wa-text mb-1">Domínio público (URL base)</label>
+          <input
+            type="url"
+            value=${publicBaseUrl}
+            onInput=${(e) => setPublicBaseUrl(e.target.value)}
+            placeholder="https://seu-dominio.com"
+            class="w-full bg-wa-panel text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
+          />
+          <span class="text-xs text-wa-secondary">URL usada em links externos gerados pelo painel (ex.: o link do painel de melhorias). Detectada automaticamente ao acessar pelo domínio; ajuste aqui se sair com um IP local. A variável de ambiente WHATSBOT_PUBLIC_URL, se definida, tem prioridade sobre este campo.</span>
+        </div>
+
         <!-- Max Executions -->
         <div>
           <label class="block text-sm font-semibold text-wa-text mb-1">Execuções salvas</label>
@@ -281,56 +221,12 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           />
           <span class="text-xs text-wa-secondary">Por quantos dias os registros da trilha de auditoria são mantidos</span>
         </div>
-
-        <!-- Panel Password -->
-        <div class="flex flex-col gap-2 p-3 bg-wa-panel rounded-lg border border-wa-border">
-          <div class="flex items-center justify-between">
-            <label class="text-sm font-semibold text-wa-text">Senha do Painel</label>
-            ${config.has_password ? html`
-              <span class="text-xs bg-wa-teal text-white px-2 py-0.5 rounded-full">Ativa</span>
-            ` : html`
-              <span class="text-xs bg-wa-secondary/20 text-wa-secondary px-2 py-0.5 rounded-full">Desativada</span>
-            `}
-          </div>
-          <span class="text-xs text-wa-secondary">Protege o acesso ao painel web com senha</span>
-          ${!removePassword ? html`
-            <input
-              type="password"
-              value=${webPassword}
-              onInput=${(e) => setWebPassword(e.target.value)}
-              placeholder=${config.has_password ? 'Nova senha (deixe vazio para manter)' : 'Definir senha'}
-              class="w-full bg-wa-bg text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none"
-            />
-            ${webPassword ? html`
-              <input
-                type="password"
-                value=${webPasswordConfirm}
-                onInput=${(e) => setWebPasswordConfirm(e.target.value)}
-                placeholder="Confirmar senha"
-                class="w-full bg-wa-bg text-wa-text px-3 py-2 rounded-lg text-sm border border-wa-border focus:border-wa-teal focus:outline-none ${webPassword && webPasswordConfirm && webPassword !== webPasswordConfirm ? 'border-red-400' : ''}"
-              />
-              ${webPassword && webPasswordConfirm && webPassword !== webPasswordConfirm ? html`
-                <span class="text-xs text-red-500">As senhas não coincidem</span>
-              ` : null}
-            ` : null}
-          ` : null}
-          ${config.has_password ? html`
-            <label class="flex items-center gap-2 text-sm text-red-600 cursor-pointer mt-1">
-              <input
-                type="checkbox"
-                checked=${removePassword}
-                onChange=${(e) => { setRemovePassword(e.target.checked); if (e.target.checked) { setWebPassword(''); setWebPasswordConfirm(''); } }}
-                class="w-4 h-4 rounded border-wa-border accent-red-600"
-              />
-              Remover senha
-            </label>
-          ` : null}
-        </div>
       <//>
 
-      <${DatabaseSettings} onNotify=${onNotify} />
+      ` : null}
 
-      <!-- Save Button (sticky) -->
+      <!-- Save Button (sticky) — vale para a fatia renderizada nesta aba -->
+      ${canSettings ? html`
       <div class="sticky bottom-0 z-10 bg-wa-panel pt-2 pb-1">
         <button
           onClick=${handleSave}
@@ -340,6 +236,7 @@ export function ConfigPanel({ config, saving, onSave, onNotify }) {
           ${saving ? 'Salvando...' : saveSuccess ? '\u2713 Salvo!' : 'Salvar Configurações'}
         </button>
       </div>
+      ` : null}
     </div>
   `;
 }

@@ -6,9 +6,12 @@ the handler/engine consume.
 
 There is **no legacy path** anymore: :func:`build_for_contact` always resolves an
 :class:`AgentSpec` via a cascade (bound agent → default agent → in-code seed
-constants). It only raises :class:`AgentResolutionError` when the database is
-genuinely broken — the handler then isolates the failure to that one
-conversation (logs + a painel-only error card) without ever messaging the client.
+constants) and, as a last resort, an in-code **emergency floor**
+(:func:`_emergency_spec`). A malformed/duplo-codified DB row therefore *degrades*
+to a usable default (logged at ERROR) instead of taking the whole AI service down.
+It only raises :class:`AgentResolutionError` in the practically-impossible case
+where even the emergency floor cannot be constructed — the handler then isolates
+that one conversation (logs + a painel-only error card) without messaging the client.
 """
 
 from __future__ import annotations
@@ -18,13 +21,17 @@ import re
 from dataclasses import dataclass, field
 
 from db.repositories import (
-    agent_repo, prompt_repo, variable_repo, conversation_repo, inbox_repo,
+    agent_repo, variable_repo, conversation_repo, inbox_repo,
 )
+from db.repositories._mapping import coerce_json
 from ai_engine import dynamic_registry
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT_KEY = agent_repo.DEFAULT_AGENT_KEY
+# Legacy: agents used to reference a shared ai_prompts template by key. The prompt
+# is now inline on each agent (``ai_agents.prompt``); this constant is retained
+# only for back-compat with old call sites/tests.
 DEFAULT_PROMPT_KEY = "default"
 
 # Seed constants — used ONLY to plant the default agent/prompt on the very first
@@ -49,11 +56,14 @@ _PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
 class AgentResolutionError(Exception):
-    """Raised when no agent can be resolved for a contact (broken DB).
+    """Raised only when even the emergency floor cannot be built (last resort).
 
-    This is the rare, genuinely-broken case. The handler catches it, logs, writes
-    a painel-only error card to the affected conversation, and sends nothing to
-    the client — so one broken conversation never takes the whole service down.
+    Since plano 34 F2, a missing/disabled default agent or a malformed DB row no
+    longer raises — :func:`build_for_contact` degrades to :func:`_emergency_spec`
+    (logged at ERROR). This exception now signals the practically-impossible case
+    where constructing the floor itself fails. The handler still catches it, logs,
+    writes a painel-only error card, and sends nothing to the client — so one
+    broken conversation never takes the whole service down.
     """
 
 
@@ -68,6 +78,36 @@ class AgentSpec:
     @property
     def model(self) -> str | None:
         return self.model_config.get("model") or None
+
+
+def _emergency_spec() -> AgentSpec:
+    """Last-resort :class:`AgentSpec` built purely from the in-code seed constants.
+
+    Used by :func:`build_for_contact` when the DB row is missing/disabled or a
+    field is corrupt beyond recovery — so the AI still answers (degraded) instead
+    of the whole service going silent. Mirrors the happy-path ``model_config``
+    shape (``_agent_key``/``_hooks_config``) the engine expects.
+    """
+    return AgentSpec(
+        agent_key=DEFAULT_AGENT_KEY,
+        base_prompt=DEFAULT_SYSTEM_PROMPT,
+        model_config={
+            "model": DEFAULT_MODEL,
+            "_agent_key": DEFAULT_AGENT_KEY,
+            "_hooks_config": {},
+        },
+        tool_names=None,
+    )
+
+
+def _coerce_dict(value) -> dict:
+    """Tolerant container coercion: dict-ready OR JSON string → ``dict``, else ``{}``.
+
+    Reuses :func:`coerce_json` (N-layer, plano 34 F1) so a duplo-codified value
+    degrades in place instead of blowing up ``dict("...string...")``.
+    """
+    coerced = coerce_json(value, {})
+    return dict(coerced) if isinstance(coerced, dict) else {}
 
 
 def render_template(body: str, variables: dict[str, str]) -> str:
@@ -88,24 +128,29 @@ def render_template(body: str, variables: dict[str, str]) -> str:
 
 
 def seed_default_agent(settings=None) -> None:
-    """Create the default prompt + agent rows if absent (idempotent).
+    """Create the default agent row if absent (idempotent "ensure").
 
     Seeds from the in-code constants (:data:`DEFAULT_SYSTEM_PROMPT` /
-    :data:`DEFAULT_MODEL`). Never overwrites existing rows (no version bump), so
-    user edits in the DB are preserved across boots. ``settings`` is accepted for
-    backwards-compatible call sites but is no longer used.
+    :data:`DEFAULT_MODEL`) with the prompt stored inline on the agent. Never
+    overwrites an existing row (no version bump), so user edits in the DB are
+    preserved across boots. ``settings`` is accepted for backwards-compatible call
+    sites but is no longer used.
+
+    Fix agente-padrão (2026-07): o BOOT só chama isto quando ``ai_agents`` está
+    vazia (instalação nova — gate em ``server/app.py``), senão um agente
+    ``default`` excluído pelo operador ressuscitaria a cada boot. O helper em si
+    continua "ensure" incondicional — testes e seeds pontuais dependem disso.
     """
     try:
-        prompt_repo.ensure(DEFAULT_PROMPT_KEY, DEFAULT_SYSTEM_PROMPT)
         agent_repo.ensure(
             DEFAULT_AGENT_KEY,
             display_name="Agente padrão",
-            prompt_key=DEFAULT_PROMPT_KEY,
+            prompt=DEFAULT_SYSTEM_PROMPT,
             model_config={"model": DEFAULT_MODEL},
             tool_names=None,  # all registered tools
             enabled=True,
         )
-        logger.info("AI engine: default agent/prompt seeded (or already present)")
+        logger.info("AI engine: default agent seeded (or already present)")
     except Exception as e:
         logger.warning("AI engine seed failed: %s", e)
 
@@ -115,41 +160,48 @@ def migrate_legacy_config_to_default_agent() -> None:
 
     Older installs configured the AI via ``config.system_prompt`` / ``config.model``.
     Those keys are being retired, so — *before* anything stops reading them — copy a
-    user's customised values into the canonical default agent. Safe to run on every
-    boot: only fills the default prompt when it is still empty/seed, and the default
-    model when it is empty or still the seed value, so a real DB edit is never lost.
+    user's customised values into the canonical default agent's inline prompt/model.
+    Safe to run on every boot: only fills the prompt when it is still empty/seed, and
+    the model when it is empty or still the seed value, so a real DB edit is never lost.
     """
     try:
         from db.repositories import config_repo
 
+        agent = agent_repo.get(DEFAULT_AGENT_KEY)
+        if not agent:
+            return
+
+        # Re-save once if either the legacy prompt or model still needs migrating.
+        new_prompt = agent.get("prompt") or ""
+        mc = dict(agent.get("model_config") or {})
+        changed = False
+
         legacy_prompt = config_repo.get("system_prompt", None)
         if legacy_prompt and legacy_prompt not in _LEGACY_SEED_PROMPTS:
-            current_body = (prompt_repo.get(DEFAULT_PROMPT_KEY) or {}).get("body") or ""
-            if current_body in _LEGACY_SEED_PROMPTS:
-                prompt_repo.save(DEFAULT_PROMPT_KEY, legacy_prompt)
-                logger.info("Legacy config.system_prompt migrated → default agent prompt")
+            if (new_prompt or "").strip() in _LEGACY_SEED_PROMPTS:
+                new_prompt = legacy_prompt
+                changed = True
 
         legacy_model = config_repo.get("model", None)
-        if legacy_model:
-            agent = agent_repo.get(DEFAULT_AGENT_KEY)
-            if agent:
-                mc = dict(agent.get("model_config") or {})
-                if not mc.get("model") or mc.get("model") == DEFAULT_MODEL:
-                    if mc.get("model") != legacy_model:
-                        mc["model"] = legacy_model
-                        agent_repo.save(
-                            DEFAULT_AGENT_KEY,
-                            display_name=agent.get("display_name") or "Agente padrão",
-                            prompt_key=agent.get("prompt_key") or DEFAULT_PROMPT_KEY,
-                            model_config=mc,
-                            tool_names=agent.get("tool_names"),
-                            enabled=bool(agent.get("enabled", True)),
-                            description=agent.get("description", ""),
-                            is_router=bool(agent.get("is_router", False)),
-                            routing_targets=agent.get("routing_targets"),
-                            hooks_config=agent.get("hooks_config") or {},
-                        )
-                        logger.info("Legacy config.model migrated → default agent model")
+        if legacy_model and (not mc.get("model") or mc.get("model") == DEFAULT_MODEL):
+            if mc.get("model") != legacy_model:
+                mc["model"] = legacy_model
+                changed = True
+
+        if changed:
+            agent_repo.save(
+                DEFAULT_AGENT_KEY,
+                display_name=agent.get("display_name") or "Agente padrão",
+                prompt=new_prompt,
+                model_config=mc,
+                tool_names=agent.get("tool_names"),
+                enabled=bool(agent.get("enabled", True)),
+                description=agent.get("description", ""),
+                is_router=bool(agent.get("is_router", False)),
+                routing_targets=agent.get("routing_targets"),
+                hooks_config=agent.get("hooks_config") or {},
+            )
+            logger.info("Legacy config (system_prompt/model) migrated → default agent")
     except Exception as e:
         logger.warning("Legacy config migration failed: %s", e)
 
@@ -165,7 +217,9 @@ def resolve_active_agent_key(contact) -> str | None:
     if cid is None:
         return None
     try:
-        conv = conversation_repo.get_open_for_contact(cid)
+        # plano 37: resolve pela conversa do CANAL do turno (inbox do ContactMemory),
+        # não a mais recente de qualquer canal. Fail-open p/ doubles sem inbox_id.
+        conv = conversation_repo.get_open_for_contact_scoped(contact)
         if not conv:
             return None
         if conv.get("active_agent_key"):
@@ -192,48 +246,133 @@ def _resolve_active_agent(contact) -> dict | None:
     return dynamic_registry.get_default_agent()
 
 
+def _transfer_tool_available(handler, agent: dict) -> bool:
+    """``transferir_agente`` está acionável por ESTE agente neste turno?
+
+    Falso quando o ``tool_names`` do agente exclui a tool, ou quando ela não
+    está ativa no registry (nasce OFF no plano 30 F3, pode ter sido desativada
+    ou deletada). ``handler`` ausente (chamadas antigas/testes) ou falha de
+    introspecção assumem disponível (comportamento anterior).
+    """
+    tool_names = agent.get("tool_names")
+    if tool_names is not None and "transferir_agente" not in tool_names:
+        return False
+    if handler is None:
+        return True
+    try:
+        return bool(handler.is_tool_active("transferir_agente"))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _router_destinations_section(router: dict) -> str:
+    """Seção "Agentes disponíveis para transferência" do prompt do roteador.
+
+    Uma linha por destino: ``display_name (agent_key) — description``. Retorna
+    string vazia quando não há destino (roteador sem spokes enabled).
+    """
+    from agent.tools.transferir_agente import router_destinations
+
+    destinations = router_destinations(router)
+    if not destinations:
+        return ""
+    lines = []
+    for a in destinations:
+        label = a.get("display_name") or a["agent_key"]
+        line = f"- {label} ({a['agent_key']})"
+        description = (a.get("description") or "").strip()
+        if description:
+            line += f" — {description}"
+        lines.append(line)
+    return (
+        "\n\n--- Agentes disponíveis para transferência ---\n"
+        "Quando o assunto do contato corresponder à especialidade de um destes "
+        "agentes, chame a tool transferir_agente informando o agent_key exato "
+        "(entre parênteses) e um motivo curto:\n"
+        + "\n".join(lines)
+        + "\n--- Fim dos agentes disponíveis ---"
+    )
+
+
 def build_for_contact(handler, contact) -> AgentSpec:
     """Resolve the DB-driven agent for a request. Always returns an ``AgentSpec``.
 
     Cascade: bound agent (conversation→inbox) → default agent → in-code seed
-    constants for any missing prompt/model. Raises :class:`AgentResolutionError`
-    only when nothing resolves (the default agent itself is missing/disabled, i.e.
-    a genuinely broken DB) — the handler isolates that to one conversation.
+    constants for any missing prompt/model → in-code **emergency floor**
+    (:func:`_emergency_spec`) when the default row is missing/disabled or a field
+    is corrupt beyond recovery (logged at ERROR). Raises :class:`AgentResolutionError`
+    only if even the emergency floor cannot be built — the handler isolates that
+    to one conversation.
     """
     try:
         agent = _resolve_active_agent(contact)
         if not agent or not agent.get("enabled"):
-            raise AgentResolutionError(
-                "agente default ausente ou desativado (banco inconsistente)"
+            # Piso de emergência (plano 34 F2): banco inconsistente NÃO derruba o
+            # atendimento — degrada para o AgentSpec default e loga alto e claro.
+            logger.error(
+                "AI engine: agente default ausente/desativado (banco inconsistente) "
+                "— usando piso de emergência"
             )
+            return _emergency_spec()
 
-        prompt_row = dynamic_registry.get_prompt(agent.get("prompt_key") or DEFAULT_PROMPT_KEY)
-        body = (prompt_row or {}).get("body") or ""
+        body = agent.get("prompt") or ""
         if not body:
-            # No prompt body in the DB — fall back to the seed prompt so the agent
-            # never runs with an empty system prompt.
+            # No inline prompt on the agent — fall back to the seed prompt so the
+            # agent never runs with an empty system prompt.
             body = DEFAULT_SYSTEM_PROMPT
 
         variables = dynamic_registry.variables_map()
         rendered = render_template(body, variables)
 
-        model_config = dict(agent.get("model_config") or {})
+        # Plano 30 F6 (WS5): o roteador recebe no system prompt a lista de
+        # destinos com as descrições dos agentes (ai_agents.description) — a
+        # MESMA allowlist que transferir_agente.execute aceita (fonte única em
+        # router_destinations, F5). Seção ADITIVA ao prompt inline (se o humano
+        # já listou agentes à mão, as duas coexistem — sem dedupe). Só injeta
+        # quando transferir_agente está de fato acionável pelo agente (a tool
+        # nasce OFF no F3 e pode estar desabilitada/deletada/fora do
+        # tool_names — anunciar destinos sem a tool induz alucinação).
+        # Defensivo: falha aqui nunca derruba o turno.
+        if agent.get("is_router") and _transfer_tool_available(handler, agent):
+            try:
+                rendered += _router_destinations_section(agent)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "AI engine: seção de destinos do roteador falhou (%s)", e)
+
+        # Coerção tolerante do container (plano 34 F2): aceita dict pronto OU
+        # string JSON (duplo-codificada) via coerce_json, caindo em {} — assim um
+        # campo sujo degrada aqui em vez de estourar no dict(...).
+        model_config = _coerce_dict(agent.get("model_config"))
         if not model_config.get("model"):
             model_config["model"] = DEFAULT_MODEL
         # Let the model factory resolve per-agent tuning vars ({param}_{agent_key}).
         model_config["_agent_key"] = agent["agent_key"]
         # Declarative tool hooks (call_limit/requires_prior_call) enforced in the
         # AGNO entrypoint. Carried on model_config; the engine strips it out.
-        model_config["_hooks_config"] = agent.get("hooks_config") or {}
+        model_config["_hooks_config"] = _coerce_dict(agent.get("hooks_config"))
+
+        # tool_names: lista OU None (None = todas as tools). Coage string suja
+        # para None em vez de deixar o consumidor iterar caractere a caractere.
+        tool_names = coerce_json(agent.get("tool_names"), None)
+        if tool_names is not None and not isinstance(tool_names, list):
+            tool_names = None
 
         return AgentSpec(
             agent_key=agent["agent_key"],
             base_prompt=rendered,
             model_config=model_config,
-            tool_names=agent.get("tool_names"),
+            tool_names=tool_names,
         )
     except AgentResolutionError:
         raise
     except Exception as e:
-        logger.error("AI engine: build_for_contact failed (%s)", e)
-        raise AgentResolutionError(str(e)) from e
+        # Piso de emergência (plano 34 F2): qualquer falha inesperada de resolução
+        # degrada para o AgentSpec default em vez de silenciar o atendimento. Só
+        # levanta se nem o próprio piso puder ser construído (praticamente
+        # impossível) — mantendo a porta de "banco genuinamente quebrado".
+        logger.error("AI engine: build_for_contact failed (%s) — piso de emergência", e)
+        try:
+            return _emergency_spec()
+        except Exception:  # noqa: BLE001
+            raise AgentResolutionError(str(e)) from e

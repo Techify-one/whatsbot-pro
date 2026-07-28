@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 # do contexto do LLM / preview da sidebar / contagem de não-lidas.
 ROLE = "conversation_event"
 
+# Autor exibido quando a ação foi AUTOMÁTICA (não um operador): reabertura já com a
+# IA ativa, religar ao fechar protocolo, auto-transferência da IA. Os call sites
+# automáticos passam ``actor=None``; os manuais passam o nome real do usuário.
+SYSTEM_ACTOR = "SISTEMA"
+
 
 # ── Registry de grupos + tipos (gate de config global) ───────────────────────
 # Estes três dicts são as STORES do registry. Eram literais; agora são populados
@@ -175,10 +180,11 @@ def _f_created(display_id=None, **_) -> str:
 
 
 def _f_ai_on(actor=None, **_) -> str:
+    # Ação automática (sem operador) ⇒ atribuída ao SISTEMA, nunca a um nome de usuário.
     return _with_actor(
         actor,
         f"🤖 {actor} reativou a IA.",
-        "🤖 IA reativada.",
+        f"🤖 {SYSTEM_ACTOR} reativou a IA.",
     )
 
 
@@ -186,12 +192,12 @@ def _f_ai_off(actor=None, **_) -> str:
     return _with_actor(
         actor,
         f"🤖 {actor} pausou a IA.",
-        "🤖 IA pausada.",
+        f"🤖 {SYSTEM_ACTOR} pausou a IA.",
     )
 
 
 def _f_ai_takeover(**_) -> str:
-    return "🤖 A IA assumiu o atendimento."
+    return "🤖 A IA assumiu a conversa."
 
 
 def _f_agent_changed(actor=None, agent=None, **_) -> str:
@@ -369,13 +375,24 @@ def has_event(conversation_id: int, event_type: str) -> bool:
         return False
 
 
-def resolve_conversation_for_contact(contact_id: int) -> dict | None:
+def resolve_conversation_for_contact(contact_id: int,
+                                     inbox_id: int | None = None) -> dict | None:
     """Resolve the contact's conversation to anchor a notice on (open → latest).
 
     Prefers the contact's OPEN conversation; falls back to the most recent one
     (events like "fechada" leave the conversation closed). Returns ``None`` when
-    the contact has no conversation. Best-effort — never raises."""
+    the contact has no conversation. Best-effort — never raises.
+
+    ``inbox_id`` restringe a resolução àquela caixa (plano 11): num contato com
+    conversas em vários canais, o caminho contact-scoped fundiria os canais e
+    ancoraria o aviso na thread errada. Quando informado, usa as variantes
+    ``*_for_contact_inbox``; ausente mantém o comportamento contact-scoped legado."""
     try:
+        if inbox_id is not None:
+            conv = conversation_repo.get_open_for_contact_inbox(contact_id, inbox_id)
+            if conv is None:
+                conv = conversation_repo.get_latest_for_contact_inbox(contact_id, inbox_id)
+            return conv
         conv = conversation_repo.get_open_for_contact(contact_id)
         if conv is None:
             conv = conversation_repo.get_latest_for_contact(contact_id)
@@ -387,15 +404,17 @@ def resolve_conversation_for_contact(contact_id: int) -> dict | None:
 
 
 def emit_for_contact(*, event_type: str, contact_id: int, phone: str | None = None,
-                     **ctx) -> dict | None:
+                     inbox_id: int | None = None, **ctx) -> dict | None:
     """Resolve the contact's conversation (open → latest) and emit a notice on it.
 
     Convenience over :func:`emit_conversation_notice` for call sites that only
     have a contact: it resolves the anchor conversation, emits the notice, and
     returns the resolved conversation (so the caller can chain further per-conv
     actions). Returns ``None`` when no conversation exists (nothing emitted).
-    Never raises — a failed notice never breaks the action."""
-    conv = resolve_conversation_for_contact(contact_id)
+    Never raises — a failed notice never breaks the action. ``inbox_id`` restringe
+    a resolução à caixa daquele canal (multicanal — ver
+    :func:`resolve_conversation_for_contact`)."""
+    conv = resolve_conversation_for_contact(contact_id, inbox_id)
     if conv is None:
         return None
     emit_conversation_notice(

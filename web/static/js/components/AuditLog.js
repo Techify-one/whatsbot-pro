@@ -8,12 +8,30 @@
 import { h, Fragment } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { listAudit, getAuditActions, downloadAuditExport } from '../services/api.js';
+import { listAudit, getAuditActions, downloadAuditExport, getConfig, saveConfig } from '../services/api.js';
 import { SearchableSelect } from './SearchableSelect.js';
+import { useUrlState } from '../hooks/useUrlState.js';
+import { readParams, writeParams, str, int } from '../services/urlState.js';
+import { CopyLinkButton } from '../utils/copyDeepLink.js';
+import { hasPermission } from '../utils/permissions.js';
 
 const html = htm.bind(h);
 
 const PAGE_SIZE = 50;
+
+// Deep-link do estado da tela (Plano 24) — filtros aplicados + paginação + linha
+// expandida na query-string legível. Datas viajam como 'YYYY-MM-DD' (o que os
+// inputs usam); o read reconverte p/ epoch. Serialize omite defaults → URL limpa.
+const AUDIT_URL_SCHEMA = [
+  str('resource_type', ''),
+  str('action', ''),
+  str('actor_type', ''),
+  str('resource_id', ''),
+  str('from', ''),                  // 'YYYY-MM-DD'
+  str('to', ''),                    // 'YYYY-MM-DD'
+  int('offset', 0),
+  int('expanded', null),            // id da linha expandida
+];
 
 // Colored badge per actor type. Uses accent tints (with dark-mode fallback in
 // custom.css); surfaces/text use the semantic wa-* classes.
@@ -57,6 +75,16 @@ function dateToEpoch(value, edge) {
   return Math.floor(dt.getTime() / 1000);
 }
 
+// Epoch seconds → 'YYYY-MM-DD' local (o formato do `<input type="date">`), p/ a
+// URL. Inverso de `dateToEpoch` no nível do dia — o round-trip via a mesma data.
+function epochToDate(ts) {
+  if (ts == null) return '';
+  const d = new Date(ts * 1000);
+  if (isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 function ActorBadge({ type }) {
   const b = ACTOR_BADGES[type] || ACTOR_BADGES.system;
   return html`<span class="px-2 py-0.5 rounded-full text-[11px] ${b.bg} ${b.text}">${b.label}</span>`;
@@ -73,7 +101,7 @@ function DiffBlock({ title, raw }) {
   `;
 }
 
-function Row({ row, expanded, onToggle }) {
+function Row({ row, expanded, onToggle, linkPath }) {
   const hasDiff = (row.before_json != null && row.before_json !== '')
     || (row.after_json != null && row.after_json !== '');
   return html`
@@ -97,10 +125,13 @@ function Row({ row, expanded, onToggle }) {
           ${row.resource_type || '—'}${row.resource_id ? html`<span class="text-wa-text">:${row.resource_id}</span>` : null}
         </td>
         <td class="px-3 py-2.5 text-wa-secondary text-xs whitespace-nowrap">${row.ip_address || '—'}</td>
+        <td class="px-3 py-2.5 text-right whitespace-nowrap">
+          <${CopyLinkButton} path=${linkPath} title="Copiar link para este registro" />
+        </td>
       </tr>
       ${expanded ? html`
         <tr class="border-t border-wa-border bg-wa-panel/40">
-          <td colspan="5" class="px-3 py-3">
+          <td colspan="6" class="px-3 py-3">
             ${hasDiff ? html`
               <div class="flex flex-col md:flex-row gap-3">
                 <${DiffBlock} title="Antes" raw=${row.before_json} />
@@ -119,7 +150,31 @@ function Row({ row, expanded, onToggle }) {
   `;
 }
 
-export default function AuditLog() {
+export default function AuditLog({ currentUser } = {}) {
+  // Master global (plano 07): liga/desliga a gravação da trilha. Só quem tem
+  // `audit.manage` vê o interruptor (P48: hide, don't disable); quem só tem
+  // `audit.read` enxerga a tela em modo leitura, sem o toggle.
+  const canManage = hasPermission(currentUser, 'audit.manage');
+  const [auditEnabled, setAuditEnabled] = useState(null);   // null = ainda carregando
+  const [togglingAudit, setTogglingAudit] = useState(false);
+
+  useEffect(() => {
+    if (!canManage) return;
+    getConfig().then((res) => {
+      if (res && res.ok && res.data) setAuditEnabled(res.data.audit_enabled !== false);
+    });
+  }, [canManage]);
+
+  async function toggleAudit() {
+    if (togglingAudit || auditEnabled == null) return;
+    const next = !auditEnabled;
+    setTogglingAudit(true);
+    setAuditEnabled(next);                                   // otimista
+    const res = await saveConfig({ audit_enabled: next });
+    if (!res || !res.ok) setAuditEnabled(!next);             // rollback em falha
+    setTogglingAudit(false);
+  }
+
   // Filter inputs (draft) — applied on "Filtrar".
   const [resourceType, setResourceType] = useState('');
   const [action, setAction] = useState('');
@@ -181,15 +236,21 @@ export default function AuditLog() {
 
   useEffect(() => { fetchList(); }, [fetchList]);
 
-  function applyFilters() {
+  // "Aplicar" a partir de valores de filtro explícitos (drafts atuais OU vindos da
+  // URL). O botão Filtrar passa os drafts; o read do deep-link passa os da URL.
+  const applyValues = useCallback((v) => {
     setApplied({
-      resource_type: resourceType,
-      action,
-      actor_type: actorType,
-      resource_id: resourceId.trim(),
-      from: dateToEpoch(fromDate, 'start'),
-      to: dateToEpoch(toDate, 'end'),
+      resource_type: v.resourceType || '',
+      action: v.action || '',
+      actor_type: v.actorType || '',
+      resource_id: (v.resourceId || '').trim(),
+      from: dateToEpoch(v.fromDate, 'start'),
+      to: dateToEpoch(v.toDate, 'end'),
     });
+  }, []);
+
+  function applyFilters() {
+    applyValues({ resourceType, action, actorType, resourceId, fromDate, toDate });
     setOffset(0);
     setExpandedId(null);
   }
@@ -205,6 +266,40 @@ export default function AuditLog() {
     setOffset(0);
     setExpandedId(null);
   }
+
+  // Deep-link (Plano 24) — hidrata filtros/paginação/linha expandida da URL no
+  // mount e no back/forward; reflete o estado APLICADO (não os drafts) + offset +
+  // expanded na query (replaceState). Datas viajam como 'YYYY-MM-DD'; o read
+  // reconverte p/ epoch via applyValues. Serialize omite defaults → link limpo.
+  useUrlState({
+    read: () => readParams(window.location.search, AUDIT_URL_SCHEMA),
+    apply: (s) => {
+      // Hidrata os inputs (drafts) e aplica (dispara o fetch pelo effect de applied).
+      setResourceType(s.resource_type);
+      setAction(s.action);
+      setActorType(s.actor_type);
+      setResourceId(s.resource_id);
+      setFromDate(s.from);
+      setToDate(s.to);
+      applyValues({
+        resourceType: s.resource_type, action: s.action, actorType: s.actor_type,
+        resourceId: s.resource_id, fromDate: s.from, toDate: s.to,
+      });
+      setOffset(s.offset);
+      setExpandedId(s.expanded);
+    },
+    serialize: () => writeParams({
+      resource_type: applied.resource_type,
+      action: applied.action,
+      actor_type: applied.actor_type,
+      resource_id: applied.resource_id,
+      from: epochToDate(applied.from),
+      to: epochToDate(applied.to),
+      offset,
+      expanded: expandedId,
+    }, AUDIT_URL_SCHEMA),
+    deps: [applied, offset, expandedId],
+  });
 
   // Export uses the *applied* filters (same as the visible list).
   async function handleExport(format) {
@@ -225,11 +320,48 @@ export default function AuditLog() {
   const page = Math.floor(offset / PAGE_SIZE) + 1;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  // Deep-link p/ uma linha: /audit?<filtros aplicados>&expanded=<id> (reusa o
+  // mesmo schema → params legíveis + omissão de defaults; offset fica de fora).
+  const rowLinkPath = (id) => {
+    const qs = writeParams({
+      resource_type: applied.resource_type,
+      action: applied.action,
+      actor_type: applied.actor_type,
+      resource_id: applied.resource_id,
+      from: epochToDate(applied.from),
+      to: epochToDate(applied.to),
+      expanded: id,
+    }, AUDIT_URL_SCHEMA);
+    return `/audit${qs ? `?${qs}` : ''}`;
+  };
+
   return html`
     <div class="flex flex-col gap-4">
-      <p class="text-[13px] text-wa-secondary">
-        Trilha de auditoria (somente leitura). Registra ações de usuários, do sistema e da IA.
-      </p>
+      <div class="flex items-start justify-between gap-4 flex-wrap">
+        <p class="text-[13px] text-wa-secondary flex-1 min-w-[240px]">
+          Trilha de auditoria (somente leitura). Registra ações de usuários, do sistema e da IA.
+        </p>
+        ${canManage && auditEnabled != null ? html`
+          <div class="flex items-center gap-3 bg-wa-bg border border-wa-border rounded-lg px-3 py-2">
+            <div class="flex flex-col">
+              <span class="text-[13px] text-wa-text font-medium">Registrar auditoria</span>
+              <span class="text-[11px] text-wa-secondary">
+                ${auditEnabled ? 'Ativa — novos eventos são gravados.' : 'Desativada — nada novo é gravado.'}
+              </span>
+            </div>
+            <button
+              onClick=${toggleAudit}
+              disabled=${togglingAudit}
+              role="switch"
+              aria-checked=${auditEnabled}
+              title=${auditEnabled ? 'Desativar auditoria' : 'Ativar auditoria'}
+              class="w-11 h-6 rounded-full transition-colors relative shrink-0 disabled:opacity-50 ${auditEnabled ? 'bg-wa-teal' : 'bg-wa-border'}"
+            >
+              <span class="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${auditEnabled ? 'left-[22px]' : 'left-0.5'}"></span>
+            </button>
+          </div>
+        ` : null}
+      </div>
 
       <!-- Filters -->
       <div class="bg-wa-bg border border-wa-border rounded-lg p-4">
@@ -315,6 +447,7 @@ export default function AuditLog() {
                   <th class="text-left px-3 py-2 font-medium text-wa-secondary text-xs">Ação</th>
                   <th class="text-left px-3 py-2 font-medium text-wa-secondary text-xs">Recurso</th>
                   <th class="text-left px-3 py-2 font-medium text-wa-secondary text-xs">IP</th>
+                  <th class="px-3 py-2"><span class="sr-only">Link</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -324,6 +457,7 @@ export default function AuditLog() {
                     row=${row}
                     expanded=${expandedId === row.id}
                     onToggle=${() => setExpandedId((id) => (id === row.id ? null : row.id))}
+                    linkPath=${rowLinkPath(row.id)}
                   />
                 `)}
               </tbody>

@@ -1,7 +1,7 @@
 """User management endpoints (plano 03 Fase 5). All gated by ``users.manage``.
 
-The legacy single-password admin (no user identity) passes the gate, so a fresh
-install can still reach these to bootstrap/manage users before enforcement is on.
+An open install (no user identity, before the first admin) passes the gate, so a
+fresh install can still reach these to bootstrap the first user.
 """
 
 import asyncio

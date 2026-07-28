@@ -21,7 +21,7 @@
   },
   "notices": [
     {
-      "content": "🤖 IA pausada.",
+      "content": "🤖 Operador pausou a IA.",
       "role": "conversation_event"
     }
   ],

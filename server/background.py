@@ -5,7 +5,7 @@ import logging
 import time
 from pathlib import Path
 
-from db.repositories import contact_repo
+from db.repositories import contact_repo, conversation_repo
 from agent import group_mentions
 from plugins.events import emit as emit_event, emit_with_filter
 from server.avatars import refresh_and_broadcast
@@ -16,6 +16,14 @@ AVATAR_REFRESH_INTERVAL = 1800  # seconds (30 min)
 # How often the audit retention purge runs (plano 07 Fase 2).
 AUDIT_PURGE_INTERVAL = 86400  # seconds (1 day)
 AUDIT_RETENTION_DAYS_DEFAULT = 365
+
+# How often the empty-inbound-ghost sweep runs, and the default TTL (plano 28 Fase 5).
+GHOST_SWEEP_INTERVAL = 600  # seconds (10 min)
+EMPTY_CONV_TTL_MINUTES_DEFAULT = 30
+
+# How often the account-identity sweep persists per-channel identity + refuses
+# duplicates connected post-QR (plano 32 F4).
+CHANNEL_IDENTITY_SWEEP_INTERVAL = 15  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +125,27 @@ async def status_poll_loop(deps):
         await asyncio.sleep(5)
 
 
+async def channel_identity_sweep_loop(deps):
+    """Persist per-channel account identity + refuse post-QR duplicates (plano 32 F4).
+
+    Generic over providers: iterates the live channel instances in the registry and
+    lets :mod:`app.services.channel_identity` read each one's ``status()`` +
+    ``account_identity()``, persisting only what changed and refusing a channel that
+    paired to an account already owned by another channel. Defensive per-channel so
+    one bad channel never stalls the sweep."""
+    from app.services import channel_identity as ci
+    registry = getattr(deps, "channel_registry", None)
+    state = deps.state
+    while not state.stop_event.is_set():
+        try:
+            if registry is not None:
+                for cid, inst in list(registry.all_channels().items()):
+                    await asyncio.to_thread(ci.sweep_channel, cid, inst)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Channel identity sweep error: %s", e)
+        await asyncio.sleep(CHANNEL_IDENTITY_SWEEP_INTERVAL)
+
+
 async def qr_poll_loop(deps):
     """Poll QR availability and cache QR image.
 
@@ -156,39 +185,53 @@ async def qr_poll_loop(deps):
 
 
 async def avatar_fetch_task(deps):
-    """Keep WhatsApp profile photos fresh for all contacts.
+    """Keep profile photos fresh for all contacts, per-channel (plano 38 F6).
 
-    Runs an initial sweep once connected, then re-sweeps every
-    ``AVATAR_REFRESH_INTERVAL`` seconds. Each pass re-fetches every contact's
-    avatar and overwrites the cached file only when it actually changed (new
-    photo, removed photo handled by keeping the last one), broadcasting
-    ``avatar_updated`` so open clients update live.
+    Runs an initial sweep after a warm-up, then re-sweeps every
+    ``AVATAR_REFRESH_INTERVAL`` seconds. Each pass resolves each contact's CHANNEL
+    (its most recent conversation) and refreshes via that provider's ``fetch_avatar``
+    hook, overwriting the cached file only when it actually changed and broadcasting
+    ``avatar_updated`` so open clients update live. A contact whose channel doesn't
+    implement avatars (Telegram/Cloud) returns None → cache kept, no GOWA call.
+
+    The sweep no longer BLOCKS on the GOWA connection: a warm-up delay lets GOWA
+    stabilize, but a down/absent GOWA doesn't stop non-GOWA contacts from refreshing
+    (their provider is independent). GOWA contacts simply get None while GOWA is down.
     """
     state = deps.state
     settings = deps.settings
     avatars_dir = settings.data_dir / "statics" / "avatars"
     avatars_dir.mkdir(parents=True, exist_ok=True)
 
-    # Wait until WhatsApp is connected
-    while not state.stop_event.is_set():
-        if state.connected:
-            break
-        await asyncio.sleep(3)
+    # Warm-up: give providers a moment to come up after boot (interruptible), but do
+    # NOT gate the whole sweep on the GOWA connection — non-GOWA contacts are refreshed
+    # regardless, and GOWA contacts no-op cleanly while GOWA is down.
+    slept = 0
+    while slept < 8 and not state.stop_event.is_set():
+        await asyncio.sleep(2)
+        slept += 2
 
     if state.stop_event.is_set():
         return
 
-    # Give GOWA a moment to stabilize after connection
-    await asyncio.sleep(5)
-
     while not state.stop_event.is_set():
+        # Plano 62 F7: the sweep used to run the heavy enriched list_contacts twice
+        # (active + archived) and then TWO enriched queries PER contact to resolve
+        # its channel (~29k queries/sweep). Now it's 1 cheap SELECT for the targets
+        # + 1 batch DISTINCT ON query for every contact's channel.
         try:
-            contacts = await asyncio.to_thread(contact_repo.list_contacts, "", False)
-            archived = await asyncio.to_thread(contact_repo.list_contacts, "", True)
-            all_contacts = contacts + archived
+            all_contacts = await asyncio.to_thread(contact_repo.list_avatar_targets)
         except Exception as e:
             logger.error("[Avatar] Failed to load contacts: %s", e)
             all_contacts = []
+
+        try:
+            channel_by_contact = await asyncio.to_thread(
+                conversation_repo.latest_channel_id_by_contact,
+                [c["id"] for c in all_contacts if c.get("id") is not None])
+        except Exception as e:
+            logger.error("[Avatar] Failed to resolve contact channels: %s", e)
+            channel_by_contact = {}
 
         changed = 0
         for c in all_contacts:
@@ -197,12 +240,20 @@ async def avatar_fetch_task(deps):
             phone = c.get("phone", "")
             if not phone:
                 continue
+            # Skip contacts with no conversation yet (absent from the batch map)
+            # or whose inbox/channel is gone (mapped to None).
+            channel_id = channel_by_contact.get(c.get("id"))
+            if not channel_id:
+                continue
             try:
-                if await refresh_and_broadcast(deps, phone):
+                if await refresh_and_broadcast(deps, phone, channel_id):
                     changed += 1
             except Exception as e:
                 logger.debug("[Avatar] refresh failed for %s: %s", phone, e)
-            # Rate limit to avoid overwhelming GOWA
+            # Rate limit to avoid overwhelming the provider (per refresh attempt,
+            # like before). NOTE: with many contacts (e.g. ~14k) a full pass at
+            # 0.5s/contact takes longer than AVATAR_REFRESH_INTERVAL — the interval
+            # then acts as a floor between sweeps, not a fixed schedule.
             await asyncio.sleep(0.5)
 
         logger.info("[Avatar] Sweep done: %d updated (of %d contacts)",
@@ -241,5 +292,51 @@ async def audit_purge_loop(deps):
 
         slept = 0
         while slept < AUDIT_PURGE_INTERVAL and not state.stop_event.is_set():
+            await asyncio.sleep(5)
+            slept += 5
+
+
+async def empty_conversation_sweep_loop(deps):
+    """Sweep 'inbound' ghost conversations (plano 28 Fase 5).
+
+    A brand-new conversation is materialized at ingest (t=0, origin='inbound') so it
+    shows on the sidebar immediately; its first message is persisted ~3s later by the
+    batch. If that batch never runs (shutdown/crash), the conversation lingers as an
+    empty row (trade-off: "visible and empty" > "invisible until F5"). This TTL sweep
+    removes inbound conversations that still have NO message after
+    ``empty_conversation_ttl_minutes`` (config, default 30; <=0 disables), broadcasting
+    ``conversation_deleted`` so open panels drop the row live. The TTL is far larger
+    than the batch delay, so a legitimate new conversation is never swept.
+    """
+    state = deps.state
+    from db.repositories import config_repo, conversation_repo
+    from app.services import conversation_service
+
+    while not state.stop_event.is_set():
+        try:
+            raw = await asyncio.to_thread(config_repo.get, "empty_conversation_ttl_minutes")
+            try:
+                ttl_min = int(raw) if raw is not None else EMPTY_CONV_TTL_MINUTES_DEFAULT
+            except (TypeError, ValueError):
+                ttl_min = EMPTY_CONV_TTL_MINUTES_DEFAULT
+            if ttl_min > 0:
+                cutoff = time.time() - ttl_min * 60
+                ghosts = await asyncio.to_thread(
+                    conversation_repo.find_empty_inbound_ghosts, cutoff)
+                for g in ghosts:
+                    if state.stop_event.is_set():
+                        break
+                    try:
+                        await conversation_service.delete(deps, g)
+                    except Exception:
+                        logger.debug("[GhostSweep] delete failed for conv %s", g.get("id"))
+                if ghosts:
+                    logger.info("[GhostSweep] removed %d empty inbound ghost conversation(s)",
+                                len(ghosts))
+        except Exception as e:
+            logger.warning("[GhostSweep] loop error: %s", e)
+
+        slept = 0
+        while slept < GHOST_SWEEP_INTERVAL and not state.stop_event.is_set():
             await asyncio.sleep(5)
             slept += 5

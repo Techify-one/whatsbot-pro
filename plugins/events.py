@@ -45,7 +45,16 @@ KNOWN_EVENTS: set[str] = {
     # ``{conversation_id, contact_id, role, msg_id, ts}``.
     "message.persisted",
     "message.reaction", "message.edited", "message.revoked", "message.deleted",
+    # ``message.failed`` (plano 75 F5): o provedor avisou que NÃO entregou uma
+    # mensagem de saída (Cloud API: ``statuses[].status == "failed"``). Payload:
+    # ``{phone, channel_id, msg_id, error_code, error_title, error_details,
+    # conversation_id, is_new, ts, raw}``. É o gancho de automação para "o
+    # template não chegou" — antes da F5 nada era emitido nesse caso.
+    "message.failed",
     # Presence / receipts
+    # ``receipt.changed`` passou a valer para TODOS os status (plano 75 F5) —
+    # ``sent``/``failed``/``played`` além de ``delivered``/``read``, que eram os
+    # únicos antes. O payload carrega ``status`` e ``errors``.
     "presence.changed", "receipt.changed",
     # Group / call / newsletter
     "group.participants_changed", "group.joined",
@@ -54,16 +63,27 @@ KNOWN_EVENTS: set[str] = {
     # Chat-level
     "chat.archived",
     # Channel lifecycle (plano 23 Fase B6 — minimal seam, C3 normalizes fully).
-    # ``channel.updated``: a channel config/credential edit (payload
-    #   ``{channel_id, keys_changed, ts}``) — cache invalidation is driven off it.
+    # ``channel.updated``: a channel edit (payload ``{channel_id, provider,
+    #   keys_changed, ts}``) — cache invalidation is driven off it. Cobre nome,
+    #   enabled, config (inclui a IA por canal) e credenciais.
     # ``channel.status_changed``: a live status read (payload
     #   ``{channel_id, status, is_connected, is_logged_in, ts}``).
+    # Os demais (created/deleted/restored/members_changed/session_action/
+    # duplicate_refused) fecham o ciclo de vida do canal e alimentam a trilha de
+    # auditoria (db/audit_actions.AUDITABLE_EVENTS) — ``status_changed`` fica de
+    # fora dela de propósito (é um read, roda a cada poll do painel).
     "channel.updated", "channel.status_changed",
+    "channel.created", "channel.deleted", "channel.restored",
+    "channel.members_changed", "channel.session_action",
+    "channel.duplicate_refused",
     # Connection / lifecycle
     "connection.changed",
     "app.startup", "app.shutdown",
     "plugin.loaded", "plugin.enabled", "plugin.disabled",
-    "plugin.settings.changed",
+    "plugin.settings.changed", "plugin.updated",
+    # Instalar/remover plugin (auditoria): ``plugin.imported`` (upload de .zip) e
+    # ``plugin.deleted`` (remoção da pasta + tabelas + settings).
+    "plugin.imported", "plugin.deleted",
     # LLM / tools
     "llm.before", "llm.after",
     "tool.before", "tool.after",
@@ -127,12 +147,21 @@ KNOWN_FILTERS: set[str] = {
     "filter.tool.args", "filter.tool.result",
     # Outbound reply (raw → parts → each part)
     "filter.reply.raw", "filter.reply.parts", "filter.reply.part",
+    # Outbound wire text (send-only): applied to the text that goes to the
+    # provider AFTER the panel copy is captured, so a transform here (e.g. a
+    # signature) reaches the contact WITHOUT appearing in the saved/broadcast
+    # message. Transform-only — returning None is treated as "no change".
+    "filter.outbound.text",
     # AuthZ ABAC seam
     "filter.authz.decision",
     # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.
     # ``filter.conversation.before_status`` was RELOCATED from the route into
     # ``conversation_service``; ``filter.conversation.before_assign`` is new.
     "filter.conversation.before_status", "filter.conversation.before_assign",
+    # Plano 67 — ``filter.conversation.clear_assignee_on_close``: bool seam applied
+    # in ``conversation_service.set_status`` on a close (default True = clear the
+    # human assignee; a plugin returns False to KEEP the attendant assigned).
+    "filter.conversation.clear_assignee_on_close",
     # Plano 23 Fase B5 — agent-turn seams (§4.2, experimental — may change while
     # the attendance plugin firms up):
     # ``filter.agent.resolve``: swap the resolved AgentSpec for a turn
@@ -166,7 +195,7 @@ _DISPATCH_ONLY_KEYS: set[str] = {"*", "message.any"}
 _LIFECYCLE_EVENTS: set[str] = {
     "app.startup", "app.shutdown",
     "plugin.loaded", "plugin.enabled", "plugin.disabled",
-    "plugin.settings.changed",
+    "plugin.settings.changed", "plugin.updated",
 }
 
 # name -> [(plugin_id, handler), ...] in registration order

@@ -1,21 +1,17 @@
-"""Standalone tests for the audit trail (plano 07 Fase 0/1) — temp DB, no HTTP.
+"""Standalone tests for the audit trail (plano 07 Fase 0/1) — Postgres de teste, no HTTP.
 
     venv/bin/python tests/test_audit.py
 """
 
 import sys
-import tempfile
 import types
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-_tmpdir = tempfile.mkdtemp(prefix="whatsbot_audit_test_")
-_db_path = Path(_tmpdir) / "whatsbot.db"
-
-from db import init_db  # noqa: E402
-init_db(_db_path)
+from tests.pg import init_test_engine  # noqa: E402
+init_test_engine(reset=True)
 
 from db.repositories import audit_repo  # noqa: E402
 from db import audit_actions  # noqa: E402

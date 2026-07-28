@@ -4,13 +4,18 @@ import { h } from 'preact';
 import { useState } from 'preact/hooks';
 import htm from 'htm';
 import { relativeTime, GroupIcon, StatusBadge, ChannelBadge, LabelChip, nameOf } from './ui.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
-function ListRow({ convo, assigneeName, currentUserId, showChannel, labels, onOpenChat, onAction }) {
+function ListRow({ convo, assigneeName, currentUserId, currentUser, showChannel, labels, onOpenChat, onAction }) {
   const [busy, setBusy] = useState(false);
   const assignedToMe = currentUserId != null && convo.assignee_user_id === currentUserId;
   const isOpen = convo.status === 'open';
+  // P48: gate each inline action by the permission its backend call enforces.
+  const canResolve = hasPermission(currentUser, 'conversation.resolve');
+  const canAssign = hasPermission(currentUser, 'conversation.assign');
+  const canArchive = hasPermission(currentUser, 'contact.write');
 
   async function run(fn) {
     if (busy) return;
@@ -21,7 +26,7 @@ function ListRow({ convo, assigneeName, currentUserId, showChannel, labels, onOp
   return html`
     <div class="bg-wa-panel border border-wa-border rounded-lg p-3 flex flex-col gap-2">
       <div class="flex items-start gap-3 flex-wrap">
-        <button onClick=${() => onOpenChat(convo)} class="flex-1 min-w-0 text-left group" title="Abrir conversa">
+        <button onClick=${() => onOpenChat(convo)} class="flex-1 min-w-0 text-left group" title="Abrir atendimento">
           <div class="flex items-center gap-1.5 min-w-0">
             ${convo.contact_is_group ? html`<${GroupIcon} />` : null}
             <span class="text-[15px] font-medium text-wa-text truncate group-hover:text-wa-teal transition-colors">${nameOf(convo)}</span>
@@ -46,29 +51,33 @@ function ListRow({ convo, assigneeName, currentUserId, showChannel, labels, onOp
       <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="text-[12px] ${assigneeName ? 'text-wa-text' : 'text-wa-secondary'}">${assigneeName || 'Não atribuído'}</div>
         <div class="flex items-center gap-1.5 flex-wrap">
+          ${canResolve ? html`
           <button disabled=${busy} onClick=${() => run(() => onAction(convo, 'status', isOpen ? 'closed' : 'open'))}
             class="px-2.5 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50">
             ${isOpen ? 'Fechar' : 'Reabrir'}
           </button>
-          ${currentUserId != null ? (assignedToMe
+          ` : null}
+          ${canAssign && currentUserId != null ? (assignedToMe
             ? html`<button disabled=${busy} onClick=${() => run(() => onAction(convo, 'assign', null))}
                 class="px-2.5 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50">Remover atribuição</button>`
             : html`<button disabled=${busy} onClick=${() => run(() => onAction(convo, 'assign', currentUserId))}
                 class="px-2.5 py-1 rounded-md text-[12px] bg-wa-teal/15 text-wa-teal hover:bg-wa-teal/25 transition-colors disabled:opacity-50">Atribuir a mim</button>`) : null}
-          ${(currentUserId == null && convo.assignee_user_id != null) ? html`
+          ${canAssign && currentUserId == null && convo.assignee_user_id != null ? html`
             <button disabled=${busy} onClick=${() => run(() => onAction(convo, 'assign', null))}
               class="px-2.5 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50">Remover atribuição</button>` : null}
+          ${canArchive ? html`
           <button disabled=${busy} onClick=${() => run(() => onAction(convo, 'archive', !convo.is_archived))}
             class="px-2.5 py-1 rounded-md text-[12px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50">
             ${convo.is_archived ? 'Desarquivar' : 'Arquivar'}
           </button>
+          ` : null}
         </div>
       </div>
     </div>
   `;
 }
 
-export function AttendanceList({ conversations, assigneeNameOf, currentUserId, showChannel, labelsOf, onOpenChat, onAction }) {
+export function AttendanceList({ conversations, assigneeNameOf, currentUserId, currentUser = null, showChannel, labelsOf, onOpenChat, onAction }) {
   if (!conversations.length) {
     return html`<div class="text-center text-wa-secondary py-12 text-[14px]">Nenhum atendimento encontrado.</div>`;
   }
@@ -76,7 +85,7 @@ export function AttendanceList({ conversations, assigneeNameOf, currentUserId, s
     <div class="flex flex-col gap-2">
       ${conversations.map(c => html`
         <${ListRow} key=${c.id} convo=${c}
-          assigneeName=${assigneeNameOf(c)} currentUserId=${currentUserId}
+          assigneeName=${assigneeNameOf(c)} currentUserId=${currentUserId} currentUser=${currentUser}
           showChannel=${showChannel} labels=${labelsOf ? labelsOf(c) : []}
           onOpenChat=${onOpenChat} onAction=${onAction} />
       `)}
@@ -84,4 +93,3 @@ export function AttendanceList({ conversations, assigneeNameOf, currentUserId, s
   `;
 }
 
-export default AttendanceList;

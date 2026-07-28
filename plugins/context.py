@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 # annotation on its inner dependency resolves under ``from __future__ import
 # annotations`` — otherwise FastAPI can't evaluate the forward ref and treats
 # ``request`` as a required QUERY param (HTTP 422 on every gated plugin route).
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 
 if TYPE_CHECKING:
     from agent.handler import AgentHandler
@@ -203,6 +203,80 @@ def register_notice(event_type: str, group: str, formatter: Callable[..., str]) 
     system_notices.register_notice(event_type, group, formatter)
 
 
+# ── Trilha de auditoria para plugins ──────────────────────────────────────────
+#
+# O core NÃO conhece plugin por nome: a allowlist ``AUDITABLE_EVENTS`` é a
+# vocabulário do core. Um plugin registra as PRÓPRIAS ações chamando este helper
+# — mesmo padrão do ``broadcast`` acima (fire-and-forget, seguro de qualquer
+# thread, nunca levanta). Guia completo: docs/PLUGINS_AUDITAVEIS.md.
+#
+#     from plugins.context import audit
+#
+#     audit("protocolos", "config.update", before=antes, after=depois)
+#     # → ação  protocolos.config.update   recurso  plugin:protocolos
+#
+# O ator sai do ContextVar da request (o usuário logado que chamou a rota), então
+# o plugin não precisa passar `current_user`.
+
+# Referências fortes das escritas em voo (uma task sem referência pode ser
+# recolhida pelo GC antes de rodar — asyncio docs).
+_pending_audits: set = set()
+
+
+def audit(plugin_id: str, action: str, *, resource_id=None,
+          resource_type: str | None = None, before=None, after=None,
+          actor_type: str | None = None, actor_label: str | None = None) -> None:
+    """Grava UMA linha na trilha de auditoria em nome de um plugin.
+
+    Args:
+        plugin_id: id do plugin (namespaceia a ação e vira o ``resource_id`` default).
+        action: verbo no formato ``recurso.verbo`` (ex.: ``"campos.update"``).
+            Prefixado com ``<plugin_id>.`` automaticamente.
+        resource_id: default ``plugin_id`` — mantém o filtro "ID do recurso =
+            <plugin>" listando TUDO do plugin. Só troque se a granularidade por
+            entidade valer mais que essa visão agregada; identifique a entidade
+            dentro de ``after`` (ex.: ``{"protocolo_id": 812}``).
+        resource_type: default ``"plugin"`` (a linha aparece como ``plugin:<id>``).
+        before / after: estado antes/depois; viram o diff expandível da tela
+            Auditoria. Segredos são mascarados pelo core antes de persistir.
+        actor_type / actor_label: só para ator NÃO-humano (``"ai"``/``"system"``);
+            por padrão o ator é o usuário logado da request.
+
+    Fire-and-forget: agenda a escrita fora do caminho da resposta quando há loop,
+    e nunca propaga exceção para o chamador — auditoria não derruba a ação.
+    """
+    from db import audit_actions
+
+    full_action = audit_actions.namespaced_action(plugin_id, action)
+    if not audit_actions.PLUGIN_ACTION_RE.match(full_action):
+        logger.warning(
+            "audit(): ação %r inválida (esperado '<plugin_id>.<recurso>.<verbo>' "
+            "em snake_case); linha ignorada", full_action)
+        return
+
+    def _write() -> None:
+        from server.audit_listener import record
+        record(action=full_action,
+               resource_type=resource_type or audit_actions.ResourceType.PLUGIN,
+               resource_id=plugin_id if resource_id is None else resource_id,
+               before=before, after=after,
+               actor_type=actor_type, actor_label=actor_label)
+
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        # Worker thread (``asyncio.to_thread`` de uma rota, job de fundo): já
+        # estamos fora do caminho da resposta — escreve aqui mesmo.
+        _write()
+        return
+    # Na thread do loop: joga o INSERT numa worker thread. ``asyncio.to_thread``
+    # copia o contexto atual → o ator da request viaja junto. A referência forte
+    # evita que o GC recolha a task antes de ela rodar.
+    task = running.create_task(asyncio.to_thread(_write))
+    _pending_audits.add(task)
+    task.add_done_callback(_pending_audits.discard)
+
+
 # ── RBAC dependency for plugin routes (plano "RBAC para Plugins" §3.5) ─────
 import re as _re
 
@@ -228,12 +302,54 @@ def plugin_permission(key: str):
 
     async def _dep(request: Request) -> None:
         from server.authz import acheck
+        from server.deps import PermissionDeniedError
         m = _PLUGIN_PATH_RE.match(request.url.path)
         if not m:
             return  # not a plugin-namespaced path — cannot infer id, allow.
         full_key = f"plugin.{m.group(1)}.{key}"
         if not await acheck(request, full_key):
-            raise HTTPException(status_code=403, detail="Permissão negada.")
+            # Raise the SAME exception the core routes use so the 403 body is the
+            # unified ``{"ok": false, "error": "Permissão negada."}`` envelope
+            # (rendered by ``install_exception_handlers``, registered app-wide),
+            # NOT FastAPI's ``{"detail": ...}``. This lets the frontend's
+            # ``res.ok === false`` guards fire for plugin routes too.
+            raise PermissionDeniedError()
+
+    return Depends(_dep)
+
+
+def core_permission(key: str):
+    """FastAPI dependency that gates a plugin route on a CORE permission key.
+
+    Sibling of :func:`plugin_permission`, but ``key`` is a literal entry from the
+    core permission catalog (e.g. ``channel.manage``) — it is NOT prefixed with
+    ``plugin.<id>.``. Use it when a plugin route belongs to a core-owned domain:
+    EVERY channel-provider plugin (gowa/telegram/whatsapp_cloud/website/
+    facebook_messenger/instagram) gates its OPERATOR routes on ``channel.manage``
+    so the same permission that governs the core Channels screen also governs each
+    provider's own config endpoints. A provider's ``/public/`` routes stay OPEN
+    (they authenticate their own visitors) — gate rota-a-rota, never the router.
+
+    Same semantics as :func:`plugin_permission`: 403 when a logged-in user lacks
+    the permission; default-allow for legacy/open installs (no user identity); the
+    ABAC seam (``filter.authz.decision``) is honored via :func:`server.authz.acheck`.
+
+    Usage in a plugin ``routes.py``::
+
+        from plugins.context import core_permission
+
+        @router.get("/reveal-hmac", dependencies=[core_permission("channel.manage")])
+        async def reveal_hmac(channel_id: str = ""): ...
+    """
+
+    async def _dep(request: Request) -> None:
+        from server.authz import acheck
+        from server.deps import PermissionDeniedError
+        if not await acheck(request, key):
+            # Same exception the core routes use → unified 403 envelope
+            # ``{"ok": false, "error": "Permissão negada."}`` (not FastAPI's
+            # ``{"detail": ...}``), so the frontend's ``res.ok === false`` guards fire.
+            raise PermissionDeniedError()
 
     return Depends(_dep)
 

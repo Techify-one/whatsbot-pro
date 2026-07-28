@@ -59,6 +59,12 @@ def register_routes(app, deps):
         return _ok({"status": "sent", "number": data["number"]})
 
     @app.get("/api/setup/key-status")
-    async def key_status():
-        """Poll Techify for the provisioned API key; save it once ready."""
+    async def key_status(request: Request):
+        """Poll Techify for the provisioned API key; save it once ready.
+
+        Saves the api_key when ready ⇒ a disguised write; gate like PUT /config.
+        Open/first-run mode has no user, so onboarding still passes."""
+        denied = permission_denied(request, "settings.manage")
+        if denied:
+            return denied
         return _ok(await svc.key_status(deps))

@@ -10,6 +10,8 @@
 import * as registry from './registry.js';
 import { openModal } from './ModalHost.js';
 import * as coreApi from '../services/api.js';
+import { authHeaders, handleUnauthorized, handleErrorResponse } from '../services/httpClient.js';
+import { notifyPermissionDenied } from '../services/notify.js';
 import { useWebSocket } from '../hooks/useWebSocket.js';
 import { hasPermission, hasAnyPermission } from '../utils/permissions.js';
 
@@ -58,7 +60,7 @@ export const PLUGIN_SERVICES_DENY = Object.freeze([
   // WhatsApp connection lifecycle / provisioning
   'reconnect', 'logout', 'setupRequestKey', 'setupKeyStatus',
   // AI engine config-in-DB (agents/prompts/tools/variables) + restart
-  'listAgents', 'getAgent', 'saveAgent', 'getAgentHistory', 'rollbackAgent', 'deleteAgent',
+  'listAgents', 'getAgent', 'saveAgent', 'saveAgentPrompt', 'getAgentHistory', 'rollbackAgent', 'deleteAgent',
   'listPrompts', 'getPrompt', 'savePrompt', 'getPromptHistory', 'rollbackPrompt',
   'listVariables', 'saveVariable', 'deleteVariable',
   'listTools', 'getTool', 'saveTool', 'deleteTool', 'getToolHistory', 'rollbackTool',
@@ -66,7 +68,6 @@ export const PLUGIN_SERVICES_DENY = Object.freeze([
   // Channel administration (create/delete/membership/credentials)
   'createChannel', 'updateChannel', 'deleteChannel', 'restoreChannel',
   'setChannelMembers', 'getChannelMembers',
-  'telegramAutoconfigure', 'telegramChannelStatus',
   // Audit log + raw log access
   'listAudit', 'getAuditActions', 'downloadAuditExport', 'getLogs', 'clearLogs',
   // Runtime/subprocess introspection
@@ -106,6 +107,47 @@ export function buildAllowedServices(extras = {}) {
   return { ...out, ...extras };
 }
 
+/**
+ * Build the plugin HTTP transport (`api.http`). Same status-aware normalisation as
+ * the core `httpClient` (checks HTTP status, unifies the `{error}`/`{detail}` bodies,
+ * fires the "Permissão negada." toast on 403 via `handleErrorResponse`, and clears the
+ * session on 401) — so a plugin never silently treats a 403 as success. Path handling:
+ * a path starting with `http(s)://` or `/api/` is used AS-IS (already absolute); any
+ * other path is resolved relative to the plugin's `apiBase` (`/api/plugins/<id>`).
+ *
+ * @param {string} apiBase - `/api/plugins/<id>`.
+ * @returns {{get:Function, post:Function, put:Function, del:Function, request:Function}}
+ */
+export function buildPluginHttp(apiBase) {
+  const resolve = (path) => {
+    const p = String(path == null ? '' : path);
+    if (/^https?:\/\//.test(p) || p.startsWith('/api/')) return p;
+    return `${apiBase}${p.startsWith('/') ? p : `/${p}`}`;
+  };
+  async function req(method, path, body) {
+    /** @type {RequestInit} */
+    const init = { method, headers: authHeaders() };
+    if (body !== undefined && body !== null) {
+      init.headers = { ...init.headers, 'Content-Type': 'application/json' };
+      init.body = JSON.stringify(body);
+    }
+    const res = await fetch(resolve(path), init);
+    if (res.status === 401) {
+      handleUnauthorized();
+      return { ok: false, error: 'Não autenticado.', status: 401 };
+    }
+    if (!res.ok) return handleErrorResponse(res);
+    return res.json();
+  }
+  return {
+    get: (path) => req('GET', path),
+    post: (path, body) => req('POST', path, body),
+    put: (path, body) => req('PUT', path, body),
+    del: (path, body) => req('DELETE', path, body),
+    request: req,
+  };
+}
+
 /** Minimal compat guard: '*' or matching MAJOR is accepted. */
 export function isFrontendApiCompatible(range) {
   if (!range || range === '*') return true;
@@ -129,8 +171,12 @@ export function buildPluginApi(pluginId) {
     emit: (name, data) => registry.emit(name, data),
     applyFilter: registry.applyFilter,
 
-    // ── modal host ──
-    ui: { openModal },
+    // ── status-aware HTTP transport (checks status, unifies error body, toasts
+    //    "Permissão negada." on 403). Plugins SHOULD use this instead of raw fetch. ──
+    http: buildPluginHttp(`/api/plugins/${pluginId}`),
+
+    // ── modal host + notificações transitórias (toast) ──
+    ui: { openModal, notifyPermissionDenied },
 
     // ── curated core utilities (so plugins don't depend on internal paths) ──
     // D1 ENFORCEMENT: the plugin-facing surface is the FROZEN PLUGIN_SERVICES

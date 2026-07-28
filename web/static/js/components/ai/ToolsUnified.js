@@ -23,10 +23,24 @@ import {
   rollbackTool,
 } from '../../services/api.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
+import { useUrlState } from '../../hooks/useUrlState.js';
+import { readParams, writeParams, bool, str } from '../../services/urlState.js';
 import { EditModal } from '../ToolsManager.js';
 import { ToolForm, HistoryModal, StatusBadge } from './ToolsEditor.js';
 
 const html = htm.bind(h);
+
+// Builtins com delete REAL liberado (plano 30 WS3/D2). Espelha
+// DELETABLE_BUILTINS em agent/ai_builtin_tools.py — o backend grava um
+// tombstone (config.deleted_builtin_tools) pra tool não voltar no boot.
+const DELETABLE_BUILTINS = new Set(['transferir_agente']);
+
+// Deep-link (Plano 24): ?q= reflete a busca (replace); ?history=1 é aditivo ao
+// path /ai/tools/{name} (o path é dono do editor aberto; a flag abre o histórico).
+const TOOLS_URL_SCHEMA = [
+  str('q', ''),      // ?q=<termo> → filtro de busca
+  bool('history'),   // ?history=1 → modal de histórico da tool code-in-DB
+];
 
 // In-app confirmation modal (substitui o confirm() nativo do navegador). Estilo
 // alinhado ao HistoryModal/EditModal, legível no modo escuro (classes wa-*).
@@ -70,6 +84,13 @@ export default function ToolsUnified({ initialEntity }) {
   const [historyBusy, setHistoryBusy] = useState(false);
 
   const [confirmDelete, setConfirmDelete] = useState(null); // row pendente de exclusão
+
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editingCode || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editingCode, creating]);
 
   async function load() {
     setLoading(true);
@@ -124,6 +145,8 @@ export default function ToolsUnified({ initialEntity }) {
         label: (reg && reg.current_label) || name,
         enabled: reg ? !!reg.enabled : !!(code && code.enabled),
         customized: reg ? !!(reg.has_override || reg.has_label_override) : false,
+        // plano 47 — reaproveitar o resultado desta tool no contexto da IA.
+        reuse_result: reg ? !!reg.reuse_result : false,
         version: code ? (code.version || 1) : null,
         install_status: code ? code.install_status : null,
         install_error: code ? code.install_error : null,
@@ -163,6 +186,36 @@ export default function ToolsUnified({ initialEntity }) {
     pushUrl(editName ? { sub: 'tools', id: editName } : { sub: 'tools' });
   }, [editName]);
 
+  // Deep-link da query (Plano 24): hidrata busca (?q) no mount/popstate e reflete
+  // no URL (replace); ?history=1 é aditivo ao path — reabre o histórico contra a
+  // tool nomeada no path (editName) via openHistory (carrega historyRows).
+  useUrlState({
+    read: () => readParams(window.location.search, TOOLS_URL_SCHEMA),
+    apply: (s) => {
+      setQuery(s.q);
+      if (s.history) {
+        const row = rows.find((r) => r.name === (editName || (historyFor && historyFor.name)));
+        if (row && row.isCode && !historyFor) openHistory(row);
+      } else if (historyFor) setHistoryFor(null);
+    },
+    serialize: () => writeParams({
+      q: query,
+      history: !!historyFor,
+    }, TOOLS_URL_SCHEMA),
+    deps: [query, historyFor],
+  });
+  // Corrida de montagem: o path (editName) só resolve depois da lista carregar.
+  // Quando resolver, reabre o histórico pedido pela URL uma única vez.
+  const histHydratedRef = useRef(false);
+  useEffect(() => {
+    if (histHydratedRef.current || !editName) return;
+    histHydratedRef.current = true;
+    const s = readParams(window.location.search, TOOLS_URL_SCHEMA);
+    if (!s.history || historyFor) return;
+    const row = rows.find((r) => r.name === editName);
+    if (row && row.isCode) openHistory(row);
+  }, [editName]);
+
   // ---- Toggle (Ativa) -------------------------------------------------------
   async function toggle(row) {
     setBusy(row.name);
@@ -197,6 +250,29 @@ export default function ToolsUnified({ initialEntity }) {
     }
   }
 
+  // ---- Reuse-result toggle (plano 47, D8) ----------------------------------
+  // Inline toggle for code-in-DB tools: their "Editar" opens the Python editor
+  // (not the override EditModal that hosts the reuse toggle for core/plugin), so
+  // without this the control would be unreachable for them. Same PUT /api/tools.
+  async function toggleReuse(row) {
+    setBusy(row.name);
+    try {
+      const r = await fetch(`/api/tools/${encodeURIComponent(row.name)}`, {
+        method: 'PUT',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ reuse_result: !row.reuse_result }),
+      });
+      if (r.status === 401) { handleUnauthorized(); throw new Error('Não autenticado.'); }
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error || 'failed');
+      setRegTools((prev) => prev.map((t) => (t.name === row.name ? { ...t, ...data.data } : t)));
+    } catch (e) {
+      alert('Erro ao salvar: ' + (e.message || e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   // ---- Edit: override modal (core/plugin) ----------------------------------
   async function saveOverride(name, body) {
     setBusy(name);
@@ -210,7 +286,7 @@ export default function ToolsUnified({ initialEntity }) {
       const data = await r.json();
       if (!data.ok) throw new Error(data.error || 'failed');
       setRegTools((prev) => prev.map((t) => (t.name === name ? { ...t, ...data.data } : t)));
-      if ('description' in body || 'display_label' in body) setEditingOverride(null);
+      if ('description' in body || 'display_label' in body || 'reuse_result' in body) setEditingOverride(null);
     } catch (e) {
       alert('Erro ao salvar: ' + (e.message || e));
     } finally {
@@ -301,8 +377,10 @@ export default function ToolsUnified({ initialEntity }) {
 
       ${error ? html`<div class="text-red-600 mb-3 text-sm">${error}</div>` : null}
 
-      ${creating ? html`<${ToolForm} onSave=${saveCode} onCancel=${() => setCreating(false)} busy=${formBusy} />` : null}
-      ${editingCode ? html`<${ToolForm} editing=${editingCode} onSave=${saveCode} onCancel=${() => setEditingCode(null)} busy=${formBusy} />` : null}
+      <div ref=${formRef}>
+        ${creating ? html`<${ToolForm} onSave=${saveCode} onCancel=${() => setCreating(false)} busy=${formBusy} />` : null}
+        ${editingCode ? html`<${ToolForm} editing=${editingCode} onSave=${saveCode} onCancel=${() => setEditingCode(null)} busy=${formBusy} />` : null}
+      </div>
 
       ${loading ? html`<div class="text-wa-secondary">Carregando…</div>` : null}
 
@@ -328,6 +406,7 @@ export default function ToolsUnified({ initialEntity }) {
                         ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-green-500/10 text-green-600">Habilitada</span>`
                         : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Desabilitada</span>`}
                       ${r.customized ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-blue-500/10 text-blue-700">customizada</span>` : null}
+                      ${r.reuse_result ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-purple-500/10 text-purple-700 dark:text-purple-400" title="A IA reaproveita o resultado desta tool nas próximas mensagens">lembra resposta</span>` : null}
                     </div>
                     ${r.name !== r.label ? html`<div class="text-[12px] text-wa-secondary mt-0.5 font-mono">${r.name}</div>` : null}
                     ${desc ? html`<div class="text-[12px] text-wa-secondary mt-1 break-words">${desc}</div>` : null}
@@ -345,6 +424,19 @@ export default function ToolsUnified({ initialEntity }) {
                       />
                       <div class="relative w-9 h-5 bg-wa-border rounded-full peer peer-checked:bg-green-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-4"></div>
                     </label>
+                    ${(r.isCode && r.registered) ? html`
+                      <label class="inline-flex items-center gap-1 cursor-pointer text-[12px] text-wa-secondary"
+                        title="A IA reaproveita o resultado desta tool nas próximas mensagens em vez de consultar de novo. Deixe desligado para dados que mudam e para tools que executam ações.">
+                        <input
+                          type="checkbox"
+                          class="w-3.5 h-3.5 rounded border-wa-border accent-wa-teal"
+                          checked=${r.reuse_result}
+                          disabled=${busy === r.name}
+                          onChange=${() => toggleReuse(r)}
+                        />
+                        Reaproveitar resposta
+                      </label>
+                    ` : null}
                     <button
                       onClick=${() => (r.isCode ? openCodeEdit(r) : setEditingOverride(r.name))}
                       class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
@@ -355,7 +447,7 @@ export default function ToolsUnified({ initialEntity }) {
                         class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                       >Histórico</button>
                     ` : null}
-                    ${r.kind === 'code' ? html`
+                    ${(r.kind === 'code' || DELETABLE_BUILTINS.has(r.name)) ? html`
                       <button
                         onClick=${() => setConfirmDelete(r)}
                         disabled=${busy === r.name}
@@ -392,7 +484,9 @@ export default function ToolsUnified({ initialEntity }) {
       ${confirmDelete ? html`
         <${ConfirmModal}
           title="Excluir tool"
-          message=${html`Excluir a tool <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker.`}
+          message=${confirmDelete.kind === 'builtin'
+            ? html`Excluir a tool core <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker. Esta ação é <b>definitiva pela interface</b> — ela não volta no próximo boot; para tê-la de volta, recrie-a como tool de código (ou remova-a da config <code>deleted_builtin_tools</code> direto no banco).`
+            : html`Excluir a tool <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker.`}
           confirmLabel="Excluir"
           danger=${true}
           busy=${busy === confirmDelete.name}

@@ -2,14 +2,31 @@
 
 Idempotente — pode rodar de novo sem duplicar. NÃO faz parte do app (é um script
 de conveniência). Roda com a venv: ./venv/bin/python seed_demo.py
+
+Postgres-only (plano 29): usa a DATABASE_URL da env; se ausente, tenta ler a
+linha DATABASE_URL= do .env na raiz do repo (mesma URL que o linux_start.sh
+carrega) antes de falhar.
 """
-from db.engine import init_engine, get_engine
-init_engine("sqlite:///storages/whatsbot.db")
+import os
+from pathlib import Path
+
+from db.engine import init_engine, get_engine, resolve_database_url
+
+if not os.environ.get("DATABASE_URL"):
+    _envfile = Path(__file__).resolve().parent / ".env"
+    if _envfile.is_file():
+        for _line in _envfile.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if _line.startswith("DATABASE_URL="):
+                os.environ["DATABASE_URL"] = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+
+init_engine(resolve_database_url())
 
 import time
 from sqlalchemy import text
 from db.repositories import (
-    agent_repo, prompt_repo, tool_repo, user_repo,
+    agent_repo, tool_repo, user_repo,
     quick_reply_repo, tag_repo, custom_attribute_repo,
 )
 from server.auth import hash_password_argon2
@@ -18,31 +35,42 @@ MODEL = "deepseek/deepseek-v4-pro"  # mesmo do agente default (válido no proxy 
 log = []
 
 # ── 1. Sub-agentes de IA (prompt + agente) ───────────────────────────────
+# Padrão hub-and-spoke (plano 29 A6): SÓ o roteador tem transfer_to_human;
+# os spokes recebem transferir_agente e DEVOLVEM pro roteador com o motivo.
+_DEVOLVE = (" Se o assunto sair do seu escopo (ou o que o cliente pediu não "
+            "existir), use transferir_agente de volta para 'triagem' explicando "
+            "o motivo — não tente resolver fora da sua área.")
 AGENTS = [
     ("vendas", "Agente de Vendas", False, None,
      "Você é um agente de vendas simpático e objetivo. Qualifique o lead, "
      "entenda a necessidade, apresente os planos e conduza para o fechamento. "
      "Use o frete e os valores quando perguntarem. Seja cordial e use no máximo "
-     "2 emojis por mensagem.", ["calcular_frete"]),
+     "2 emojis por mensagem." + _DEVOLVE,
+     ["calcular_frete", "transferir_agente", "save_contact_info"]),
     ("suporte", "Suporte Técnico", False, None,
      "Você é o suporte técnico. Diagnostique o problema do cliente com perguntas "
      "claras, dê o passo a passo da solução e confirme se resolveu. Se for algo "
-     "que você não resolve, oriente a abrir um chamado.", []),
+     "que você não resolve, oriente a abrir um chamado." + _DEVOLVE,
+     ["transferir_agente", "save_contact_info"]),
     ("financeiro", "Financeiro", False, None,
      "Você cuida do financeiro: segunda via de boleto, chave PIX, prazos de "
-     "pagamento e negociação de débitos. Seja formal e preciso com valores e datas.",
-     []),
+     "pagamento e negociação de débitos. Seja formal e preciso com valores e "
+     "datas." + _DEVOLVE,
+     ["transferir_agente", "save_contact_info"]),
+    # Roteador (hub): tool_names=None herda TODAS as tools — é o único com
+    # transfer_to_human (escala pra humano quando ninguém resolve).
     ("triagem", "Triagem (Roteador)", True, ["vendas", "suporte", "financeiro"],
      "Você é a triagem. Identifique a intenção do cliente e transfira para o "
      "agente certo: vendas (comprar/planos/preços), suporte (problema técnico) ou "
-     "financeiro (pagamento/boleto/PIX). Faça no máximo uma pergunta antes de transferir.",
+     "financeiro (pagamento/boleto/PIX). Faça no máximo uma pergunta antes de "
+     "transferir. Quando um agente devolver com um motivo ([REDIRECIONAMENTO]), "
+     "decida o próximo destino — se ninguém resolver, use transfer_to_human.",
      None),
 ]
 for key, name, is_router, targets, prompt_body, tools in AGENTS:
     try:
-        prompt_repo.save(f"{key}_prompt", prompt_body)
         agent_repo.save(
-            key, display_name=name, prompt_key=f"{key}_prompt",
+            key, display_name=name, prompt=prompt_body,
             model_config={"model": MODEL},
             tool_names=tools, enabled=True,
             description=f"Agente de demonstração: {name}.",

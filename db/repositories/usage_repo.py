@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from sqlalchemy import and_, func, insert as sa_insert, select
+from sqlalchemy import and_, false, func, insert as sa_insert, or_, select
 
 from db.engine import get_engine
 from db.tables import contacts, usage
@@ -118,11 +118,45 @@ def global_summary(start_ts: float | None = None,
     return totals
 
 
+# Campos ordenáveis (plano 69 F7). Allowlist — a UI manda a chave da coluna; nada
+# fora daqui chega ao ORDER BY (o valor default `cost_usd` cobre entradas inválidas).
+def _sort_expr(sort: str | None):
+    exprs = {
+        "cost_usd": func.coalesce(func.sum(usage.c.cost_usd), 0.0),
+        "total_tokens": func.coalesce(func.sum(usage.c.total_tokens), 0),
+        "prompt_tokens": func.coalesce(func.sum(usage.c.prompt_tokens), 0),
+        "completion_tokens": func.coalesce(func.sum(usage.c.completion_tokens), 0),
+        "call_count": func.count(),
+        "name": contacts.c.name,
+    }
+    return exprs.get(sort or "cost_usd", exprs["cost_usd"])
+
+
+def _search_clause(q: str | None):
+    """WHERE de busca por nome/telefone do contato (case-insensível no nome)."""
+    q = (q or "").strip()
+    if not q:
+        return None
+    like = f"%{q}%"
+    return or_(contacts.c.name.ilike(like), contacts.c.phone.like(like))
+
+
 def by_contact(start_ts: float | None = None,
-               end_ts: float | None = None) -> list[dict]:
-    """Return usage breakdown per contact (for the by-contact endpoint)."""
+               end_ts: float | None = None, *,
+               limit: int | None = None, offset: int = 0,
+               q: str | None = None, sort: str | None = None,
+               order: str | None = None) -> list[dict]:
+    """Return usage breakdown per contact (for the by-contact endpoint).
+
+    Ordena pelo campo pedido (default custo desc = "top-N gastadores"; plano 69 F7).
+    ``q`` filtra por nome/telefone no SERVIDOR (busca acha gastador fora da 1ª página).
+    ``limit``/``offset`` (plano 50 F9) paginam; ``limit=None`` ⇒ tudo. Com paginação,
+    o agregado ``by_type`` é restringido aos contatos DA PÁGINA."""
     time_clauses = _time_clauses(start_ts, end_ts)
+    search = _search_clause(q)
     agg = _aggregate_columns()
+    sort_expr = _sort_expr(sort)
+    direction = sort_expr.asc() if str(order or "desc").lower() == "asc" else sort_expr.desc()
     base_stmt = (
         select(
             usage.c.contact_id,
@@ -133,24 +167,35 @@ def by_contact(start_ts: float | None = None,
         .join(contacts, contacts.c.id == usage.c.contact_id)
         .group_by(usage.c.contact_id, contacts.c.phone, contacts.c.name)
         .having(func.count() > 0)
-        .order_by(func.coalesce(func.sum(usage.c.cost_usd), 0.0).desc())
+        # tiebreaker determinístico (contact_id) — sem ele, empates deixam a
+        # paginação por offset com dup/gap ao rolar.
+        .order_by(direction, usage.c.contact_id)
     )
-    if time_clauses:
-        base_stmt = base_stmt.where(and_(*time_clauses))
-
-    # Single aggregate of by_type for ALL contacts in one GROUP BY (fixes the
-    # per-contact N+1: previously one query per contact row). Same per-call_type
-    # shape via the shared ``_by_type_entry``.
-    by_type_stmt = (
-        select(usage.c.contact_id, usage.c.call_type, *_aggregate_columns())
-        .group_by(usage.c.contact_id, usage.c.call_type)
-    )
-    if time_clauses:
-        by_type_stmt = by_type_stmt.where(and_(*time_clauses))
+    where_clauses = list(time_clauses)
+    if search is not None:
+        where_clauses.append(search)
+    if where_clauses:
+        base_stmt = base_stmt.where(and_(*where_clauses))
+    if limit is not None:
+        base_stmt = base_stmt.limit(limit).offset(offset)
 
     results: list[dict] = []
     with get_engine().connect() as conn:
         rows = conn.execute(base_stmt).mappings().all()
+        # by_type em UMA query (fixes o N+1 por contato). Com paginação, restringe aos
+        # contatos da página; sem paginação agrega todos (comportamento legado).
+        by_type_stmt = (
+            select(usage.c.contact_id, usage.c.call_type, *_aggregate_columns())
+            .group_by(usage.c.contact_id, usage.c.call_type)
+        )
+        if time_clauses:
+            by_type_stmt = by_type_stmt.where(and_(*time_clauses))
+        if limit is not None:
+            page_ids = [row["contact_id"] for row in rows]
+            if page_ids:
+                by_type_stmt = by_type_stmt.where(usage.c.contact_id.in_(page_ids))
+            else:
+                by_type_stmt = by_type_stmt.where(false())
         by_type_by_contact: dict = {}
         for r in conn.execute(by_type_stmt).mappings().all():
             by_type_by_contact.setdefault(r["contact_id"], {})[r["call_type"]] = \
@@ -169,18 +214,60 @@ def by_contact(start_ts: float | None = None,
     return results
 
 
+def count_by_contact(start_ts: float | None = None,
+                     end_ts: float | None = None, *, q: str | None = None) -> int:
+    """Número de contatos com uso na janela (o ``total`` da paginação de :func:`by_contact`).
+
+    ``q`` (plano 69 F7) restringe ao mesmo conjunto buscado, então o ``total`` reflete
+    a busca (a lista bate com o total)."""
+    time_clauses = _time_clauses(start_ts, end_ts)
+    search = _search_clause(q)
+    grouped = (
+        select(usage.c.contact_id)
+        .join(contacts, contacts.c.id == usage.c.contact_id)
+        .group_by(usage.c.contact_id)
+        .having(func.count() > 0)
+    )
+    where_clauses = list(time_clauses)
+    if search is not None:
+        where_clauses.append(search)
+    if where_clauses:
+        grouped = grouped.where(and_(*where_clauses))
+    with get_engine().connect() as conn:
+        return conn.execute(
+            select(func.count()).select_from(grouped.subquery())
+        ).scalar() or 0
+
+
 def detail(contact_id: int, start_ts: float | None = None,
-           end_ts: float | None = None) -> list[dict]:
-    """Return raw usage records for a specific contact."""
+           end_ts: float | None = None, *,
+           limit: int | None = None, offset: int = 0) -> list[dict]:
+    """Return raw usage records for a specific contact.
+
+    ``limit``/``offset`` (plano 50 F9) paginam os registros brutos (crescem por contato);
+    ``limit=None`` ⇒ todos (byte-idêntico legado)."""
+    where_clauses = [usage.c.contact_id == contact_id, *_time_clauses(start_ts, end_ts)]
+    stmt = (
+        select(
+            usage.c.call_type, usage.c.model, usage.c.prompt_tokens,
+            usage.c.completion_tokens, usage.c.total_tokens,
+            usage.c.cost_usd, usage.c.ts,
+        )
+        .where(and_(*where_clauses))
+        .order_by(usage.c.ts)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset)
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def count_detail(contact_id: int, start_ts: float | None = None,
+                 end_ts: float | None = None) -> int:
+    """Número de registros brutos do contato na janela (``total`` de :func:`detail`)."""
     where_clauses = [usage.c.contact_id == contact_id, *_time_clauses(start_ts, end_ts)]
     with get_engine().connect() as conn:
-        rows = conn.execute(
-            select(
-                usage.c.call_type, usage.c.model, usage.c.prompt_tokens,
-                usage.c.completion_tokens, usage.c.total_tokens,
-                usage.c.cost_usd, usage.c.ts,
-            )
-            .where(and_(*where_clauses))
-            .order_by(usage.c.ts)
-        ).mappings().all()
-    return [dict(r) for r in rows]
+        return conn.execute(
+            select(func.count()).select_from(usage).where(and_(*where_clauses))
+        ).scalar() or 0

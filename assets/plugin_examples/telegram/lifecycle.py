@@ -7,14 +7,16 @@ provider-agnostic funnel via ``ctx.ingest_event`` (wired by plano 13 Fase 1.1).
 No core code is touched: this is the same supervised-task + ingest path any third
 party channel plugin would use.
 
-When ``inbound_mode == "webhook"`` nothing is started here — the core's generic
-``POST /api/webhook/telegram/{channel_id}`` route already parses + dispatches; the
-user registers the webhook URL from the config screen.
+The mode is PER-CHANNEL (``channels.config["telegram"]["inbound_mode"]`` — see
+``mode.py``): the loop runs whenever the runtime is wired and, each cycle, SKIPS
+channels in ``webhook`` mode (their updates arrive via the core's generic
+``POST /api/webhook/telegram/{channel_id}`` route). So a channel can flip between
+webhook and long-poll WITHOUT a restart, and two inboxes can use different modes.
 
 Robustness:
 - The loop re-scans the channel registry each cycle, so a channel created/edited
-  after boot is picked up WITHOUT a restart (and self-healed into the registry so
-  inbound media download works).
+  (or whose mode changed) after boot is picked up WITHOUT a restart (and self-healed
+  into the registry so inbound media download works).
 - The first poll of a channel DRAINS the backlog (sets the offset past the last
   pending update without ingesting), so a restart never replays — and re-answers —
   a flood of messages that arrived while the bot was down.
@@ -31,12 +33,10 @@ logger = logging.getLogger(__name__)
 
 # Long-poll server-side hold; the AsyncClient read timeout must exceed it.
 _LONGPOLL_TIMEOUT = 25
+# Teto do backoff exponencial por canal em falha consecutiva (assets).
+_ERROR_BACKOFF_MAX = 30.0
 _ALLOWED_UPDATES = ["message", "edited_message", "channel_post",
                     "message_reaction", "callback_query"]
-# Cap for the per-channel exponential backoff applied after consecutive
-# getUpdates failures (network blips, or a 409 when a webhook is still set / a
-# second instance is also long-polling — Telegram allows only ONE getUpdates).
-_ERROR_BACKOFF_MAX = 30.0
 
 
 def _is_conflict(err: str) -> bool:
@@ -73,12 +73,25 @@ def _get_setting(key: str, default):
         return default
 
 
+# Stashed in setup() so the routes can re-arm the poll task when a channel flips
+# to long-poll at runtime (the task is only alive while ≥1 channel needs it).
+_CTX = None
+
+
 def _telegram_channels(registry):
     try:
         return [c for c in registry.list_channels()
                 if c.get("provider") == "telegram" and c.get("enabled", 1)]
     except Exception:  # noqa: BLE001
         return []
+
+
+def _poll_channels(registry):
+    """Enabled Telegram channels in long-poll mode (the ones the loop must serve).
+
+    Webhook channels are excluded — they're delivered by the core webhook route."""
+    from whatsbot_plugins.telegram.mode import mode_from_row
+    return [c for c in _telegram_channels(registry) if mode_from_row(c) != "webhook"]
 
 
 def _ensure_live(registry, cid):
@@ -111,24 +124,35 @@ async def _get_updates(client, base, token, offset, *, timeout):
 
 
 async def _poll_loop(ctx) -> None:
-    """Supervised forever-loop: long-poll every Telegram channel → ingest_event."""
+    """Supervised loop: long-poll every poll-mode Telegram channel.
+
+    Exits cleanly (→ task state ``completed``, not relaunched — the task is
+    TRANSIENT) once NO channel is in long-poll mode, so a webhook-only install
+    shows no running poll task. The routes re-arm it via ``ensure_poll_running``
+    when a channel flips back to long-poll."""
     from whatsbot_plugins.telegram.channels import api_base
     registry = ctx.channel_registry
     ingest = ctx.ingest_event
     base = api_base()
     offsets: dict[str, int] = {}
     drained: set[str] = set()
-    errors: dict[str, int] = {}   # consecutive getUpdates failures per channel
+    # Falhas consecutivas por canal → backoff + dica de 409 (vinha do assets;
+    # preservado ao adotar o loop por-canal da loja).
+    errors: dict[str, int] = {}
     logger.info("telegram long-poll loop started")
     # Read timeout must comfortably exceed the long-poll hold.
     timeout = httpx.Timeout(_LONGPOLL_TIMEOUT + 10)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             while True:
+                poll_chans = _poll_channels(registry)
+                if not poll_chans:
+                    logger.info("telegram: no long-poll channels left — stopping "
+                                "poll loop (webhook channels unaffected)")
+                    return
                 interval = float(_get_setting("poll_interval", 2.0) or 2.0)
-                got_any = False
                 backoff_needed = 0.0
-                for ch in _telegram_channels(registry):
+                for ch in poll_chans:
                     cid = ch["id"]
                     token = registry.get_credential(cid, "bot_token")
                     if not token:
@@ -143,10 +167,10 @@ async def _poll_loop(ctx) -> None:
                             if backlog:
                                 offsets[cid] = backlog[-1].get("update_id", 0) + 1
                             drained.add(cid)
-                            errors[cid] = 0
                         except Exception as e:  # noqa: BLE001
                             backoff_needed = max(backoff_needed,
                                                  _note_error(errors, cid, "drain", e))
+                            continue
                         continue
                     try:
                         updates = await _get_updates(
@@ -157,8 +181,6 @@ async def _poll_loop(ctx) -> None:
                         backoff_needed = max(backoff_needed,
                                              _note_error(errors, cid, "getUpdates", e))
                         continue
-                    if updates:
-                        got_any = True
                     for upd in updates:
                         offsets[cid] = upd.get("update_id", 0) + 1
                         try:
@@ -167,32 +189,59 @@ async def _poll_loop(ctx) -> None:
                         except Exception:  # noqa: BLE001
                             logger.warning("telegram update ingest failed (%s)", cid,
                                            exc_info=True)
-                # Snappy: if we just handled updates, poll again immediately so
-                # consecutive messages are answered back-to-back. On errors, apply
-                # the (capped, exponential) backoff; when idle, breathe one interval.
-                if got_any:
-                    continue
-                await asyncio.sleep(backoff_needed or max(0.2, interval))
+                await asyncio.sleep(max(0.2, interval, backoff_needed))
     except asyncio.CancelledError:
         logger.info("telegram long-poll loop cancelled cleanly")
         raise
 
 
-async def setup(ctx) -> None:
-    mode = str(_get_setting("inbound_mode", "poll") or "poll").lower()
-    if mode != "poll":
-        logger.info("telegram: inbound_mode=%s — long-poll not started "
-                    "(register the webhook URL from the config screen)", mode)
+def _spawn_poll(ctx) -> bool:
+    """Register + start the TRANSIENT long-poll task. Idempotent (the supervisor
+    no-ops if it's already running). Returns True if (re)armed."""
+    try:
+        from runtime.supervisor import RestartPolicy
+        full = ctx.spawn_task("poll", lambda: _poll_loop(ctx),
+                              policy=RestartPolicy.TRANSIENT)
+        logger.info("telegram: armed long-poll task %r (per-channel mode)", full)
+        return True
+    except RuntimeError as e:
+        logger.warning("telegram: supervisor not wired (%s); long-poll disabled", e)
+        return False
+
+
+def ensure_poll_running() -> None:
+    """Re-arm the long-poll task when a channel flips to long-poll at runtime.
+
+    Called by the routes after switching a channel to poll mode. No-op if the
+    runtime isn't wired or there's no poll-mode channel to serve."""
+    ctx = _CTX
+    if ctx is None or ctx.ingest_event is None or ctx.channel_registry is None:
         return
+    try:
+        if not _poll_channels(ctx.channel_registry):
+            return
+        _spawn_poll(ctx)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("telegram: ensure_poll_running failed: %s", e)
+
+
+async def setup(ctx) -> None:
+    # Inbound mode is PER-CHANNEL (channels.config["telegram"]["inbound_mode"]).
+    # The long-poll task only exists while ≥1 channel is in long-poll mode, so a
+    # webhook-only install shows NO running poll task. It's TRANSIENT and self-exits
+    # when the last poll channel goes webhook; the routes re-arm it (ensure_poll_running)
+    # when a channel flips back to long-poll.
+    global _CTX
+    _CTX = ctx
     if ctx.ingest_event is None or ctx.channel_registry is None:
         logger.warning("telegram: channel runtime not wired (ingest_event/registry "
                        "missing) — cannot long-poll. Webhook mode still works.")
         return
-    try:
-        full = ctx.spawn_task("poll", lambda: _poll_loop(ctx))
-        logger.info("telegram: registered supervised long-poll task %r", full)
-    except RuntimeError as e:
-        logger.warning("telegram: supervisor not wired (%s); long-poll disabled", e)
+    if not _poll_channels(ctx.channel_registry):
+        logger.info("telegram: no long-poll channels — poll task not started "
+                    "(webhook channels are served by the core webhook route)")
+        return
+    _spawn_poll(ctx)
 
 
 async def teardown(ctx) -> None:

@@ -1,6 +1,6 @@
 // Tela "Atendimentos" (container). Toggle Lista|Kanban; o kanban agrupa de forma
 // configurável (atendente / etapa / etiqueta / status). Reaproveita as funções de
-// conversa do api.js e os eventos WS já existentes; o drag-and-drop é otimista
+// atendimento do api.js e os eventos WS já existentes; o drag-and-drop é otimista
 // com rollback. Abrir um card navega para o chat (/conversations/<id>).
 import { h } from 'preact';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'preact/hooks';
@@ -8,12 +8,15 @@ import htm from 'htm';
 import {
   filterConversations, assignConversation, assignAgent,
   archiveConversation, updateConversationInfo, updateConversationLabels,
-  getConversationLabels, getConversationLabelsFor, getAssignableAgents,
-  getCustomAttributes, getMe,
+  getConversationLabels, getConversationLabelsFor, getConversationLabelsBatch,
+  getAssignableAgents, getCustomAttributes, getMe,
 } from '../../services/api.js';
 import { resolveConversation } from '../../utils/resolveConversation.js';
 import { Slot } from '../../plugins/Slot.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
+import { useScrollSentinel } from '../../hooks/useInfiniteScroll.js';
+import { useUrlState } from '../../hooks/useUrlState.js';
+import { readParams, writeParams, enumStr, str } from '../../services/urlState.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { buildGrouping } from './grouping.js';
 import { GroupBySelector } from './GroupBySelector.js';
@@ -22,12 +25,27 @@ import { AttendanceList } from './AttendanceList.js';
 
 const html = htm.bind(h);
 
+// Tamanho de página do scroll infinito de atendimentos (plano 50 D).
+const ATT_PAGE = 50;
 const VIEW_KEY = 'whatsbot_attendances_view';
 const MODE_KEY = 'whatsbot_attendances_mode';
 const STAGE_KEY = 'whatsbot_attendances_stage_attr';
 
 function lsGet(k, def) { try { return localStorage.getItem(k) || def; } catch (e) { return def; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
+
+// Deep-link do estado da tela (Plano 24) — view/agrupamento/atributo/só-abertos na
+// query-string legível. Serialize omite defaults → URL limpa quando nada mexeu.
+// `status=open` traduz o toggle onlyOpen; `attr` só vale no modo etapa.
+const ATT_URL_SCHEMA = [
+  enumStr('view', 'board'),      // board|list
+  enumStr('mode', 'assignee'),   // assignee|stage|label|status
+  str('attr', ''),               // attribute_key (só quando mode=stage)
+  // onlyOpen ↔ ?status=open: bool serializado como o valor legível "open" (omitido no default).
+  { key: 'status', default: false, dec: (v) => v === 'open', enc: () => 'open', isDefault: (v) => !v },
+];
+// Precedência URL > localStorage: só cai no localStorage quando a URL não traz o param.
+const urlHas = (key) => { try { return new URLSearchParams(location.search).has(key); } catch (e) { return false; } };
 
 export function Attendances() {
   const [view, setView] = useState(() => lsGet(VIEW_KEY, 'board'));   // 'board' | 'list'
@@ -37,14 +55,22 @@ export function Attendances() {
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Scroll infinito (plano 50 D) — acumula páginas em vez do cap fixo de 200. O Kanban
+  // agrupa client-side sobre a lista acumulada, então uma única página global (offset)
+  // alimenta todas as colunas; a lista renderiza o mesmo conjunto acumulado.
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const offsetRef = useRef(0);
+  const loadingMoreRef = useRef(false);
+  const bottomSentinelRef = useRef(null);
 
   const [currentUser, setCurrentUser] = useState(null);
   const [agents, setAgents] = useState({ users: [], ai_agents: [] });
   const [labels, setLabels] = useState([]);          // [{id,name,color}]
-  const [stageAttrs, setStageAttrs] = useState([]);  // atributos de conversa type=list
+  const [stageAttrs, setStageAttrs] = useState([]);  // atributos de atendimento type=list
   const [stageAttrKey, setStageAttrKey] = useState(() => lsGet(STAGE_KEY, ''));
 
-  // label_names por conversa (hidratado sob demanda no modo etiqueta).
+  // label_names por atendimento (hidratado sob demanda no modo etiqueta).
   const [labelsByConv, setLabelsByConv] = useState({});
 
   // ── Lookups derivados ────────────────────────────────────────────
@@ -100,21 +126,58 @@ export function Attendances() {
     }).catch(() => {});
   }, []);
 
-  // ── Fetch das conversas ──────────────────────────────────────────
+  // ── Fetch dos atendimentos ──────────────────────────────────────────
+  // 1ª página (reset). Recomeça o cursor; a próxima página vem por loadMore (scroll).
   const fetchConversations = useCallback(async () => {
     setLoading(true); setError('');
+    offsetRef.current = 0;
+    loadingMoreRef.current = false;
     try {
-      const params = { archived: 'false', limit: 200 };
+      const params = { archived: 'false', limit: ATT_PAGE, offset: 0 };
       if (onlyOpen) params.status = 'open';
       const res = await filterConversations(params);
-      if (res && res.ok) setConversations((res.data && res.data.conversations) || []);
-      else { setError((res && res.error) || 'Falha ao carregar atendimentos.'); setConversations([]); }
+      if (res && res.ok) {
+        const rows = (res.data && res.data.conversations) || [];
+        setConversations(rows);
+        setHasMore(!!(res.data && res.data.has_more));
+        offsetRef.current = rows.length;
+      } else {
+        setError((res && res.error) || 'Falha ao carregar atendimentos.');
+        setConversations([]); setHasMore(false);
+      }
     } catch (e) {
-      setError('Falha ao carregar atendimentos.'); setConversations([]);
+      setError('Falha ao carregar atendimentos.'); setConversations([]); setHasMore(false);
     } finally { setLoading(false); }
   }, [onlyOpen]);
 
+  // Próxima página (scroll infinito) — ANEXA com dedup por id. Guardado contra
+  // chamadas concorrentes. Alimenta tanto a lista quanto as colunas do Kanban.
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current || !hasMore) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const params = { archived: 'false', limit: ATT_PAGE, offset: offsetRef.current };
+      if (onlyOpen) params.status = 'open';
+      const res = await filterConversations(params);
+      if (res && res.ok) {
+        const rows = (res.data && res.data.conversations) || [];
+        setConversations((prev) => {
+          const seen = new Set(prev.map(c => c.id));
+          const fresh = rows.filter(c => !seen.has(c.id));
+          return [...prev, ...fresh];
+        });
+        setHasMore(!!(res.data && res.data.has_more));
+        offsetRef.current += rows.length;
+      }
+    } catch (e) { /* mantém o que já carregou */ }
+    finally { loadingMoreRef.current = false; setLoadingMore(false); }
+  }, [hasMore, onlyOpen]);
+
   useEffect(() => { fetchConversations(); }, [fetchConversations]);
+
+  // Sentinela de fim (viewport) — dispara loadMore ao rolar até o fim, nas duas vistas.
+  useScrollSentinel(bottomSentinelRef, loadMore, !loading && hasMore, undefined, '0px 0px 300px 0px');
 
   // ── Hidratar label_names quando o modo etiqueta está ativo ───────
   useEffect(() => {
@@ -122,12 +185,25 @@ export function Attendances() {
     let alive = true;
     const missing = conversations.filter(c => c.label_names == null && labelsByConv[c.id] == null);
     if (!missing.length) return;
-    Promise.all(missing.map(c => getConversationLabelsFor(c.id).then(r => [c.id, (r && r.ok && r.data && r.data.labels) ? r.data.labels.map(l => l.name) : []]).catch(() => [c.id, []])))
-      .then(pairs => { if (!alive) return; setLabelsByConv(prev => { const next = { ...prev }; for (const [id, names] of pairs) next[id] = names; return next; }); });
+    // plano 50 F13 — UMA request batch em vez de 1 GET por atendimento.
+    getConversationLabelsBatch(missing.map(c => c.id))
+      .then(r => {
+        if (!alive) return;
+        const byConv = (r && r.ok && r.data && r.data.labels_by_conv) || {};
+        setLabelsByConv(prev => {
+          const next = { ...prev };
+          for (const c of missing) {
+            const rows = byConv[c.id] || [];
+            next[c.id] = rows.map(l => l.name);
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
     return () => { alive = false; };
   }, [mode, conversations, labelsByConv]);
 
-  // Mescla label_names hidratados nas conversas (para grouping.columnIdOf e chips).
+  // Mescla label_names hidratados nos atendimentos (para grouping.columnIdOf e chips).
   const conversationsForBoard = useMemo(() => {
     if (mode !== 'label') return conversations;
     return conversations.map(c => c.label_names != null ? c : { ...c, label_names: labelsByConv[c.id] || [] });
@@ -211,7 +287,7 @@ export function Attendances() {
 
   // ── Navegação: abrir o chat ──────────────────────────────────────
   const openChat = useCallback((convo) => {
-    // /contacts/{id} agora é o detalhe do contato; o hub abre só por conversa.
+    // /contacts/{id} agora é o detalhe do contato; o hub abre só por atendimento.
     if (convo.id == null) return;
     history.pushState(null, '', `/conversations/${convo.id}`);
     window.dispatchEvent(new PopStateEvent('popstate'));
@@ -256,10 +332,30 @@ export function Attendances() {
     if (mode === 'stage' && stageAttrs.length === 0) setMode('assignee');
   }, [mode, stageAttrs]);
 
-  // ── Persistência das prefs ───────────────────────────────────────
+  // ── Persistência das prefs (por-device, mantida) ─────────────────
   useEffect(() => { lsSet(VIEW_KEY, view); }, [view]);
   useEffect(() => { lsSet(MODE_KEY, mode); }, [mode]);
   useEffect(() => { if (stageAttrKey) lsSet(STAGE_KEY, stageAttrKey); }, [stageAttrKey]);
+
+  // ── Deep-link do estado → URL (Plano 24) ─────────────────────────
+  // Hidrata da URL no mount/back-forward e reflete na query (replaceState). Precedência
+  // URL > localStorage: no apply, só sobrescreve o estado quando o param existe na URL —
+  // senão preserva o valor semeado do localStorage (o useState inicial). Serialize omite
+  // defaults → link limpo. `attr` só entra na URL no modo etapa.
+  useUrlState({
+    read: () => readParams(location.search, ATT_URL_SCHEMA),
+    apply: (s) => {
+      if (urlHas('view')) setView(s.view);
+      if (urlHas('mode')) setMode(s.mode);
+      if (urlHas('attr') && s.attr) setStageAttrKey(s.attr);
+      if (urlHas('status')) setOnlyOpen(s.status);
+    },
+    serialize: () => writeParams({
+      view, mode, status: onlyOpen,
+      attr: mode === 'stage' ? stageAttrKey : '',  // atributo só faz sentido no modo etapa
+    }, ATT_URL_SCHEMA),
+    deps: [view, mode, stageAttrKey, onlyOpen],
+  });
 
   // ── Render ───────────────────────────────────────────────────────
   const TabBtn = (id, label) => html`
@@ -306,10 +402,19 @@ export function Attendances() {
               showChannel=${showChannel} onOpenChat=${openChat} onCardDrop=${handleCardDrop} />`
           : html`<${AttendanceList}
               conversations=${conversationsForBoard} assigneeNameOf=${assigneeNameOf}
-              currentUserId=${currentUserId} showChannel=${showChannel} labelsOf=${labelsOf}
+              currentUserId=${currentUserId} currentUser=${currentUser} showChannel=${showChannel} labelsOf=${labelsOf}
               onOpenChat=${openChat} onAction=${handleAction} />`}
+
+      <!-- Scroll infinito (plano 50 D): sentinela no fim carrega a próxima página
+           automaticamente; o botão é o fallback acessível. Vale p/ Kanban e Lista. -->
+      ${!loading && hasMore ? html`
+        <div ref=${bottomSentinelRef} class="flex justify-center py-4">
+          <button onClick=${loadMore} disabled=${loadingMore}
+            class="px-4 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50">
+            ${loadingMore ? 'Carregando…' : 'Carregar mais'}
+          </button>
+        </div>` : null}
     </div>
   `;
 }
 
-export default Attendances;

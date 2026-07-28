@@ -17,7 +17,7 @@
 // from the selection refs and consumed by the list/WS optimistic patches.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { getContact, getConversationMessages } from '../../../services/api.js';
-import { isDuplicateMessage } from '../../../services/messages.js';
+import { mergeBufferedMessages } from '../../../services/messages.js';
 import { shapeConvData } from '../../../services/conversationRows.js';
 import { emit as emitClientEvent } from '../../../plugins/registry.js';
 
@@ -37,6 +37,10 @@ export function useConversationSelection({
   contacts, loading, setContacts, contactsRef,
   pageVisibleRef, newConvChannelRef,
   initialContactId, initialConversationId, initialScrollMsgId = null,
+  // plano 72 F8 — reconcilia a aba Menções (serverMode) ao ler a menção da conversa
+  // aberta (a leitura tira a linha da view, mas o clear otimista só zera o flag).
+  // No-op fora da aba Menções. Default no-op p/ callers antigos.
+  reconcileMentionsOnRead = () => {},
 }) {
   const [selected, setSelected] = useState(null);          // open thread's phone (contact-level ops)
   const [selectedConvId, setSelectedConvId] = useState(null);   // open thread's conversation id
@@ -44,6 +48,7 @@ export function useConversationSelection({
   const [scrollToMsg, setScrollToMsg] = useState(null);  // DB id of a message to focus on open (search hit)
   const [contactData, setContactData] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);  // plano 50 F4: scroll-up
   // Which side drawer is open: 'contact' (foto/nome) | 'conversation' (botão ℹ️) |
   // null. Single state so opening one closes the other (no overlapping drawers).
   const [openPanel, setOpenPanel] = useState(null);
@@ -56,8 +61,11 @@ export function useConversationSelection({
   const selectedChannelIdRef = useRef('default');
   const lastResolvedId = useRef(null);
   const lastResolvedConvId = useRef(null);
+  const contactDataRef = useRef(null);         // plano 50 F4: cursor sem stale-closure
+  const loadingOlderRef = useRef(false);        // guarda contra loadOlder concorrente
 
   // Keep refs in sync — avoids stale closures
+  useEffect(() => { contactDataRef.current = contactData; }, [contactData]);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { selectedConvIdRef.current = selectedConvId; }, [selectedConvId]);
   useEffect(() => { selectedChannelIdRef.current = selectedChannelId; }, [selectedChannelId]);
@@ -102,7 +110,7 @@ export function useConversationSelection({
     if (row.conversation_id != null) {
       history.pushState(null, '', `/conversations/${row.conversation_id}`);
     } else {
-      // Sem conversa ainda: a seleção fica no estado; /contacts/{id} agora é a tela
+      // Sem atendimento ainda: a seleção fica no estado; /contacts/{id} agora é a tela
       // de detalhe do contato (não o hub), então a URL volta pra raiz do hub.
       history.pushState(null, '', '/');
     }
@@ -121,14 +129,14 @@ export function useConversationSelection({
         setSelectedConvId(row.conversation_id);
         setSelectedChannelId(row.channel_id || 'default');
       } else {
-        // Conversa fora da sidebar (ex: além do limite ou arquivada) — abre direto
+        // Atendimento fora da sidebar (ex: além do limite ou arquivada) — abre direto
         // por id; o load deriva o telefone/canal da resposta do endpoint.
         setSelected(null);
         setSelectedConvId(initialConversationId);
       }
-      // Permalink (?message=<_id>): foca a mensagem assim que a conversa renderiza.
+      // Permalink (?message=<_id>): foca a mensagem assim que o atendimento renderiza.
       // Lido no momento da resolução e consumido uma vez (onScrolledToMsg limpa);
-      // a conversa carrega TODAS as mensagens, então o alvo está sempre no DOM.
+      // o atendimento carrega TODAS as mensagens, então o alvo está sempre no DOM.
       if (initialScrollMsgId != null) setScrollToMsg(initialScrollMsgId);
       lastResolvedConvId.current = initialConversationId;
       lastResolvedId.current = null;
@@ -158,7 +166,7 @@ export function useConversationSelection({
     }
   }, [initialContactId, initialConversationId, contacts, loading]);
 
-  // Load chat detail when the open thread changes. Conversa-cêntrico: prefer the
+  // Load chat detail when the open thread changes. Atendimento-cêntrico: prefer the
   // per-conversation endpoint (scoped to one channel); fall back to the legacy
   // per-contact endpoint for rows without a conversation.
   useEffect(() => {
@@ -179,13 +187,17 @@ export function useConversationSelection({
     const isPageVisible = pageVisibleRef.current;
     if (isPageVisible) {
       setContacts(prev => prev.map(c =>
-        isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false } : c
+        isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false } : c
       ));
+      // plano 72 F8: se estamos na aba Menções (serverMode), ler a menção da conversa
+      // aberta a remove da view server-filtrada — refetch reconcilia lista×badge (no-op
+      // em qualquer outra view).
+      reconcileMentionsOnRead();
     }
     const convId = selectedConvId;
-    // Conversa nova sem conversation_id ainda: escopa o getContact ao canal
+    // Atendimento novo sem conversation_id ainda: escopa o getContact ao canal
     // escolhido no picker (lido-e-zerado aqui), para não fundir os canais nem
-    // abrir a conversa de outro canal do mesmo número (multicanal).
+    // abrir o atendimento de outro canal do mesmo número (multicanal).
     const newConvChannel = newConvChannelRef.current;
     newConvChannelRef.current = null;
     const loader = convId != null
@@ -199,15 +211,14 @@ export function useConversationSelection({
         // Opened by conversation id alone (row not in the sidebar) — adopt the
         // phone from the response so contact-level handlers key correctly.
         if (!selectedRef.current && data.phone) setSelected(data.phone);
-        // Merge buffered messages: pre-fetch (arrived before click) + during-fetch (arrived during loading)
+        // Merge buffered messages: pre-fetch (arrived before click) + during-fetch
+        // (arrived during loading). plano 57: mergeBufferedMessages honra `supersedes`
+        // (colapsa as bolhas otimistas que uma linha combinada do batch substituiu)
+        // além do dedup R12.
         const duringFetch = pendingWsMessages.current[bufKey] || [];
         const pending = [...preFetchBuffer, ...duringFetch];
         if (pending.length > 0) {
-          const existing = data.messages || [];
-          const newMsgs = pending.filter(m => !isDuplicateMessage(m, existing));
-          if (newMsgs.length > 0) {
-            data.messages = [...(data.messages || []), ...newMsgs];
-          }
+          data.messages = mergeBufferedMessages(data.messages || [], pending);
         }
         // Hydrate failed messages with _localId so retry button works after reload
         data.messages = (data.messages || []).map(m => {
@@ -224,6 +235,82 @@ export function useConversationSelection({
     });
   }, [selected, selectedConvId]);
 
+  // Plano 33 F2 — re-fetch the OPEN thread after a WS RECONNECT. The bus has no
+  // replay, so a `new_message` that arrived during a connection gap (sleep / NAT
+  // blip / half-open socket) is lost from the open thread — only the sidebar is
+  // separately refetched. This ref-based, BACKGROUND reload recovers it. Reuses
+  // the SAME per-conversation/per-contact loader and the R12 dedup, so it is
+  // idempotent with the optimistic append (nothing is duplicated) and a failed
+  // fetch leaves the current thread intact. Unlike the selection-time effect it
+  // deliberately does NOT flip the loading spinner, reset the open panel, or clear
+  // unread badges — a reconnect must not flash or reshuffle the open thread. Reads
+  // refs (not deps) so it is stable across renders and safe in a WS closure.
+  const reloadOpenThread = useCallback(() => {
+    const sel = selectedRef.current;
+    const convId = selectedConvIdRef.current;
+    if (!sel && convId == null) return;
+    const bufKey = sel || (convId != null ? `conv:${convId}` : '');
+    const preFetchBuffer = pendingWsMessages.current[bufKey] || [];
+    pendingWsMessages.current[bufKey] = [];
+    const isPageVisible = pageVisibleRef.current;
+    const loader = convId != null
+      ? getConversationMessages(convId, isPageVisible).then(res =>
+          res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
+      : getContact(sel, isPageVisible, null);
+    loader.then(res => {
+      if (!res.ok) return;
+      const data = res.data;
+      if (data.channel_id) setSelectedChannelId(data.channel_id);
+      const duringFetch = pendingWsMessages.current[bufKey] || [];
+      const pending = [...preFetchBuffer, ...duringFetch];
+      if (pending.length > 0) {
+        data.messages = mergeBufferedMessages(data.messages || [], pending);  // plano 57
+      }
+      data.messages = (data.messages || []).map(m =>
+        m.status === 'failed' ? { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' } : m);
+      pendingWsMessages.current[bufKey] = [];
+      setContactData(data);
+    });
+  }, []);
+
+  // Plano 50 F4 — carregar mensagens ANTERIORES (scroll-up / keyset). Busca a página
+  // anterior (before_id = menor _id já carregado) SEM re-marcar como lida e a PREPENDA
+  // ao histórico (dedup por _id, como o merge de WS). Guardado por ref contra chamadas
+  // concorrentes. O caller (ContactDetail) ancora o scroll para a viewport não saltar.
+  const loadOlder = useCallback(() => {
+    const data = contactDataRef.current;
+    if (!data || !data.has_more || loadingOlderRef.current) return;
+    const msgs = data.messages || [];
+    const ids = msgs.map(m => m._id).filter(v => v != null);
+    if (ids.length === 0) return;
+    const beforeId = Math.min(...ids);
+    const sel = selectedRef.current;
+    const convId = selectedConvIdRef.current;
+    if (!sel && convId == null) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const loader = convId != null
+      ? getConversationMessages(convId, false, { beforeId }).then(res =>
+          res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
+      : getContact(sel, false, null, { beforeId });
+    loader.then(res => {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+      if (!res.ok) return;
+      let older = res.data.messages || [];
+      const newHasMore = !!res.data.has_more;
+      older = older.map(m =>
+        m.status === 'failed' ? { ...m, _localId: `loaded_${m.ts}`, _status: 'failed' } : m);
+      setContactData(prev => {
+        if (!prev) return prev;
+        const existing = prev.messages || [];
+        const existingIds = new Set(existing.map(m => m._id).filter(v => v != null));
+        const fresh = older.filter(m => m._id == null || !existingIds.has(m._id));
+        return { ...prev, messages: [...fresh, ...existing], has_more: newHasMore };
+      });
+    });
+  }, []);
+
   return {
     selected, setSelected,
     selectedConvId, setSelectedConvId,
@@ -231,9 +318,10 @@ export function useConversationSelection({
     scrollToMsg, setScrollToMsg,
     contactData, setContactData,
     loadingDetail,
+    loadingOlder, loadOlder,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     openInfoAfterSelect, pendingWsMessages,
-    isOpenRow, selectContact,
+    isOpenRow, selectContact, reloadOpenThread,
   };
 }

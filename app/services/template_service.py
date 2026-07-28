@@ -18,11 +18,158 @@ from __future__ import annotations
 import asyncio
 import time
 
-from db.repositories import (contact_repo, conversation_repo, inbox_repo,
-                             message_repo)
+from db.repositories import (channel_repo, contact_repo, conversation_repo,
+                             inbox_repo, message_repo)
 from plugins.events import emit_with_filter
 
 TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
+
+# ── Criação estendida: cabeçalho de mídia + botões (plano 73) ────────────
+# O contrato é do CORE (nenhuma forma Graph aqui — o provider converte). Estes
+# validadores são compartilhados pelas duas rotas de criação (conv-scoped e
+# channel-scoped) para que as regras não divirjam.
+
+TEMPLATE_HEADER_FORMATS = {"IMAGE", "VIDEO", "DOCUMENT"}
+TEMPLATE_BUTTON_TYPES = {"QUICK_REPLY", "URL", "PHONE_NUMBER", "COPY_CODE"}
+BUTTON_TEXT_MAX = 25
+BUTTONS_MAX = 10
+# Limites de mistura da Meta (P9): validados aqui só para dar erro cedo e
+# legível; a Meta continua sendo a fonte da verdade (o erro dela é repassado).
+BUTTON_TYPE_MAX = {"URL": 2, "PHONE_NUMBER": 1, "COPY_CODE": 1}
+
+# Whitelist de mídia aceita como EXEMPLO de cabeçalho (upload resumável).
+UPLOAD_EXAMPLE_MIMES = {
+    "image/jpeg", "image/png",
+    "video/mp4", "video/3gpp",
+    "application/pdf", "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+UPLOAD_EXAMPLE_MAX_BYTES = 16 * 1024 * 1024  # 16 MiB (limite da Meta)
+
+
+def normalize_header_media(header_format, header_handle):
+    """Validate the media-header pair. Returns ``(format, handle, error)``.
+
+    Both empty ⇒ ``(None, None, None)`` (text header path, unchanged). Only one
+    of the two present is a client error — a media header without its handle
+    would be silently dropped by the provider.
+    """
+    fmt = (header_format or "").strip().upper() or None
+    handle = (header_handle or "").strip() or None
+    if fmt is None and handle is None:
+        return (None, None, None)
+    if fmt is not None and fmt not in TEMPLATE_HEADER_FORMATS:
+        return (None, None,
+                f"header_format deve ser um de {sorted(TEMPLATE_HEADER_FORMATS)}.")
+    if fmt is None or handle is None:
+        return (None, None,
+                "Cabeçalho de mídia exige header_format e header_handle juntos.")
+    return (fmt, handle, None)
+
+
+def normalize_buttons(raw):
+    """Validate/normalize the button list. Returns ``(buttons, error)``.
+
+    ``buttons`` is ``None`` when nothing was sent (no BUTTONS component). Each
+    item keeps only the keys its type uses, so nothing extra leaks to the
+    provider.
+    """
+    if raw is None:
+        return (None, None)
+    if not isinstance(raw, list):
+        return (None, "buttons deve ser uma lista.")
+    if not raw:
+        return (None, None)
+    if len(raw) > BUTTONS_MAX:
+        return (None, f"No máximo {BUTTONS_MAX} botões por template.")
+
+    out: list[dict] = []
+    counts: dict[str, int] = {}
+    for i, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            return (None, f"Botão {i}: formato inválido.")
+        btype = (item.get("type") or "").strip().upper()
+        if btype not in TEMPLATE_BUTTON_TYPES:
+            return (None,
+                    f"Botão {i}: type deve ser um de {sorted(TEMPLATE_BUTTON_TYPES)}.")
+        counts[btype] = counts.get(btype, 0) + 1
+        limit = BUTTON_TYPE_MAX.get(btype)
+        if limit is not None and counts[btype] > limit:
+            return (None, f"No máximo {limit} botão(ões) do tipo {btype}.")
+
+        text = (item.get("text") or "").strip()
+        if btype != "COPY_CODE":
+            if not text:
+                return (None, f"Botão {i}: texto é obrigatório.")
+            if len(text) > BUTTON_TEXT_MAX:
+                return (None,
+                        f"Botão {i}: texto deve ter até {BUTTON_TEXT_MAX} caracteres.")
+
+        btn: dict = {"type": btype}
+        if btype == "QUICK_REPLY":
+            btn["text"] = text
+        elif btype == "URL":
+            url = (item.get("url") or "").strip()
+            if not url:
+                return (None, f"Botão {i}: url é obrigatória.")
+            btn["text"] = text
+            btn["url"] = url
+            example = item.get("example")
+            if isinstance(example, list):
+                example = example[0] if example else ""
+            example = (example or "").strip() if isinstance(example, str) else ""
+            if "{{" in url:
+                if not example:
+                    return (None, f"Botão {i}: URL com variável exige um exemplo.")
+                btn["example"] = [example]
+            elif example:
+                btn["example"] = [example]
+        elif btype == "PHONE_NUMBER":
+            phone = (item.get("phone_number") or "").strip()
+            if not phone:
+                return (None, f"Botão {i}: phone_number é obrigatório.")
+            btn["text"] = text
+            btn["phone_number"] = phone
+        else:  # COPY_CODE
+            example = item.get("example")
+            if isinstance(example, list):
+                example = example[0] if example else ""
+            example = (example or "").strip() if isinstance(example, str) else ""
+            if not example:
+                return (None, f"Botão {i}: código de exemplo é obrigatório.")
+            btn["example"] = example
+        out.append(btn)
+    return (out, None)
+
+
+def validate_example_upload(mime: str, size: int):
+    """Validate a header-example upload BEFORE hitting the provider.
+
+    Returns an error string, or ``None`` when acceptable.
+    """
+    mime = (mime or "").split(";")[0].strip().lower()
+    if mime not in UPLOAD_EXAMPLE_MIMES:
+        return ("Tipo de arquivo não suportado. Use JPG, PNG, MP4, 3GPP, PDF, "
+                "DOC(X) ou XLS(X).")
+    if size <= 0:
+        return "Arquivo vazio."
+    if size > UPLOAD_EXAMPLE_MAX_BYTES:
+        return "Arquivo maior que 16 MB."
+    return None
+
+
+async def upload_template_example(deps, channel_id: str, *, file_bytes: bytes,
+                                  mime: str, filename: str):
+    """Upload a media sample to the provider. Returns ``("ok", data)`` or
+    ``("failed", error)``."""
+    result = await asyncio.to_thread(
+        deps.outbound_router.upload_template_example, channel_id,
+        file_bytes, mime, filename)
+    if not result.get("ok"):
+        return ("failed", result.get("error"))
+    return ("ok", {"handle": result.get("handle")})
 
 
 def session_state(deps, channel_id: str, phone: str) -> dict:
@@ -53,6 +200,45 @@ def session_state(deps, channel_id: str, phone: str) -> dict:
     }
 
 
+def _digits(value) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _channel_badge_sync(deps, channel_id: str) -> dict:
+    """``{id, name, phone}`` do canal — quem é o remetente do template.
+
+    O painel mostra isso no cabeçalho do modal (enviar/criar/selecionar) para o
+    atendente saber DE QUAL número o template vai sair. O número vem de
+    ``channels.own_phone`` (persistido pelo sweep de identidade); quando ainda
+    está vazio, pergunta ao provider uma vez via ``status()`` e persiste — assim
+    a instalação que não roda o sweep (sem o plugin gowa) também mostra o número.
+    Genérico: nenhum ``if provider ==``; um provider que não expõe número
+    simplesmente devolve ``phone=None`` e o painel mostra só o nome.
+    """
+    try:
+        row = channel_repo.get(channel_id) or {}
+    except Exception:  # noqa: BLE001
+        row = {}
+    name = (row.get("display_name") or "").strip() or channel_id
+    phone = _digits(row.get("own_phone"))
+    if not phone:
+        try:
+            inst = deps.outbound_router.get(channel_id)
+            st = inst.status() if inst is not None else {}
+            phone = _digits((st or {}).get("own_phone")
+                            or (st or {}).get("display_phone_number"))
+            if phone:
+                channel_repo.set_status(channel_id, own_phone=phone)
+        except Exception:  # noqa: BLE001
+            phone = ""
+    return {"id": channel_id, "name": name, "phone": phone or None}
+
+
+async def channel_badge(deps, channel_id: str) -> dict:
+    """Async wrapper de :func:`_channel_badge_sync` (DB + provider bloqueiam)."""
+    return await asyncio.to_thread(_channel_badge_sync, deps, channel_id)
+
+
 def supports_templates(deps, channel_id: str) -> bool:
     return deps.outbound_router.supports(channel_id, "templates")
 
@@ -62,7 +248,9 @@ async def list_templates(deps, channel_id: str) -> list[dict]:
 
 
 async def send_template(deps, channel_id: str, *, phone: str, template_name: str,
-                        language: str, components, preview_text: str):
+                        language: str, components, preview_text: str,
+                        sent_by_user_id: int | None = None,
+                        sent_by_name: str | None = None):
     """Send an approved template and persist the operator message (plano 21).
 
     Returns one of:
@@ -86,7 +274,8 @@ async def send_template(deps, channel_id: str, *, phone: str, template_name: str
     try:
         msg_data = await asyncio.to_thread(
             deps.agent_handler.save_operator_message, phone, preview,
-            status="operator", msg_id=msg_id, channel_id=channel_id)
+            status="operator", msg_id=msg_id, channel_id=channel_id,
+            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name)
     except Exception as e:  # noqa: BLE001
         return ("save_failed", str(e))
 
@@ -106,7 +295,10 @@ async def send_template(deps, channel_id: str, *, phone: str, template_name: str
 
 async def create_template(deps, channel_id: str, *, name: str, category: str,
                           language: str, body_text: str, header_text: str | None,
-                          footer_text: str | None, body_examples, header_examples):
+                          footer_text: str | None, body_examples, header_examples,
+                          header_format: str | None = None,
+                          header_handle: str | None = None,
+                          buttons: list | None = None):
     """Create a template on ``channel_id``. Returns ``("ok", data)`` or
     ``("failed", error)``."""
     result = await asyncio.to_thread(
@@ -114,7 +306,10 @@ async def create_template(deps, channel_id: str, *, name: str, category: str,
         category=category, language=language, body_text=body_text,
         header_text=header_text, footer_text=footer_text,
         body_examples=body_examples or None,
-        header_examples=header_examples or None)
+        header_examples=header_examples or None,
+        header_format=header_format or None,
+        header_handle=header_handle or None,
+        buttons=buttons or None)
     if not result.get("ok"):
         return ("failed", result.get("error"))
     return ("ok", {

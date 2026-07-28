@@ -16,10 +16,37 @@ def count() -> int:
         return conn.execute(select(func.count()).select_from(users)).scalar() or 0
 
 
+def has_any() -> bool:
+    """Whether at least one user exists — drives the auth gate (plano 48).
+
+    Queried DIRECTLY on every call, with NO cache. The gate must be correct across
+    processes and uvicorn workers: a per-process cache would keep the API open on a
+    sibling process after another process bootstraps the first admin (the
+    invalidation is in-process only), and would silently reopen the API the moment
+    ``workers=N`` is set. It is a cheap indexed count and the gate already runs it
+    off the event loop via ``asyncio.to_thread``.
+    """
+    return count() > 0
+
+
 def get(user_id: int) -> dict | None:
     with get_engine().connect() as conn:
         row = conn.execute(select(users).where(users.c.id == user_id)).mappings().first()
     return _with_roles(dict(row)) if row else None
+
+
+def is_active(user_id: int) -> bool:
+    """Whether a user row exists AND is active — a single-column, indexed read.
+
+    Cheap alternative to :func:`get` for the plano-71 default-assignee guard, which
+    only needs ``is_active`` and must not pay the ``_with_roles`` roles+permissions
+    joins (:func:`get` fires 3 round-trips) on a hot per-message path. Returns False
+    for a missing OR inactive user (both mean "don't stamp")."""
+    with get_engine().connect() as conn:
+        val = conn.execute(
+            select(users.c.is_active).where(users.c.id == user_id)
+        ).scalar()
+    return bool(val)
 
 
 def get_by_email(email: str) -> dict | None:
@@ -39,6 +66,21 @@ def get_auth_row(email: str) -> dict | None:
         row = conn.execute(
             select(users.c.id, users.c.password_hash, users.c.is_active)
             .where(users.c.email == email.strip().lower())
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def get_auth_row_by_id(user_id: int) -> dict | None:
+    """Internal: same shape as :func:`get_auth_row` but keyed by id.
+
+    Used by the self-service password change (plano 47) to verify the current
+    password of the logged-in user (whose ``current_user`` dict has no hash).
+    Keeps the hash — never expose it to the API.
+    """
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(users.c.id, users.c.password_hash, users.c.is_active)
+            .where(users.c.id == user_id)
         ).mappings().first()
     return dict(row) if row else None
 
@@ -106,8 +148,21 @@ def set_custom_permissions(user_id: int, permission_keys: list[str]) -> dict | N
     """Switch a user to custom mode and replace their explicit permission set.
 
     Clears any role assignments (custom replaces roles) and sets the flag.
+    Grants de permissões de plugins DESATIVADOS (escondidas do PermissionPicker)
+    são preservados — igual a ``rbac_repo.set_role_permissions`` — para
+    sobreviverem ao ciclo desativar→editar→reativar.
     """
+    from db.repositories import rbac_repo
+    hidden = rbac_repo.hidden_plugin_permission_keys()
     with get_engine().begin() as conn:
+        if hidden:
+            existing = {r[0] for r in conn.execute(
+                select(permissions.c.key).select_from(
+                    user_permissions.join(
+                        permissions,
+                        permissions.c.id == user_permissions.c.permission_id))
+                .where(user_permissions.c.user_id == user_id))}
+            permission_keys = list(set(permission_keys) | (existing & hidden))
         conn.execute(update(users).where(users.c.id == user_id)
                      .values(custom_permissions=1, updated_at=time.time()))
         conn.execute(sa_delete(user_roles).where(user_roles.c.user_id == user_id))

@@ -56,10 +56,9 @@ export function PluginScreen({ screen, currentUser }) {
 
   const apiBase = `/api/plugins/${screen.pluginId}`;
   // RBAC helper handed to the plugin component: can('delete') →
-  // hasPermission(user, 'plugin.<id>.delete'). Default-allow for legacy/open
+  // hasPermission(user, 'plugin.<id>.delete'). Default-allow for open (no-identity)
   // installs (no user) so screens keep working (plano "RBAC para Plugins").
   const can = (key) => hasPermission(currentUser, `plugin.${screen.pluginId}.${key}`);
   return html`<${Component} apiBase=${apiBase} screen=${screen} can=${can} currentUser=${currentUser} />`;
 }
 
-export default PluginScreen;

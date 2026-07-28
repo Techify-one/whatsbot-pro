@@ -1,10 +1,12 @@
 // Tela de configuração do plugin Telegram (config:true).
 // Renderizada DENTRO do modal "Configurar" do card em /plugins.
-// Ajuda o operador a: criar o bot no @BotFather, validar o token de um canal
-// (getMe) e — no modo webhook — registrar a URL do webhook na Bot API.
 //
-// O canal em si (com o bot_token) é criado na tela "Canais" do core. Dark mode:
-// classes semânticas wa-* e .wa-field (legível nos dois temas).
+// SOMENTE INFORMATIVA: ajuda o operador a criar o bot no @BotFather e a validar o
+// token de um canal (getMe). O modo de recebimento (webhook se houver domínio
+// HTTPS público, senão long-poll) é decidido AUTOMATICAMENTE ao criar a inbox na
+// tela "Canais" — não há configuração manual de webhook/long-poll aqui.
+//
+// Dark mode: classes semânticas wa-* e .wa-field (legível nos dois temas).
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
@@ -27,28 +29,6 @@ async function apiFetch(url, init = {}) {
   return res;
 }
 
-// Copy `text` to the clipboard with a non-secure-context fallback. The async
-// Clipboard API (navigator.clipboard) is UNDEFINED over plain HTTP (e.g. the
-// panel on a LAN IP like http://203.0.113.50), so fall back to a temporary
-// textarea + execCommand('copy') — the same pattern the core uses.
-function copyText(text, onOk) {
-  const fallback = () => {
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta); ta.focus(); ta.select();
-      const ok = document.execCommand('copy');
-      document.body.removeChild(ta);
-      if (ok && onOk) onOk();
-    } catch (e) { /* clipboard truly unavailable */ }
-  };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(() => onOk && onOk()).catch(fallback);
-  } else {
-    fallback();
-  }
-}
-
 const FIELD = 'wa-field w-full rounded px-3 py-2 text-sm border border-wa-border';
 const LABEL = 'block text-sm font-medium text-wa-text mb-1';
 const HINT = 'text-xs text-wa-secondary mt-1';
@@ -60,7 +40,6 @@ export default function TelegramConfig({ apiBase = '/api/plugins/telegram' } = {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [copied, setCopied] = useState(false);
 
   async function loadChannels() {
     try {
@@ -76,43 +55,11 @@ export default function TelegramConfig({ apiBase = '/api/plugins/telegram' } = {
 
   async function loadStatus(cid) {
     if (!cid) { setStatus(null); return; }
+    setBusy(true);
     try {
       const r = await apiFetch(`${apiBase}/status?channel_id=${encodeURIComponent(cid)}`);
       const data = await r.json();
       setStatus((data && data.data) || null);
-    } catch (e) {
-      setMsg({ kind: 'err', text: String(e.message || e) });
-    }
-  }
-
-  useEffect(() => { loadChannels(); }, [apiBase]);
-  useEffect(() => { loadStatus(channelId); }, [channelId]);
-
-  const webhookUrl = `${location.origin}/api/webhook/telegram/${channelId || '{channel_id}'}`;
-
-  function copyWebhook() {
-    copyText(webhookUrl, () => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }
-
-  async function action(path, body) {
-    setBusy(true);
-    setMsg(null);
-    try {
-      const r = await apiFetch(`${apiBase}/${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await r.json();
-      if (data.ok) {
-        setMsg({ kind: 'ok', text: 'Pronto!' });
-        await loadStatus(channelId);
-      } else {
-        setMsg({ kind: 'err', text: data.error || 'Falhou.' });
-      }
     } catch (e) {
       setMsg({ kind: 'err', text: String(e.message || e) });
     } finally {
@@ -120,8 +67,19 @@ export default function TelegramConfig({ apiBase = '/api/plugins/telegram' } = {
     }
   }
 
+  useEffect(() => { loadChannels(); }, [apiBase]);
+  // NÃO valida automaticamente: a checagem do token só roda ao clicar em "Validar
+  // token". Ao trocar de canal, limpamos o status anterior (sem nova chamada).
+  function selectChannel(cid) {
+    setChannelId(cid);
+    setStatus(null);
+    setMsg(null);
+  }
+
   const me = status && status.me;
   const webhook = status && status.webhook;
+  const isWebhook = !!(status && (status.mode === 'webhook' || (webhook && webhook.url)));
+  const webhookError = webhook && webhook.last_error_message;
 
   return html`
     <div class="p-5 max-w-2xl mx-auto text-wa-text">
@@ -138,7 +96,7 @@ export default function TelegramConfig({ apiBase = '/api/plugins/telegram' } = {
         <li>No Telegram, fale com o <strong>@BotFather</strong> e use <code>/newbot</code>.</li>
         <li>Copie o token (algo como <code>123456:ABC-DEF...</code>).</li>
         <li>Em <strong>Canais</strong>, crie um canal provider <strong>telegram</strong> com a credencial <code>bot_token</code>.</li>
-        <li>Modo <strong>long-poll</strong> (padrão) funciona sem host público. Para <strong>webhook</strong>, registre a URL abaixo.</li>
+        <li>O recebimento é definido <strong>automaticamente</strong> ao criar a inbox: <strong>webhook</strong> se houver domínio público (HTTPS), senão <strong>long-poll</strong>. Não há configuração manual aqui.</li>
       </ol>
 
       ${msg && html`
@@ -152,7 +110,7 @@ export default function TelegramConfig({ apiBase = '/api/plugins/telegram' } = {
           <label class=${LABEL}>Canal Telegram</label>
           ${channels.length
             ? html`<select class=${FIELD} value=${channelId}
-                onChange=${(e) => setChannelId(e.target.value)}>
+                onChange=${(e) => selectChannel(e.target.value)}>
                 ${channels.map((c) => html`<option value=${c.id}>${c.display_name} (${c.id})</option>`)}
               </select>`
             : html`<div class=${HINT}>Nenhum canal telegram ainda — crie um na tela <strong>Canais</strong>.</div>`}
@@ -160,37 +118,26 @@ export default function TelegramConfig({ apiBase = '/api/plugins/telegram' } = {
 
         ${channelId && html`
           <div class="px-3 py-2 rounded bg-wa-bg border border-wa-border text-xs text-wa-secondary">
-            ${status && status.configured === false
-              ? html`<span>Sem <code>bot_token</code> cadastrado para este canal.</span>`
-              : me
-                ? html`<span>Bot conectado: <strong>@${me.username}</strong> (${me.first_name}) ·
-                    Webhook: <strong>${webhook && webhook.url ? webhook.url : 'não registrado (long-poll)'}</strong></span>`
-                : html`<span>Token inválido ou indisponível${status && status.me_error ? html` — ${status.me_error}` : ''}.</span>`}
+            ${!status
+              ? html`<span>Clique em <strong>Validar token</strong> para checar a conexão deste canal.</span>`
+              : status.configured === false
+                ? html`<span>Sem <code>bot_token</code> cadastrado para este canal.</span>`
+                : me
+                  ? html`<span>Bot conectado: <strong>@${me.username}</strong> (${me.first_name}) ·
+                      Recebimento: <strong>${isWebhook ? 'webhook' : 'long-poll'}</strong></span>`
+                  : html`<span>Token inválido ou indisponível${status.me_error ? html` — ${status.me_error}` : ''}.</span>`}
           </div>`}
 
-        <div>
-          <label class=${LABEL}>URL de webhook (modo webhook)</label>
-          <div class="flex gap-2">
-            <input class=${FIELD + ' font-mono'} readonly value=${webhookUrl} />
-            <button class=${BTN} onClick=${copyWebhook}>${copied ? 'Copiado!' : 'Copiar'}</button>
-          </div>
-          <div class=${HINT}>
-            Exige host público (HTTPS). No desktop/EXE prefira o modo long-poll
-            (padrão) — não precisa de webhook.
-          </div>
-        </div>
+        ${channelId && isWebhook && webhookError && html`
+          <div class="px-3 py-2 rounded bg-red-100 text-red-700 text-sm">
+            O Telegram reportou um erro de entrega no webhook: <code>${webhookError}</code>.
+            Você pode ver e copiar a URL do webhook ao <strong>editar este canal</strong> na tela Canais.
+          </div>`}
 
         ${channelId && html`
-          <div class="flex flex-wrap gap-2">
-            <button class=${BTN} disabled=${busy} onClick=${() => loadStatus(channelId)}>Validar token</button>
-            <button class=${BTN} disabled=${busy}
-              onClick=${() => action('set-webhook', { channel_id: channelId, url: webhookUrl })}>
-              Registrar webhook
-            </button>
-            <button class="shrink-0 px-3 py-2 rounded text-sm border border-wa-border text-wa-text hover:bg-wa-hover disabled:opacity-50"
-              disabled=${busy}
-              onClick=${() => action('delete-webhook', { channel_id: channelId })}>
-              Remover webhook (usar long-poll)
+          <div>
+            <button class=${BTN} disabled=${busy} onClick=${() => loadStatus(channelId)}>
+              ${busy ? 'Validando…' : 'Validar token'}
             </button>
           </div>`}
       </div>

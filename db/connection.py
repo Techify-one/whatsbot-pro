@@ -1,10 +1,10 @@
 """Database bootstrap.
 
-This module is the entry point used by the rest of the app. It keeps the
-historical ``init_db(db_path)`` signature so callers (``main.py``,
-``server/dev.py``, tests) do not need to change, but internally it now:
+This module is the entry point used by the rest of the app (``main.py``,
+``server/dev.py``, tests). It:
 
-* resolves the SQLAlchemy URL (env > file > sqlite default),
+* resolves the Postgres URL from the ``DATABASE_URL`` env (plano 29 — fail-fast
+  when missing or non-Postgres),
 * creates the module-level engine via ``db.engine.init_engine``,
 * runs every pending Alembic migration up to ``head``.
 
@@ -20,8 +20,6 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import inspect
-
 from db.engine import (
     get_engine,
     init_engine,
@@ -33,23 +31,16 @@ logger = logging.getLogger(__name__)
 
 # ── Public bootstrap API ──────────────────────────────────────────────────
 
-def init_db(db_path: Optional[Path] = None, *, storages_dir: Optional[Path] = None) -> None:
+def init_db(*, storages_dir: Optional[Path] = None) -> None:
     """Initialize the engine and bring the schema up to date.
 
-    Resolution order:
-        - ``db_path`` (legacy): force SQLite at the given file path.
-        - ``storages_dir``: apply ENV > ``database.json`` > sqlite default.
-        - Neither: use ``./storages`` relative to CWD.
+    ``storages_dir`` is kept for call-site compatibility (dados do GOWA e mídia
+    continuam vivendo lá) — a URL do banco vem exclusivamente da env.
     """
-    if db_path is not None:
-        db_path = Path(db_path)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        url = f"sqlite:///{db_path}"
-    else:
-        if storages_dir is None:
-            storages_dir = Path("storages").resolve()
-        storages_dir.mkdir(parents=True, exist_ok=True)
-        url = resolve_database_url(storages_dir)
+    if storages_dir is None:
+        storages_dir = Path("storages").resolve()
+    storages_dir.mkdir(parents=True, exist_ok=True)
+    url = resolve_database_url(storages_dir)
 
     init_engine(url)
     _run_alembic_upgrade()
@@ -68,10 +59,9 @@ def _describe_url(url: str) -> str:
 def _run_alembic_upgrade() -> None:
     """Bring the bound database to the latest Alembic revision.
 
-    For brand-new databases the baseline revision creates every table. For
-    pre-existing SQLite databases created by the legacy ``executescript`` path,
-    Alembic stamps the baseline before applying any subsequent revisions, so we
-    never try to re-create existing tables.
+    For brand-new databases the baseline revision creates every table. O stamp
+    automático de bancos SQLite pré-Alembic morreu junto com o caminho SQLite
+    (plano 29 Eixo C) — todo banco Postgres nasce via Alembic.
     """
     from alembic import command
     from alembic.config import Config
@@ -83,16 +73,16 @@ def _run_alembic_upgrade() -> None:
     # Pass the engine URL explicitly so the alembic env.py picks the same DB.
     cfg.set_main_option("sqlalchemy.url", str(engine.url).replace("%", "%%"))
 
-    insp = inspect(engine)
-    existing = set(insp.get_table_names())
-    has_alembic = "alembic_version" in existing
-    has_legacy_tables = "contacts" in existing or "config" in existing
-
-    if not has_alembic and has_legacy_tables:
-        logger.info("Stamping pre-existing schema as Alembic baseline")
-        command.stamp(cfg, "0001_baseline")
-
     command.upgrade(cfg, "head")
+
+    # Seeds de migration com id explícito (ex.: inbox default id=1 na 0013) NÃO
+    # avançam a sequence no Postgres — o 1º INSERT implícito num banco fresh
+    # colidiria com a PK. Re-ancorar é idempotente e barato.
+    from db.pg_maintenance import repair_postgres_sequences
+
+    fixed = repair_postgres_sequences(engine)
+    if fixed:
+        logger.info("Postgres sequences re-anchored: %s", sorted(fixed))
 
 
 # ── Legacy shim ───────────────────────────────────────────────────────────

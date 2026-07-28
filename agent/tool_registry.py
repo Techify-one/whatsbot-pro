@@ -29,6 +29,34 @@ from plugins.context import ToolContext
 logger = logging.getLogger(__name__)
 
 
+def _builtin_tombstoned(name: str) -> bool:
+    """Builtin deletada de verdade pelo operador? (plano 30 WS3 — tombstone).
+
+    Import lazy + defensivo: falha de leitura NUNCA bloqueia um registro
+    (fail-open pro comportamento legado — a tool registra).
+    """
+    try:
+        from agent import ai_builtin_tools
+        return (ai_builtin_tools.is_builtin(name)
+                and name in ai_builtin_tools.deleted_builtin_tools())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _default_enabled(name: str) -> bool:
+    """Default de ``tool_overrides.enabled`` na primeira criação da row.
+
+    Delegado a ``agent.ai_builtin_tools.default_override_enabled`` (dono da
+    política off-by-default do plano 30 WS2). Import lazy + defensivo: qualquer
+    falha cai no comportamento legado (nasce ligada).
+    """
+    try:
+        from agent import ai_builtin_tools
+        return ai_builtin_tools.default_override_enabled(name)
+    except Exception:  # noqa: BLE001 — nunca bloqueia um registro de tool
+        return True
+
+
 class ToolRegistry:
     """Holds the tool schema/executor registry and resolves overrides.
 
@@ -61,6 +89,8 @@ class ToolRegistry:
         schema: dict,
         executor: callable,
         plugin_id: str | None = None,
+        *,
+        tombstone_exempt: bool = False,
     ) -> None:
         """Register a tool schema + executor. No-ops on name collision.
 
@@ -68,6 +98,11 @@ class ToolRegistry:
         keys like ``display_label`` stripped, so it's safe to send to the LLM
         as-is) and eagerly inserts a default row into ``tool_overrides`` so the
         management UI sees every registered tool.
+
+        ``tombstone_exempt`` (plano 30 WS3 · review): o tombstone de builtin
+        deletado bloqueia a ressurreição da BASELINE on-disk, mas uma tool
+        code-in-DB recriada pelo operador com o mesmo nome é a via de
+        recuperação documentada (D8) — o installer registra com exempt=True.
         """
         try:
             name = schema["function"]["name"]
@@ -81,6 +116,12 @@ class ToolRegistry:
                 name, existing_pid or "core", plugin_id or "core",
             )
             return
+        if not tombstone_exempt and _builtin_tombstoned(name):
+            # Builtin DELETADA pelo operador (plano 30 WS3): não registra nem
+            # recria a row tool_overrides — o delete_orphans do boot limpa o
+            # resto. Sem este skip a tool ressuscitaria a cada restart.
+            logger.info("Builtin '%s' deletada pelo operador; registro pulado", name)
+            return
         # Pluck WhatsBot-only metadata so the schema we pass to the LLM proxy is
         # a clean tool spec.
         clean = copy.deepcopy(schema)
@@ -91,7 +132,8 @@ class ToolRegistry:
         self._tool_schemas.append(clean)
         self._tool_executors[name] = (executor, plugin_id)
         try:
-            tool_override_repo.ensure(name, plugin_id)
+            tool_override_repo.ensure(
+                name, plugin_id, default_enabled=_default_enabled(name))
         except Exception as e:
             logger.warning("tool_overrides.ensure failed for %s: %s", name, e)
 
@@ -113,7 +155,12 @@ class ToolRegistry:
         """
         before = len(self._tool_executors)
         for schema, executor in tools:
-            self.register_tool(schema, executor, plugin_id=None)
+            # tombstone_exempt: recriar um builtin deletado como tool code-in-DB
+            # é a via de recuperação documentada (plano 30 D8) — o tombstone só
+            # barra a baseline on-disk. Depende da ordem de boot: os builtins
+            # (seed/register_builtin_overrides) rodam ANTES do installer.
+            self.register_tool(schema, executor, plugin_id=None,
+                               tombstone_exempt=True)
         return len(self._tool_executors) - before
 
     def override_tool(
@@ -145,7 +192,8 @@ class ToolRegistry:
         self._tool_originals[name] = clean
         self._tool_executors[name] = (executor, plugin_id)
         try:
-            tool_override_repo.ensure(name, plugin_id)
+            tool_override_repo.ensure(
+                name, plugin_id, default_enabled=_default_enabled(name))
         except Exception as e:
             logger.warning("tool_overrides.ensure failed for %s: %s", name, e)
 
@@ -174,6 +222,11 @@ class ToolRegistry:
     def known_tool_names(self) -> set[str]:
         """Names of every tool currently registered (core + plugin)."""
         return set(self._tool_originals.keys())
+
+    def is_tool_active(self, name: str) -> bool:
+        """Registrada E não desabilitada por override — ou seja, entra no
+        schema efetivo do LLM (antes do recorte por ``tool_names`` do agente)."""
+        return name in self._tool_originals and name not in self._disabled_tools
 
     def refresh_tool_overrides(self) -> None:
         """Re-read ``tool_overrides`` and rebuild ``_tool_schemas``.
@@ -231,6 +284,8 @@ class ToolRegistry:
                 "display_label": ov.get("display_label"),
                 "current_label": current_label,
                 "enabled": bool(ov.get("enabled", 1)),
+                # plano 47 — reaproveitar o resultado desta tool no tool_memory.
+                "reuse_result": bool(ov.get("reuse_result", 0)),
                 "has_override": bool(ov.get("description")),
                 "has_label_override": bool(ov.get("display_label")),
                 "parameters_schema": fn.get("parameters", {}),

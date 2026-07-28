@@ -75,9 +75,29 @@ def save(
     """
     now = time.time()
     existing = get(name)
-    version = (existing["version"] + 1) if existing else 1
     row_kind = kind or (existing or {}).get("kind") or "code"
     deps = dependencies or []
+    if existing is not None and (
+        (description or "") == (existing.get("description") or "")
+        and (code or "") == (existing.get("code") or "")
+        and deps == (existing.get("dependencies") or [])
+        and row_kind == (existing.get("kind") or "code")
+    ):
+        # Toggle de `enabled` (ou save idêntico) NÃO é edição: sem bump de
+        # versão, sem history (plano 30 · review F3). Sem isso, ligar um
+        # builtin nasce-OFF pela UI unificada virava version=2 = "editado" e o
+        # register_builtin_overrides passava a executar o código do BANCO
+        # in-process (e a cópia congelada deixava de seguir updates do disco).
+        # install_status re-valida no próximo boot, como no save normal.
+        with get_engine().begin() as conn:
+            conn.execute(sa_update(ai_tools).where(ai_tools.c.name == name).values(
+                enabled=1 if enabled else 0,
+                install_status="pending",
+                install_error=None,
+                updated_at=now,
+            ))
+        return get(name)
+    version = (existing["version"] + 1) if existing else 1
     values = {
         "name": name,
         "kind": row_kind,

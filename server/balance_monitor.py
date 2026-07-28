@@ -78,6 +78,26 @@ def get_cached() -> dict | None:
     return {**_last_balance, "fetched_at": _last_check_ts}
 
 
+async def prime_cache(api_key: str) -> None:
+    """Best-effort one-shot fetch at boot to seed ``_last_balance`` (plano 42 C).
+
+    Runs fire-and-forget from the server lifespan so the FIRST ``GET /api/balance``
+    already has a cached snapshot instead of hitting the proxy cold (the window the
+    old 502 lived in). Never raises — ``fetch_balance`` already swallows network
+    errors and returns ``None``; a dead/slow proxy just leaves the cache empty and
+    the endpoint degrades gracefully (available:false)."""
+    global _last_balance, _last_check_ts
+    if not api_key:
+        return
+    try:
+        balance = await fetch_balance(api_key)
+        if balance is not None:
+            _last_balance = balance
+            _last_check_ts = time.monotonic()
+    except Exception as e:  # belt-and-suspenders; fetch_balance already guards
+        logger.debug("balance prime_cache failed: %s", e)
+
+
 async def _check_and_notify() -> None:
     global _last_check_ts, _last_notify_ts, _last_balance, _check_in_flight
     if _check_in_flight or _settings is None:

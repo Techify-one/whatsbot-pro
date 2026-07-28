@@ -1,14 +1,27 @@
 import { h } from 'preact';
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { SearchIcon, DefaultAvatar, GroupAvatar, SingleCheckIcon, DoubleCheckIcon, ClockIcon, ArchiveIcon } from './icons.js';
 import { formatTime, avatarUrl } from './utils.js';
+import { useScrollSentinel } from '../../hooks/useInfiniteScroll.js';
 import { formatPhoneDisplay } from '../../utils/phone.js';
 import { TagPicker } from './TagPicker.js';
+import { AssigneeList } from './AssigneeList.js';
+import { clampFlyoutOffset } from './menuLayout.js';
+import { dragHasFiles } from './hooks/useDropZone.js';
 import { ConversationFilterBar } from './ConversationFilterBar.js';
+// Selo do canal — compartilhado com o cabeçalho do chat (mesma aparência nos dois).
+import { ChannelChip } from './ChannelChip.js';
 import { Slot } from '../../plugins/Slot.js';
+// Rascunho do compositor (services/drafts.js): a linha mostra "Rascunho: …" no
+// lugar da última mensagem enquanto houver texto não enviado naquela conversa.
+import { getDraft } from '../../services/drafts.js';
+import { useDrafts } from '../../hooks/useDrafts.js';
 
 const html = htm.bind(h);
+
+// Approximate flyout width (px) — used to decide which side the bulk submenu opens on.
+const FLYOUT_WIDTH = 264;
 
 // Tiny assignee chip shown on each row (plano 10): person for a human agent, bot
 // for an AI agent. Highlighted in teal when the conversation is assigned to me.
@@ -37,38 +50,54 @@ const PinIcon = () => html`
     <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>
   </svg>
 `;
+// Cadeado — prefixo do preview quando a última mensagem é uma nota privada
+// (role 'private_note'), notificada na sidebar via `notify_private_messages`. Mesmo
+// path do card "Mensagem privada" em SystemMessageCard.js.
+const LockIcon = () => html`
+  <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" class="inline-block shrink-0 align-[-1px] mr-[3px]">
+    <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/>
+  </svg>
+`;
 
-// Conversa-cêntrico (plano 11 D1): cada linha é uma CONVERSA. A identidade é a
-// conversation_id (linhas sem conversa caem no phone) — usada como key do Preact e
+// Atendimento-cêntrico (plano 11 D1): cada linha é um ATENDIMENTO. A identidade é a
+// conversation_id (linhas sem atendimento caem no phone) — usada como key do Preact e
 // para casar a seleção. Mantém os dois canais do mesmo número como linhas distintas.
 export function rowKeyFor(c) {
   return c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
 }
 
-// Chave do estado de "digitando". Conversa-cêntrico: a presença pertence a UMA
-// conversa específica (o canal GOWA que reportou) — casamos por conversation_id,
-// que é inequívoco. Linhas/eventos sem conversa (legado/sandbox) caem no par
+// Chave do estado de "digitando". Atendimento-cêntrico: a presença pertence a UMA
+// atendimento específica (o canal GOWA que reportou) — casamos por conversation_id,
+// que é inequívoco. Linhas/eventos sem atendimento (legado/sandbox) caem no par
 // canal::telefone. As duas pontas (broadcast e linha da sidebar) usam ESTA função.
 export function typingKey({ conversationId = null, channelId = null, phone = null } = {}) {
   if (conversationId != null) return `conv:${conversationId}`;
   return `${channelId || 'default'}::${phone}`;
 }
 
-// Per-provider channel chip (only shown when ≥2 channels exist). Colour tints stay
-// in the dark-mode-safe set (wa-*/blue) per CLAUDE.md theming rule.
-const CHANNEL_META = {
-  gowa:           { label: 'WhatsApp',  cls: 'bg-wa-teal/15 text-wa-teal' },
-  whatsapp_cloud: { label: 'Cloud API', cls: 'bg-blue-100 text-blue-700' },
-  telegram:       { label: 'Telegram',  cls: 'bg-blue-100 text-blue-700' },
-  test:           { label: 'Teste',     cls: 'bg-wa-hover text-wa-secondary' },
-};
-function ChannelChip({ provider, name }) {
-  if (!provider) return null;
-  const meta = CHANNEL_META[provider] || { label: provider, cls: 'bg-wa-hover text-wa-secondary' };
-  return html`<span
-    class="ml-[6px] inline-flex items-center gap-[3px] text-[10px] font-semibold rounded px-[5px] py-[1px] align-middle ${meta.cls}"
-    title=${name ? `Canal: ${name} (${provider})` : `Canal: ${provider}`}
-  ><span class="w-[5px] h-[5px] rounded-full bg-current opacity-70"></span>${name || meta.label}</span>`;
+// Multi-operador: outro ATENDENTE digitando nesta linha (WS `operator_typing`),
+// ou null. O estado já vem sem o próprio usuário logado — aqui é só o casamento
+// da linha, pela MESMA chave da presença do cliente.
+export function operatorTypingFor(state, c) {
+  if (!state) return null;
+  return state[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] || null;
+}
+
+// "● Teste está digitando…" — para o operador não responder por cima do colega.
+// Aparência PEDIDA pelo usuário: a MESMA do indicador "IA respondendo…" logo
+// abaixo (bolinha pulsando + texto em `wa-teal`), para os três indicadores da
+// linha lerem como a mesma família. Ressalva conhecida: sobre `--wa-selected` no
+// tema escuro o teal mede 2,3:1 (ver themeContrast.js) e a conversa aberta é
+// justamente a que costuma ter um colega digitando — o nome fica em `semibold`
+// para não sumir de vez. Mesma escolha já feita no "IA respondendo…".
+function OperatorTypingLine({ who }) {
+  return html`
+    <span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium flex items-center gap-1.5"
+          title=${`${who.name} está respondendo esta conversa agora`}>
+      <span class="inline-block w-1.5 h-1.5 rounded-full bg-wa-teal animate-pulse shrink-0"></span>
+      <span class="truncate"><span class="font-semibold">${who.name}</span>${' está digitando...'}</span>
+    </span>
+  `;
 }
 
 function normalizePhone(input) {
@@ -109,34 +138,200 @@ function highlightParts(text, query) {
   return parts;
 }
 
+// Chevron da faixa de etiquetas (mesmo path do ChevronDown da barra de filtros).
+const TagChevron = () => html`
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+`;
+
+// Faixa de etiquetas da linha da conversa. Regras (pedido do operador):
+//   - o nome da etiqueta aparece SEMPRE inteiro (nada de truncar com "…");
+//   - colapsada, mostra só o que coube na PRIMEIRA linha;
+//   - havendo excesso, uma seta expande a linha inteira (todas as etiquetas) e
+//     recolhe no clique seguinte.
+// O corte é feito por `max-height` = altura de uma etiqueta + `overflow-hidden`: o
+// flex-wrap já posiciona os chips, então o navegador esconde as linhas seguintes sem
+// nunca cortar um chip no meio. A altura da etiqueta é MEDIDA (não hardcoded) para
+// acompanhar zoom/fonte do usuário, e re-medida quando a sidebar muda de largura.
+function RowTags({ tags, globalTags, expanded, onToggle }) {
+  const wrapRef = useRef(null);
+  const [lineH, setLineH] = useState(0);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const measure = () => {
+      const first = el.firstElementChild;
+      if (!first) { setLineH(0); setOverflowing(false); return; }
+      const h = first.offsetHeight;
+      setLineH(h);
+      setOverflowing(el.scrollHeight > h + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tags.join('|'), expanded]);
+
+  return html`
+    <div class="flex items-start gap-[3px] mt-[2px]">
+      <div
+        ref=${wrapRef}
+        class="flex-1 min-w-0 flex flex-wrap gap-[3px] overflow-hidden"
+        style=${(!expanded && lineH) ? `max-height:${lineH}px` : null}
+      >
+        ${tags.map(tagName => {
+          const tagInfo = globalTags && globalTags[tagName];
+          const color = tagInfo ? tagInfo.color : '#6b7280';
+          return html`<span
+            key=${tagName}
+            class="text-[9px] font-semibold rounded px-[4px] py-[0.5px] leading-[14px] whitespace-nowrap"
+            style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
+            title=${tagName}
+          >${tagName}</span>`;
+        })}
+      </div>
+      ${(overflowing || expanded) ? html`
+        <button
+          onClick=${(e) => { e.stopPropagation(); e.preventDefault(); onToggle(); }}
+          title=${expanded ? 'Mostrar menos etiquetas' : 'Mostrar todas as etiquetas'}
+          class="shrink-0 w-[16px] h-[16px] flex items-center justify-center rounded text-wa-secondary hover:text-wa-text hover:bg-wa-hover transition-colors"
+        ><span class="flex transition-transform ${expanded ? 'rotate-180' : ''}"><${TagChevron} /></span></button>
+      ` : null}
+    </div>
+  `;
+}
+
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, showChannel, onSelect, onContextMenu, typingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
-  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onCreateTag,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, operatorTypingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onDeselectAll, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
+  currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
-  savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters }) {
+  savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
+  loadMore = null, loadingMore = false, hasMore = false }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
+  // Rascunhos (services/drafts.js): re-renderiza quando o compositor — ou outra
+  // aba do navegador — mexe no mapa, e resolve o texto de cada linha aqui. A
+  // chave do rascunho É o rowKeyFor (a conversa é a dona do texto); truncado no
+  // mesmo tamanho do preview da última mensagem.
+  //
+  // A conversa ABERTA fica de fora: com o chat na tela o operador já vê o que
+  // escreveu no compositor, e trocar o preview a cada tecla era ruído. O
+  // "Rascunho:" aparece quando ele SAI da conversa deixando texto para trás.
+  useDrafts(selected);
+  const rowDrafts = {};
+  for (const c of (contacts || [])) {
+    const key = rowKeyFor(c);
+    if (key === selected) continue;
+    const text = getDraft(key);
+    if (text) rowDrafts[key] = text.substring(0, 80);
+  }
+  // plano 50 F8 — scroll infinito: sentinela no fim da lista dispara loadMore quando
+  // há próxima página. plano 62 F6: os DOIS modos paginam (conversa-first e busca), então
+  // o gatilho é só `hasMore`. Usa o mesmo primitivo reutilizável `useScrollSentinel` das
+  // demais listas.
+  const bottomSentinelRef = useRef(null);
+  const listScrollRef = useRef(null);
+  useScrollSentinel(
+    bottomSentinelRef,
+    () => { if (!loadingMore) loadMore && loadMore(); },
+    !!(hasMore && loadMore),
+    listScrollRef,
+    '0px 0px 200px 0px',
+  );
   const selCount = (selectedKeys || []).length;
   // Selection is keyed per CONVERSATION row (rowKeyFor), not by phone — so the two
   // channels of the same number are selectable independently.
   const selectedSet = new Set(selectedKeys || []);
   // For the bulk-tag toggle indicator: does every selected conversation have this tag?
   const selectedContacts = (contacts || []).filter(c => selectedSet.has(rowKeyFor(c)));
+  // "Selecionar todas" é um TOGGLE: quando todas as conversas exibidas já estão marcadas,
+  // apertar de novo DESMARCA todas (sem sair do modo de seleção).
+  const allSelected = (contacts || []).length > 0 && (contacts || []).every(c => selectedSet.has(rowKeyFor(c)));
+
+  // Arrastar arquivos direto para uma conversa da lista (plano 64 · F11). O
+  // drop NÃO envia às cegas (P7): abre a conversa com a prévia já montada, e o
+  // operador confirma. `dragOverKey` realça a linha sob o cursor.
+  const [dragOverKey, setDragOverKey] = useState(null);
+  const dropEnabled = !selectionMode && typeof onDropFiles === 'function';
+
+  // Linhas com a faixa de etiquetas expandida (todas as etiquetas, várias linhas).
+  // Chaveado por rowKeyFor — o mesmo identificador de seleção/drag. O estado mora AQUI
+  // (e não dentro do RowTags) para sobreviver aos re-renders frequentes da lista
+  // (WebSocket de nova mensagem, refresh de contagens, etc.).
+  const [expandedTagRows, setExpandedTagRows] = useState(() => new Set());
+  const toggleTagRow = (key) => setExpandedTagRows(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
   const allSelectedHaveTag = (name) =>
     selectedContacts.length > 0 && selectedContacts.every(c => (c.tags || []).includes(name));
   // Pin toggle: when every selected is already pinned, the action unpins all.
   const allSelectedPinned = selectedContacts.length > 0 && selectedContacts.every(c => c.is_pinned);
+  // Bulk assign (attendant): mirror the single-conversation menu — the flyout reuses
+  // AssigneeList (search + humans + AI). Hide when there's no identity and no
+  // listable agents (open install before the first admin).
+  const bulkAgentsUsers = Array.isArray(agentsUsers) ? agentsUsers : [];
+  const bulkAgentsAi = Array.isArray(agentsAi) ? agentsAi : [];
+  const showBulkAssign = currentUserId != null || bulkAgentsUsers.length > 0 || bulkAgentsAi.length > 0;
+  // AssigneeList checkmarks a single assignee/agent. For the multi-selection, resolve
+  // the COMMON value: the shared assignee (or AI agent) when every selected row agrees,
+  // else null (mixed → no checkmark).
+  const _uids = new Set(selectedContacts.map(c => c.assignee_user_id ?? null));
+  const commonAssigneeId = _uids.size === 1 ? [..._uids][0] : null;
+  const _keys = new Set(selectedContacts.map(c => c.active_agent_key ?? null));
+  const commonActiveKey = _keys.size === 1 ? [..._keys][0] : null;
+  // "Desatribuir" clears whoever is assigned — human OR AI agent — so it must appear
+  // whenever any selected conversation has either set (incl. those assigned before
+  // entering selection mode), even when the selection is mixed.
+  const anySelectedAssigned = selectedContacts.some(c => c.assignee_user_id != null || c.active_agent_key != null);
 
   // Header dropdown state (one menu visible at a time given selectionMode).
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
-  const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
   const menuRef = useRef(null);
+
+  // Bulk submenus (Adicionar tags / Atribuir atendente) render as a flyout BESIDE the
+  // dropdown (`openSub` = 'tags' | 'assign' | null), mirroring the right-click ContextMenu
+  // instead of expanding inline. The flyout is `position: fixed` (like ContextMenu) so it
+  // escapes the sidebar's `overflow-hidden` and paints ABOVE the conversation pane instead
+  // of being clipped by it. Opens on hover; a short close delay lets the pointer travel
+  // from the trigger into the flyout without it flickering shut.
+  const [openSub, setOpenSub] = useState(null);
+  const [flyoutSide, setFlyoutSide] = useState('right');
+  const flyoutRef = useRef(null);
+  const tagsRowRef = useRef(null);
+  const assignRowRef = useRef(null);
+  const [flyoutTop, setFlyoutTop] = useState(0);
+  const [flyoutLeft, setFlyoutLeft] = useState(0);
+  const [flyoutReady, setFlyoutReady] = useState(false);
+  // While the Tags flyout's inline "create tag" form is open, pin the flyout so it
+  // doesn't close on mouse-leave (the form pops up away from the pointer).
+  const [flyoutPinned, setFlyoutPinned] = useState(false);
+  const flyoutPinnedRef = useRef(false);
+  const closeTimer = useRef(null);
+  const openSubmenu = (name) => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } if (name !== openSub) setFlyoutReady(false); setOpenSub(name); };
+  const scheduleClose = () => { if (flyoutPinnedRef.current) return; if (closeTimer.current) clearTimeout(closeTimer.current); closeTimer.current = setTimeout(() => { if (!flyoutPinnedRef.current) setOpenSub(null); }, 180); };
+
+  // Chevron pointing toward where the flyout opens.
+  const SubArrow = () => html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto shrink-0">
+    ${flyoutSide === 'left'
+      ? html`<path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/>`
+      : html`<path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/>`}
+  </svg>`;
+  // `fixed` (viewport-anchored) + high z so it is neither clipped by the sidebar's
+  // overflow nor painted under the conversation pane. Hidden until measured (no flash).
+  const flyoutCls = `fixed z-[110] w-64 bg-wa-panel border border-wa-border rounded-lg shadow-lg ${flyoutReady ? '' : 'invisible'}`;
 
   function closeMenus() {
     setHeaderMenuOpen(false);
     setBulkMenuOpen(false);
-    setBulkTagsOpen(false);
+    setOpenSub(null);
+    setFlyoutPinned(false);
+    if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
   }
 
   useEffect(() => {
@@ -150,6 +345,33 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
 
   // Leaving selection mode collapses any open bulk menu.
   useEffect(() => { if (!selectionMode) closeMenus(); }, [selectionMode]);
+
+  // Drop the pin whenever the open submenu is not the Tags flyout (only its create-tag
+  // form needs it); mirror it into the ref and cancel a pending close the instant we pin.
+  useEffect(() => { if (openSub !== 'tags') setFlyoutPinned(false); }, [openSub]);
+  useEffect(() => {
+    flyoutPinnedRef.current = flyoutPinned;
+    if (flyoutPinned && closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
+  }, [flyoutPinned]);
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
+
+  // Position the open flyout in viewport (fixed) coords, computed from its trigger row's
+  // rect. Opens to the right of the row by default; flips to the left when it would
+  // overflow the right viewport edge. Vertically clamped so it stays fully on screen
+  // (clampFlyoutOffset); its max-height caps it below the viewport, so it always fits.
+  useLayoutEffect(() => {
+    if (!openSub) { setFlyoutReady(false); return; }
+    const el = flyoutRef.current;
+    const rowEl = openSub === 'tags' ? tagsRowRef.current : assignRowRef.current;
+    if (!el || !rowEl) return;
+    const rect = rowEl.getBoundingClientRect();
+    const flyH = el.getBoundingClientRect().height;
+    const side = rect.right + FLYOUT_WIDTH + 8 > window.innerWidth ? 'left' : 'right';
+    setFlyoutSide(side);
+    setFlyoutLeft(side === 'left' ? Math.max(8, rect.left - FLYOUT_WIDTH) : rect.right);
+    setFlyoutTop(rect.top + clampFlyoutOffset(rect.top, flyH, window.innerHeight));
+    setFlyoutReady(true);
+  }, [openSub, globalTags, bulkAgentsUsers.length, bulkAgentsAi.length]);
 
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
@@ -168,7 +390,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
         </div>
         <div ref=${menuRef} class="relative shrink-0">
           <button
-            onClick=${() => { setBulkMenuOpen(o => !o); setBulkTagsOpen(false); }}
+            onClick=${() => { setBulkMenuOpen(o => !o); setOpenSub(null); }}
             class="w-[40px] h-[40px] rounded-full flex items-center justify-center hover:bg-white/10 text-white"
             title="Ações em massa"
           ><${KebabIcon} /></button>
@@ -216,31 +438,60 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
                 Marcar como não lidas
               </button>
-              <button
-                disabled=${selCount === 0}
-                onClick=${() => setBulkTagsOpen(o => !o)}
-                class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
-              >
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
-                Adicionar tags
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" class="ml-auto transition-transform ${bulkTagsOpen ? 'rotate-180' : ''}"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
-              </button>
-              ${(bulkTagsOpen && selCount > 0) ? html`
-                <div class="border-t border-wa-border">
-                  <button
-                    onClick=${() => { if (confirm(`Remover TODAS as tags de ${selCount} conversa(s) selecionada(s)?`)) onBulkRemoveAllTags && onBulkRemoveAllTags(); }}
-                    class="w-full text-left px-4 py-[8px] text-[13px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
-                  >
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="#ef4444"><path d="M19 13H5v-2h14v2z"/></svg>
-                    Remover todas as tags
-                  </button>
-                  <${TagPicker}
-                    globalTags=${globalTags}
-                    isActive=${allSelectedHaveTag}
-                    onToggle=${(name) => onBulkTag && onBulkTag(name)}
-                    onCreateTag=${onCreateTag}
-                  />
-                </div>
+              <div ref=${tagsRowRef} class="relative" onMouseEnter=${() => { if (selCount > 0) openSubmenu('tags'); }} onMouseLeave=${scheduleClose}>
+                <button
+                  disabled=${selCount === 0}
+                  onClick=${() => { if (selCount > 0) openSubmenu('tags'); }}
+                  class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : (openSub === 'tags' ? 'bg-wa-hover text-wa-text' : 'text-wa-text')}"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
+                  Adicionar tags
+                  <${SubArrow} />
+                </button>
+                ${(openSub === 'tags' && selCount > 0) ? html`
+                  <div ref=${flyoutRef} class=${flyoutCls} style="left:${flyoutLeft}px;top:${flyoutTop}px">
+                    <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
+                      <${TagPicker}
+                        globalTags=${globalTags}
+                        isActive=${allSelectedHaveTag}
+                        onToggle=${(name) => onBulkTag && onBulkTag(name)}
+                        onCreateTag=${onCreateTag}
+                        onClearAll=${() => { if (confirm(`Remover TODAS as tags de ${selCount} conversa(s) selecionada(s)?`)) onBulkRemoveAllTags && onBulkRemoveAllTags(); }}
+                        onCreatingChange=${setFlyoutPinned}
+                      />
+                    </div>
+                  </div>
+                ` : ''}
+              </div>
+              ${showBulkAssign ? html`
+              <div ref=${assignRowRef} class="relative" onMouseEnter=${() => { if (selCount > 0) openSubmenu('assign'); }} onMouseLeave=${scheduleClose}>
+                <button
+                  disabled=${selCount === 0}
+                  onClick=${() => { if (selCount > 0) openSubmenu('assign'); }}
+                  class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : (openSub === 'assign' ? 'bg-wa-hover text-wa-text' : 'text-wa-text')}"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+                  Atribuir atendente
+                  <${SubArrow} />
+                </button>
+                ${(openSub === 'assign' && selCount > 0) ? html`
+                  <div ref=${flyoutRef} class=${flyoutCls} style="left:${flyoutLeft}px;top:${flyoutTop}px">
+                    <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
+                      <${AssigneeList}
+                        users=${bulkAgentsUsers}
+                        aiAgents=${bulkAgentsAi}
+                        me=${currentUserId != null ? { id: currentUserId } : null}
+                        assigneeUserId=${commonAssigneeId}
+                        activeAgentKey=${commonActiveKey}
+                        showUnassign=${anySelectedAssigned}
+                        onPick=${(payload) => onBulkAssign && onBulkAssign(payload)}
+                        showAssignToMe=${currentUserId != null}
+                        searchPlaceholder="Buscar atendentes"
+                      />
+                    </div>
+                  </div>
+                ` : ''}
+              </div>
               ` : ''}
               <button
                 disabled=${selCount === 0}
@@ -252,19 +503,11 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
               </button>
               <div class="border-t border-wa-border">
                 <button
-                  onClick=${() => { onSelectAll && onSelectAll(); }}
+                  onClick=${() => { if (allSelected) { onDeselectAll && onDeselectAll(); } else { onSelectAll && onSelectAll(); } }}
                   class="w-full text-left px-4 py-[10px] text-[14px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
                 >
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 14l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-                  Selecionar todas
-                </button>
-                <button
-                  disabled=${selCount === 0}
-                  onClick=${() => { onClearSelection && onClearSelection(); closeMenus(); }}
-                  class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : 'text-wa-text'}"
-                >
-                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM7 13v-2h10v2H7z"/></svg>
-                  Limpar conversas selecionadas
+                  ${allSelected ? 'Desmarcar todas' : 'Selecionar todas'}
                 </button>
               </div>
             </div>
@@ -282,28 +525,13 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           >
             <span class="text-white"><${ArchiveIcon} /></span>
           </button>
-          <button
-            onClick=${() => {
-              const msg = autoReply
-                ? 'Deseja DESATIVAR a IA para responder mensagens?'
-                : 'Deseja ATIVAR a IA para responder mensagens?';
-              if (confirm(msg) && onToggleAutoReply) {
-                onToggleAutoReply(!autoReply);
-              }
-            }}
-            class="flex items-center gap-[5px] rounded-full px-[10px] py-[4px] text-[11px] font-semibold cursor-pointer transition-colors ${autoReply ? 'bg-green-500/25 text-green-300 hover:bg-green-500/35' : 'bg-red-500/25 text-red-300 hover:bg-red-500/35'}"
-            title=${autoReply ? 'IA ativada globalmente — clique para desativar' : 'IA desativada globalmente — clique para ativar'}
-          >
-            <span class="inline-block w-[6px] h-[6px] rounded-full ${autoReply ? 'bg-green-400' : 'bg-red-400'}"></span>
-            ${autoReply ? 'IA Ativada' : 'IA Desativada'}
-          </button>
         </div>
         <div class="flex items-center gap-2">
           ${wsConnected === false ? html`
             <span class="text-white/80 text-[13px] animate-pulse">Sem conexão</span>
             <span class="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" title="Offline"></span>
           ` : html`
-            <span class="text-white text-[15px] font-medium opacity-90">${showArchived ? 'Arquivados' : 'WhatsBot'}</span>
+            <span class="text-white text-[15px] font-medium opacity-90">${showArchived ? 'Arquivados' : 'WhatsBot-Pro'}</span>
             <span class="inline-block w-2 h-2 rounded-full bg-green-400" title="Online"></span>
           `}
           <div ref=${menuRef} class="relative">
@@ -327,19 +555,6 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 >
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 9h-2v2H9v-2H7V9h2V7h2v2h2v2z"/></svg>
                   Iniciar conversa
-                </button>
-                <button
-                  onClick=${() => {
-                    closeMenus();
-                    if (window.location.pathname !== '/contacts') {
-                      history.pushState(null, '', '/contacts');
-                      window.dispatchEvent(new PopStateEvent('popstate'));
-                    }
-                  }}
-                  class="w-full text-left px-4 py-[10px] text-[14px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3"
-                >
-                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
-                  Contatos
                 </button>
               </div>
             ` : ''}
@@ -394,7 +609,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
       ` : null}
 
       <!-- Contact rows -->
-      <div class="flex-1 overflow-y-auto wa-scrollbar bg-wa-bg">
+      <div ref=${listScrollRef} class="flex-1 overflow-y-auto wa-scrollbar bg-wa-bg">
         ${loading && contacts.length === 0
           ? html`<div class="text-center text-wa-secondary py-8 animate-pulse-slow text-[14px]">Carregando...</div>`
           : contacts.length === 0
@@ -426,9 +641,26 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 <div
                   key=${rowKeyFor(c)}
                   onClick=${() => selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id)}
+                  onDragEnter=${dropEnabled ? (e) => { if (dragHasFiles(e)) { e.preventDefault(); setDragOverKey(rowKeyFor(c)); } } : null}
+                  onDragOver=${dropEnabled ? (e) => {
+                    if (!dragHasFiles(e)) return;
+                    e.preventDefault();
+                    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+                    setDragOverKey(rowKeyFor(c));
+                  } : null}
+                  onDragLeave=${dropEnabled ? () => setDragOverKey(k => (k === rowKeyFor(c) ? null : k)) : null}
+                  onDrop=${dropEnabled ? (e) => {
+                    if (!dragHasFiles(e)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOverKey(null);
+                    const files = e.dataTransfer && e.dataTransfer.files;
+                    if (files && files.length) onDropFiles(c, files);
+                  } : null}
                   onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, conversationId: c.conversation_id ?? null, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
-                    (selectionMode && selectedSet.has(rowKeyFor(c))) ? 'bg-wa-selected'
+                    dragOverKey === rowKeyFor(c) ? 'bg-wa-teal/25 outline outline-2 outline-wa-teal -outline-offset-2'
+                      : (selectionMode && selectedSet.has(rowKeyFor(c))) ? 'bg-wa-selected'
                       : (!selectionMode && selected === rowKeyFor(c)) ? 'bg-wa-selected' : 'hover:bg-wa-hover'
                   }"
                 >
@@ -451,6 +683,15 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
 
                   <!-- Text content with bottom border -->
                   <div class="flex-1 min-w-0 border-b border-wa-border py-[13px]">
+                    <!-- Linha 1: canal (esq.) + atendente (dir.), na MESMA altura, para não
+                         sobrar vão vazio de um dos lados. O canal fica ACIMA do nome (estilo
+                         Chatwoot) e é sempre visível — não passa pelo gate showChannel, que
+                         segue valendo só no cabeçalho do chat. Cada chip devolve null quando
+                         não há dado (linha sem canal / sem atendente). -->
+                    <div class="flex items-center justify-between gap-[6px] min-w-0 mb-[1px]">
+                      <${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} margin=${false} />
+                      ${resolveAssignee ? html`<span class="ml-auto shrink-0"><${AssigneeChip} assignee=${resolveAssignee(c)} /></span>` : null}
+                    </div>
                     <div class="flex justify-between items-baseline">
                       <span class="text-wa-text text-[17px] truncate leading-[21px]">
                         ${c.is_group
@@ -461,47 +702,54 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                           ? html`<span class="ml-[6px] text-[10px] font-semibold text-amber-400 bg-amber-500/15 rounded px-[5px] py-[1px] align-middle" title="Arquivado pela aplicação">APP</span>`
                           : null
                         }
-                        ${(c.conv_ai_active === 0 || c.conv_ai_active === false)
-                          ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle">IA OFF</span>`
-                          : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
+                        ${c.conversation_id == null
+                          // O badge descreve o gate de IA do ATENDIMENTO. Linha sem atendimento
+                          // (contato que só aparece na busca) não tem estado de IA a mostrar —
+                          // sem este guard cairia no ramo verde, porque `conv_ai_active` vem
+                          // NULL do banco e `_shape_contact_row` defaulta para true.
+                          ? null
+                          : (!autoReply || c.conv_ai_active === 0 || c.conv_ai_active === false)
+                            ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle" title=${!autoReply ? 'IA desligada pelo interruptor global' : null}>IA OFF</span>`
+                            : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }
-                        ${showChannel ? html`<${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} />` : null}
                       </span>
-                      <span class="flex flex-col items-end gap-[3px] ml-[6px] shrink-0">
-                        <span class="flex items-center gap-[4px]">
-                          ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}
-                          <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
-                        </span>
-                        ${resolveAssignee ? html`<${AssigneeChip} assignee=${resolveAssignee(c)} />` : null}
+                      <!-- Linha 2 (dir.): só fixado + hora. O atendente subiu para a linha do
+                           canal, então esta coluna deixou de ser uma pilha. -->
+                      <span class="flex items-center gap-[4px] ml-[6px] shrink-0">
+                        ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}
+                        <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
                       </span>
                     </div>
-                    ${(c.tags && c.tags.length > 0) ? html`
-                      <div class="flex items-center gap-[3px] mt-[2px] flex-wrap">
-                        ${c.tags.slice(0, 3).map(tagName => {
-                          const tagInfo = globalTags && globalTags[tagName];
-                          const color = tagInfo ? tagInfo.color : '#6b7280';
-                          return html`<span
-                            class="text-[9px] font-semibold rounded px-[4px] py-[0.5px] max-w-[70px] truncate leading-[14px]"
-                            style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
-                            title=${tagName}
-                          >${tagName}</span>`;
-                        })}
-                        ${c.tags.length > 3 ? html`<span class="text-[9px] text-wa-secondary">+${c.tags.length - 3}</span>` : null}
-                      </div>
-                    ` : null}
+                    ${(c.tags && c.tags.length > 0) ? html`<${RowTags}
+                      tags=${c.tags}
+                      globalTags=${globalTags}
+                      expanded=${expandedTagRows.has(rowKeyFor(c))}
+                      onToggle=${() => toggleTagRow(rowKeyFor(c))}
+                    />` : null}
                     <div class="flex justify-between items-center mt-[3px]">
-                      ${typingState && typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })]
+                      ${aiRespondingState && aiRespondingState[typingKey({ channelId: c.channel_id, phone: c.phone })]
+                        ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium flex items-center gap-1.5">
+                            <span class="inline-block w-1.5 h-1.5 rounded-full bg-wa-teal animate-pulse shrink-0"></span>
+                            <span class="truncate">IA respondendo…</span>
+                          </span>`
+                        : typingState && typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })]
                         ? html`<span class="text-[14px] truncate leading-[20px] text-wa-teal font-medium">
                             ${typingState[typingKey({ conversationId: c.conversation_id, channelId: c.channel_id, phone: c.phone })] === 'audio' ? 'gravando áudio...' : 'digitando...'}
                           </span>`
+                        : operatorTypingFor(operatorTypingState, c)
+                        ? html`<${OperatorTypingLine} who=${operatorTypingFor(operatorTypingState, c)} />`
                         : c.match_snippet
                           ? html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
                               ${highlightParts(c.match_snippet, search).map(p =>
                                 p.hit ? html`<span class="font-semibold text-wa-text">${p.s}</span>` : p.s
                               )}
                             </span>`
+                          : rowDrafts[rowKeyFor(c)]
+                          ? html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
+                              <span class="text-wa-draft font-medium">Rascunho:</span>${' ' + rowDrafts[rowKeyFor(c)]}
+                            </span>`
                           : html`<span class="text-wa-secondary text-[14px] truncate leading-[20px]">
-                            ${c.last_message_role === 'assistant' ? (() => {
+                            ${c.last_message_role === 'private_note' ? html`<${LockIcon} />` : ''}${c.last_message_role === 'assistant' ? (() => {
                               const st = c.last_message_status;
                               if (st === 'sent') return html`<${SingleCheckIcon} />`;
                               if (st === 'delivered' || st === 'operator') return html`<${DoubleCheckIcon} color="#92a58c" />`;
@@ -510,8 +758,11 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                             })() : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
                           </span>`
                       }
-                      ${(c.unread_ai_count > 0 || c.unread_count > 0 || c.has_unread_mention) ? html`
+                      ${(c.unread_ai_count > 0 || c.unread_count > 0 || c.has_unread_mention || c.has_user_mention) ? html`
                         <div class="flex items-center gap-[4px] ml-auto pl-[6px] shrink-0">
+                          ${c.has_user_mention ? html`
+                            <span class="text-violet-400 font-bold text-[17px] leading-none" title="Você foi mencionado numa nota privada">@</span>
+                          ` : null}
                           ${c.has_unread_mention ? html`
                             <span class="text-wa-badge font-bold text-[17px] leading-none" title="Você foi mencionado">@</span>
                           ` : null}
@@ -534,6 +785,24 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                 </div>
               `)
         }
+        <!-- plano 69 F4: "mostrando X de Y" — só quando o TOTAL da aba (server-side)
+             supera o carregado. Verdadeiro agora que a lista é a filtrada (F2/F3);
+             some quando iguais. Legível no modo escuro (text-wa-secondary). -->
+        ${(() => {
+          const total = tabCounts ? Number(tabCounts[assignmentTab] ?? tabCounts.all ?? 0) : 0;
+          const loaded = contacts.length;
+          if (!total || total <= loaded) return null;
+          return html`<div class="text-center text-wa-secondary pt-3 pb-1 text-[11px]">
+            Mostrando ${loaded} de ${total}
+          </div>`;
+        })()}
+        <!-- Sentinela do scroll infinito (plano 50 F8): dispara loadMore ao aproximar
+             do fim quando há mais páginas. plano 62 F6: vale também no modo BUSCA (que
+             agora pagina) — quem decide é só o hasMore. -->
+        ${hasMore ? html`
+          <div ref=${bottomSentinelRef} class="text-center text-wa-secondary py-4 text-[12px]">
+            ${loadingMore ? 'Carregando mais…' : ''}
+          </div>` : null}
       </div>
     </div>
   `;

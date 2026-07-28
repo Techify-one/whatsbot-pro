@@ -3,8 +3,8 @@
 Apenas a preferência NÃO-secreta (versão da Graph API) vive aqui — o form
 auto-gerado pelo ``PluginSettingsForm`` persiste em ``plugin.whatsapp_cloud.*``.
 
-Os segredos do provider (access_token, phone_number_id, waba_id, verify_token)
-NÃO ficam nas settings do plugin: eles são credenciais por-canal,
+Os segredos do provider (access_token, phone_number_id, waba_id, verify_token,
+app_secret) NÃO ficam nas settings do plugin: eles são credenciais por-canal,
 gravadas via o registry de canais do core (``channels.registry`` →
 ``channel_credential_repo``) na tela "Canais". O form Preact deste plugin
 (``static/whatsapp_cloud.js``) é só ajuda/documentação do provider.

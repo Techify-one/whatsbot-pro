@@ -1,0 +1,33 @@
+id: website
+name: Site (Widget)
+version: 1.1.1
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Caixa de chat embarcável ("live-chat") que você cola em qualquer site — o
+  inverso dos outros canais: a mensagem entra por um endpoint público que o
+  navegador chama e a resposta (IA ou atendente) é empurrada de volta pro
+  navegador via WebSocket. Cada canal tem seu próprio widget_token (o id público
+  que vai no HTML do site) e uma lista de domínios autorizados. Construído 100%
+  sobre o ponto de extensão de canal — sem tocar no core.
+short_description: >-
+  Widget de chat embarcável para sites. Cole o snippet, escolha os domínios autorizados e a IA/atendente responde ao vivo pelo navegador.
+author: WhatsBot
+frontend_extends: /plugins/website/static/extends.js
+frontend_api_version: "1.0"
+entry:
+  channels: channels
+  routes: routes
+  lifecycle: lifecycle
+migrations: migrations
+screens:
+  - id: website-config
+    title: Widget de site
+    path: /website/config
+    icon: chat
+    config: true
+    component: /plugins/website/static/website.js
+permissions:
+  - channel.provider
+  - runtime.task
+  - db.write
+dependencies: []

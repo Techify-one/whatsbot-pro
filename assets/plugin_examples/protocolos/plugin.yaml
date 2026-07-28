@@ -1,0 +1,56 @@
+id: protocolos
+name: Protocolos
+version: 1.20.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Camada de protocolos sobre os atendimentos (estilo Chatwoot personalizado). MANTÉM o
+  kanban/lista nativo e ADICIONA a entidade Protocolo, que agrupa os atendimentos de um
+  contato (1 protocolo aberto por contato; todo atendimento do contato entra nele). Assume
+  a aba Protocolos (override de rota em /protocolos) com kanban e lista próprios + uma
+  entrada no menu da engrenagem. O Kanban traz visualizações dinâmicas de "Agrupar por"
+  (status, atendente, data — por dia/semana/mês/faixas ou período personalizado — e por
+  campo de opção do protocolo), arrastar cards entre colunas com confirmação, e
+  visualizações de EQUIPE e PESSOAIS com controle de visibilidade (ACL) e ordenação de
+  colunas. Ao resolver cada atendimento abre um popup com campos CONFIGURÁVEIS (com
+  enforcement no backend) e espelha esses campos em conversations.custom_attributes do core
+  (integra atendimento↔protocolo e sobrevive se o plugin desativar). A tela de configuração
+  cria/remove campos de vários tipos — texto, área, número, data, seleção, rádio, checkbox,
+  múltipla escolha e atendente nativo — com validação por regex. Ao finalizar exige resolver
+  o último atendimento, grava o agente que resolveu e registra uma nota privada de abertura.
+  Permissões: ver, editar/resolver/configurar, criar visualizações e gerenciar visualizações
+  de equipe. Desative e a tela volta ao padrão — os dados ficam nas tabelas do plugin e no
+  custom_attributes do core.
+author: WhatsBot
+entry:
+  routes: routes      # REST: /api/plugins/protocolos/...
+  events: events      # message.saved / message.sent → auto-vínculo atendimento↔protocolo
+  filters: filters    # filter.conversation.before_status → enforcement do popup
+  settings: settings  # toggles (enforce_backend, auto_link, mirror_custom_attributes)
+migrations: migrations
+# Override de rota + slot + popup beforeResolve vivem no extends.js (registrado 1x no boot).
+frontend_extends: /plugins/protocolos/static/extends.js
+frontend_api_version: "1.0"
+screens:
+  # Tela de CONFIGURAÇÃO (config:true): field-builder dos rótulos + Avaliação + Geral no modal
+  # "Configurar" do card. Filtrada fora do GearMenu; a lista de protocolos vive no
+  # override da aba Protocolos.
+  - id: protocolos-config
+    title: Configurar campos
+    path: /protocolos/config
+    config: true
+    component: /plugins/protocolos/static/config.js
+    requires: config
+permissions:
+  - db.write
+rbac:
+  group: Protocolos
+  permissions:
+    - { key: view, label: "Ver protocolos" }
+    - { key: edit, label: "Editar campos/observações do protocolo" }
+    - { key: manage_team_views, label: "Criar/editar visualizações de EQUIPE no Kanban" }
+    - { key: create_views, label: "Criar novas visualizações (agrupamentos) no Kanban" }
+    - { key: resolve, label: "Fechar/reabrir protocolo e resolver atendimento" }
+    - { key: assign, label: "Atribuir/reatribuir protocolos" }
+    - { key: config, label: "Configurar campos, avaliação e opções gerais do plugin" }
+    - { key: delete, label: "Excluir protocolos" }
+dependencies: []

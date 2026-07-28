@@ -27,12 +27,13 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
 import httpx
 
-from channels.base import Channel, ChannelCapabilities, SendResult
+from channels.base import AccountIdentity, Channel, ChannelCapabilities, SendResult
 from channels.events import InboundEvent
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,13 @@ def api_base() -> str:
 class TelegramChannel(Channel):
     provider = "telegram"
 
+    # ── Contact type (marca por canal — plano tipos-de-contato) ──────
+    # Telegram não é WhatsApp: não guarda telefone (o identificador é o chat_id
+    # numérico do Telegram, gravado na coluna `phone`), então tem tipo próprio.
+    @classmethod
+    def contact_type(cls) -> str:
+        return "telegram"
+
     def __init__(self, channel_id: str, registry=None,
                  credentials: Optional[dict] = None):
         super().__init__(
@@ -64,6 +72,8 @@ class TelegramChannel(Channel):
                 presence=False,       # Bot API has no "typing received" inbound
                 reactions=True,       # setMessageReaction (Bot API 7.0+)
                 media=True,
+                revoke=True,          # deleteMessage (delete for everyone)
+                edit_message=True,    # editMessageText
                 inbound_route="poll",  # long-poll by default; webhook also supported
                 session_window_hours=0,
                 # No QR / connect step: without a bot_token the channel can never
@@ -74,6 +84,34 @@ class TelegramChannel(Channel):
         )
         self.registry = registry
         self._credentials = dict(credentials or {})
+
+    # ── Provider descriptor (plano 33) ───────────────────────────────
+    @classmethod
+    def provider_descriptor(cls) -> dict:
+        """Telegram is a Bot API provider: one ``bot_token`` credential, no QR, no
+        templates. After create it self-configures (webhook if a public HTTPS domain
+        exists, else long-poll) via the ``autoconfigure`` route — declared as the
+        ``post_create`` action so the core drives it without knowing "telegram"."""
+        return {
+            "provider": "telegram",
+            "label": "Telegram",
+            "color": "purple",
+            "credential_fields": [
+                {"key": "bot_token", "label": "Bot Token", "type": "secret",
+                 "required": True,
+                 "placeholder": "123456:ABC-DEF... (do @BotFather)",
+                 "help": "Crie um bot com o @BotFather (/newbot) e cole o token. "
+                         "Recebe por long-poll (sem host público) — basta criar e "
+                         "mandar mensagem ao bot."},
+            ],
+            "config_fields": [],
+            "capabilities": {"needs_qr": False, "templates": False},
+            "ai_sequential_default": False,
+            "post_create": {"kind": "autoconfigure",
+                            "endpoint": "/api/plugins/telegram/autoconfigure",
+                            "webhook_path": "/api/webhook/telegram/{channel_id}"},
+            "form_component": None,
+        }
 
     # ── Credential access ────────────────────────────────────────────
     def _cred(self, key: str) -> str:
@@ -89,6 +127,37 @@ class TelegramChannel(Channel):
     @property
     def _token(self) -> str:
         return self._cred("bot_token")
+
+    # ── Account identity (dedup contract — plano 32 F5) ──────────────
+    # A Telegram bot token is ``{bot_id}:{auth_hash}``, so the numeric ``bot_id``
+    # (the bot's Telegram user id — the account) is derivable from the token
+    # WITHOUT a network call. We use ``kind="bot_id"`` for BOTH hooks so the
+    # create-time identity and the live ``getMe`` identity dedup against each other
+    # (plano 32 P1: one consistent kind). Storing the bot_id — not the secret token
+    # — also keeps the token out of the ``account_identity`` column.
+    @staticmethod
+    def _bot_id_from_token(token: str) -> str:
+        token = (token or "").strip()
+        prefix = token.split(":", 1)[0].strip() if ":" in token else ""
+        return prefix if prefix.isdigit() else ""
+
+    @classmethod
+    def identity_from_credentials(cls, creds: dict) -> Optional[AccountIdentity]:
+        """The bot account (``bot_id``), parsed from the ``bot_token`` at create time."""
+        bot_id = cls._bot_id_from_token(creds.get("bot_token") or "")
+        return AccountIdentity("bot_id", bot_id) if bot_id else None
+
+    def account_identity(self) -> Optional[AccountIdentity]:
+        """Live ``bot_id``: parsed from the token (no network), else via ``getMe``."""
+        bot_id = self._bot_id_from_token(self._token)
+        if bot_id:
+            return AccountIdentity("bot_id", bot_id)
+        res = self._request("getMe")
+        if res.get("ok"):
+            bid = str((res.get("result") or {}).get("id") or "").strip()
+            if bid:
+                return AccountIdentity("bot_id", bid)
+        return None
 
     def _base_url(self) -> str:
         return f"{api_base()}/bot{self._token}"
@@ -133,7 +202,13 @@ class TelegramChannel(Channel):
                   mentions=None) -> SendResult:
         # Telegram has no separate mentions list — @username goes inline in the
         # text. ``mentions`` is accepted for contract parity and ignored.
-        payload: dict = {"chat_id": chat_id, "text": text}
+        # WhatsApp-style ``*bold*`` markup is not native on Telegram; convert it
+        # to Bot API ``entities`` (no parse_mode → nothing needs escaping) so the
+        # text renders bold instead of showing literal asterisks.
+        body, entities = _bold_to_entities(text)
+        payload: dict = {"chat_id": chat_id, "text": body}
+        if entities:
+            payload["entities"] = entities
         if reply_to:
             payload["reply_parameters"] = {"message_id": _to_int(reply_to)}
         res = self._request("sendMessage", payload)
@@ -153,6 +228,15 @@ class TelegramChannel(Channel):
         local = _local_file(path_or_url)
         if local is not None:
             name = filename or local.name
+            if method == "sendDocument":
+                # O Telegram faz DETECÇÃO DE TIPO no servidor para uploads
+                # multipart: um .mp4 mandado como documento ganha atributos de
+                # vídeo e o cliente o exibe com player, ignorando a intenção de
+                # "enviar como arquivo" (plano 64 — a zona "Arquivo" do drop
+                # ficava indistinguível da zona "Foto ou vídeo"). Este flag
+                # desliga a detecção e o anexo chega como anexo. String "true"
+                # de propósito: aqui o payload vai como form-data, não JSON.
+                payload["disable_content_type_detection"] = "true"
             with local.open("rb") as fh:
                 res = self._request(method, payload, files={field: (name, fh)})
         else:
@@ -165,6 +249,17 @@ class TelegramChannel(Channel):
         reaction = ([{"type": "emoji", "emoji": emoji}] if emoji else [])
         self._request("setMessageReaction", {
             "chat_id": chat_id, "message_id": _to_int(msg_id), "reaction": reaction})
+
+    def revoke(self, chat_id: str, msg_id: str) -> None:
+        """Delete a message for everyone via Bot API ``deleteMessage``."""
+        self._request("deleteMessage", {
+            "chat_id": chat_id, "message_id": _to_int(msg_id)})
+
+    def edit_text(self, chat_id: str, msg_id: str, text: str) -> SendResult:
+        """Edit a sent message's text via Bot API ``editMessageText``."""
+        res = self._request("editMessageText", {
+            "chat_id": chat_id, "message_id": _to_int(msg_id), "text": text})
+        return _send_result(res)
 
     # mark_read: Bot API has no "mark as read"; inherit the base no-op.
 
@@ -223,8 +318,24 @@ class TelegramChannel(Channel):
         if not isinstance(raw, dict):
             return events
 
-        msg = (raw.get("message") or raw.get("edited_message")
-               or raw.get("channel_post") or raw.get("edited_channel_post"))
+        # An edited message keeps the SAME message_id, so mirror it as an "edited"
+        # event (new text/caption) instead of re-ingesting it as a brand-new
+        # message. The core webhook updates the stored content + broadcasts.
+        edited = raw.get("edited_message") or raw.get("edited_channel_post")
+        if isinstance(edited, dict):
+            base = self._parse_message(edited)
+            if base is not None:
+                mid = base.external_msg_id
+                events.append(InboundEvent(
+                    channel_id=self.channel_id, provider=self.provider, kind="edited",
+                    external_msg_id=mid, chat_id=base.chat_id, sender_id=base.sender_id,
+                    sender_name=base.sender_name, is_group=base.is_group,
+                    text=base.text, ts=base.ts,
+                    media_extras={"original_message_id": mid, "is_from_me": False},
+                    raw=edited))
+            return events
+
+        msg = raw.get("message") or raw.get("channel_post")
         if isinstance(msg, dict):
             ev = self._parse_message(msg)
             if ev is not None:
@@ -343,6 +454,18 @@ class TelegramChannel(Channel):
         # Prune Nones so the extras stay clean (mirrors the GOWA extractor).
         extras = {k: v for k, v in extras.items() if v is not None} or {}
 
+        # Citação do cliente (plano 75 F9 — bug C1): o Bot API entrega a
+        # mensagem citada inteira em ``reply_to_message``. O ``external_msg_id``
+        # deste provider é ``str(message_id)``, então o id abaixo casa com o do
+        # banco por igualdade exata — nada de normalizar. Acesso defensivo: a
+        # chave só existe quando a mensagem é de fato uma resposta.
+        reply_to: Optional[str] = None
+        replied = msg.get("reply_to_message")
+        if isinstance(replied, dict):
+            replied_id = replied.get("message_id")
+            if replied_id is not None and replied_id != "":
+                reply_to = str(replied_id)
+
         return InboundEvent(
             channel_id=self.channel_id,
             provider=self.provider,
@@ -357,6 +480,7 @@ class TelegramChannel(Channel):
             media_type=media_type,
             media_path=media_path,
             media_extras=extras,
+            reply_to_msg_id=reply_to,
             ts=_to_float(msg.get("date")),
             raw=msg,
         )
@@ -390,6 +514,37 @@ def _local_file(path_or_url: str) -> Optional[Path]:
         return p if p.is_file() else None
     except Exception:  # noqa: BLE001
         return None
+
+
+_BOLD_RE = re.compile(r"\*([^*\n]+)\*")
+
+
+def _bold_to_entities(text: str) -> tuple[str, list[dict]]:
+    """Convert WhatsApp-style ``*bold*`` markup to plain text + Telegram bold
+    entities. Offsets/lengths are in UTF-16 code units (Bot API requirement).
+    No ``parse_mode`` is used, so nothing in the text needs escaping.
+    """
+    if "*" not in text:
+        return text, []
+
+    def _u16(s: str) -> int:
+        return len(s.encode("utf-16-le")) // 2
+
+    out: list[str] = []
+    entities: list[dict] = []
+    last = 0
+    units = 0  # UTF-16 code units already emitted into `out`
+    for m in _BOLD_RE.finditer(text):
+        before = text[last:m.start()]
+        out.append(before)
+        units += _u16(before)
+        inner = m.group(1)
+        entities.append({"type": "bold", "offset": units, "length": _u16(inner)})
+        out.append(inner)
+        units += _u16(inner)
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out), entities
 
 
 def _to_int(value) -> int:

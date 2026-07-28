@@ -10,6 +10,7 @@ from fastapi import Request
 from db.repositories import execution_repo
 from server.authz import permission_denied
 from server.helpers import _ok
+from server.pagination import CAP_LIST, PAGE_LIST, clamp_limit
 
 
 def _gowa_log_path() -> Path:
@@ -57,6 +58,7 @@ def register_routes(app, deps):
         denied = permission_denied(request, "settings.manage")
         if denied:
             return denied
+        limit = clamp_limit(limit, PAGE_LIST, CAP_LIST)  # plano 50 F1 — ?limit livre
         try:
             entries = await asyncio.to_thread(execution_repo.get_webhook_payloads, limit)
             if entries:

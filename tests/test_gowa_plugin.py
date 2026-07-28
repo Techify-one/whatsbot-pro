@@ -187,6 +187,29 @@ def _load_module(path, name):
     return mod
 
 
+def _load_gowa_plugin_module(name):
+    """Load a gowa-plugin submodule WITH package context.
+
+    ``lifecycle.py`` does ``from . import alerts`` (and plano 52 adds
+    ``from . import processes``), so a bare ``spec_from_file_location`` load —
+    no parent package — breaks with "attempted relative import with no known
+    parent package". Mirror the loader's real mechanics instead: register the
+    plugin dir as a package (``submodule_search_locations``) and import the
+    submodule through the import system.
+    """
+    import importlib as _importlib
+    pkg_dir = ROOT / "assets" / "plugin_examples" / "gowa"
+    pkg_name = "test_gowa_pkg"
+    if pkg_name not in sys.modules:
+        pkg_spec = importlib.util.spec_from_file_location(
+            pkg_name, pkg_dir / "__init__.py",
+            submodule_search_locations=[str(pkg_dir)])
+        pkg = importlib.util.module_from_spec(pkg_spec)
+        sys.modules[pkg_name] = pkg
+        pkg_spec.loader.exec_module(pkg)
+    return _importlib.import_module(f"{pkg_name}.{name}")
+
+
 class _FakeSvc:
     def __init__(self):
         self.spawned = []
@@ -222,8 +245,7 @@ class _FakeSup:
         self.stopped.append(owner)
 
 
-gl = _load_module(str(ROOT / "assets" / "plugin_examples" / "gowa" / "lifecycle.py"),
-                  "test_gowa_lifecycle")
+gl = _load_gowa_plugin_module("lifecycle")
 
 # ── Interface guard: the plugin reaches into GOWAManager/gowa.manager internals.
 # Assert those symbols exist on the REAL class/module so an over-mock can never
@@ -242,6 +264,29 @@ check("_get_gowa_binary is a MODULE function, not a GOWAManager method "
       "(the live-bug invariant: plugin must NOT call gm._get_gowa_binary())",
       callable(getattr(_gowa_mgr_mod, "_get_gowa_binary", None))
       and not hasattr(GOWAManager, "_get_gowa_binary"))
+
+# ── Plano 52 F1 baseline: characterize the REAL _build_cmd argv shape (with the
+# repo binary), so the F2 parametrization is provably byte-identical for the
+# shared process. Skipped when the binary hasn't been downloaded on this machine.
+if _gowa_mgr_mod._get_gowa_binary().exists():
+    _tmp_dd = Path(tempfile.mkdtemp(prefix="gowa_cmd_"))
+    try:
+        _mgr_base = GOWAManager(
+            port=12345, data_dir=_tmp_dd,
+            webhook_url="http://127.0.0.1:8090/api/webhook/gowa/default")
+        _cmd_base = _mgr_base._build_cmd()
+        check("_build_cmd: argv[1:4] == ['rest','--port','12345']",
+              _cmd_base[1:4] == ["rest", "--port", "12345"])
+        check("_build_cmd: --webhook uses the instance URL",
+              "--webhook" in _cmd_base and
+              _cmd_base[_cmd_base.index("--webhook") + 1].endswith("/api/webhook/gowa/default"))
+        check("_build_cmd: --webhook-events present", "--webhook-events" in _cmd_base)
+        check("_build_cmd: presence + os flags present",
+              "--presence-on-connect" in _cmd_base and "--os" in _cmd_base)
+        check("_build_cmd: no --whatsapp-proxy in argv (plano 52 D5)",
+              all("whatsapp-proxy" not in a for a in _cmd_base))
+    finally:
+        shutil.rmtree(_tmp_dd, ignore_errors=True)
 
 # spec=GOWAManager makes any access to an attribute NOT on the real class raise
 # AttributeError (so a future gm.<typo>() surfaces as a setup error here, not in
@@ -277,11 +322,19 @@ try:
     check("subprocess stdout is NOT PIPE (deadlock guard)",
           bool(spec and spec.stdout is not subprocess.PIPE))
     check("subprocess signature set (stale-kill guard)", bool(spec and spec.signature))
+    # ── Plano 52 baseline: the SHARED process contract that dedicated (per-proxy)
+    # processes must NOT disturb — parent env/cwd inherited, no proxy in argv.
+    check("shared spec inherits parent env (env is None)", bool(spec) and spec.env is None)
+    check("shared spec inherits parent cwd (cwd is None)", bool(spec) and spec.cwd is None)
+    check("shared argv has no --whatsapp-proxy (proxy is env-only, plano 52 D5)",
+          bool(spec) and all("whatsapp-proxy" not in str(a) for a in spec.cmd))
 
     task_names = {s.name for s in fsup.registered}
     check("registered post-spawn init task (gowa:gowa_init)", "gowa:gowa_init" in task_names)
     check("registered 3 polling loops (status/qr/avatar)",
           {"gowa:status_poll", "gowa:qr_poll", "gowa:avatar_fetch"} <= task_names)
+    check("registered the plano-52 process reconcile loop",
+          "gowa:process_reconcile" in task_names)
     check("all gowa tasks owned by 'gowa'",
           all(s.owner == "gowa" for s in fsup.registered))
 
@@ -396,7 +449,9 @@ try:
     check("tombstone blocks the re-enable of gowa", ("gowa", True) not in _t_enable)
 
     # (2) fresh-install bootstrap (empty dir, e.g. user removed every plugin) must
-    #     SKIP gowa while still copying the other bundled examples.
+    #     SKIP gowa when tombstoned. Only gowa is auto-installed now (plano 33 D3:
+    #     telegram/whatsapp_cloud are import-only), so a tombstoned gowa leaves
+    #     nothing copied.
     copied = _loader.bootstrap_initial_plugins(tp, _src)
     check("tombstone skips gowa in initial bootstrap",
           "gowa" not in copied and not (tp / "gowa").exists())
@@ -497,12 +552,10 @@ section("inbound GOWA device → channel resolution (channel_repo)")
 
 import logging as _logging
 _logging.disable(_logging.INFO)
-_routedb = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
-os.environ["DATABASE_URL"] = f"sqlite:///{_routedb}"
-from db.engine import dispose_engine as _dispose_engine
-_dispose_engine()  # force a fresh engine bound to the temp DB
-from db.connection import init_db as _init_db
-_init_db()
+# Plano 29 C3 (Postgres-only): roda contra o Postgres de teste com o schema
+# resetado — o equivalente do antigo temp-SQLite dedicado desta seção.
+from tests.pg import init_test_engine as _init_test_engine
+_init_test_engine(reset=True)
 from db.repositories import channel_repo as _cr
 
 # 'default' is seeded by migration 0011 (gowa, gowa_device_id='whatsbot').
@@ -531,10 +584,263 @@ check("session_id resolves before login (own_phone still NULL)",
 _cr.set_status("whatsapp_teste", enabled=0)
 check("disabled channel → None (won't route)",
       _cr.get_gowa_channel_for_device("whatsapp_teste", None) is None)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Plano 52 — dedicated per-proxy GOWA processes (pure units)
+# ═══════════════════════════════════════════════════════════════════
+section("plano 52 — processes: validation / planning / ports / spec (pure)")
+
+gp = _load_gowa_plugin_module("processes")
+
+# validate_proxy_url
+check("proxy: socks5 with auth is valid",
+      gp.validate_proxy_url("socks5://user:pass@1.2.3.4:1080") is None)
+check("proxy: plain http is valid", gp.validate_proxy_url("http://1.2.3.4:8080") is None)
+check("proxy: https is valid", gp.validate_proxy_url("https://proxy.example:443") is None)
+check("proxy: empty is rejected", gp.validate_proxy_url("") is not None)
+check("proxy: bad scheme rejected (ftp)", gp.validate_proxy_url("ftp://x:1") is not None)
+check("proxy: hostless rejected", gp.validate_proxy_url("socks5://") is not None)
+check("proxy: garbage rejected", gp.validate_proxy_url("not a url") is not None)
+
+# plan_reconcile (pure diff)
+check("plan: empty/empty -> no actions",
+      gp.plan_reconcile({}, {}) == {"spawn": [], "stop": [], "restart": []})
+check("plan: new desired -> spawn",
+      gp.plan_reconcile({"a": "p1"}, {}) == {"spawn": ["a"], "stop": [], "restart": []})
+check("plan: gone desired -> stop",
+      gp.plan_reconcile({}, {"a": {"proxy": "p1"}})
+      == {"spawn": [], "stop": ["a"], "restart": []})
+check("plan: changed proxy -> restart",
+      gp.plan_reconcile({"a": "p2"}, {"a": {"proxy": "p1"}})
+      == {"spawn": [], "stop": [], "restart": ["a"]})
+check("plan: same proxy -> steady state (no actions)",
+      gp.plan_reconcile({"a": "p1"}, {"a": {"proxy": "p1"}})
+      == {"spawn": [], "stop": [], "restart": []})
+check("plan: deterministic ordering",
+      gp.plan_reconcile({"b": "x", "a": "y"}, {}) ["spawn"] == ["a", "b"])
+
+# desired_proxies (pure over rows + credential getter)
+_rows_52 = [
+    {"id": "default", "provider": "gowa", "enabled": 1, "archived": 0},
+    {"id": "ch_ok", "provider": "gowa", "enabled": 1, "archived": 0},
+    {"id": "ch_off", "provider": "gowa", "enabled": 0, "archived": 0},
+    {"id": "ch_arch", "provider": "gowa", "enabled": 1, "archived": 1},
+    {"id": "ch_noproxy", "provider": "gowa", "enabled": 1, "archived": 0},
+    {"id": "ch_bad", "provider": "gowa", "enabled": 1, "archived": 0},
+    {"id": "tg", "provider": "telegram", "enabled": 1, "archived": 0},
+]
+_creds_52 = {
+    ("default", "proxy_url"): "socks5://u:p@9.9.9.9:1080",
+    ("ch_ok", "proxy_url"): "socks5://u:p@1.2.3.4:1080",
+    ("ch_off", "proxy_url"): "socks5://u:p@1.2.3.4:1080",
+    ("ch_arch", "proxy_url"): "socks5://u:p@1.2.3.4:1080",
+    ("ch_bad", "proxy_url"): "ftp://nope",
+    ("tg", "proxy_url"): "socks5://u:p@1.2.3.4:1080",
+}
+_desired = gp.desired_proxies(_rows_52, lambda cid, key: _creds_52.get((cid, key)))
+check("desired: only enabled+non-archived gowa channels with valid proxy",
+      _desired == {"ch_ok": "socks5://u:p@1.2.3.4:1080"})
+check("desired: 'default' is NEVER dedicated (legacy singleton)",
+      "default" not in _desired)
+
+# allocate_port (persisted-first, injectable port_free)
+check("port: persisted port reused when free",
+      gp.allocate_port({"config": '{"gowa_dedicated_port": 4001}'}, 4000, set(),
+                       port_free=lambda p: True) == 4001)
+check("port: persisted port skipped when taken by another channel",
+      gp.allocate_port({"config": '{"gowa_dedicated_port": 4001}'}, 4000, {4001},
+                       port_free=lambda p: True) == 4002)
+check("port: allocates first free above base",
+      gp.allocate_port({"config": "{}"}, 4000, set(),
+                       port_free=lambda p: p != 4001) == 4002)
+check("port: malformed config falls through to allocation",
+      gp.allocate_port({"config": "not json"}, 4000, set(),
+                       port_free=lambda p: True) == 4001)
+
+# webhook derivation + spec building
+check("webhook: default URL -> per-channel URL",
+      gp._channel_webhook_url("http://127.0.0.1:8090/api/webhook/gowa/default", "ch1")
+      == "http://127.0.0.1:8090/api/webhook/gowa/ch1")
+check("webhook: unset shared URL -> None", gp._channel_webhook_url(None, "ch1") is None)
+
+_spec_52 = gp.build_spec(name="gowa_x", cmd=["/bin/x", "rest"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env={"WHATSAPP_PROXY": "socks5://u:p@h:1"}, cwd="/tmp/x")
+check("build_spec: name/env/cwd pass through",
+      _spec_52.name == "gowa_x" and _spec_52.cwd == "/tmp/x"
+      and _spec_52.env.get("WHATSAPP_PROXY") == "socks5://u:p@h:1")
+check("build_spec: signature derived from argv[0]", _spec_52.signature == "/bin/x")
+check("build_spec: shared defaults keep env/cwd inherited (None)",
+      gp.build_spec(name="gowa", cmd=["/bin/x"], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL).env is None)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Plano 52 — reconcile integration (real repos on the test PG,
+#  fake ctx/deps, tmp cwd so storages/gowa_ch_* never touches the repo)
+# ═══════════════════════════════════════════════════════════════════
+section("plano 52 — reconcile_once (spawn/stop/transitions against test PG)")
+
+from db.repositories import channel_credential_repo as _ccr
+from types import SimpleNamespace
+
+
+class _RecCtx:
+    """ctx double: records specs, returns a fake ManagedProcess per spawn."""
+
+    def __init__(self):
+        self.specs = []
+        self.managed = []
+
+    def spawn_subprocess(self, spec):
+        self.specs.append(spec)
+        m = MagicMock(name=f"managed_{spec.name}")
+        m.spec = spec
+        self.managed.append(m)
+        return m
+
+    def on_unload(self, fn):
+        pass
+
+
+_cr.create(id="proxy1", provider="gowa", display_name="Proxied")
+_ccr.set("proxy1", "proxy_url", "socks5://user:pass@10.0.0.9:1080")
+_ccr.set("default", "proxy_url", "socks5://user:pass@10.0.0.9:1080")
+_ccr.set("vendas", "proxy_url", "ftp://invalid")
+
+_rec_ctx = _RecCtx()
+_rec_mgr = GOWAManager(port=19997, data_dir=Path(tempfile.mkdtemp(prefix="gowa_dd_")),
+                       webhook_url="http://127.0.0.1:8090/api/webhook/gowa/default")
+_rec_deps = SimpleNamespace(gowa_manager=_rec_mgr, gowa_client=MagicMock(port=19997),
+                            channel_registry=MagicMock())
+
+_prev_cwd = os.getcwd()
+_tmp_cwd = tempfile.mkdtemp(prefix="gowa_rec_")
+os.chdir(_tmp_cwd)
 try:
-    os.unlink(_routedb)
-except OSError:
-    pass
+    gp._MANAGED.clear()
+    plan1 = gp.reconcile_once(_rec_ctx, _rec_deps)
+    check("reconcile: spawns exactly the valid proxied channel",
+          plan1["spawn"] == ["proxy1"] and len(_rec_ctx.specs) == 1)
+    _sp = _rec_ctx.specs[0]
+    check("reconcile: spec name is gowa_<cid>", _sp.name == "gowa_proxy1")
+    check("reconcile: WHATSAPP_PROXY only in env, never argv",
+          _sp.env.get("WHATSAPP_PROXY") == "socks5://user:pass@10.0.0.9:1080"
+          and all("socks5" not in str(a) and "whatsapp-proxy" not in str(a)
+                  for a in _sp.cmd))
+    check("reconcile: per-channel webhook in argv",
+          any(str(a).endswith("/api/webhook/gowa/proxy1") for a in _sp.cmd))
+    check("reconcile: dedicated cwd under storages/gowa_ch_<cid>",
+          _sp.cwd is not None and _sp.cwd.endswith(os.path.join("storages", "gowa_ch_proxy1")))
+    check("reconcile: statics symlink bridge created",
+          (Path(_sp.cwd) / "statics").is_symlink())
+    _row_p1 = _cr.get("proxy1")
+    _cfg_p1 = __import__("json").loads(_row_p1.get("config") or "{}")
+    check("reconcile: port persisted in channel config",
+          int(_cfg_p1.get("gowa_dedicated_port") or 0) > 19997)
+    check("reconcile: gowa_isolation flipped to dedicated_process",
+          _row_p1.get("gowa_isolation") == "dedicated_process")
+    check("reconcile: live instance rebuilt in the registry",
+          _rec_deps.channel_registry.add_channel.called)
+    check("reconcile: default with proxy -> last_error explains, no dedicated spawn",
+          str((_cr.get("default") or {}).get("last_error") or "").startswith("Proxy não é suportado"))
+    check("reconcile: invalid proxy -> last_error 'Proxy inválido'",
+          str((_cr.get("vendas") or {}).get("last_error") or "").startswith("Proxy inválido"))
+
+    # Steady state: nothing changes on the next pass.
+    plan2 = gp.reconcile_once(_rec_ctx, _rec_deps)
+    check("reconcile: steady state is a no-op",
+          plan2 == {"spawn": [], "stop": [], "restart": []} and len(_rec_ctx.specs) == 1)
+
+    # Proxy CHANGED -> restart (stop + respawn, same channel).
+    _ccr.set("proxy1", "proxy_url", "http://user:pass@10.0.0.10:8080")
+    plan3 = gp.reconcile_once(_rec_ctx, _rec_deps)
+    check("reconcile: changed proxy -> restart", plan3["restart"] == ["proxy1"])
+    check("reconcile: restart stopped the old process",
+          _rec_ctx.managed[0].stop.called)
+    check("reconcile: restart spawned with the NEW proxy env",
+          len(_rec_ctx.specs) == 2
+          and _rec_ctx.specs[1].env.get("WHATSAPP_PROXY") == "http://user:pass@10.0.0.10:8080")
+
+    # Proxy REMOVED -> stop + transition back to shared.
+    _ccr.set("proxy1", "proxy_url", "")
+    plan4 = gp.reconcile_once(_rec_ctx, _rec_deps)
+    check("reconcile: removed proxy -> stop", plan4["stop"] == ["proxy1"])
+    check("reconcile: dedicated process stopped", _rec_ctx.managed[1].stop.called)
+    _row_p1b = _cr.get("proxy1")
+    _cfg_p1b = __import__("json").loads(_row_p1b.get("config") or "{}")
+    check("reconcile: back to shared (isolation + port cleared)",
+          _row_p1b.get("gowa_isolation") == "shared"
+          and "gowa_dedicated_port" not in _cfg_p1b)
+
+    # Heal: row CLAIMS dedicated but nothing desired/running (e.g. proxy removed
+    # while the server was off) -> converges back to shared on the next pass.
+    _cr.set_status("proxy1", gowa_isolation="dedicated_process",
+                   config='{"gowa_dedicated_port": 45678}')
+    gp._MANAGED.clear()
+    gp.reconcile_once(_rec_ctx, _rec_deps)
+    _row_heal = _cr.get("proxy1")
+    check("reconcile: heals stale dedicated claim back to shared",
+          _row_heal.get("gowa_isolation") == "shared"
+          and "gowa_dedicated_port" not in (_row_heal.get("config") or ""))
+finally:
+    os.chdir(_prev_cwd)
+    gp._MANAGED.clear()
+    shutil.rmtree(_tmp_cwd, ignore_errors=True)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Plano 52 — bundled-plugin VERSION-AWARE upgrade (P7): newer bundled
+#  version replaces the installed copy; same/older never re-copies.
+# ═══════════════════════════════════════════════════════════════════
+section("plano 52 — bootstrap_gowa_upgrade version-aware in-place upgrade")
+
+_v_orig_list = _channel_repo.list_all
+_v_orig_env = os.environ.get("WHATSBOT_TEST")
+_channel_repo.list_all = lambda: [{"id": "default", "provider": "gowa"}]
+_tmp3 = tempfile.mkdtemp(prefix="gowa_verup_")
+try:
+    os.environ.pop("WHATSBOT_TEST", None)
+    tp = Path(_tmp3) / "plugins"; tp.mkdir(parents=True)
+    # Install the CURRENT bundled version first (the missing-install path).
+    r_install = _loader.bootstrap_gowa_upgrade(tp, _src)
+    check("verup: initial install works", r_install is True)
+
+    # Simulate an OLDER installed copy + a marker file (would be lost on clobber).
+    yaml_p = tp / "gowa" / "plugin.yaml"
+    _yaml_txt = yaml_p.read_text(encoding="utf-8")
+    import re as _re
+    _cur_ver = _re.search(r"^version:\s*(\S+)", _yaml_txt, _re.M).group(1).strip("'\"")
+    yaml_p.write_text(_yaml_txt.replace(f"version: {_cur_ver}", "version: 0.9.0"),
+                      encoding="utf-8")
+    (tp / "gowa" / "LOCAL_EDIT.marker").write_text("x", encoding="utf-8")
+
+    r_up = _loader.bootstrap_gowa_upgrade(tp, _src)
+    check("verup: newer bundled version re-copies in place", r_up is True)
+    check("verup: installed manifest now matches the bundled version",
+          f"version: {_cur_ver}" in yaml_p.read_text(encoding="utf-8"))
+    check("verup: replacement is a clean copy (local marker gone)",
+          not (tp / "gowa" / "LOCAL_EDIT.marker").exists())
+    check("verup: processes.py shipped by the upgrade",
+          (tp / "gowa" / "processes.py").exists())
+
+    r_same = _loader.bootstrap_gowa_upgrade(tp, _src)
+    check("verup: same version never re-copies", r_same is False)
+
+    # NEWER installed than bundled (e.g. dev rollback) -> keep installed.
+    yaml_p.write_text(yaml_p.read_text(encoding="utf-8")
+                      .replace(f"version: {_cur_ver}", "version: 99.0.0"),
+                      encoding="utf-8")
+    r_newer = _loader.bootstrap_gowa_upgrade(tp, _src)
+    check("verup: installed NEWER than bundled is left alone", r_newer is False)
+finally:
+    _channel_repo.list_all = _v_orig_list
+    if _v_orig_env is None:
+        os.environ.pop("WHATSBOT_TEST", None)
+    else:
+        os.environ["WHATSBOT_TEST"] = _v_orig_env
+    shutil.rmtree(_tmp3, ignore_errors=True)
 
 
 # ═══════════════════════════════════════════════════════════════════

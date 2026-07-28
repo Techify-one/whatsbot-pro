@@ -2,8 +2,10 @@
 
 import asyncio
 import dataclasses
+import mimetypes
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,17 +13,19 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from server.auth import auth_required, verify_token, rbac_enforced, resolve_request_token
+from server.auth import rbac_enforced, resolve_request_token
 from server.helpers import _get_web_dir
 from server.audit_listener import register_audit_listener
 from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
 from server.state import MemoryLogHandler, ConnectionManager, AppState
-from server.background import audit_purge_loop
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, audit as audit_routes
+from server.background import audit_purge_loop, empty_conversation_sweep_loop
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
 from plugins.loader import bootstrap_initial_plugins, bootstrap_gowa_upgrade, discover_and_load, PluginRegistry
+from server.persistence_check import ensure_storage_persistence
+from server.upload_limits import MAX_UPLOAD_BYTES, is_upload_path, too_large_response
 from plugins.context import set_runtime as _set_plugin_runtime, set_runtime_services as _set_runtime_services, set_channel_runtime as _set_channel_runtime, set_deps as _set_deps
 from plugins.lifecycle import manager as _lifecycle_manager
 from runtime.supervisor import TaskSupervisor, TaskSpec, RestartPolicy
@@ -29,16 +33,26 @@ from runtime.subprocess_service import SubprocessService
 from channels.registry import ChannelRegistry
 from channels.outbound import OutboundRouter
 from channels.providers.gowa_channel import GOWAChannel
-from db.repositories import channel_repo
+from db.repositories import channel_repo, user_repo
 from plugins.events import (
     set_runtime as _set_events_runtime,
     register_plugin_events,
     register_plugin_filters,
     emit as emit_event,
 )
+from server import balance_monitor
 from server.balance_monitor import set_runtime as _set_balance_runtime
 
 logger = logging.getLogger(__name__)
+
+
+# A plugin exposes PUBLIC (auth-exempt) endpoints under ``/api/plugins/<id>/
+# public/…`` and authenticates them ITSELF (plano 46 · 01-D — e.g. the website
+# widget validates a per-visitor session token + allowed-domains, never the
+# operator bearer). Generic convention: the core never names a plugin; a plugin
+# opts in simply by mounting its public routes under ``/public/``. Module-level so
+# it compiles once and is unit-testable.
+PLUGIN_PUBLIC_PATH_RE = re.compile(r"^/api/plugins/[a-z][a-z0-9_]{0,31}/public/")
 
 
 # ── Static files with mandatory revalidation ─────────────────────────────
@@ -126,6 +140,10 @@ def create_app(
     # plugin routes/tools/prompts are wired into the app before the first request.
     plugins_dir = settings.data_dir / "storages" / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
+    # Deploy safeguard: detect a wiped storages/ (Coolify redeploy without a
+    # Persistent Storage volume) BEFORE bootstrap re-seeds, so a silent data-loss
+    # failure becomes a loud, actionable log. Fail-open / WHATSBOT_TEST no-op.
+    ensure_storage_persistence(settings.data_dir / "storages")
     _plugin_examples_dir = settings.data_dir / "assets" / "plugin_examples"
     bootstrap_initial_plugins(plugins_dir, _plugin_examples_dir)
     # plano 13: existing installs (storages/plugins already populated, so the
@@ -198,12 +216,30 @@ def create_app(
     # registry's collision no-op gives precedence to code over the DB. Both
     # steps are best-effort: a failure never blocks the app from booting.
     try:
-        agent_factory.seed_default_agent(settings)
+        # Fix agente-padrão (2026-07): só semeia o agente "default" em instalação
+        # NOVA (tabela vazia). Antes o boot recriava a row sempre que ausente —
+        # o que ressuscitava um "default" que o operador tinha excluído (a
+        # exclusão só é permitida com outro agente marcado como padrão, então
+        # uma instalação com agentes nunca fica sem fallback).
+        from db.repositories import agent_repo as _agent_repo
+        if not _agent_repo.list_all():
+            agent_factory.seed_default_agent(settings)
         # Plano 22: preserve any legacy config.system_prompt/model into the
         # canonical default agent before those config keys are retired (idempotent).
         agent_factory.migrate_legacy_config_to_default_agent()
     except Exception as e:
         logger.warning("AI engine seed failed: %s", e)
+    # Core RBAC permissions: backfill any catalog key missing from the
+    # ``permissions`` table (idempotent). Self-heals an orphaned/skipped
+    # permission migration — otherwise those keys can't be granted (the checkbox
+    # saves as a no-op). Mirrors how plugins reconcile their perms at load.
+    try:
+        from db.repositories import rbac_repo as _rbac_repo
+        _n = _rbac_repo.sync_core_permissions()
+        if _n:
+            logger.warning("RBAC: backfilled %d missing core permission(s)", _n)
+    except Exception as e:
+        logger.warning("Core permissions sync failed: %s", e)
     # Built-in system custom-attributes (plano 19): seed CPF & friends (idempotent).
     try:
         from db.system_attributes import seed_system_attributes
@@ -292,6 +328,12 @@ def create_app(
         from app.services.ws_projections import register_lifecycle_ws_projection
         register_lifecycle_ws_projection(ws_manager)
         _set_balance_runtime(ws_manager, _loop, settings)
+        # plano 42 C: seed the balance cache at boot (fire-and-forget) so the first
+        # GET /api/balance serves a cached snapshot before any LLM call primes it —
+        # closing the window the old 502 lived in. A dead/slow proxy just no-ops.
+        _bal_key = settings.get("openrouter_api_key", "")
+        if _bal_key:
+            _loop.create_task(balance_monitor.prime_cache(_bal_key))
         # Lifecycle: plugins finished loading + bus is live, now broadcast
         for loaded in registry.loaded.values():
             emit_event("plugin.loaded", {
@@ -328,6 +370,11 @@ def create_app(
         # audit_purge is not a channel concern and stays core, always registered.
         supervisor.register(TaskSpec(
             "audit_purge", lambda: audit_purge_loop(deps), policy=RestartPolicy.PERMANENT))
+        # plano 28 Fase 5: sweep empty 'inbound' ghost conversations (t=0 materialized
+        # but batch never persisted the 1st message). Core concern, always registered.
+        supervisor.register(TaskSpec(
+            "empty_conversation_sweep", lambda: empty_conversation_sweep_loop(deps),
+            policy=RestartPolicy.PERMANENT))
         state.task_supervisor = supervisor
         # Shared subprocess service for plugins (plano 09 Fase 5). GOWA keeps its
         # own ManagedProcess; this one tracks plugin-spawned subprocesses.
@@ -388,7 +435,7 @@ def create_app(
 
     _docs_enabled = os.getenv("WHATSBOT_ENABLE_DOCS", "0") == "1"
     app = FastAPI(
-        title="WhatsBot",
+        title="WhatsBot-Pro",
         lifespan=lifespan,
         docs_url="/docs" if _docs_enabled else None,
         redoc_url="/redoc" if _docs_enabled else None,
@@ -428,6 +475,46 @@ def create_app(
             headers={"Cache-Control": "no-cache"},
         )
 
+    # Operator-uploaded media (plano 64 · F10) — XSS armazenado.
+    #
+    # `statics/outbox/` recebe arquivo ARBITRÁRIO enviado pelo operador e é
+    # servido same-origin, com uma CSP que permite `'unsafe-inline'`. Um `.html`
+    # ou `.svg` ali dentro executaria script no domínio do painel (o `nosniff`
+    # não ajuda: o tipo é corretamente adivinhado). Arrastar arquivos amplia
+    # muito a superfície, então:
+    #
+    #   1. o nome em disco já nasce com a extensão do MIME validado e nunca com
+    #      uma extensão executável (F1, server/upload_names.py); e
+    #   2. esta rota — que shadow-a o mount, por ser registrada ANTES, igual ao
+    #      precedente do avatar — força `Content-Disposition: attachment` para
+    #      todo tipo fora de uma allow-list inline pequena e explícita.
+    #
+    # A allow-list é exatamente o que o painel precisa renderizar embutido
+    # (<img>/<video>/<audio> e o PDF que o navegador abre). Qualquer coisa fora
+    # dela é baixada, nunca renderizada.
+    _INLINE_SAFE_MIMES = {
+        "image/jpeg", "image/png", "image/webp", "image/gif",
+        "video/mp4", "video/webm",
+        "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm",
+        "application/pdf",
+    }
+
+    @app.get("/statics/outbox/{name}")
+    async def serve_outbox_media(name: str):
+        if "/" in name or "\\" in name or ".." in name:
+            return Response(status_code=404)
+        media_file = statics_outbox_dir / name
+        if not media_file.is_file():
+            return Response(status_code=404)
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if mime in _INLINE_SAFE_MIMES:
+            return FileResponse(str(media_file), media_type=mime)
+        return FileResponse(
+            str(media_file),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
     # Mount statics/ for GOWA media files (auto-downloaded images, audio, etc.)
     app.mount("/statics", StaticFiles(directory=str(statics_dir)), name="statics")
 
@@ -451,7 +538,7 @@ def create_app(
         # English canonical routes + legacy PT aliases (kept so a hard reload on an
         # old bookmark still serves index.html; the frontend rewrites them to the
         # English path via redirectLegacyPath).
-        {"/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/attendances", "/ai", "/channels", "/audit", "/wizard"}
+        {"/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/protocolos", "/attendances", "/ai", "/channels", "/audit", "/wizard"}
         | {"/contatos", "/painel", "/atendimentos", "/auditoria"}
         | _PLUGIN_SPA_PATHS
     )
@@ -459,6 +546,15 @@ def create_app(
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
         path = request.url.path
+
+        # Plugin-owned PUBLIC endpoints (generic convention, plano 46 · 01-D): any
+        # route under ``/api/plugins/<id>/public/`` is auth-exempt — the plugin
+        # authenticates the request ITSELF (e.g. the website widget validates a
+        # per-visitor session token + allowed-domains, never the operator bearer).
+        # This is provider-agnostic: the core never names a plugin; a plugin opts in
+        # simply by mounting its public routes under ``/public/``.
+        if PLUGIN_PUBLIC_PATH_RE.match(path):
+            return await call_next(request)
 
         # SPA pages, static assets, webhook, and auth endpoints are always open.
         # The prefixes serve the SPA on hard reload of an entity deep-link
@@ -475,30 +571,23 @@ def create_app(
             if path.startswith(prefix):
                 return await call_next(request)
 
-        # Only protect /api/* paths. RBAC is additive (plano 03): a valid USER
-        # session OR the legacy single-password token both authenticate. When
-        # rbac_enforce is on, ONLY a user session is accepted. Default off so a
-        # live single-password / open install keeps working.
+        # Only protect /api/* paths. The gate closes as soon as ≥1 RBAC user
+        # exists (``has_users``, self-healing — plano 48): from that moment a
+        # valid USER session is required. A genuinely zero-user install stays
+        # open only until the first admin is bootstrapped (``/api/auth/`` is
+        # exempt). ``rbac_enforce`` is a rigid override (normally redundant).
         request.state.user = None
         if path.startswith("/api/"):
-            enforce = rbac_enforced(settings)
-            auth_req = auth_required(settings)
+            has_users = await asyncio.to_thread(user_repo.has_any)
+            enforce = rbac_enforced(settings) or has_users
             auth_header = request.headers.get("authorization", "")
             token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
             # Resolve a present token even in open mode so per-permission gating
-            # applies to voluntarily-logged-in users; only hit the DB when there's
-            # a token or auth is actually required/enforced.
-            if token or enforce or auth_req:
-                kind, user = await asyncio.to_thread(
-                    resolve_request_token, token, settings)
+            # applies to voluntarily-logged-in users.
+            if token or enforce:
+                kind, user = await asyncio.to_thread(resolve_request_token, token)
                 request.state.user = user
-                if enforce:
-                    denied = kind != "user"
-                elif auth_req:
-                    denied = kind is None
-                else:
-                    denied = False  # open mode — token (if any) attached for gating
-                if denied:
+                if enforce and kind != "user":  # only a USER session passes
                     return JSONResponse(
                         {"ok": False, "error": "Não autenticado."},
                         status_code=401,
@@ -524,23 +613,62 @@ def create_app(
             reset_current_actor(_actor_token)
 
     @app.middleware("http")
+    async def upload_size_limit(request: Request, call_next):
+        # Plano 64 · F2 — recusa um upload grande demais ANTES de lê-lo na RAM.
+        # Só olha o Content-Length declarado (barato); um cliente que mente sobre
+        # ele ainda passa, mas o teto do navegador + este gate cobrem o caso real
+        # (arrastar um arquivo enorme por engano).
+        if request.method == "POST" and is_upload_path(request.url.path):
+            raw_len = request.headers.get("content-length")
+            try:
+                if raw_len is not None and int(raw_len) > MAX_UPLOAD_BYTES:
+                    return too_large_response()
+            except ValueError:
+                pass
+        return await call_next(request)
+
+    @app.middleware("http")
     async def security_headers(request: Request, call_next):
         resp = await call_next(request)
         resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         resp.headers["X-Content-Type-Options"] = "nosniff"
-        resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        resp.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
-            "worker-src 'self' blob:; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob:; "
-            "media-src 'self' data: blob:; "
-            "connect-src 'self' ws: wss:; "
-            "frame-ancestors 'none'"
-        )
+        # A route may set its OWN Content-Security-Policy to opt out of the default
+        # frame lock — e.g. an embeddable page (the website-widget iframe) that must
+        # allow ``frame-ancestors <allowed_domains>`` instead of ``'none'``. When it
+        # did, respect it and DON'T also send ``X-Frame-Options: DENY`` (which would
+        # override the allow-list and block every embed). Otherwise apply the strict
+        # app-wide default. Generic: the middleware never names a route/plugin.
+        if "content-security-policy" not in resp.headers:
+            resp.headers["X-Frame-Options"] = "DENY"
+            resp.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+                "worker-src 'self' blob:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: blob:; "
+                "media-src 'self' data: blob:; "
+                "connect-src 'self' ws: wss:; "
+                "frame-ancestors 'none'"
+            )
         return resp
+
+    @app.middleware("http")
+    async def _legacy_conversation_route_alias(request: Request, call_next):
+        # Compat: as rotas foram renomeadas /api/conversations -> /api/atendimentos
+        # (e /api/contacts/{phone}/conversation -> /atendimento). Reescreve o path
+        # legado para o novo ANTES do roteamento, então bundles/clients antigos que
+        # ainda chamam /api/conversations continuam funcionando.
+        p = request.scope.get("path", "")
+        np = None
+        if p.startswith("/api/conversations"):
+            np = "/api/atendimentos" + p[len("/api/conversations"):]
+        elif p.startswith("/api/contacts/") and p.endswith("/conversation"):
+            np = p[: -len("/conversation")] + "/atendimento"
+        if np is not None:
+            request.scope["path"] = np
+            request.scope["raw_path"] = np.encode("latin-1")
+        return await call_next(request)
 
     # ── Health endpoint (always open, used by Docker healthcheck) ──────
 
@@ -562,6 +690,8 @@ def create_app(
     @app.get("/runtime")
     @app.get("/users")
     @app.get("/conversations")
+    # /protocolos = path canônico da aba do plugin protocolos; /attendances é alias.
+    @app.get("/protocolos")
     @app.get("/attendances")
     @app.get("/audit")
     @app.get("/ai")
@@ -631,6 +761,8 @@ def create_app(
     conversations_routes.register_routes(app, deps)
     conversation_labels_routes.register_routes(app, deps)
     saved_filters_routes.register_routes(app, deps)
+    sound_prefs_routes.register_routes(app, deps)
+    account_routes.register_routes(app, deps)
     webhook.register_routes(app, deps)
     logs.register_routes(app, deps)
     sandbox.register_routes(app, deps)

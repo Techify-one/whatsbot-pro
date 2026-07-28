@@ -28,6 +28,8 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -76,6 +78,10 @@ contacts = Table(
     Column("unread_count", Integer, nullable=False, server_default="0"),
     Column("unread_ai_count", Integer, nullable=False, server_default="0"),
     Column("has_unread_mention", Integer, nullable=False, server_default="0"),
+    # Tipo do contato herdado do canal de origem (plano tipos-de-contato): o
+    # provider declara via Channel.contact_type() — 'whatsapp' (GOWA + Cloud),
+    # 'telegram', ou 'outros' (default universal, provider sem override).
+    Column("contact_type", Text, nullable=False, server_default="outros"),
     # Custom attributes (plano 05) — native JSON/JSONB, owned by this plan for
     # the contact scope. conversations.custom_attributes is owned by plano 01.
     Column("custom_attributes", _json_type(), nullable=False, server_default="{}"),
@@ -84,6 +90,15 @@ contacts = Table(
 )
 Index("idx_contacts_updated", contacts.c.updated_at)
 Index("idx_contacts_archived", contacts.c.is_archived)
+# GIN sobre o JSONB de custom attributes (migration 0014) — declarado aqui para o
+# metadata espelhar o banco (autogenerate/drift-check não podem propor DROP).
+Index("idx_contacts_cattr_gin", contacts.c.custom_attributes, postgresql_using="gin")
+# GIN trigram sobre f_unaccent(lower(name)) (plano 62 F4, migration 0060) —
+# espelhado aqui para o autogenerate/drift-check não propor DROP do índice.
+Index("idx_contacts_name_trgm",
+      func.f_unaccent(func.lower(contacts.c.name)).label("name_unaccent"),
+      postgresql_using="gin",
+      postgresql_ops={"name_unaccent": "gin_trgm_ops"})
 
 
 observations = Table(
@@ -112,14 +127,54 @@ messages = Table(
     Column("revoked", Integer, nullable=False, server_default="0"),
     Column("reactions", Text),  # JSON: {emoji: [reactor, ...]}
     Column("reply_to_msg_id", Text),  # GOWA msg_id of the quoted message (reply)
+    # Timestamp (epoch) da última edição de uma mensagem de saída (operador/IA).
+    # NULL = nunca editada. O painel mostra "editada" quando setado.
+    Column("edited_ts", Float),
     # plano 01: thread de atendimento. Aditivo e nullable (contact_id permanece).
     # FK por nome (conversations é definida adiante).
     Column("conversation_id", Integer,
-           ForeignKey("conversations.id", ondelete="CASCADE")),
+           ForeignKey("atendimentos.id", ondelete="CASCADE")),
+    # Quem (operador logado) enviou uma mensagem MANUAL (role='assistant' +
+    # status='operator'). Aditivo e nullable. FK LÓGICA para users.id (sem
+    # constraint, igual audit_log.actor_user_id) — permite op.add_column em SQLite
+    # sem rebuild e não quebra a linha se o usuário for deletado. sent_by_name é um
+    # SNAPSHOT do nome no momento do envio (o frontend o lê direto, sem join).
+    # NULL = remetente desconhecido → o painel cai no rótulo "Manual".
+    Column("sent_by_user_id", Integer),
+    Column("sent_by_name", Text),
+    # Qual agente de IA produziu esta mensagem: role='assistant' (resposta) ou
+    # 'tool_call' (execução de tool). Aditivo e nullable — o painel resolve o
+    # display_name e exibe "IA - <NOME>" / "Ferramenta IA - <NOME>". NULL em
+    # mensagens não-IA (user/operator/private_note) e em linhas legadas.
+    Column("agent_key", Text),
+    # plano 51 (01 F1): execução que produziu esta resposta da IA. FK LÓGICA para
+    # executions.id (sem constraint, igual sent_by_user_id) — execução é log
+    # histórico e não deve cascatear/travar o INSERT. NULL em linhas legadas /
+    # mensagens fora de um turno rastreado; o consumidor cai no fuzzy (DL2).
+    Column("execution_id", Integer),
 )
 Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)
 Index("idx_msg_conversation_ts", messages.c.conversation_id, messages.c.ts)
+Index("idx_msg_execution", messages.c.execution_id)
+# Índice PARCIAL (plano 62 F2, materializado na migration 0059): o scan de
+# conteúdo da busca (``contact_ids_matching_message`` em db/search/contact_search.py)
+# faz ``ORDER BY ts DESC LIMIT MESSAGE_SCAN_CAP`` filtrando os MESMOS 4 roles do
+# predicado abaixo — vira index scan reverso com early-termination. Subconjunto
+# deliberado de LIST_PANEL_ONLY_ROLES: transcription/private_note/error seguem
+# pesquisáveis, então ficam no índice.
+Index("idx_msg_ts_visible", messages.c.ts.desc(),
+      postgresql_where=text(
+          "role NOT IN ('tool_call', 'system_notice', 'conversation_event', 'system')"))
+# GIN trigram PARCIAL sobre f_unaccent(lower(content)) (plano 62 F4, migration
+# 0060) — mesmo predicado de roles do idx_msg_ts_visible. Espelhado aqui para o
+# autogenerate/drift-check não propor DROP do índice.
+Index("idx_msg_content_trgm",
+      func.f_unaccent(func.lower(messages.c.content)).label("content_unaccent"),
+      postgresql_using="gin",
+      postgresql_ops={"content_unaccent": "gin_trgm_ops"},
+      postgresql_where=text(
+          "role NOT IN ('tool_call','system_notice','conversation_event','system')"))
 
 
 usage = Table(
@@ -216,6 +271,13 @@ channels = Table(
     Column("connected", Integer, nullable=False, server_default="0"),
     Column("logged_in", Integer, nullable=False, server_default="0"),
     Column("own_phone", Text, nullable=True),
+    # Account-identity dedup contract (plano 32): canonical account id + its kind
+    # (namespace: phone | phone_number_id | bot_id | bot_token | ...). Populated by
+    # the provider hooks (create-time or the status sweep). The partial unique
+    # index below forbids two enabled/non-archived channels of the same provider
+    # sharing an identity.
+    Column("account_identity", Text, nullable=True),
+    Column("account_identity_kind", Text, nullable=True),
     Column("last_error", Text, nullable=True),
     # Soft-delete (plano inboxes/canais §4.3-c): "excluir" um canal o arquiva
     # (esconde da UI) em vez de apagar, preservando o histórico de conversas da
@@ -223,6 +285,17 @@ channels = Table(
     Column("archived", Integer, nullable=False, server_default="0"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    # plano 32: one account per (provider) among enabled, non-archived channels.
+    # Partial so NULL/'' identities (not-yet-logged-in, disabled, archived) never
+    # collide. Mirrors the Alembic migration 0038_channels_account_identity.
+    Index(
+        "ux_channels_account_identity", "provider", "account_identity",
+        unique=True,
+        postgresql_where=text("enabled = 1 AND archived = 0 "
+                              "AND account_identity IS NOT NULL AND account_identity <> ''"),
+        sqlite_where=text("enabled = 1 AND archived = 0 "
+                          "AND account_identity IS NOT NULL AND account_identity <> ''"),
+    ),
 )
 
 channel_credentials = Table(
@@ -378,8 +451,8 @@ inbox_members = Table(
 )
 Index("idx_inbox_members_user", inbox_members.c.user_id)
 
-conversations = Table(
-    "conversations",
+atendimentos = Table(
+    "atendimentos",                                             # RENOMEADA de "conversations" (nomenclatura Atendimento)
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("display_id", Integer, nullable=False),              # sequencial humano (P6)
@@ -389,11 +462,17 @@ conversations = Table(
            ForeignKey("contact_inboxes.id", ondelete="CASCADE"), nullable=False),
     Column("status", Text, nullable=False, server_default="open"),  # open|closed (P3)
     Column("is_archived", Integer, nullable=False, server_default="0"),  # ortogonal (P10)
+    Column("is_pinned", Integer, nullable=False, server_default="0"),    # fixar no topo por CONVERSA (plano 54)
     Column("assignee_user_id", Integer),                        # NULLABLE sem FK (P1)
     Column("team_id", Integer),                                 # NULLABLE sem FK
     Column("priority", Text),
     Column("ai_active", Integer, nullable=False, server_default="1"),   # gate IA nível 3
     Column("active_agent_key", Text),                          # plano 06: agente da conversa
+    # plano 28: origem do atendimento — 'inbound' (cliente iniciou), 'outbound'/'manual'
+    # (operador), 'imported' (import de chats). Dirige o gate de visibilidade da sidebar
+    # (uma conversa inbound aparece em t=0 mesmo sem mensagem salva ainda), substituindo
+    # o proxy racy last_message_ts>0. NULL = tratado como não-inbound (cai no ts>0).
+    Column("origin", Text),
     Column("opened_at", Float, nullable=False),
     Column("resolved_at", Float),
     Column("waiting_since", Float),
@@ -401,18 +480,25 @@ conversations = Table(
     Column("custom_attributes", _json_type(), nullable=False, server_default="{}"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
-    UniqueConstraint("display_id", name="uq_conv_display_id"),
+    UniqueConstraint("display_id", name="uq_conv_display_id"),   # nome do constraint mantido (interno, convergente c/ live)
 )
-Index("idx_conv_inbox_status", conversations.c.inbox_id, conversations.c.status)
-Index("idx_conv_assignee_status", conversations.c.assignee_user_id, conversations.c.status)
-Index("idx_conv_contact", conversations.c.contact_id)
-Index("idx_conv_contact_inbox", conversations.c.contact_inbox_id)
-Index("idx_conv_last_activity", conversations.c.last_activity_at)
-Index("idx_conv_archived", conversations.c.is_archived)
+Index("idx_atend_inbox_status", atendimentos.c.inbox_id, atendimentos.c.status)
+Index("idx_atend_assignee_status", atendimentos.c.assignee_user_id, atendimentos.c.status)
+Index("idx_atend_contact", atendimentos.c.contact_id)
+Index("idx_atend_contact_inbox", atendimentos.c.contact_inbox_id)
+Index("idx_atend_last_activity", atendimentos.c.last_activity_at)
+Index("idx_atend_archived", atendimentos.c.is_archived)
+# Índice único PARCIAL (plano 28, materializado na migration 0036): no máximo UMA
+# conversa aberta por (contato, inbox). É o cinto de segurança do double-create de
+# resolvers concorrentes — o loser recebe IntegrityError e adota a thread do winner
+# (catch em conversation_repo._create_open_atomic). Múltiplas conversas FECHADAS
+# por par continuam permitidas (o modelo de atendimento guarda o histórico).
+Index("uq_atend_open_contact_inbox", atendimentos.c.contact_id, atendimentos.c.inbox_id,
+      unique=True, postgresql_where=text("status = 'open'"))
 
 # Contador atômico de display_id (P6) — INSERT/UPDATE na mesma transação do create.
-conversation_counters = Table(
-    "conversation_counters",
+atendimento_counters = Table(
+    "atendimento_counters",                                     # RENOMEADA de "conversation_counters"
     metadata,
     Column("name", Text, primary_key=True),
     Column("next_value", Integer, nullable=False, server_default="1"),
@@ -422,8 +508,8 @@ conversation_counters = Table(
 # Etiquetas de conversa (estilo Chatwoot labels) — registro GLOBAL próprio, SEPARADO
 # das tags de contato (tags/contact_tags). Decisão Thiago: etiquetas pertencem à
 # conversa, não ao contato. Atribuição N:N via conversation_label_links.
-conversation_labels = Table(
-    "conversation_labels",
+atendimento_labels = Table(
+    "atendimento_labels",                                      # RENOMEADA de "conversation_labels"
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", Text, nullable=False, unique=True),
@@ -432,15 +518,15 @@ conversation_labels = Table(
     Column("created_at", Float, nullable=False),
 )
 
-conversation_label_links = Table(
-    "conversation_label_links",
+atendimento_label_links = Table(
+    "atendimento_label_links",                                 # RENOMEADA de "conversation_label_links"
     metadata,
-    Column("conversation_id", Integer,
-           ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True),
+    Column("conversation_id", Integer,                         # coluna CONGELADA (contrato do plugin)
+           ForeignKey("atendimentos.id", ondelete="CASCADE"), primary_key=True),
     Column("label_id", Integer,
-           ForeignKey("conversation_labels.id", ondelete="CASCADE"), primary_key=True),
+           ForeignKey("atendimento_labels.id", ondelete="CASCADE"), primary_key=True),
 )
-Index("idx_conv_label_links_label", conversation_label_links.c.label_id)
+Index("idx_atend_label_links_label", atendimento_label_links.c.label_id)
 
 
 unread_msg_ids = Table(
@@ -451,6 +537,32 @@ unread_msg_ids = Table(
     Column("msg_id", Text, nullable=False),
 )
 Index("idx_unread_contact", unread_msg_ids.c.contact_id)
+
+
+# Menção direcionada a um usuário (atendente) numa nota privada — colaboração
+# estilo Chatwoot. Distinta de `contacts.has_unread_mention` (que é @menção do BOT
+# em grupo do WhatsApp, nível-contato): esta é POR-USUÁRIO. Uma nota privada que
+# menciona N usuários gera N linhas. `read_at` NULL = não-lida (badge "@" + aba
+# Menções); vira timestamp quando o usuário abre a conversa. FKs lógicas (sem
+# constraint em user, igual ao resto do schema) — não quebra se o usuário sumir.
+mentions = Table(
+    "mentions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("message_id", Integer,
+           ForeignKey("messages.id", ondelete="CASCADE"), nullable=False),
+    Column("conversation_id", Integer,
+           ForeignKey("atendimentos.id", ondelete="CASCADE"), nullable=False),
+    Column("contact_id", Integer,
+           ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False),
+    Column("mentioned_user_id", Integer, nullable=False),      # FK lógica -> users.id
+    Column("actor_user_id", Integer),                          # quem mencionou (FK lógica)
+    Column("actor_name", Text),                                # snapshot do nome do autor
+    Column("created_at", Float, nullable=False),
+    Column("read_at", Float),                                  # NULL = não-lida
+)
+Index("idx_mentions_user_unread", mentions.c.mentioned_user_id, mentions.c.read_at)
+Index("idx_mentions_conversation", mentions.c.conversation_id)
 
 
 executions = Table(
@@ -470,8 +582,26 @@ executions = Table(
     Column("total_tokens", Integer, nullable=False, server_default="0"),
     Column("total_cost_usd", Float, nullable=False, server_default="0.0"),
     Column("routing_steps", Text),                             # plano 06: JSON dos saltos de handoff
+    # plano 36: conversa + canal da execução. conversation_id é coluna SOLTA (sem FK)
+    # — execução é log histórico, não deve travar/cascatear ao apagar a conversa;
+    # o telefone colide entre canais, então o filtro principal é por conversa.
+    # channel_id/channel_label desnormalizados evitam join na listagem.
+    Column("conversation_id", Integer),
+    Column("channel_id", Text),
+    Column("channel_label", Text),
+    # plano "Execuções estilo Nexus": colunas desnormalizadas para busca rápida na
+    # listagem sem precisar varrer execution_steps. input_text = mensagem do cliente
+    # que disparou o turno; output_text = resposta final da IA; msg_id = id da
+    # mensagem WhatsApp de origem; has_ai = o turno realmente invocou o modelo
+    # (tem passo llm_* / agent_key) — alimenta o filtro "só execuções com IA".
+    Column("input_text", Text),
+    Column("output_text", Text),
+    Column("msg_id", Text),
+    Column("has_ai", Integer, nullable=False, server_default="0"),
 )
 Index("idx_exec_started", executions.c.started_at)
+Index("idx_exec_conversation", executions.c.conversation_id)
+Index("idx_executions_msg_id", executions.c.msg_id)
 
 
 execution_steps = Table(
@@ -521,6 +651,10 @@ tool_overrides = Table(
     Column("enabled", Integer, nullable=False, server_default="1"),
     Column("description", Text),
     Column("display_label", Text),
+    # plano 47 — reaproveitar o RESULTADO desta tool para a IA entre turnos: o
+    # tool_memory reinjeta o "→ resultado" (não só nome+args) no bloco compacto.
+    # Default 0 (byte-idêntico ao legado); toggle uniforme na tela AI Engine → Tools.
+    Column("reuse_result", Integer, nullable=False, server_default="0"),
     Column("updated_at", Float, nullable=False),
 )
 Index("idx_tool_overrides_plugin", tool_overrides.c.plugin_id)
@@ -530,8 +664,9 @@ Index("idx_tool_overrides_plugin", tool_overrides.c.plugin_id)
 # AI engine — config-in-DB + code-in-DB (prefix ``ai_``)
 # --------------------------------------------------------------------------- #
 # These tables move the agent's prompt/model/tools out of code and into the DB,
-# so behaviour can change without a deploy. All JSON-shaped values are stored as
-# JSON-encoded TEXT (portable across SQLite/Postgres), mirroring ``config``.
+# so behaviour can change without a deploy. The ``ai_agents`` JSON columns are
+# NATIVE JSONB (plano 34 F5 — the DB serializes once, killing the double-encoding
+# class at the source); other JSON-shaped values here remain JSON-encoded TEXT.
 
 ai_agents = Table(
     "ai_agents",
@@ -539,20 +674,36 @@ ai_agents = Table(
     # ``agent_key`` is identity — never rename (breaks executions.agent_key).
     Column("agent_key", Text, primary_key=True),
     Column("display_name", Text, nullable=False, server_default=""),
+    # Inline, per-agent system prompt (free text, not reusable across agents).
+    # Source of truth for resolution. ``{placeholder}`` slots are resolved from
+    # ai_variables at render time.
+    Column("prompt", Text, nullable=False, server_default=""),
+    # Legacy: reference to a shared ai_prompts template. No longer read for
+    # resolution (the inline ``prompt`` above replaced it); kept for back-compat
+    # with old rows/snapshots.
     Column("prompt_key", Text, nullable=False, server_default=""),
-    # JSON object: {model, temperature, top_p, max_tokens, ...}
-    Column("model_config", Text, nullable=False, server_default="{}"),
-    # JSON array of tool names, or null/"all" meaning every registered tool.
-    Column("tool_names", Text),
+    # JSON object: {model, temperature, top_p, max_tokens, ...} — native JSONB (F5).
+    Column("model_config", _json_type(), nullable=False, server_default="{}"),
+    # JSON array of tool names, or null/"all" meaning every registered tool. JSONB (F5).
+    Column("tool_names", _json_type()),
     Column("enabled", Integer, nullable=False, server_default="1"),
     # plano 06: roteamento/handoff (consumido pelo motor de routing futuro).
     Column("description", Text, nullable=False, server_default=""),
     Column("is_router", Integer, nullable=False, server_default="0"),
-    Column("routing_targets", Text),                          # JSON array de agent_keys
-    Column("hooks_config", Text, nullable=False, server_default="{}"),  # plano 06: hooks declarativos
+    # plano 36: agente padrão para novas conversas (semântica radio, espelha is_router).
+    Column("is_default", Integer, nullable=False, server_default="0"),
+    Column("routing_targets", _json_type()),                  # JSON array de agent_keys — JSONB (F5)
+    Column("hooks_config", _json_type(), nullable=False, server_default="{}"),  # hooks declarativos — JSONB (F5)
     Column("version", Integer, nullable=False, server_default="1"),
     Column("updated_at", Float, nullable=False),
 )
+# Único roteador no sistema (plano 29 Eixo B, migration 0035) — declarado aqui para
+# o metadata espelhar o banco (autogenerate/drift-check não podem propor DROP).
+Index("ux_ai_agents_single_router", ai_agents.c.is_router,
+      unique=True, postgresql_where=text("is_router = 1"))
+# Único agente padrão de novas conversas (plano 36, migration 0043) — espelha o de router.
+Index("ux_ai_agents_single_default", ai_agents.c.is_default,
+      unique=True, postgresql_where=text("is_default = 1"))
 
 
 ai_prompts = Table(
@@ -573,7 +724,9 @@ ai_variables = Table(
     # Global values referenceable by prompts via ``{name}``.
     Column("name", Text, primary_key=True),
     Column("value", Text, nullable=False, server_default=""),
-    Column("category", Text, nullable=False, server_default=""),
+    # plano 51 (01 F3): versionamento no molde de ai_tools — bump por edição
+    # real (dedup no repo), snapshot em ai_variables_history, rollback forward.
+    Column("version", Integer, nullable=False, server_default="1"),
     Column("updated_at", Float, nullable=False),
 )
 
@@ -642,6 +795,40 @@ ai_tools_history = Table(
 Index("idx_ai_tools_hist", ai_tools_history.c.name, ai_tools_history.c.version)
 
 
+# plano 51 (01 F3): trilha de versão de ai_variables (era o único ponto cego de
+# revert). snapshot = JSON {"name": ..., "value": ...} — molde de ai_tools_history.
+ai_variables_history = Table(
+    "ai_variables_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", Text, nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("snapshot", Text, nullable=False),
+    Column("created_at", Float, nullable=False),
+)
+Index("idx_ai_variables_hist",
+      ai_variables_history.c.name, ai_variables_history.c.version)
+
+
+# Dedicated, git-like version trail for an agent's INLINE prompt only. Each row is
+# a full snapshot of the prompt text (the git "blob" content model); the diff is
+# computed on demand by ``agent.prompt_diff`` (never stored). ``version`` is an
+# independent per-``agent_key`` counter (MAX(version)+1), with dedup on save. This
+# is ADDITIVE to ``ai_agents_history`` (the whole-agent trail) — both coexist.
+ai_agent_prompt_history = Table(
+    "ai_agent_prompt_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("agent_key", Text, nullable=False),
+    Column("version", Integer, nullable=False),   # own counter (independe de ai_agents.version)
+    Column("prompt", Text, nullable=False),        # snapshot COMPLETO do texto (modelo blob do git)
+    Column("note", Text),                          # mensagem de commit (nullable)
+    Column("created_at", Float, nullable=False),
+)
+Index("idx_ai_agent_prompt_hist",
+      ai_agent_prompt_history.c.agent_key, ai_agent_prompt_history.c.version)
+
+
 # Audit trail (plano 07). Append-only "who did what, when, to which resource,
 # before/after". FK to users.id is LOGICAL (no ForeignKey/cascade — the trail
 # must survive user deletion). before/after are TEXT JSON, masked at ingestion
@@ -669,22 +856,70 @@ Index("idx_audit_action", audit_log.c.action, audit_log.c.created_at)
 
 
 # Saved conversation filters (Chatwoot-style): each user can name and persist one
-# or more inbox filter presets. ``user_id`` is NULL for legacy single-password
-# sessions (no user identity) → those presets are shared on that install. ``spec``
+# or more inbox filter presets. ``user_id`` is NULL in open mode (no user identity,
+# before the first admin) → those presets are shared on that install. ``spec``
 # is the full filter snapshot (status/assignment/sort/tags/advanced clauses).
-saved_conversation_filters = Table(
-    "saved_conversation_filters",
+saved_atendimento_filters = Table(
+    "saved_atendimento_filters",                               # RENOMEADA de "saved_conversation_filters"
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = legacy/shared
+    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = open-mode/shared
     Column("name", Text, nullable=False),
     Column("spec", _json_type(), nullable=False),              # {statusFilter, assignmentTab, sortBy, tagFilter, advFilters}
     Column("position", Integer, nullable=False, server_default="0"),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
 )
-Index("idx_saved_filters_user", saved_conversation_filters.c.user_id,
-      saved_conversation_filters.c.position)
+Index("idx_saved_filters_user", saved_atendimento_filters.c.user_id,
+      saved_atendimento_filters.c.position)
+
+# ── Compat aliases (renomeação Conversa→Atendimento) ────────────────────────
+# O nome físico da tabela e a variável passaram a ser ``atendimento*``. O plugin
+# ``protocolos`` (ex-atendimentos) e todo o código legado importam ``conversation*``
+# de ``db.tables``; estes aliases apontam para o MESMO objeto Table, mantendo tudo
+# funcionando sem tocar em ~1100 referências. A coluna ``conversation_id`` e o role
+# ``conversation_event`` permanecem congelados (contrato persistido/plugin).
+conversations = atendimentos
+conversation_counters = atendimento_counters
+conversation_labels = atendimento_labels
+conversation_label_links = atendimento_label_links
+saved_conversation_filters = saved_atendimento_filters
+
+
+# Preferências de som POR-USUÁRIO (plano 63). Override ESPARSO do padrão global
+# ``config.sound_settings``: ``prefs`` guarda só os campos que o usuário
+# sobrescreveu (mesma forma de ``sound_settings.events`` + ``master_enabled``);
+# eventos/sons novos caem no default global automaticamente. ``user_id`` é NULL no
+# modo aberto (sem identidade, antes do 1º admin) → preferência compartilhada
+# naquela instalação. Chave de upsert = índice único em ``user_id``. Molde:
+# ``saved_atendimento_filters`` (FK lógica NULL-safe, payload JSON nativo).
+user_sound_prefs = Table(
+    "user_sound_prefs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=True),                 # logical FK -> users.id; NULL = open-mode/shared
+    Column("prefs", _json_type(), nullable=False),             # override esparso: {master_enabled?, events:{<key>:{...}}}
+    Column("updated_at", Float, nullable=False),
+)
+Index("ux_user_sound_prefs_user", user_sound_prefs.c.user_id, unique=True)
+
+
+# Biblioteca de sons IMPORTADOS pela equipe (aba "Sons"). O áudio em si fica em
+# ``statics/sounds/<filename>`` (servido pelo mount estático); aqui ficam o nome
+# escolhido pelo operador e a proveniência. O id vira ``custom:<id>`` nas
+# preferências de som (``sound_settings`` / ``user_sound_prefs``).
+custom_sounds = Table(
+    "custom_sounds",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String(80), nullable=False),
+    Column("filename", String(120), nullable=False),   # gerado; nunca o nome do upload
+    Column("mime", String(80), nullable=False, server_default=""),
+    Column("size_bytes", Integer, nullable=False, server_default="0"),
+    Column("created_by", Integer, nullable=True),      # logical FK -> users.id
+    Column("created_at", Float, nullable=False, server_default="0"),
+)
+Index("ix_custom_sounds_name", custom_sounds.c.name)
 
 
 # Set of core table names — used by the SQLite → Postgres migration helper to

@@ -13,13 +13,15 @@ import asyncio
 import logging
 import time
 
-from fastapi import Request
+from fastapi import Depends, Request
 
 from db.repositories import conversation_label_repo as label_repo, conversation_repo
 from plugins.events import emit_with_filter
 from server import system_notices
 from server.authz import permission_denied, current_user
+from server.deps import require_permission, install_exception_handlers
 from server.helpers import _ok, _err
+from server.pagination import CAP_LIST
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ _MAX_NAME = 40
 
 def register_routes(app, deps):
     ws_manager = deps.ws_manager
+
+    install_exception_handlers(app)
 
     async def _broadcast_registry():
         """Push the updated label registry so open editors refresh their palette."""
@@ -43,7 +47,8 @@ def register_routes(app, deps):
         rows = await asyncio.to_thread(label_repo.get_all)
         return _ok(rows)
 
-    @app.post("/api/conversation-labels")
+    @app.post("/api/conversation-labels",
+              dependencies=[Depends(require_permission("conversation_label.manage"))])
     async def create_conversation_label(request: Request):
         body = await request.json()
         name = (body.get("name") or "").strip()
@@ -60,7 +65,8 @@ def register_routes(app, deps):
             "id": row["id"], "name": name, "color": color, "ts": time.time()})
         return _ok(row)
 
-    @app.put("/api/conversation-labels/{label_id}")
+    @app.put("/api/conversation-labels/{label_id}",
+             dependencies=[Depends(require_permission("conversation_label.manage"))])
     async def update_conversation_label(label_id: int, request: Request):
         body = await request.json()
         name = (body.get("name") or "").strip() or None
@@ -79,7 +85,8 @@ def register_routes(app, deps):
             "id": label_id, "name": row["name"], "color": row["color"], "ts": time.time()})
         return _ok(row)
 
-    @app.delete("/api/conversation-labels/{label_id}")
+    @app.delete("/api/conversation-labels/{label_id}",
+                dependencies=[Depends(require_permission("conversation_label.manage"))])
     async def delete_conversation_label(label_id: int):
         ok = await asyncio.to_thread(label_repo.delete, label_id)
         if not ok:
@@ -89,7 +96,7 @@ def register_routes(app, deps):
         return _ok({"deleted": label_id})
 
     # ── Etiquetas de uma conversa ─────────────────────────────────────
-    @app.get("/api/conversations/{conv_id}/labels")
+    @app.get("/api/atendimentos/{conv_id}/labels")
     async def get_conversation_labels(conv_id: int, request: Request):
         denied = permission_denied(request, "conversation.read")
         if denied:
@@ -97,7 +104,27 @@ def register_routes(app, deps):
         rows = await asyncio.to_thread(label_repo.get_for_conversation, conv_id)
         return _ok({"conversation_id": conv_id, "labels": rows})
 
-    @app.put("/api/conversations/{conv_id}/labels")
+    @app.post("/api/atendimentos/labels-batch")
+    async def get_conversation_labels_batch(body: dict, request: Request):
+        """Etiquetas de VÁRIAS conversas em UMA request (plano 50 F13). Substitui o
+        fan-out de 1 GET por atendimento no modo etiqueta do Kanban. Body: ``{ids:[...]}``
+        → ``{labels_by_conv: {id: [label,...]}}``. Cap defensivo no nº de ids."""
+        denied = permission_denied(request, "conversation.read")
+        if denied:
+            return denied
+        raw = body.get("ids") or []
+        if not isinstance(raw, list):
+            return _err("ids deve ser uma lista.")
+        ids = []
+        for x in raw[:CAP_LIST * 5]:  # cap defensivo (F12): no máximo 1000 ids
+            try:
+                ids.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        by_conv = await asyncio.to_thread(label_repo.get_for_conversations, ids)
+        return _ok({"labels_by_conv": by_conv})
+
+    @app.put("/api/atendimentos/{conv_id}/labels")
     async def set_conversation_labels(conv_id: int, body: dict, request: Request):
         denied = permission_denied(request, "conversation.reply")
         if denied:

@@ -14,19 +14,14 @@ def main():
     data_dir = get_data_dir()
 
     # Initialize database before anything else.
-    # URL resolution: DATABASE_URL env > storages/database.json > sqlite default.
+    # URL resolution (Postgres-only, plano 29): exclusivamente a env DATABASE_URL.
     from db import init_db
     is_docker = os.environ.get("WHATSBOT_DOCKER") == "1" or Path("/.dockerenv").exists()
     storages_dir = data_dir / "storages"
     storages_dir.mkdir(exist_ok=True)
     init_db(storages_dir=storages_dir)
 
-    # Auto-migrate from JSON files if DB is empty
-    from db.migrate_json import needs_migration, migrate
-    if needs_migration(data_dir):
-        migrate(data_dir)
-
-    # Now load settings (reads from SQLite)
+    # Now load settings (reads from the database)
     from config.settings import Settings
     settings = Settings()
 
@@ -68,7 +63,6 @@ def main():
         audio_model=settings.get("audio_model", "google/gemini-3-flash-preview"),
         image_model=settings.get("image_model", "google/gemini-3-flash-preview"),
         document_model=settings.get("document_model", "google/gemini-2.5-flash"),
-        improvement_model=settings.get("improvement_model", ""),
         default_ai_enabled=settings.get("default_ai_enabled", True),
     )
 

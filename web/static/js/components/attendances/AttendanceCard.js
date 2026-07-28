@@ -1,5 +1,5 @@
 // Card de atendimento (kanban). Draggable quando o usuário tem a permissão do
-// modo atual. Clicar (sem arrastar) abre o chat da conversa.
+// modo atual. Clicar (sem arrastar) abre o chat do atendimento.
 import { h } from 'preact';
 import { useRef } from 'preact/hooks';
 import htm from 'htm';
@@ -60,4 +60,3 @@ export function AttendanceCard({ convo, canDrag, assigneeName, showChannel, labe
   `;
 }
 
-export default AttendanceCard;

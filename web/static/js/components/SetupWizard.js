@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
-import { fetchQrBlob, refreshQr, setupRequestKey, setupKeyStatus, savePrompt } from '../services/api.js';
+import { fetchQrBlob, refreshQr, setupRequestKey, setupKeyStatus, saveAgentPrompt } from '../services/api.js';
 import { formatPhone } from './QRCode.js';
 
 const html = htm.bind(h);
@@ -186,11 +186,12 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
   const [agentPrompt, setAgentPrompt] = useState('');
   const [showExample, setShowExample] = useState(false);
 
-  function saveAgentPrompt() {
+  function submitAgentPrompt() {
     const txt = agentPrompt.trim();
-    // Plano 22: the prompt is the canonical default agent's prompt (config-in-DB),
-    // saved straight to ai_prompts['default'] — there is no config.system_prompt.
-    if (txt) savePrompt('default', { body: txt });
+    // The prompt is the canonical default agent's inline prompt (config-in-DB),
+    // saved straight onto ai_agents['default'].prompt — there is no
+    // config.system_prompt and no shared prompt template anymore.
+    if (txt) saveAgentPrompt('default', txt);
     setStep(4);
   }
 
@@ -216,7 +217,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
       <div class="flex flex-col items-center text-center">
         <h2 class="text-xl font-bold text-wa-text mb-1">Conecte seu WhatsApp</h2>
         <p class="text-sm text-wa-secondary mb-4">
-          Escaneie o código abaixo para o WhatsBot atender no seu número.
+          Escaneie o código abaixo para o WhatsBot-Pro atender no seu número.
         </p>
         <div class="w-[248px] h-[248px] flex items-center justify-center bg-wa-panel border-2 border-wa-border rounded-2xl overflow-hidden mb-3">
           ${status.connected ? html`
@@ -503,7 +504,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
       return html`
         <div class="flex items-center gap-2">
           <button onClick=${() => setStep(4)} class=${btnGhost}>Pular</button>
-          <button onClick=${saveAgentPrompt} class=${btnPrimary}>Salvar e continuar</button>
+          <button onClick=${submitAgentPrompt} class=${btnPrimary}>Salvar e continuar</button>
         </div>
       `;
     }
@@ -528,7 +529,7 @@ export function SetupWizard({ status, qrAvailable, qrVersion, config, onComplete
           ` : null}
 
           <div class="text-center mb-1">
-            <h1 class="text-2xl font-bold text-wa-teal">Bem-vindo ao WhatsBot</h1>
+            <h1 class="text-2xl font-bold text-wa-teal">Bem-vindo ao WhatsBot-Pro</h1>
             <p class="text-sm text-wa-secondary">Vamos configurar em 4 passos rápidos</p>
           </div>
           <div class="mt-5">

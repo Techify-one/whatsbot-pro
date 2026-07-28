@@ -5,14 +5,16 @@ services:
     restart: unless-stopped
     expose:
       - "8080"
-    # Bind-mount real folders inside the install dir (Chatwoot-style) so the
-    # database, uploaded media (statics/senditems) and logs live in visible host
-    # folders that SURVIVE any container recreation / redeploy. `docker_start.sh`
-    # pre-creates these dirs. Nothing shared, nothing opaque.
+    # NAMED VOLUMES (não bind mounts) para os dados persistirem entre redeploys —
+    # inclusive no Coolify com build pack "Docker Compose", que NÃO preserva bind
+    # mounts de caminho relativo (./data) e apagaria storages/plugins + a sessão do
+    # WhatsApp + a mídia a cada redeploy. Um volume nomeado é gerido pelo Docker e
+    # sobrevive à recriação do container (só some com `docker compose down -v`, que
+    # o Coolify não faz num redeploy normal). Ver docs/DEPLOY_COOLIFY.md.
     volumes:
-      - ./data/storages:/app/storages
-      - ./data/statics:/app/statics
-      - ./data/logs:/app/logs
+      - whatsbot_storages:/app/storages
+      - whatsbot_statics:/app/statics
+      - whatsbot_logs:/app/logs
     environment:
       - WHATSBOT_DOCKER=1
       - WHATSBOT_WEB_PORT=${WHATSBOT_WEB_PORT:-8080}
@@ -23,3 +25,12 @@ services:
     # No healthcheck here on purpose — the image already defines it in the
     # Dockerfile (HEALTHCHECK ...), and Compose inherits it. Duplicating the
     # block kept two copies of the same params drifting out of sync.
+
+# Named volumes geridos pelo Docker — persistem entre redeploys (Coolify inclusive).
+# Backup/inspeção: `docker volume inspect whatsbot-pro_whatsbot_storages` (o prefixo
+# é o nome do projeto compose). NUNCA rode `docker compose down -v` em produção — o
+# `-v` remove estes volumes e apaga plugins + sessão do WhatsApp + mídia.
+volumes:
+  whatsbot_storages:
+  whatsbot_statics:
+  whatsbot_logs:

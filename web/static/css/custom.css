@@ -12,39 +12,83 @@
   --wa-bg: 255 255 255;
   --wa-panel: 240 242 245;
   --wa-chatBg: 239 234 226;
-  --wa-chatOverlay: 209 215 219;
   --wa-outgoing: 217 253 211;
   --wa-incoming: 255 255 255;
   --wa-text: 17 27 33;
-  --wa-secondary: 102 119 129;
-  --wa-border: 233 237 239;
+  /* Um passo mais escuro que o cinza original (102 119 129): aquele media 4,13:1
+     sobre --wa-panel, abaixo do mínimo AA de 4,5 para texto pequeno. */
+  --wa-secondary: 95 111 121;
+  /* Idem: 233 237 239 dava 1,05:1 contra o painel — separador invisível na prática. */
+  --wa-border: 223 228 232;
   --wa-inputBg: 255 255 255;
+  --wa-replyPreviewBg: 255 255 255;
   --wa-hover: 245 246 246;
   --wa-selected: 240 242 245;
   --wa-badge: 37 211 102;
   --wa-icon: 84 101 111;
   --wa-iconActive: 0 128 105;
+  /* Cor do rótulo do remetente IA ("IA - <agente>"). Verde escuro no tema claro
+     (bom contraste no bubble branco/cinza). Ver override claro em html.dark. */
+  --wa-ai-label: 4 120 87;
+  /* Rótulo "Rascunho:" na linha da conversa (vermelho, como no WhatsApp). Tom
+     escuro no tema claro; o escuro clareia em html.dark. Token próprio porque
+     nenhum acento existente passa nos DOIS temas sobre --wa-selected. */
+  --wa-draft: 185 28 28;
 }
 
+/* Tema escuro no molde do VS Code Dark (Dark Modern) — referência escolhida pelo
+   usuário. Duas rodadas de ajuste chegaram aqui: primeiro os acentos neon foram
+   dessaturados, depois as superfícies quase pretas e azuladas foram trocadas por
+   CINZAS NEUTROS MAIS CLAROS, que é o que dá o ar de "tema escuro padrão".
+
+   Superfícies espelham os tokens do VS Code (editor #1F1F1F, painel #252526,
+   barra lateral #181818, borda #3C3C3C, input #313131, hover de lista #2A2D2E):
+   cinza puro, sem dominante de cor, e degraus DELIBERADAMENTE curtos — no VS Code
+   o editor e o painel diferem só ΔL* ≈ 2,4. É por isso que os pisos de superfície
+   em services/themeContrast.js são baixos: eles guardam o limiar de percepção,
+   não uma ambição de contraste.
+
+   Acento: verde saturado porém escuro (nível do tema claro, #008069), o suficiente
+   para o rótulo BRANCO do botão primário manter 4,5:1. O brilho fica por conta dos
+   elementos tipo-texto (ícone ativo, hover), que não carregam texto por cima.
+
+   LETRAS INTACTAS desde a paleta original: --wa-text, --wa-secondary, --wa-icon e
+   --wa-ai-label nunca entraram nesses ajustes — a leitura não perdeu nada em
+   nenhuma rodada. O que NÃO pode regredir: border/hover/selected continuam três
+   valores distintos (já foram iguais, e aí os separadores somem e a conversa
+   aberta fica idêntica à conversa sob o cursor). */
 html.dark {
   color-scheme: dark;
-  --wa-teal: 0 168 132;
-  --wa-tealDark: 0 168 132;
-  --wa-bg: 17 27 33;
-  --wa-panel: 32 44 51;
-  --wa-chatBg: 11 20 26;
-  --wa-chatOverlay: 32 44 51;
-  --wa-outgoing: 0 92 75;
-  --wa-incoming: 32 44 51;
-  --wa-text: 233 237 239;
-  --wa-secondary: 142 158 168;
-  --wa-border: 42 57 66;
-  --wa-inputBg: 42 57 66;
-  --wa-hover: 42 57 66;
-  --wa-selected: 42 57 66;
-  --wa-badge: 37 211 102;
-  --wa-icon: 142 158 168;
-  --wa-iconActive: 0 168 132;
+  /* Verde do acento na mesma faixa do tema claro (0 128 105): saturado, escuro o
+     bastante para o texto branco por cima (4,5:1) e sem voltar ao neon. */
+  --wa-teal: 0 134 108;
+  --wa-tealDark: 0 168 132;    /* hover CLAREIA no escuro (no tema claro, escurece) */
+  --wa-bg: 30 30 30;           /* #1E1E1E — editor do VS Code */
+  --wa-panel: 37 37 38;        /* #252526 — painel/sidebar elevados */
+  --wa-chatBg: 24 24 24;       /* #181818 — a superfície mais funda */
+  --wa-outgoing: 27 77 64;     /* bubble enviado: verde escuro, legível e discreto */
+  /* Um passo acima do fundo do chat, o suficiente para o bubble recebido descolar
+     sem virar um bloco claro. */
+  --wa-incoming: 45 45 46;
+  --wa-text: 242 246 248;
+  /* Timestamps, prévias e ícones secundários — ~8,6:1 sobre o fundo (AAA), sem
+     virar texto primário. */
+  --wa-secondary: 173 189 199;
+  /* ── Degraus de superfície: hover < border < selected ────────────── */
+  --wa-border: 60 60 60;       /* #3C3C3C — a borda do VS Code */
+  --wa-inputBg: 49 49 49;      /* #313131 — o campo tem corpo próprio */
+  --wa-replyPreviewBg: 42 42 43;
+  --wa-hover: 42 45 46;        /* #2A2D2E — hover de lista do VS Code */
+  --wa-selected: 26 71 62;     /* tingido de verde, como a seleção azul do VS Code */
+  --wa-badge: 18 130 80;       /* verde saturado; o número branco mantém 4,8:1 */
+  --wa-icon: 173 189 199;
+  --wa-iconActive: 0 176 138;  /* ícone é elemento tipo-texto: pode brilhar mais */
+  /* Rótulo da IA mais CLARO no modo escuro (emerald-300) — o verde escuro do tema
+     claro somia no bubble escuro. Legível sobre bg-wa-outgoing/incoming escuros. */
+  --wa-ai-label: 110 231 183;
+  /* "Rascunho:" clareia no escuro (red-300): o vermelho do tema claro morre
+     sobre --wa-selected (a linha da conversa aberta, verde escuro). */
+  --wa-draft: 252 165 165;
 }
 
 /* Smooth transitions for status indicators */
@@ -100,7 +144,8 @@ html.dark {
 
 /* Thin scrollbar like WhatsApp */
 .wa-scrollbar::-webkit-scrollbar {
-  width: 6px;
+  width: 6px;   /* barra vertical */
+  height: 6px;  /* barra horizontal (faixa de abas do inbox) */
 }
 .wa-scrollbar::-webkit-scrollbar-track {
   background: transparent;
@@ -116,7 +161,7 @@ html.dark .wa-scrollbar::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.16);
 }
 html.dark .wa-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.26);
 }
 
 /* Contact row hover transition */
@@ -128,6 +173,15 @@ html.dark .wa-scrollbar::-webkit-scrollbar-thumb:hover {
 .wa-chat-pattern {
   background-color: rgb(var(--wa-chatBg));
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300'%3E%3Cg fill='%23c8c3ba' fill-opacity='0.2'%3E%3Cpath d='M20 15a5 5 0 110 10 5 5 0 010-10zm0 2a3 3 0 100 6 3 3 0 000-6z'/%3E%3Cpath d='M80 45l-4 8h8l-4-8zm0 2l2.5 5h-5l2.5-5z'/%3E%3Crect x='140' y='15' width='8' height='10' rx='1' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Ccircle cx='200' cy='20' r='4' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M258 15l6 5-6 5V15zm1 1.8v6.4l4.3-3.2-4.3-3.2z'/%3E%3Cpath d='M20 75a6 6 0 014 2l-1 1a4.8 4.8 0 00-7 0l-1-1a6 6 0 014-2z'/%3E%3Cpath d='M78 80h4v1h-4v3h-1v-3h-4v-1h4v-4h1v4z'/%3E%3Cpath d='M135 75h10v1h-10v-1zm0 4h7v1h-7v-1z'/%3E%3Ccircle cx='200' cy='80' r='5' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M195 78l3 2 3-2v5l-3 2-3-2v-5z' fill='none' stroke='%23c8c3ba' stroke-opacity='0.15'/%3E%3Cpath d='M260 75c2 0 4 2 4 4s-2 4-4 4-4-2-4-4 2-4 4-4zm0 1.5c-1.4 0-2.5 1.1-2.5 2.5s1.1 2.5 2.5 2.5 2.5-1.1 2.5-2.5-1.1-2.5-2.5-2.5z'/%3E%3Cpath d='M17 135h6l-3 6-3-6zm3 1.5l-1.8 3.5h3.6l-1.8-3.5z'/%3E%3Cpath d='M80 135a4 4 0 110 8 4 4 0 010-8zm0 1.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z'/%3E%3Cpath d='M140 138h3v-3h1v3h3v1h-3v3h-1v-3h-3v-1z'/%3E%3Cpath d='M195 135h10v8h-10v-8zm1 1v6h8v-6h-8z'/%3E%3Ccircle cx='260' cy='140' r='3'/%3E%3Cpath d='M20 200l4-3v6l-4-3zm1 0l2 1.5v-3l-2 1.5z'/%3E%3Cpath d='M75 195h10v1h-10v-1zm2 3h6v1h-6v-1z'/%3E%3Cpath d='M140 197a3 3 0 110 6 3 3 0 010-6z'/%3E%3Cpath d='M197 195l3 5 3-5h-6zm3 1.5l1.8 3h-3.6l1.8-3z'/%3E%3Cpath d='M258 197c1.7 0 3 1.3 3 3s-1.3 3-3 3-3-1.3-3-3 1.3-3 3-3z' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M18 260h4v4h-4v-4zm.8.8v2.4h2.4v-2.4h-2.4z'/%3E%3Ccircle cx='80' cy='262' r='3.5' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2'/%3E%3Cpath d='M138 258l4 4 4-4' fill='none' stroke='%23c8c3ba' stroke-opacity='0.2' stroke-width='1.2'/%3E%3Cpath d='M198 260a2 2 0 012 2c0 1.1-.9 2-2 2s-2-.9-2-2a2 2 0 012-2z'/%3E%3Cpath d='M256 258h8v6h-8v-6zm1 1v4h6v-4h-6z'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* No escuro o rabisco (#c8c3ba a 20%) ficava claro demais sobre o fundo do chat —
+   pontinhos brilhantes atrás das bolhas, enquanto a referência (VS Code) não tem
+   textura nenhuma. `overlay` com um backdrop escuro multiplica a fonte pelo fundo
+   (resultado = 2 × fundo × rabisco), então a textura continua lá, só que apagada.
+   Vale só no tema escuro. */
+html.dark .wa-chat-pattern {
+  background-blend-mode: overlay;
 }
 
 /* WhatsApp bubble shadow */
@@ -188,6 +242,8 @@ html.dark .text-gray-300,
 html.dark .text-gray-400,
 html.dark .text-gray-500,
 html.dark .text-gray-600 { color: rgb(var(--wa-secondary)); }
+html.dark .text-gray-100,
+html.dark .text-gray-200,
 html.dark .text-gray-700,
 html.dark .text-gray-800,
 html.dark .text-gray-900,
@@ -197,47 +253,247 @@ html.dark .border-gray-100,
 html.dark .border-gray-200,
 html.dark .border-gray-300 { border-color: rgb(var(--wa-border)); }
 
+html.dark .placeholder-gray-300::placeholder,
 html.dark .placeholder-gray-400::placeholder,
-html.dark .placeholder-gray-500::placeholder { color: rgb(var(--wa-secondary)); }
+html.dark .placeholder-gray-500::placeholder,
+html.dark .placeholder-gray-600::placeholder { color: rgb(var(--wa-secondary)); }
 
 /* Soft accent tints (bg-green-50, border-red-200, text-amber-700, …) used for
    selected / success / warning / error states stay LIGHT by default, so in dark
    mode they'd show themed light text over a near-white pill = unreadable. Re-tint
    them to a dark, translucent version of the same hue (so the card reads as a
-   subtle colored-dark surface) and lift the paired accent text to a light shade. */
-html.dark .bg-green-50, html.dark .bg-green-100 { background-color: rgba(34, 197, 94, 0.14); }
-html.dark .border-green-100, html.dark .border-green-200 { border-color: rgba(34, 197, 94, 0.40); }
-html.dark .text-green-600, html.dark .text-green-700, html.dark .text-green-800 { color: #86efac; }
+   subtle colored-dark surface) and lift the paired accent text to a light shade.
 
-html.dark .bg-red-50, html.dark .bg-red-100 { background-color: rgba(239, 68, 68, 0.14); }
-html.dark .border-red-100, html.dark .border-red-200 { border-color: rgba(239, 68, 68, 0.40); }
-html.dark .text-red-600, html.dark .text-red-700, html.dark .text-red-800 { color: #fca5a5; }
+   Per hue, three rules with the same shape:
+     bg-<h>-50/100/200     → translucent dark tint of the hue (15% / 21%). O valor
+                             acompanha a claridade das superfícies: com o fundo em
+                             cinza VS Code (#1E1E1E), um tint de 9% sumia
+                             (calibragem da rodada anterior, que tinha fundo quase
+                             preto)
+     border-<h>-100…500    → the hue at 36% (seam visível, sem virar contorno neon)
+     text-<h>-500…900      → the hue's 300 shade (light enough to read on dark).
+                             LETRAS: nunca entraram nos ajustes de tema escuro —
+                             só fundo e borda mudaram em cada rodada.
+   The `500` text shade matters: it is the most used accent in the codebase
+   (text-red-500 alone appears 74×) and measures only 3,88:1 on bg-wa-panel —
+   below the 4,5:1 AA floor. Shade `400` is deliberately NOT overridden: it is
+   already light enough on a dark surface. */
+html.dark .bg-green-50, html.dark .bg-green-100 { background-color: rgba(34, 197, 94, 0.15); }
+html.dark .bg-green-200 { background-color: rgba(34, 197, 94, 0.21); }
+html.dark .border-green-100, html.dark .border-green-200, html.dark .border-green-300,
+html.dark .border-green-400, html.dark .border-green-500 { border-color: rgba(34, 197, 94, 0.36); }
+html.dark .text-green-500, html.dark .text-green-600, html.dark .text-green-700,
+html.dark .text-green-800, html.dark .text-green-900 { color: #86efac; }
 
-html.dark .bg-amber-50, html.dark .bg-amber-100 { background-color: rgba(245, 158, 11, 0.14); }
-html.dark .border-amber-100, html.dark .border-amber-200 { border-color: rgba(245, 158, 11, 0.40); }
-html.dark .text-amber-600, html.dark .text-amber-700, html.dark .text-amber-800 { color: #fcd34d; }
+html.dark .bg-red-50, html.dark .bg-red-100 { background-color: rgba(239, 68, 68, 0.15); }
+html.dark .bg-red-200 { background-color: rgba(239, 68, 68, 0.21); }
+html.dark .border-red-100, html.dark .border-red-200, html.dark .border-red-300,
+html.dark .border-red-400, html.dark .border-red-500 { border-color: rgba(239, 68, 68, 0.36); }
+html.dark .text-red-500, html.dark .text-red-600, html.dark .text-red-700,
+html.dark .text-red-800, html.dark .text-red-900 { color: #fca5a5; }
 
-html.dark .bg-yellow-50, html.dark .bg-yellow-100 { background-color: rgba(234, 179, 8, 0.14); }
-html.dark .border-yellow-100, html.dark .border-yellow-200 { border-color: rgba(234, 179, 8, 0.40); }
-html.dark .text-yellow-600, html.dark .text-yellow-700, html.dark .text-yellow-800 { color: #fde047; }
+html.dark .bg-amber-50, html.dark .bg-amber-100 { background-color: rgba(245, 158, 11, 0.15); }
+html.dark .bg-amber-200 { background-color: rgba(245, 158, 11, 0.21); }
+html.dark .border-amber-100, html.dark .border-amber-200, html.dark .border-amber-300,
+html.dark .border-amber-400, html.dark .border-amber-500 { border-color: rgba(245, 158, 11, 0.36); }
+html.dark .text-amber-500, html.dark .text-amber-600, html.dark .text-amber-700,
+html.dark .text-amber-800, html.dark .text-amber-900 { color: #fcd34d; }
 
-html.dark .bg-blue-50, html.dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.14); }
-html.dark .border-blue-100, html.dark .border-blue-200 { border-color: rgba(59, 130, 246, 0.40); }
-html.dark .text-blue-600, html.dark .text-blue-700, html.dark .text-blue-800 { color: #93c5fd; }
+html.dark .bg-yellow-50, html.dark .bg-yellow-100 { background-color: rgba(234, 179, 8, 0.15); }
+html.dark .bg-yellow-200 { background-color: rgba(234, 179, 8, 0.21); }
+html.dark .border-yellow-100, html.dark .border-yellow-200, html.dark .border-yellow-300,
+html.dark .border-yellow-400, html.dark .border-yellow-500 { border-color: rgba(234, 179, 8, 0.36); }
+html.dark .text-yellow-500, html.dark .text-yellow-600, html.dark .text-yellow-700,
+html.dark .text-yellow-800, html.dark .text-yellow-900 { color: #fde047; }
 
-html.dark .bg-orange-50, html.dark .bg-orange-100 { background-color: rgba(249, 115, 22, 0.14); }
-html.dark .border-orange-100, html.dark .border-orange-200 { border-color: rgba(249, 115, 22, 0.40); }
-html.dark .text-orange-600, html.dark .text-orange-700, html.dark .text-orange-800 { color: #fdba74; }
+html.dark .bg-blue-50, html.dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.15); }
+html.dark .bg-blue-200 { background-color: rgba(59, 130, 246, 0.21); }
+html.dark .border-blue-100, html.dark .border-blue-200, html.dark .border-blue-300,
+html.dark .border-blue-400, html.dark .border-blue-500 { border-color: rgba(59, 130, 246, 0.36); }
+html.dark .text-blue-500, html.dark .text-blue-600, html.dark .text-blue-700,
+html.dark .text-blue-800, html.dark .text-blue-900 { color: #93c5fd; }
 
-html.dark .bg-purple-50, html.dark .bg-purple-100 { background-color: rgba(168, 85, 247, 0.14); }
-html.dark .border-purple-100, html.dark .border-purple-200 { border-color: rgba(168, 85, 247, 0.40); }
-html.dark .text-purple-600, html.dark .text-purple-700, html.dark .text-purple-800 { color: #d8b4fe; }
+html.dark .bg-orange-50, html.dark .bg-orange-100 { background-color: rgba(249, 115, 22, 0.15); }
+html.dark .bg-orange-200 { background-color: rgba(249, 115, 22, 0.21); }
+html.dark .border-orange-100, html.dark .border-orange-200, html.dark .border-orange-300,
+html.dark .border-orange-400, html.dark .border-orange-500 { border-color: rgba(249, 115, 22, 0.36); }
+html.dark .text-orange-500, html.dark .text-orange-600, html.dark .text-orange-700,
+html.dark .text-orange-800, html.dark .text-orange-900 { color: #fdba74; }
 
-html.dark .bg-pink-50, html.dark .bg-pink-100 { background-color: rgba(236, 72, 153, 0.14); }
-html.dark .border-pink-100, html.dark .border-pink-200 { border-color: rgba(236, 72, 153, 0.40); }
-html.dark .text-pink-600, html.dark .text-pink-700, html.dark .text-pink-800 { color: #f9a8d4; }
+html.dark .bg-purple-50, html.dark .bg-purple-100 { background-color: rgba(168, 85, 247, 0.15); }
+html.dark .bg-purple-200 { background-color: rgba(168, 85, 247, 0.21); }
+html.dark .border-purple-100, html.dark .border-purple-200, html.dark .border-purple-300,
+html.dark .border-purple-400, html.dark .border-purple-500 { border-color: rgba(168, 85, 247, 0.36); }
+html.dark .text-purple-500, html.dark .text-purple-600, html.dark .text-purple-700,
+html.dark .text-purple-800, html.dark .text-purple-900 { color: #d8b4fe; }
 
-/* Form fields: fixed gray surface + black text, readable in both themes.
-   A dedicated class so the dark utility overrides above never touch it. */
+html.dark .bg-pink-50, html.dark .bg-pink-100 { background-color: rgba(236, 72, 153, 0.15); }
+html.dark .bg-pink-200 { background-color: rgba(236, 72, 153, 0.21); }
+html.dark .border-pink-100, html.dark .border-pink-200, html.dark .border-pink-300,
+html.dark .border-pink-400, html.dark .border-pink-500 { border-color: rgba(236, 72, 153, 0.36); }
+html.dark .text-pink-500, html.dark .text-pink-600, html.dark .text-pink-700,
+html.dark .text-pink-800, html.dark .text-pink-900 { color: #f9a8d4; }
+
+/* Hues below were missing entirely — a bg-teal-100 pill or a text-indigo-800
+   label (both present in the codebase) rendered as dark-on-near-white in dark
+   mode. Added with the same shape so any screen, including future plugins, is
+   covered whichever hue it reaches for. */
+html.dark .bg-teal-50, html.dark .bg-teal-100 { background-color: rgba(20, 184, 166, 0.15); }
+html.dark .bg-teal-200 { background-color: rgba(20, 184, 166, 0.21); }
+html.dark .border-teal-100, html.dark .border-teal-200, html.dark .border-teal-300,
+html.dark .border-teal-400, html.dark .border-teal-500 { border-color: rgba(20, 184, 166, 0.36); }
+html.dark .text-teal-500, html.dark .text-teal-600, html.dark .text-teal-700,
+html.dark .text-teal-800, html.dark .text-teal-900 { color: #5eead4; }
+
+html.dark .bg-indigo-50, html.dark .bg-indigo-100 { background-color: rgba(99, 102, 241, 0.15); }
+html.dark .bg-indigo-200 { background-color: rgba(99, 102, 241, 0.21); }
+html.dark .border-indigo-100, html.dark .border-indigo-200, html.dark .border-indigo-300,
+html.dark .border-indigo-400, html.dark .border-indigo-500 { border-color: rgba(99, 102, 241, 0.36); }
+html.dark .text-indigo-500, html.dark .text-indigo-600, html.dark .text-indigo-700,
+html.dark .text-indigo-800, html.dark .text-indigo-900 { color: #a5b4fc; }
+
+html.dark .bg-emerald-50, html.dark .bg-emerald-100 { background-color: rgba(16, 185, 129, 0.15); }
+html.dark .bg-emerald-200 { background-color: rgba(16, 185, 129, 0.21); }
+html.dark .border-emerald-100, html.dark .border-emerald-200, html.dark .border-emerald-300,
+html.dark .border-emerald-400, html.dark .border-emerald-500 { border-color: rgba(16, 185, 129, 0.36); }
+html.dark .text-emerald-500, html.dark .text-emerald-600, html.dark .text-emerald-700,
+html.dark .text-emerald-800, html.dark .text-emerald-900 { color: #6ee7b7; }
+
+html.dark .bg-violet-50, html.dark .bg-violet-100 { background-color: rgba(139, 92, 246, 0.15); }
+html.dark .bg-violet-200 { background-color: rgba(139, 92, 246, 0.21); }
+html.dark .border-violet-100, html.dark .border-violet-200, html.dark .border-violet-300,
+html.dark .border-violet-400, html.dark .border-violet-500 { border-color: rgba(139, 92, 246, 0.36); }
+html.dark .text-violet-500, html.dark .text-violet-600, html.dark .text-violet-700,
+html.dark .text-violet-800, html.dark .text-violet-900 { color: #c4b5fd; }
+
+html.dark .bg-cyan-50, html.dark .bg-cyan-100 { background-color: rgba(6, 182, 212, 0.15); }
+html.dark .bg-cyan-200 { background-color: rgba(6, 182, 212, 0.21); }
+html.dark .border-cyan-100, html.dark .border-cyan-200, html.dark .border-cyan-300,
+html.dark .border-cyan-400, html.dark .border-cyan-500 { border-color: rgba(6, 182, 212, 0.36); }
+html.dark .text-cyan-500, html.dark .text-cyan-600, html.dark .text-cyan-700,
+html.dark .text-cyan-800, html.dark .text-cyan-900 { color: #67e8f9; }
+
+html.dark .bg-sky-50, html.dark .bg-sky-100 { background-color: rgba(14, 165, 233, 0.15); }
+html.dark .bg-sky-200 { background-color: rgba(14, 165, 233, 0.21); }
+html.dark .border-sky-100, html.dark .border-sky-200, html.dark .border-sky-300,
+html.dark .border-sky-400, html.dark .border-sky-500 { border-color: rgba(14, 165, 233, 0.36); }
+html.dark .text-sky-500, html.dark .text-sky-600, html.dark .text-sky-700,
+html.dark .text-sky-800, html.dark .text-sky-900 { color: #7dd3fc; }
+
+html.dark .bg-lime-50, html.dark .bg-lime-100 { background-color: rgba(132, 204, 22, 0.15); }
+html.dark .bg-lime-200 { background-color: rgba(132, 204, 22, 0.21); }
+html.dark .border-lime-100, html.dark .border-lime-200, html.dark .border-lime-300,
+html.dark .border-lime-400, html.dark .border-lime-500 { border-color: rgba(132, 204, 22, 0.36); }
+html.dark .text-lime-500, html.dark .text-lime-600, html.dark .text-lime-700,
+html.dark .text-lime-800, html.dark .text-lime-900 { color: #bef264; }
+
+html.dark .bg-rose-50, html.dark .bg-rose-100 { background-color: rgba(244, 63, 94, 0.15); }
+html.dark .bg-rose-200 { background-color: rgba(244, 63, 94, 0.21); }
+html.dark .border-rose-100, html.dark .border-rose-200, html.dark .border-rose-300,
+html.dark .border-rose-400, html.dark .border-rose-500 { border-color: rgba(244, 63, 94, 0.36); }
+html.dark .text-rose-500, html.dark .text-rose-600, html.dark .text-rose-700,
+html.dark .text-rose-800, html.dark .text-rose-900 { color: #fda4af; }
+
+/* Form fields. A dedicated class (never touched by the raw-utility overrides
+   above) so every input/select/textarea in the app — core AND plugin screens —
+   is themed from one place.
+   Light: fixed gray surface + black text.
+   Dark: follows the tokens. The inset ring is NOT decorative — most call sites
+   write just `wa-field w-full px-3 py-2 rounded-md`, with no border utility, and
+   a dark field with no outline would dissolve into the panel. box-shadow (not
+   border) keeps the box model identical and never fights `border-wa-border`
+   where a call site does set one. */
 .wa-field { background-color: #e5e7eb; color: #000; }
 .wa-field::placeholder { color: #6b7280; }
+
+html.dark .wa-field {
+  background-color: rgb(var(--wa-inputBg));
+  color: rgb(var(--wa-text));
+  box-shadow: inset 0 0 0 1px rgb(var(--wa-border));
+}
+html.dark .wa-field::placeholder { color: rgb(var(--wa-secondary)); }
+/* 21 call sites pair .wa-field with `focus:outline-none`, so without this the
+   focused field would be indistinguishable from the others in dark mode. Reuses
+   the same inset ring, just tinted with the accent. */
+html.dark .wa-field:focus { box-shadow: inset 0 0 0 1px rgb(var(--wa-teal)); }
+
+/* Toast UI WYSIWYG editor (MarkdownEditor.js): round the corners and use the
+   app border color so it blends with the surrounding form. The base/dark themes
+   handle the inner surfaces; this only frames the widget. */
+.wa-md-editor .toastui-editor-defaultUI {
+  border-radius: 0.375rem; /* matches .rounded-md inputs */
+  border-color: rgb(var(--wa-border));
+}
+
+/* Mode switch as a single toggle: hide Toast UI's two native tabs and show our
+   own injected button ("Markdown" ⇄ "Editor"), styled to sit in the same bottom
+   bar. "Markdown" reveals the raw text with all markup; "Editor" returns to the
+   formatted WYSIWYG view. */
+.wa-md-editor .toastui-editor-mode-switch .tab-item { display: none; }
+.wa-md-editor .wa-md-mode-toggle {
+  display: inline-block;
+  height: 24px;
+  line-height: 24px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgb(var(--wa-secondary));
+  background: transparent;
+  cursor: pointer;
+}
+.wa-md-editor .wa-md-mode-toggle:hover { color: rgb(var(--wa-text)); }
+
+/* Markdown mode shows a single full-width raw-text pane: hide the Write/Preview
+   tab bar so only the editable markdown (with all its markup) is visible. Toast UI
+   sets `display:block` inline on this element in tab style, so `!important` is
+   required to override it. */
+.wa-md-editor .toastui-editor-md-tab-container { display: none !important; }
+
+/* Keep the WHOLE toolbar on one line so no button is pushed into the "..." overflow
+   menu. Toast UI moves the trailing group (our undo/redo/zoom) into a dropdown once
+   the cumulative item width passes `clientWidth - 50`. With 21 items + 5 dividers the
+   default spacing (button margin 5px, divider margin 12px, toolbar padding 25px) tips
+   just over the edge at typical panel widths — redo/zoom end up hidden behind "...".
+   Tightening the spacing frees ~200px so every button stays visible inline. */
+.wa-md-editor .toastui-editor-defaultUI-toolbar { padding: 0 8px; }
+.wa-md-editor .toastui-editor-defaultUI-toolbar button { margin: 7px 2px; }
+.wa-md-editor .toastui-editor-toolbar-item-wrapper { margin: 7px 2px; }
+.wa-md-editor .toastui-editor-toolbar-divider { margin: 14px 6px; }
+
+/* Undo/redo buttons: a custom toolbar group floated to the far right of the bar
+   (the float itself is applied inline in JS via margin-left:auto on the group). */
+.wa-md-editor .wa-md-history-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-image: none; /* drop Toast UI's sprite background */
+  color: rgb(var(--wa-text));
+  cursor: pointer;
+}
+.wa-md-editor .wa-md-history-btn:not(:disabled):hover { background-color: rgb(var(--wa-hover)); }
+.wa-md-editor .wa-md-history-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Expand/collapse arrow in the bottom mode-switch bar (MarkdownEditor.js): grows
+   the inline box so the whole prompt is visible without scrolling. The chevron
+   points down when collapsed and flips up (.is-tall) when expanded. */
+.wa-md-editor .wa-md-arrow-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 8px;
+  color: rgb(var(--wa-secondary));
+  background: transparent;
+  cursor: pointer;
+}
+.wa-md-editor .wa-md-arrow-btn:hover { color: rgb(var(--wa-text)); }
+.wa-md-editor .wa-md-arrow-btn svg { transition: transform 0.15s ease; }
+.wa-md-editor .wa-md-arrow-btn.is-tall svg { transform: rotate(180deg); }
+
+/* Nested editor rendered inside the full-screen modal: fill the modal body so
+   Toast UI's height:100% resolves against a real height. */
+.wa-md-editor.wa-md-editor-nested,
+.wa-md-editor.wa-md-editor-nested .toastui-editor-defaultUI { height: 100%; }

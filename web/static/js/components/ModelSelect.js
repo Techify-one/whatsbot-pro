@@ -80,4 +80,3 @@ export function ModelSelect({ value, onChange, filterModality, placeholder, allo
   `;
 }
 
-export default ModelSelect;

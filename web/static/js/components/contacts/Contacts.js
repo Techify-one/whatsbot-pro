@@ -1,7 +1,9 @@
 import { h } from 'preact';
-import { useRef, useCallback, useEffect } from 'preact/hooks';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
-import { ContactList, typingKey } from './ContactList.js';
+import { useUrlState } from '../../hooks/useUrlState.js';
+import { readParams, writeParams, enumStr, str, bool, list, json } from '../../services/urlState.js';
+import { ContactList, typingKey, rowKeyFor, operatorTypingFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
 import { ConversationInfoPanel } from './ConversationInfoPanel.js';
@@ -16,8 +18,29 @@ import { useConversationActions } from './hooks/useConversationActions.js';
 import { useBulkSelection } from './hooks/useBulkSelection.js';
 import { useChannelPicker } from './hooks/useChannelPicker.js';
 import { useConversationWsEvents } from './hooks/useConversationWsEvents.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
+
+// Deep-link do estado da lista (Plano 24) — filtros/busca/ordenação/painel na
+// query-string legível. `adv` guarda só as cláusulas do filtro avançado (JSON),
+// omitido quando vazio. Serialize omite tudo que está no default → URL limpa.
+const HUB_URL_SCHEMA = [
+  enumStr('status', 'open'),        // open|closed|all
+  enumStr('assignment', 'all'),     // all|mine|unassigned
+  enumStr('sort', 'activity'),      // activity|oldest|unread
+  str('search', ''),
+  bool('archived'),
+  list('tags'),
+  str('panel', ''),                 // ''|contact|conversation
+  json('adv', { isDefault: (v) => !Array.isArray(v) || v.length === 0 }),
+];
+const HUB_URL_KEYS = HUB_URL_SCHEMA.map((f) => f.key);
+// A URL traz algum filtro do hub? (decide a precedência URL > preset salvo).
+const hubUrlHasParams = (search) => {
+  const p = new URLSearchParams(search || '');
+  return HUB_URL_KEYS.some((k) => p.has(k));
+};
 
 // ── Main Component (conversation hub container) ──────────────────────
 //
@@ -40,10 +63,14 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // Refs shared between hooks (owned here so a single instance is threaded into
   // both the selection loader and the WS handlers — same identity, no drift).
   const pageVisibleRef = useRef(!document.hidden);
-  // Canal escolhido no picker para uma conversa NOVA ainda sem conversa naquele
+  // Canal escolhido no picker para um atendimento Novo ainda sem atendimento naquele
   // canal — consumido (e zerado) pelo loader de detalhe para escopar o getContact
-  // ao canal certo (multicanal), em vez de fundir/abrir a conversa de outro canal.
+  // ao canal certo (multicanal), em vez de fundir/abrir o atendimento de outro canal.
   const newConvChannelRef = useRef(null);
+  // plano 72: espelho fresco da VIEW atual (serverMode + status/aba/tags/avançado +
+  // usuário), escrito em render pelo hook de filtros e lido pelos handlers de WS
+  // (useCallback([]) que só leem refs) para gatear insert/drop das linhas em serverMode.
+  const viewSpecRef = useRef(null);
 
   // ── Sidebar geometry (self-contained) ──────────────────────────────
   const { sidebarHidden, sidebarWidth, isResizing, isDesktop, startResize } = useSidebarResize();
@@ -52,18 +79,47 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const list = useConversationList({ onUnreadChange });
   const {
     contacts, setContacts, loading,
+    loadingMore, hasMore, loadMore,
     search, setSearch, handleSearchChange,
     showArchived, setShowArchived,
     fetchContacts, sortContacts,
     contactsRef, displayedRef, searchRef, fetchContactsRef, showArchivedRef,
+    serverFilterRef,
     showChannel, channelOptions,
   } = list;
+
+  // plano 72 F5 — após um patch OTIMISTA de membership (toggle IA / bulk IA / bulk
+  // assign) a linha pode ter saído da view server-filtrada. Em serverMode a lista está
+  // em paridade com a WHERE do servidor (a contagem já é server-side), então um refetch
+  // server-filtrado reconcilia a membership. Fora de serverMode é no-op — o
+  // `displayedContacts` client-side já reavalia a aba sobre as linhas patchadas.
+  // `serverFilterRef` já foi sincronizado em render, então `fetchContacts` lê os params
+  // certos. Chamado DEPOIS dos awaits do POST, logo o backend já commitou a mudança.
+  const reconcileAfterMembershipChange = useCallback(() => {
+    if (viewSpecRef.current && viewSpecRef.current.serverMode) {
+      fetchContacts(searchRef.current);
+    }
+  }, [fetchContacts, searchRef]);
+
+  // plano 72 F8 — ao LER uma menção (abrir a conversa) na aba Menções em serverMode, a
+  // conversa deixa a view server-filtrada (has_mention→false), mas o clear otimista do
+  // badge só zera o flag sem remover a linha (lista N vs badge N-1). Ler a menção NÃO
+  // emite WS, então nada auto-cura → um refetch server-filtrado reconcilia a lista com a
+  // contagem. Escopado à aba Menções (specNeedsServer): no-op em qualquer outra view, p/
+  // não refazer a lista a cada conversa aberta. Passado ao selection-hook (site primário
+  // de leitura, que não tem acesso ao scheduleListRefetch do ws-hook).
+  const reconcileMentionsOnRead = useCallback(() => {
+    const vs = viewSpecRef.current;
+    if (vs && vs.serverMode && vs.assignmentTab === 'mentions') fetchContacts(searchRef.current);
+  }, [fetchContacts, searchRef]);
 
   // ── Selection / open thread / detail load ──────────────────────────
   const selection = useConversationSelection({
     contacts, loading, setContacts, contactsRef,
     pageVisibleRef, newConvChannelRef,
     initialContactId, initialConversationId, initialScrollMsgId,
+    // plano 72 F8: refetch a aba Menções (serverMode) ao ler a menção da conversa aberta.
+    reconcileMentionsOnRead,
   });
   const {
     selected, setSelected,
@@ -72,25 +128,28 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     scrollToMsg, setScrollToMsg,
     contactData, setContactData,
     loadingDetail,
+    loadingOlder, loadOlder,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     openInfoAfterSelect,
     pendingWsMessages,
-    isOpenRow, selectContact,
+    isOpenRow, selectContact, reloadOpenThread,
   } = selection;
 
   // ── Contact/conversation actions + identity + tags + context menu ──
   const actions = useConversationActions({
     setContacts, sortContacts, setContactData,
     setSelected, setSelectedConvId, selectedRef, selectedConvIdRef,
+    // plano 72 F5: refetch server-filtrado após toggle IA otimista (reconcilia membership).
+    reconcileAfterMembershipChange,
   });
   const {
     globalTags, setGlobalTags,
-    currentUserId, users, agentsUsers, agentsAi,
+    currentUserId, currentUser, users, agentsUsers, agentsAi,
     ctxMenu, setCtxMenu, ctxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
-    handleAssignConversation, handleResolveConversation,
+    handleAssignConversation, handleAssignAgent, handleResolveConversation,
     handleCreateTag, applyTagResults, resolveAssignee,
   } = actions;
 
@@ -98,13 +157,15 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const bulk = useBulkSelection({
     contactsRef, displayedRef, showArchivedRef,
     setContacts, sortContacts, setContactData,
-    setSelected, setSelectedConvId, selectedRef, applyTagResults,
+    setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyTagResults,
+    // plano 72 F5: refetch server-filtrado após bulk IA / bulk assign otimistas.
+    reconcileAfterMembershipChange,
   });
   const {
     selectionMode, setSelectionMode, selectedKeys, setSelectedKeys,
-    enterSelection, exitSelection, toggleSelect, selectAllContacts, clearSelection,
+    enterSelection, exitSelection, toggleSelect, selectAllContacts, clearSelection, deselectAll,
     handleBulkAI, handleBulkArchive, handleBulkTag, handleBulkRemoveAllTags,
-    handleBulkPin, handleBulkMarkRead, handleBulkMarkUnread,
+    handleBulkPin, handleBulkMarkRead, handleBulkMarkUnread, handleBulkAssign,
   } = bulk;
 
   // Archive toggle (deselect + drop selection mode), split from the list hook's
@@ -117,9 +178,42 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, [setShowArchived, setSelected, setSelectedConvId]);
   useEffect(() => { setSelectionMode(false); setSelectedKeys([]); }, [showArchived]);
 
+  // Esc fecha, em camadas, o que estiver aberto no hub: primeiro o painel lateral
+  // (contato / atendimento), depois a própria conversa — volta ao estado "nenhuma
+  // conversa selecionada" (URL "/", só a sidebar + placeholder). Guardas:
+  // `defaultPrevented` respeita quem já consumiu a tecla (menus de autocomplete do
+  // compositor, prévia de mídia), e um overlay `.fixed.inset-0` no DOM significa
+  // modal aberto — ele tem o próprio Esc e tem precedência.
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (document.querySelector('.fixed.inset-0')) return;
+      if (openPanel) { setOpenPanel(null); return; }
+      if (selectedRef.current == null && selectedConvIdRef.current == null) return;
+      selectContact(null);
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openPanel, setOpenPanel, selectContact, selectedRef, selectedConvIdRef]);
+
   // ── Filters + saved presets + derived sidebar list ──────────────────
+  // Precedência (Plano 24 · D3): se a URL trouxer filtros, ela vence o preset
+  // salvo no localStorage — o hook não auto-aplica o preset armazenado nesse caso.
+  const hasUrlFilters = useMemo(() => hubUrlHasParams(window.location.search), []);
   const filters = useConversationFilters({
     contacts, selected, selectedConvId, currentUserId, displayedRef,
+    search,
+    searching: !!search,
+    showArchived,
+    skipStoredPreset: hasUrlFilters,
+    // plano 69 F2: a sidebar conversa-first é servida por /api/atendimentos/filter
+    // (mesma query da contagem) quando o spec é server-expressável. O hook de filtros
+    // escreve os params em `serverFilterRef` e refaz a lista ao mudar um filtro.
+    serverFilterRef,
+    fetchContacts,
+    // plano 72 F2: o hook escreve a view atual aqui (em render) para os handlers de WS
+    // reproduzirem a decisão do servidor no insert/drop das linhas em serverMode.
+    viewSpecRef,
   });
   const {
     statusFilter, setStatusFilter,
@@ -133,8 +227,51 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     tabCounts, displayedContacts,
   } = filters;
 
+  // Deep-link do estado da lista → URL (Plano 24). Hidrata da URL no mount e no
+  // back/forward; reflete filtros/busca/ordenação/painel na query (replaceState,
+  // sem poluir histórico). Serialize omite defaults → link limpo quando nada mexeu.
+  useUrlState({
+    read: () => readParams(window.location.search, HUB_URL_SCHEMA),
+    apply: (s) => {
+      setStatusFilter(s.status);
+      setAssignmentTab(s.assignment);
+      setSortBy(s.sort);
+      setSearch(s.search);
+      setShowArchived(s.archived);
+      setTagFilter(s.tags);
+      setOpenPanel(s.panel || null);
+      // Re-seed clause ids p/ o diálogo avançado editar sem colisão.
+      setAdvFilters(Array.isArray(s.adv) ? s.adv.map((f, i) => ({ ...f, id: `u${i}` })) : []);
+    },
+    serialize: () => writeParams({
+      status: statusFilter,
+      assignment: assignmentTab,
+      sort: sortBy,
+      search,
+      archived: showArchived,
+      tags: tagFilter,
+      panel: openPanel || '',
+      // Descarta o id efêmero das cláusulas p/ a URL ficar estável.
+      adv: (advFilters || []).map(({ id, ...rest }) => rest),
+    }, HUB_URL_SCHEMA),
+    deps: [statusFilter, assignmentTab, sortBy, search, showArchived, tagFilter, openPanel, advFilters],
+  });
+
   // ── New-conversation / channel picker ───────────────────────────────
   const picker = useChannelPicker({ selectContact, fetchContacts, setSearch, newConvChannelRef });
+
+  // Arrastar arquivos para uma linha da sidebar (plano 64 · F11). Abre aquela
+  // conversa e entrega os arquivos ao painel, que monta a prévia — nada é
+  // enviado sem confirmação (P7). O handoff é um estado com `token` para o
+  // painel consumir uma vez só (soltar os MESMOS arquivos duas vezes seguidas
+  // ainda dispara, porque o token muda).
+  const [droppedFiles, setDroppedFiles] = useState(null);
+  const dropTokenRef = useRef(0);
+  const handleRowDropFiles = useCallback((row, files) => {
+    selectContact(row);
+    dropTokenRef.current += 1;
+    setDroppedFiles({ token: dropTokenRef.current, phone: row.phone, files });
+  }, [selectContact]);
   const {
     checkingPhone, checkPhoneError, setCheckPhoneError,
     channelPicker, setChannelPicker,
@@ -143,16 +280,21 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   } = picker;
 
   // ── Real-time WS events (sidebar + open thread patches) ─────────────
-  const { typingState, aiRespondingState, convAttrPatch } = useConversationWsEvents({
+  const { typingState, aiRespondingState, operatorTypingState, convAttrPatch } = useConversationWsEvents({
     newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged,
     contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, conversationCreated,
     setContacts, contactsRef, fetchContacts, fetchContactsRef, searchRef, search, sortContacts,
+    showArchivedRef,
     setContactData, setSelected, setSelectedConvId,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     pendingWsMessages, isOpenRow, selected, contactData,
     setGlobalTags,
     pageVisibleRef,
+    reloadOpenThread,
+    currentUserId,
+    // plano 72 F3/F4: view atual (serverMode + filtros) p/ gatear insert/drop das linhas.
+    viewSpecRef,
   });
 
   // Search box: clear the phone-check error as the operator types (preserves the
@@ -165,6 +307,23 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const messages = contactData ? contactData.messages || [] : [];
   const info = contactData ? contactData.info || {} : {};
   const selectedKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+  // Linha da conversa aberta: é ela que carrega `channel_provider`/`channel_name`
+  // (só a query da LISTA traz o canal — o detalhe do contato não). O cabeçalho do
+  // chat mostra o mesmo selo da sidebar a partir daqui, sem requisição nova.
+  const selectedRow = selectedKey
+    ? (displayedContacts || []).find(c => rowKeyFor(c) === selectedKey) || null
+    : null;
+  // Rede de segurança: um filtro/busca ativo pode esconder a linha da conversa ABERTA
+  // da lista. Aí o canal vem do catálogo de canais (casado por `channelId`), para o
+  // selo do cabeçalho não piscar quando o operador mexe nos filtros.
+  const selectedChannelOpt = selectedChannelId
+    ? (channelOptions || []).find(o => o.id === selectedChannelId) || null
+    : null;
+  const headerChannelProvider = (selectedRow && selectedRow.channel_provider)
+    || (selectedChannelOpt && selectedChannelOpt.provider) || null;
+  const headerChannelName = (selectedRow && selectedRow.channel_name)
+    || (selectedChannelOpt && selectedChannelOpt.label) || null;
+  const canReadContact = hasPermission(currentUser, 'contact.read');
 
   const autoReply = config ? config.auto_reply : false;
   const handleToggleAutoReply = useCallback(async (newValue) => {
@@ -183,6 +342,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         <${ContactList}
           contacts=${displayedContacts}
           loading=${loading}
+          loadingMore=${loadingMore}
+          hasMore=${hasMore}
+          loadMore=${loadMore}
           search=${search}
           onSearchChange=${onSearchChange}
           statusFilter=${statusFilter}
@@ -211,10 +373,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           resolveAssignee=${resolveAssignee}
           hasIdentity=${currentUserId != null}
           selected=${selectedKey}
-          showChannel=${showChannel}
           onSelect=${selectContact}
+          onDropFiles=${handleRowDropFiles}
           onContextMenu=${setCtxMenu}
           typingState=${typingState}
+          aiRespondingState=${aiRespondingState}
+          operatorTypingState=${operatorTypingState}
           showArchived=${showArchived}
           onToggleArchived=${handleToggleArchived}
           globalTags=${globalTags}
@@ -233,6 +397,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onSelectAll=${selectAllContacts}
           onCreateTag=${handleCreateTag}
           onClearSelection=${clearSelection}
+          onDeselectAll=${deselectAll}
           onBulkAI=${handleBulkAI}
           onBulkArchive=${handleBulkArchive}
           onBulkTag=${handleBulkTag}
@@ -240,6 +405,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onBulkPin=${handleBulkPin}
           onBulkMarkRead=${handleBulkMarkRead}
           onBulkMarkUnread=${handleBulkMarkUnread}
+          onBulkAssign=${handleBulkAssign}
+          currentUserId=${currentUserId}
         />
       </div>
       <!-- Divisória redimensionável (desktop): arraste p/ redimensionar, clique p/ esconder -->
@@ -266,19 +433,31 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 setContactData=${setContactData}
                 info=${info}
                 contact=${contactData}
-                onAvatarClick=${() => selected && setOpenPanel('contact')}
+                channelProvider=${headerChannelProvider}
+                channelName=${headerChannelName}
+                showChannel=${showChannel}
+                onAvatarClick=${canReadContact ? () => selected && setOpenPanel('contact') : null}
                 onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
+                currentUser=${currentUser}
                 contactTyping=${selected && typingState[typingKey({ conversationId: selectedConvId, channelId: selectedChannelId, phone: selected })] || null}
-                aiResponding=${selected && !!aiRespondingState[selected]}
+                aiResponding=${selected && !!aiRespondingState[typingKey({ channelId: selectedChannelId, phone: selected })]}
+                operatorTyping=${selected ? operatorTypingFor(operatorTypingState, { conversation_id: selectedConvId, channel_id: selectedChannelId, phone: selected }) : null}
                 globalTags=${globalTags}
                 groupParticipantsChanged=${groupParticipantsChanged}
                 scrollToMsg=${scrollToMsg}
                 onScrolledToMsg=${() => setScrollToMsg(null)}
+                showAgentName=${config ? (config.show_agent_name !== false) : true}
+                loadOlder=${loadOlder}
+                loadingOlder=${loadingOlder}
+                hasMore=${contactData && contactData.has_more}
+                droppedFiles=${droppedFiles}
+                onDroppedFilesConsumed=${() => setDroppedFiles(null)}
               />`
           }
-          ${openPanel === 'contact' && selected ? html`
+          ${openPanel === 'contact' && selected && canReadContact ? html`
             <${ContactInfoPanel}
               phone=${selected}
+              currentUser=${currentUser}
               info=${info}
               contactTags=${contactData && contactData.tags || []}
               globalTags=${globalTags}
@@ -302,7 +481,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
               phone=${selected}
               conversationId=${selectedConvId}
               onClose=${() => setOpenPanel(null)}
-              onOpenContactInfo=${() => selected && setOpenPanel('contact')}
+              onOpenContactInfo=${canReadContact ? () => selected && setOpenPanel('contact') : null}
               contactInfo=${info}
               convAttrPatch=${convAttrPatch}
             />
@@ -329,6 +508,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           x=${ctxMenu.x}
           y=${ctxMenu.y}
           phone=${ctxMenu.phone}
+          conversationId=${ctxMenu.conversationId}
           aiEnabled=${ctxMenu.aiEnabled}
           contactTags=${ctxMenu.tags}
           globalTags=${globalTags}
@@ -339,8 +519,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           convLoading=${ctxConv.loading}
           convError=${ctxConv.error}
           users=${users}
+          agentsUsers=${agentsUsers}
+          agentsAi=${agentsAi}
           currentUserId=${currentUserId}
+          currentUser=${currentUser}
           onAssignConversation=${handleAssignConversation}
+          onAssignAgent=${handleAssignAgent}
           onResolveConversation=${handleResolveConversation}
           onToggleAI=${handleToggleAI}
           onEditContact=${(phone) => {

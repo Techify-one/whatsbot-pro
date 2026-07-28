@@ -1,7 +1,7 @@
 // Run with: node --test web/static/js/utils/phone.test.js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatPhoneDisplay, formatPhone } from './phone.js';
+import { formatPhoneDisplay, formatPhone, samePhone } from './phone.js';
 
 test('empty / nullish → empty string', () => {
   assert.equal(formatPhoneDisplay(''), '');
@@ -42,4 +42,25 @@ test('accepts numeric input (coerced to string)', () => {
 test('formatPhone is an alias for formatPhoneDisplay', () => {
   assert.equal(formatPhone, formatPhoneDisplay);
   assert.equal(formatPhone('5511999998888'), '+55 (11) 99999-8888');
+});
+
+// ── plano 57: samePhone (digit-normalized comparison) ─────────────────────
+test('samePhone: exact string equal → true', () => {
+  assert.equal(samePhone('5564911110001', '5564911110001'), true);
+});
+
+test('samePhone: digit-equal but different format → true (broadens only)', () => {
+  assert.equal(samePhone('+55 64 91111-0001', '5564911110001'), true);
+  assert.equal(samePhone('5564911110001', '5564911110001@s.whatsapp.net'), true);
+});
+
+test('samePhone: distinct numbers → false (never crosses)', () => {
+  assert.equal(samePhone('5564911110001', '5511999998888'), false);
+});
+
+test('samePhone: nullish / empty-after-strip → false', () => {
+  assert.equal(samePhone(null, '5564911110001'), false);
+  assert.equal(samePhone('5564911110001', undefined), false);
+  assert.equal(samePhone('abc', 'def'), false);   // both strip to '' → false
+  assert.equal(samePhone(null, null), true);       // identical ref short-circuit
 });

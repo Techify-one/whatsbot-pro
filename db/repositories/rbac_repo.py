@@ -22,7 +22,7 @@ from sqlalchemy import func, insert, select, update
 
 from db.engine import get_engine
 from db.tables import (
-    roles, permissions, role_permissions, user_roles, users,
+    roles, permissions, role_permissions, user_roles, users, plugins,
     # aliased: the module also defines a function named ``user_permissions``,
     # which would shadow the table name at module scope.
     user_permissions as user_permissions_t,
@@ -89,6 +89,30 @@ def user_has_permission(user_id: int, permission_key: str) -> bool:
     return "*" in perms or permission_key in perms
 
 
+def sync_core_permissions() -> int:
+    """Reconcile the ``permissions`` table with the static core catalog (idempotent).
+
+    Core permission rows are otherwise seeded only by migrations. If a
+    permission-adding migration is ever skipped (e.g. ``alembic_version``
+    reconciled past it — the "orphan migration" case), its keys stay ABSENT from
+    the table. That silently breaks granting them: ``_insert_role_permissions``
+    resolves keys to ``permissions.id`` and just skips any key without a row — so
+    the checkbox saves as a no-op and the permission count never moves.
+
+    Called at boot (mirrors how plugins self-heal via ``upsert_plugin_permission``)
+    so a missing core key is always backfilled from ``PERMISSION_CATALOG`` — the
+    runtime source of truth. INSERT-only: never touches existing rows or grants.
+    Returns the number of rows inserted."""
+    from domain.permission_catalog import PERMISSION_CATALOG
+    with get_engine().begin() as conn:
+        have = {r[0] for r in conn.execute(select(permissions.c.key))}
+        missing = [(k, d) for k, d in PERMISSION_CATALOG if k not in have]
+        if missing:
+            conn.execute(insert(permissions), [
+                {"key": k, "description": d, "plugin_id": None} for k, d in missing])
+    return len(missing)
+
+
 # ── Plugin permissions (plano "RBAC para Plugins" §3.3-3.4) ────────────────
 
 def upsert_plugin_permission(
@@ -136,26 +160,63 @@ def list_plugin_permissions() -> list[dict]:
 
 
 def plugin_permission_keys() -> set[str]:
-    """The set of keys of every plugin permission (for validation in users/roles)."""
+    """The set of keys of every plugin permission (for validation in users/roles).
+
+    Inclui plugins desativados de propósito: um grant existente de um plugin off
+    continua sendo uma chave VÁLIDA (não some da validação), então sobrevive a
+    edições e volta a aparecer quando o plugin é reativado."""
     with get_engine().connect() as conn:
         rows = conn.execute(
             select(permissions.c.key).where(permissions.c.plugin_id.isnot(None)))
     return {r[0] for r in rows}
 
 
+def enabled_plugin_ids() -> set[str]:
+    """Ids dos plugins atualmente ATIVOS (``plugins.enabled = 1``)."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(select(plugins.c.id).where(plugins.c.enabled == 1))
+    return {r[0] for r in rows}
+
+
+def hidden_plugin_permission_keys() -> set[str]:
+    """Chaves de permissão de plugin que NÃO aparecem no PermissionPicker agora —
+    plugin desativado (ou ausente, com linha remanescente). Os grants delas são
+    PRESERVADOS nas edições de cargo/usuário para sobreviverem ao ciclo
+    desativar→editar→reativar (o toggle nunca perde atribuição)."""
+    enabled = enabled_plugin_ids()
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(permissions.c.key, permissions.c.plugin_id)
+            .where(permissions.c.plugin_id.isnot(None)))
+    return {k for k, pid in rows if pid not in enabled}
+
+
 def list_catalog() -> list[dict]:
     """Effective permission catalog: core (static) + plugin rows (from DB).
 
-    Each entry is ``{key, description, plugin_id, group_label}``. Core perms have
-    ``plugin_id``/``group_label`` = ``None``. This replaces the static
-    ``PERMISSION_CATALOG`` in the ``/api/roles`` response so plugin perms appear
-    in the PermissionPicker automatically."""
-    from domain.permission_catalog import PERMISSION_CATALOG
-    catalog = [
-        {"key": k, "description": d, "plugin_id": None, "group_label": None}
-        for k, d in PERMISSION_CATALOG
-    ]
-    catalog.extend(list_plugin_permissions())
+    Each entry is ``{key, description, plugin_id, group_label, tier, group}``.
+    Core perms have ``plugin_id``/``group_label`` = ``None`` but carry a display
+    ``tier`` ("core"/"plugin") and ``group`` (subheader) from
+    ``permission_catalog.group_for`` — the PermissionPicker renders two tiers
+    (Sistema vs Plugins) grouped by ``group``. Plugin rows are always
+    ``tier="plugin"`` with ``group`` = their ``group_label``. This replaces the
+    static ``PERMISSION_CATALOG`` in the ``/api/roles`` response so plugin perms
+    appear in the PermissionPicker automatically."""
+    from domain.permission_catalog import PERMISSION_CATALOG, group_for
+    catalog = []
+    for k, d in PERMISSION_CATALOG:
+        tier, group = group_for(k)
+        catalog.append({"key": k, "description": d, "plugin_id": None,
+                        "group_label": None, "tier": tier, "group": group})
+    # Só permissões de plugins ATIVOS aparecem na tela. Ao desativar um plugin as
+    # linhas em `permissions` são mantidas (grants sobrevivem ao toggle — ver
+    # plugins/rbac.py), mas ficam escondidas do picker; reativar volta a exibi-las.
+    enabled = enabled_plugin_ids()
+    for p in list_plugin_permissions():
+        if p.get("plugin_id") not in enabled:
+            continue
+        catalog.append({**p, "tier": "plugin",
+                        "group": p.get("group_label") or p.get("plugin_id")})
     return catalog
 
 
@@ -216,12 +277,29 @@ def role_assignment_count(role_id: int) -> int:
         ).scalar() or 0
 
 
+def _replace_role_permissions(conn, role_id: int, permission_keys: list[str]) -> None:
+    """Delete+reinsert dos grants de um cargo, PRESERVANDO as chaves de plugin
+    DESATIVADO já concedidas (escondidas do PermissionPicker) — senão editar o
+    cargo com o plugin off apagaria a atribuição e reativar não a traria de volta
+    (quebra o "sobrevive ao toggle"). Usado por set_role_permissions e update_role."""
+    hidden = hidden_plugin_permission_keys()
+    if hidden:
+        existing = {r[0] for r in conn.execute(
+            select(permissions.c.key).select_from(
+                role_permissions.join(
+                    permissions, permissions.c.id == role_permissions.c.permission_id))
+            .where(role_permissions.c.role_id == role_id))}
+        permission_keys = list(set(permission_keys) | (existing & hidden))
+    conn.execute(sa_delete(role_permissions)
+                 .where(role_permissions.c.role_id == role_id))
+    _insert_role_permissions(conn, role_id, permission_keys)
+
+
 def set_role_permissions(role_id: int, permission_keys: list[str]) -> None:
-    """Replace a role's permission grants with the given keys (unknown keys ignored)."""
+    """Replace a role's permission grants with the given keys (unknown keys ignored).
+    Grants de plugins desativados são preservados (ver _replace_role_permissions)."""
     with get_engine().begin() as conn:
-        conn.execute(sa_delete(role_permissions)
-                     .where(role_permissions.c.role_id == role_id))
-        _insert_role_permissions(conn, role_id, permission_keys)
+        _replace_role_permissions(conn, role_id, permission_keys)
 
 
 def create_role(key: str, name: str, permission_keys: list[str]) -> dict:
@@ -239,9 +317,7 @@ def update_role(role_id: int, *, name: str | None = None,
         if name is not None:
             conn.execute(update(roles).where(roles.c.id == role_id).values(name=name))
         if permission_keys is not None:
-            conn.execute(sa_delete(role_permissions)
-                         .where(role_permissions.c.role_id == role_id))
-            _insert_role_permissions(conn, role_id, permission_keys)
+            _replace_role_permissions(conn, role_id, permission_keys)
     return get_role(role_id)
 
 

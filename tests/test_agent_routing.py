@@ -7,24 +7,20 @@ the transferir_agente tool directly against a temp DB — no LLM / no HTTP neede
 """
 
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-_tmpdir = tempfile.mkdtemp(prefix="whatsbot_routing_test_")
-_db_path = Path(_tmpdir) / "whatsbot.db"
-
-from db import init_db  # noqa: E402
-init_db(_db_path)
+from tests.pg import init_test_engine  # noqa: E402
+init_test_engine(reset=True)
 
 from sqlalchemy import update  # noqa: E402
 from db.engine import get_engine  # noqa: E402
 from db.tables import inboxes  # noqa: E402
 from db.repositories import (  # noqa: E402
-    agent_repo, prompt_repo, conversation_repo, contact_repo,
+    agent_repo, conversation_repo, contact_repo,
 )
 from agent import agent_factory  # noqa: E402
 from agent.tools import transferir_agente, CORE_TOOLS  # noqa: E402
@@ -63,14 +59,14 @@ class FakeCtx:
         self.contact = contact
 
 
-# ── Seed agents/prompts ─────────────────────────────────────────────
+# ── Seed agents (prompt inline em cada agente) ──────────────────────
 agent_factory.seed_default_agent()
-prompt_repo.save("suporte_prompt", "Você é o agente de SUPORTE técnico.")
-agent_repo.save("suporte", display_name="Suporte", prompt_key="suporte_prompt",
+agent_repo.save("suporte", display_name="Suporte",
+                prompt="Você é o agente de SUPORTE técnico.",
                 model_config={"model": "test/model"}, tool_names=None, enabled=True)
-agent_repo.save("vendas", display_name="Vendas", prompt_key="default",
+agent_repo.save("vendas", display_name="Vendas", prompt="Você é o agente de vendas.",
                 model_config={"model": "test/model"}, tool_names=None, enabled=True)
-agent_repo.save("triagem", display_name="Triagem", prompt_key="default",
+agent_repo.save("triagem", display_name="Triagem", prompt="Você é a triagem.",
                 model_config={"model": "test/model"}, tool_names=None, enabled=True,
                 is_router=True, routing_targets=["vendas"])
 
@@ -97,18 +93,27 @@ check("agente vazio -> erro", r.startswith("Erro:"))
 r = transferir_agente.execute(ctx, {"agente": "inexistente"})
 check("destino inexistente -> erro lista disponíveis", "não existe" in r)
 
+print("\ntransferir_agente — enforcement spoke→router (plano 30 F5):")
+# A conversa nasce vinculada ao agente default (não-router, carimbado por
+# default_agent_key_for_inbox na criação); com um roteador configurado, um
+# não-router SÓ pode devolver pro roteador (D4) — destino livre exigiria não
+# ter roteador (P4) ou conversa sem agente ativo.
+r = transferir_agente.execute(ctx, {"agente": "suporte"})
+check("não-router p/ outro agente -> bloqueado", r.startswith("Erro"))
+check("bloqueio cita a rota de escape (roteador)", "triagem" in r)
+
 print("\ntransferir_agente — handoff persistente:")
-r = transferir_agente.execute(ctx, {"agente": "suporte"})
-check("transfere p/ suporte -> confirma", "Suporte" in r)
+r = transferir_agente.execute(ctx, {"agente": "triagem"})
+check("transfere p/ o roteador -> confirma", "Triagem" in r)
 conv2 = conversation_repo.get_open_for_contact(c["id"])
-check("conversa ganha active_agent_key=suporte", conv2["active_agent_key"] == "suporte")
-r = transferir_agente.execute(ctx, {"agente": "suporte"})
+check("conversa ganha active_agent_key=triagem", conv2["active_agent_key"] == "triagem")
+r = transferir_agente.execute(ctx, {"agente": "triagem"})
 check("transferir p/ o mesmo -> idempotente/aviso", "já está atendendo" in r)
 
 print("\nbuild_for_contact resolve o agente vinculado:")
 spec = agent_factory.build_for_contact(handler_on, contact)
-check("agora resolve 'suporte'", spec is not None and spec.agent_key == "suporte")
-check("prompt do suporte renderizado", "suporte" in spec.base_prompt.lower())
+check("agora resolve 'triagem'", spec is not None and spec.agent_key == "triagem")
+check("prompt da triagem renderizado", "triagem" in spec.base_prompt.lower())
 
 print("\nrouter allowlist (routing_targets):")
 conversation_repo.set_agent(conv["id"], "triagem")  # router c/ targets=["vendas"]
@@ -130,7 +135,8 @@ with get_engine().begin() as cn:
     cn.execute(update(inboxes).where(inboxes.c.id == conv["inbox_id"])
                .values(default_agent_key=None))
 conversation_repo.set_agent(conv["id"], "suporte")
-agent_repo.save("suporte", display_name="Suporte", prompt_key="suporte_prompt",
+agent_repo.save("suporte", display_name="Suporte",
+                prompt="Você é o agente de SUPORTE técnico.",
                 model_config={"model": "test/model"}, tool_names=None, enabled=False)
 dynamic_registry.invalidate()  # a API faz isso via _emit_changed; aqui o save é direto
 spec = agent_factory.build_for_contact(handler_on, contact)
@@ -176,6 +182,58 @@ check("execution.routing_steps persistido (JSON)",
 _steps = _full.get("steps") or []
 check("execution_steps.agent_key gravado por passo",
       {s.get("agent_key") for s in _steps} == {"triagem", "vendas"})
+
+print("\núnico roteador (plano 29 Eixo B):")
+# "triagem" é o roteador atual (seed lá em cima). Promover outro rebaixa ela.
+agent_repo.save("comercial", display_name="Comercial",
+                prompt="Você é o comercial.", model_config={"model": "test/model"},
+                tool_names=None, enabled=True,
+                is_router=True, routing_targets=["vendas"])
+_tri = agent_repo.get("triagem")
+_com = agent_repo.get("comercial")
+check("promover 2º roteador rebaixa o anterior (radio)",
+      _com["is_router"] and not _tri["is_router"])
+check("get_router devolve o único roteador",
+      (agent_repo.get_router() or {}).get("agent_key") == "comercial")
+_tri_hist = agent_repo.list_history("triagem")
+check("rebaixamento bumpa versão + snapshot do rebaixado",
+      _tri_hist and _tri_hist[0]["version"] == _tri["version"])
+
+# Cinto de segurança no banco: índice único parcial barra violação direta.
+import sqlalchemy.exc  # noqa: E402
+from sqlalchemy import text as _sql_text  # noqa: E402
+try:
+    with get_engine().begin() as cn:
+        cn.execute(_sql_text(
+            "UPDATE ai_agents SET is_router = 1 WHERE agent_key = 'triagem'"))
+    _violated = False
+except sqlalchemy.exc.IntegrityError:
+    _violated = True
+check("índice único parcial barra 2º roteador direto no banco", _violated)
+check("estado pós-violação: só 'comercial' segue roteador",
+      (agent_repo.get_router() or {}).get("agent_key") == "comercial")
+
+print("\ngating de transfer_to_human (plano 29 A6 — só o roteador escala):")
+from agent.tool_registry import ToolRegistry  # noqa: E402
+
+_reg = ToolRegistry()
+for _schema, _executor in CORE_TOOLS:
+    _reg.register_tool(_schema, _executor)
+_spoke_spec = agent_factory.AgentSpec(
+    agent_key="vendas", base_prompt="x",
+    tool_names=["transferir_agente", "save_contact_info"])
+_spoke_names = [(s.get("function") or {}).get("name")
+                for s in _reg.select_active_tools(_spoke_spec)]
+check("spoke sem transfer_to_human no tool_names NÃO recebe a tool",
+      "transfer_to_human" not in _spoke_names)
+check("spoke recebe transferir_agente (devolve pro roteador)",
+      "transferir_agente" in _spoke_names)
+_router_spec = agent_factory.AgentSpec(
+    agent_key="triagem", base_prompt="x", tool_names=None)
+_router_names = [(s.get("function") or {}).get("name")
+                 for s in _reg.select_active_tools(_router_spec)]
+check("roteador (tool_names=None) recebe transfer_to_human",
+      "transfer_to_human" in _router_names)
 
 print(f"\nRESULTS: {_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

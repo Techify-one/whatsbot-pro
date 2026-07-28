@@ -4,7 +4,7 @@
 // from Contacts.js. Owns the "start conversation" flow: phone validity check,
 // the multichannel inbox picker popup, opening a thread scoped to the chosen
 // channel (resolving the existing conversation or seeding `newConvChannelRef`
-// for an empty thread), and the "Iniciar conversa" modal toggle + its error
+// for an empty thread), and the "Iniciar atendimento" modal toggle + its error
 // state.
 //
 // Cross-hook wiring: `selectContact` + `fetchContacts` (open/refresh the thread),
@@ -24,9 +24,9 @@ import { formatPhoneDisplay } from '../../../utils/phone.js';
 export function useChannelPicker({ selectContact, fetchContacts, setSearch, newConvChannelRef }) {
   const [checkingPhone, setCheckingPhone] = useState(false);
   const [checkPhoneError, setCheckPhoneError] = useState(null);
-  // Popup de escolha de caixa de entrada ao iniciar uma conversa nova (multicanal).
+  // Popup de escolha de caixa de entrada ao iniciar um atendimento novo (multicanal).
   const [channelPicker, setChannelPicker] = useState(null);  // {phone, phoneDisplay, channels} | null
-  // Modal "Iniciar conversa" (compor número + canal + 1ª mensagem) — menu da engrenagem.
+  // Modal "Iniciar atendimento" (compor número + canal + 1ª mensagem) — menu da engrenagem.
   const [showNewConversation, setShowNewConversation] = useState(false);
 
   const handleStartConversation = useCallback(async (normalizedPhone) => {
@@ -53,7 +53,7 @@ export function useChannelPicker({ selectContact, fetchContacts, setSearch, newC
       const canonicalPhone = res.data.phone || normalizedPhone;
 
       // Multicanal: deixar o operador escolher por qual caixa de entrada CONECTADA
-      // iniciar a conversa. O backend já filtra desconectadas/desabilitadas.
+      // iniciar o atendimento. O backend já filtra desconectadas/desabilitadas.
       const chRes = await listConnectedChannels();
       const channels = (chRes && chRes.ok && Array.isArray(chRes.data)) ? chRes.data : [];
       setCheckingPhone(false);
@@ -81,8 +81,8 @@ export function useChannelPicker({ selectContact, fetchContacts, setSearch, newC
   }, [checkingPhone]);
 
   // Caixa de entrada escolhida no popup — abre a thread DAQUELE canal. Resolve a
-  // conversa existente do contato NAQUELE canal (multicanal): se já houver, abre-a
-  // escopada (não cai na conversa de outro canal do mesmo número); se não houver,
+  // atendimento existente do contato NAQUELE canal (multicanal): se já houver, abre-a
+  // escopada (não cai no atendimento de outro canal do mesmo número); se não houver,
   // abre um thread vazio do canal escolhido (a 1ª mensagem é roteada por ele).
   const openInChannel = useCallback(async (phone, channelId) => {
     setSearch('');
@@ -91,8 +91,8 @@ export function useChannelPicker({ selectContact, fetchContacts, setSearch, newC
       const ss = await getChannelSessionState(channelId, phone);
       if (ss && ss.ok && ss.data && ss.data.conversation_id) convId = ss.data.conversation_id;
     } catch (e) { /* best-effort: cai no thread vazio do canal */ }
-    // Sem conversa ainda nesse canal: marca o canal para o loader escopar o
-    // getContact (senão ele funde os canais e mostra a conversa errada).
+    // Sem atendimento ainda nesse canal: marca o canal para o loader escopar o
+    // getContact (senão ele funde os canais e mostra o atendimento errada).
     newConvChannelRef.current = convId == null ? channelId : null;
     selectContact({
       phone,
@@ -111,8 +111,8 @@ export function useChannelPicker({ selectContact, fetchContacts, setSearch, newC
     openInChannel(picker.phone, channel.id);
   }, [channelPicker, openInChannel]);
 
-  // 1ª mensagem enviada pelo modal "Iniciar conversa" — fecha o modal, recarrega a
-  // sidebar (a conversa nova já aparece) e abre a thread vinculada ao canal usado.
+  // 1ª mensagem enviada pelo modal "Iniciar atendimento" — fecha o modal, recarrega a
+  // sidebar (o atendimento novo já aparece) e abre a thread vinculada ao canal usado.
   const handleNewConversationSent = useCallback((phone, channelId) => {
     setShowNewConversation(false);
     openInChannel(phone, channelId);

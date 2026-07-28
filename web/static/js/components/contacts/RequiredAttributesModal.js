@@ -3,10 +3,10 @@ import htm from 'htm';
 
 const html = htm.bind(h);
 
-// RequiredAttributesModal (P05) — bloqueia a resolução da conversa quando há
+// RequiredAttributesModal (P05) — bloqueia a resolução do atendimento quando há
 // atributos personalizados marcados como "Obrigatório preencher" ainda vazios.
 // Lista quais atributos faltam; ao clicar em "OK", o chamador abre o local de
-// preenchimento (painel "Informações da conversa") via onConfirm.
+// preenchimento (painel "Informações do atendimento") via onConfirm.
 export function RequiredAttributesModal({ missing = [], onConfirm }) {
   return html`
     <div
@@ -43,4 +43,3 @@ export function RequiredAttributesModal({ missing = [], onConfirm }) {
   `;
 }
 
-export default RequiredAttributesModal;

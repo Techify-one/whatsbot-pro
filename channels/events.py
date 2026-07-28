@@ -15,7 +15,7 @@ from typing import Any, Optional
 class InboundEvent:
     channel_id: str
     provider: str
-    kind: str = "message"                 # message | reaction | receipt | presence | ...
+    kind: str = "message"                 # message | reaction | receipt | presence | system | ...
     direction: str = "in"                 # in | out
     external_msg_id: str = ""
     chat_id: str = ""
@@ -47,6 +47,30 @@ class InboundEvent:
     group_name: Optional[str] = None
     can_send: Optional[bool] = None
     is_archived: Optional[bool] = None
+    # ── Non-actionable SYSTEM inbound (plano 82) ─────────────────────────────
+    # ``kind="system"`` is a channel LIFECYCLE notice about the chat itself, not a
+    # message from the counterpart — e.g. the WhatsApp Cloud API ``type: system``
+    # (``user_changed_number``/``customer_identity_changed``), or Telegram's future
+    # ``migrate_to_chat_id``. The core dispatch (``_dispatch_events`` in
+    # server/routes/channel_webhook.py) writes it as a PANEL-ONLY card
+    # (``conversation_event`` role) attached to the contact's EXISTING conversation
+    # and NOTHING else:
+    #   • does NOT create/reopen a conversation (a system event never opens a thread);
+    #   • does NOT materialize a new contact (only surfaces if the contact exists);
+    #   • does NOT run the agent (the ``conversation_event`` role is already
+    #     black-listed from the LLM context / sidebar / unread badge);
+    #   • does NOT emit ``message.saved``/``message.received`` — so automation
+    #     plugins (protocolos) never fire. It emits the distinct, opt-in bus event
+    #     ``channel.system_event`` instead, for plugins that WANT to react.
+    # The provider only DECLARES the kind; the gate lives entirely in the core
+    # (policy-vs-mechanism, no ``if provider ==``). Providers should populate
+    # ``media_extras`` with the structured subtype so subscribers get more than the
+    # rendered ``text``:
+    #   media_extras = {"system_type": str, "wa_id": str | None, "body": str}
+    # and set ``text`` to the human-facing card line (Cloud uses ``describe_system``,
+    # prefixed with ``ℹ️``). ``chat_id`` is the OLD/current chat identifier (for
+    # ``user_changed_number`` that is the old number); the new identity, when the
+    # provider knows it, rides in ``media_extras["wa_id"]``.
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

@@ -6,6 +6,11 @@ from db.repositories import conversation_repo
 
 logger = logging.getLogger(__name__)
 
+# Tag applied to the contact on a human handoff. Plano 29 A5: it is ALSO read as
+# a belt-and-suspenders AI gate (``messaging_service._conversation_ai_active``)
+# and cleared when the AI retakes the conversation (``conversation_service``).
+TRANSFER_TAG = "transferido_atendente"
+
 
 TRANSFER_TO_HUMAN_TOOL = {
     "type": "function",
@@ -51,14 +56,14 @@ def execute(ctx, args: dict) -> str | None:
     """
     try:
         ctx.contact.set_ai_enabled(False)
-        ctx.tag_registry.create("transferido_atendente", "#ef4444")
-        ctx.contact.add_tag("transferido_atendente")
+        ctx.tag_registry.create(TRANSFER_TAG, "#ef4444")
+        ctx.contact.add_tag(TRANSFER_TAG)
         ctx.contact.save()
         # Unassign the conversation so it lands in the "Não atribuídas" inbox:
         # clear both the human assignee and the bound AI agent, and pause the
         # conversation-level AI gate (a human takes over from here).
         try:
-            conv = conversation_repo.get_open_for_contact(ctx.contact.id)
+            conv = conversation_repo.get_open_for_contact_scoped(ctx.contact)
             if conv:
                 # plano 23 Fase B5 (§4.2): the round-robin DESTINATION of a
                 # human handoff is a plugin seam. Default = unassigned

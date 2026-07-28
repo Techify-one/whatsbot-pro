@@ -63,13 +63,64 @@ async def _resolve_agent_spec(handler, contact, sender):
     return spec
 
 
+def _handoff_notice(from_agent: str, reason: str | None,
+                    is_reinvoke: bool = False) -> str:
+    """Synthetic user turn injected on a routing hop (plano 29 A2, estilo nexus).
+
+    Threads WHY the conversation arrived: the target agent sees the sender and
+    the ``transferir_agente`` motivo instead of receiving the hop blind.
+    ``is_reinvoke`` (A3) tells a revisited agent to re-decide with the motivo
+    instead of repeating its earlier take (nexus ``skip_history`` equivalent).
+    """
+    lines = [f"[REDIRECIONAMENTO de {from_agent}]"]
+    if reason:
+        lines.append(f"Motivo: {reason}")
+    lines.append("")
+    if is_reinvoke:
+        lines.append("(você já atendeu esta conversa neste turno — reavalie com o "
+                     "motivo acima e responda ao cliente; não repita a mesma "
+                     "transferência)")
+    else:
+        lines.append("(responda à mensagem atual do cliente acima)")
+    return "\n".join(lines)
+
+
+def _resolve_max_route_depth() -> int:
+    """Depth cap do routing (plano 29 A3): config ``ai_max_route_depth``.
+
+    Fallback no default do módulo (:data:`ai_engine.routing.MAX_ROUTING_DEPTH`);
+    valores malformados/não-positivos caem no default (fail safe, not open)."""
+    from ai_engine import routing as _routing
+    try:
+        from db.repositories import config_repo
+        n = int(config_repo.get("ai_max_route_depth", _routing.MAX_ROUTING_DEPTH))
+        return n if n >= 1 else _routing.MAX_ROUTING_DEPTH
+    except Exception:
+        return _routing.MAX_ROUTING_DEPTH
+
+
+def _last_transfer_reason(executed_tools: list[dict] | None) -> str | None:
+    """Motivo of the last real (non-skipped) ``transferir_agente`` call, if any."""
+    for e in reversed(executed_tools or []):
+        if e.get("tool") == "transferir_agente" and not e.get("skipped"):
+            motivo = (e.get("args") or {}).get("motivo")
+            return str(motivo) if motivo else None
+    return None
+
+
 async def _run_routing_hop(handler, contact, sender, context_messages, spec, *,
-                           disable_tools):
+                           disable_tools, handoff: dict | None = None):
     """Build prompt/messages/tools for ``spec`` and run one AGNO hop.
 
     Mirrors the inline first-hop build, but returns ``None`` if a filter
     aborts (so within-turn routing stops on the last good reply instead of
     sending an empty message). Used only for handoff continuations.
+
+    ``handoff`` (plano 29 A2/A3): ``{"from": agent_key, "reason": str | None,
+    "is_reinvoke": bool}`` — when present, a synthetic user turn
+    (:func:`_handoff_notice`) is appended AFTER the frozen context so this hop
+    sees who handed the conversation over and why (the nexus
+    ``[REDIRECIONAMENTO de X]`` pattern).
     """
     eff_split = bool(ai_settings.value(
         getattr(contact, "channel_id", "default"),
@@ -81,6 +132,13 @@ async def _run_routing_hop(handler, contact, sender, context_messages, spec, *,
     if system_prompt_str is None:
         return None
     messages = [{"role": "system", "content": system_prompt_str}, *context_messages]
+    if handoff:
+        messages.append({
+            "role": "user",
+            "content": _handoff_notice(handoff.get("from") or "?",
+                                       handoff.get("reason"),
+                                       bool(handoff.get("is_reinvoke"))),
+        })
     messages = await apply_filter("filter.llm.messages", messages, {"phone": sender})
     if messages is None:
         return None
@@ -105,6 +163,10 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
 
     combined = list(executed_tools)
     acc_usage = dict(usage_dict) if usage_dict else {}
+    # Plano 29 A2: state of the hop that HANDED OFF — the next hop reads the
+    # motivo of its last transferir_agente call and receives it in-context.
+    last_hop = {"agent": first_spec.agent_key,
+                "executed": first_result.executed_tools}
 
     def _resolve_next():
         # transferir_agente persisted the handoff on the conversation; re-resolve.
@@ -113,7 +175,10 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
         except agent_factory.AgentResolutionError:
             return None
 
-    async def _run_hop(agent_key):
+    def _pending_reason():
+        return _last_transfer_reason(last_hop["executed"])
+
+    async def _run_hop(agent_key, *, is_reinvoke=False):
         try:
             spec = agent_factory.build_for_contact(handler, contact)
         except agent_factory.AgentResolutionError:
@@ -122,8 +187,11 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
             return None
         set_execution_agent_key(spec.agent_key)
         set_current_step_agent(spec.agent_key)
+        handoff = {"from": last_hop["agent"], "reason": _pending_reason(),
+                   "is_reinvoke": is_reinvoke}
         hop = await _run_routing_hop(
-            handler, contact, sender, context_messages, spec, disable_tools=disable_tools)
+            handler, contact, sender, context_messages, spec,
+            disable_tools=disable_tools, handoff=handoff)
         if hop is None:
             return None
         if hop.usage:
@@ -136,13 +204,38 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
             for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 acc_usage[k] = acc_usage.get(k, 0) + hop.usage.get(k, 0)
         combined.extend(hop.executed_tools or [])
+        last_hop["agent"] = agent_key
+        last_hop["executed"] = hop.executed_tools
         return hop
 
-    result, steps = await _routing.run_with_routing(
+    result, steps, halted = await _routing.run_with_routing(
         first_result=first_result, first_agent_key=first_spec.agent_key,
-        resolve_next=_resolve_next, run_hop=_run_hop)
+        resolve_next=_resolve_next, run_hop=_run_hop,
+        max_depth=_resolve_max_route_depth(),
+        get_reason=_pending_reason)
     if steps:
         set_execution_routing_steps(steps)
+    if halted is not None:
+        # Plano 29 A4: fim anômalo (cap estourado com handoff pendente) → rede de
+        # segurança: escala pra humano em vez do break silencioso. A10: registra
+        # o halt na execução. Ambos best-effort — nunca quebram o turno.
+        chain = "→".join([first_spec.agent_key] + [s["to"] for s in steps])
+        track_step("routing_halted", {"reason": halted.get("reason"),
+                                      "pending": halted.get("pending"),
+                                      "chain": chain}, status="error")
+        motivo = (f"Limite de roteamento atingido ({chain}). "
+                  f"Nenhum agente conseguiu resolver.")
+        try:
+            feedback = await asyncio.to_thread(
+                handler._dispatch_tool, contact, "transfer_to_human",
+                {"reason": motivo})
+            combined.append({"tool": "transfer_to_human",
+                             "args": {"reason": motivo},
+                             "result": feedback, "forced": True})
+            logger.warning("Routing halted for %s (%s) — escalado pra humano",
+                           sender, chain)
+        except Exception:
+            logger.exception("Escalação pra humano falhou para %s", sender)
     return result, combined, (acc_usage or None), steps
 
 
@@ -188,6 +281,21 @@ async def run_turn(handler, sender: str, text: str, *,
     if eff_split:
         context_messages = handler._encode_history_for_split(context_messages)
 
+    # Plano 37 A1: memória compacta de tool. O role ``tool_call`` é excluído do
+    # contexto do LLM (get_context) e o motor roda stateless, então o modelo
+    # re-executa as mesmas tools todo turno. Injeta um bloco ``system`` curto
+    # ("já executadas / atributos já definidos") que atravessa split_messages
+    # (concatenado ao system prompt) e é herdado por todos os hops de routing.
+    # Best-effort + kill-switch: falha ou OFF ⇒ segue sem o bloco.
+    try:
+        from agent import tool_memory
+        _mem_block = tool_memory.build_block(contact)
+        if _mem_block:
+            context_messages = [*context_messages,
+                                {"role": "system", "content": _mem_block}]
+    except Exception:
+        logger.debug("tool_memory: injeção falhou para %s", sender, exc_info=True)
+
     # Config-in-DB: resolve the DB-driven agent for this contact + the
     # filter.agent.resolve seam. Always returns a spec; a genuinely broken DB
     # raises AgentResolutionError, which we isolate to this one conversation
@@ -196,7 +304,8 @@ async def run_turn(handler, sender: str, text: str, *,
         agent_spec = await _resolve_agent_spec(handler, contact, sender)
     except agent_factory.AgentResolutionError as e:
         handler._emit_resolution_error(contact, sender, e)
-        return ProcessResult(reply="")
+        # aborted: já sinalizado com card próprio — não é mudez do motor.
+        return ProcessResult(reply="", aborted=True)
     set_execution_agent_key(agent_spec.agent_key)
     set_current_step_agent(agent_spec.agent_key)
     # The AI is now handling this message: attribute the conversation to it so
@@ -212,7 +321,9 @@ async def run_turn(handler, sender: str, text: str, *,
         "filter.system_prompt", system_prompt_str, {"phone": sender}
     )
     if system_prompt_str is None:
-        return ProcessResult(reply="")
+        # aborted: silêncio intencional de plugin (contrato do filter) — não é
+        # mudez do motor (plano 31 F4).
+        return ProcessResult(reply="", aborted=True)
 
     messages = [
         {"role": "system", "content": system_prompt_str},
@@ -222,7 +333,8 @@ async def run_turn(handler, sender: str, text: str, *,
         "filter.llm.messages", messages, {"phone": sender}
     )
     if messages is None:
-        return ProcessResult(reply="")
+        # aborted: idem — plugin cancelou o turno de propósito.
+        return ProcessResult(reply="", aborted=True)
 
     active_tools = [] if disable_tools else handler._select_active_tools(agent_spec)
     active_tools = await apply_filter(
@@ -267,13 +379,18 @@ async def run_turn(handler, sender: str, text: str, *,
         # Within-turn routing (config-in-DB): a mid-turn handoff lets the new
         # agent answer this same message. No-op when no handoff occurred, so
         # the single-agent path is unchanged.
-        result, executed_tools, usage_dict, _ = await _continue_routing(
+        result, executed_tools, usage_dict, routing_steps = await _continue_routing(
             handler, contact, sender, context_messages, agent_spec,
             result, executed_tools, usage_dict, disable_tools=disable_tools)
         reply = result.reply
+        # Agente que EFETIVAMENTE respondeu: o último hop do routing (ou o resolvido
+        # no início, sem handoff). Capturado ANTES de qualquer efeito colateral do
+        # turno (ex.: transfer_to_human zera o active_agent_key da conversa), então é
+        # a fonte confiável para atribuir a resposta e os cards de tool ao agente.
+        final_agent_key = routing_steps[-1]["to"] if routing_steps else agent_spec.agent_key
 
         if save_response:
-            contact.add_message("assistant", reply)
+            contact.add_message("assistant", reply, agent_key=final_agent_key)
         logger.info("Processed message from %s", sender)
 
         updated_info = None
@@ -291,7 +408,8 @@ async def run_turn(handler, sender: str, text: str, *,
             "ts": time.time(),
         })
 
-        return ProcessResult(reply=reply, tool_calls=executed_tools, contact_info=updated_info)
+        return ProcessResult(reply=reply, tool_calls=executed_tools,
+                             contact_info=updated_info, agent_key=final_agent_key)
 
     except asyncio.CancelledError:
         raise

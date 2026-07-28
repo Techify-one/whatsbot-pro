@@ -4,17 +4,30 @@
 // the knobs that used to be global in the IA "Configurações" tab — now per channel.
 import { h } from 'preact';
 import htm from 'htm';
+import { parseAudioModes, serializeAudioModes } from './constants.js';
+import { SearchableSelect } from '../SearchableSelect.js';
 
 const html = htm.bind(h);
 
-export function AiSettingsFields({ value, onChange, sequentialDefault = true }) {
+export function AiSettingsFields({ value, onChange, sequentialDefault = true, users = [] }) {
   const ai = value || {};
   const set = (key, v) => onChange({ ...ai, [key]: v });
+  // Default human attendant for NEW conversations (plano 71). Stored as an int
+  // (or null) in ai.default_assignee_user_id; the <select> works in strings.
+  const assigneeVal = ai.default_assignee_user_id != null ? String(ai.default_assignee_user_id) : '';
   const num = (key, v, fallback) => {
     const n = parseFloat(v);
     set(key, isNaN(n) ? fallback : n);
   };
   const aiOn = ai.ai_enabled !== false;
+  // Audio transcription is a multi-select of directions (recebidas/enviadas/privadas).
+  const audioModes = parseAudioModes(ai.audio_transcription_mode);
+  const audioOff = audioModes.size === 0;
+  const toggleAudioMode = (token, on) => {
+    const next = new Set(audioModes);
+    if (on) next.add(token); else next.delete(token);
+    set('audio_transcription_mode', serializeAudioModes(next));
+  };
   // Sequential reply toggle (per channel). When the channel hasn't set it yet,
   // fall back to ``sequentialDefault`` (GOWA → on, other providers → off on new
   // channels; legacy channels inherit "on" to preserve prior always-active behavior).
@@ -28,6 +41,23 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true }) 
           class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
         Ativar a IA neste canal
       </label>
+
+      <!-- Atendente padrão para novas conversas (plano 71). SEMPRE visível — vale
+           mesmo com a IA do canal desligada (o consumidor Curseduca tem a IA off):
+           a conversa nova nasce atribuída a este humano e com a IA desligada. -->
+      <div>
+        <label class="block text-[12px] text-wa-secondary mb-1">Atendente padrão para novas conversas</label>
+        <${SearchableSelect}
+          value=${assigneeVal ? String(assigneeVal) : ''}
+          onChange=${(v) => set('default_assignee_user_id', v ? parseInt(v, 10) : null)}
+          options=${users.map((u) => ({ value: String(u.id), label: u.name || u.email }))}
+          allowEmpty=${true} emptyLabel='Nenhum (fila "Não atribuídas")'
+          placeholder='Nenhum (fila "Não atribuídas")'
+          searchPlaceholder="Pesquisar atendente…" />
+        ${assigneeVal ? html`
+          <span class="block text-[11px] text-wa-secondary mt-1">A conversa nasce atribuída a esta pessoa, com a IA desligada.</span>
+        ` : null}
+      </div>
 
       ${aiOn ? html`
         <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
@@ -66,28 +96,42 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true }) 
           <div class="text-[13px] font-semibold text-wa-text">Transcrição de áudio</div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label class="block text-[12px] text-wa-secondary mb-1">Transcrever mensagens</label>
-              <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-                value=${ai.audio_transcription_mode || 'received'}
-                onChange=${(e) => set('audio_transcription_mode', e.target.value)}>
-                <option value="received">Somente recebidas</option>
-                <option value="sent">Somente enviadas</option>
-                <option value="both">Nos dois sentidos</option>
-                <option value="off">Não transcrever</option>
-              </select>
+              <label class="block text-[12px] text-wa-secondary mb-1.5">Transcrever mensagens</label>
+              <div class="flex flex-col gap-1.5">
+                <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
+                  <input type="checkbox" checked=${audioModes.has('received')}
+                    onChange=${(e) => toggleAudioMode('received', e.target.checked)}
+                    class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+                  Recebidas
+                </label>
+                <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
+                  <input type="checkbox" checked=${audioModes.has('sent')}
+                    onChange=${(e) => toggleAudioMode('sent', e.target.checked)}
+                    class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+                  Enviadas
+                </label>
+                <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
+                  <input type="checkbox" checked=${audioModes.has('private')}
+                    onChange=${(e) => toggleAudioMode('private', e.target.checked)}
+                    class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+                  Privadas (áudios do operador)
+                </label>
+              </div>
+              ${audioOff ? html`<span class="block text-[11px] text-wa-secondary mt-1">Nenhuma marcada — transcrição desativada.</span>` : null}
             </div>
             <div>
               <label class="block text-[12px] text-wa-secondary mb-1">Onde aparece a transcrição</label>
               <select class="wa-field w-full px-3 py-2 rounded-md text-[14px] disabled:opacity-50"
                 value=${ai.audio_transcription_target || 'private'}
-                disabled=${(ai.audio_transcription_mode || 'received') === 'off'}
+                disabled=${audioOff}
                 onChange=${(e) => set('audio_transcription_target', e.target.value)}>
                 <option value="private">Mensagem privada (só no painel)</option>
                 <option value="chat">Direto no chat (envia ao contato)</option>
               </select>
+              <span class="block text-[11px] text-wa-secondary mt-1">Vale para recebidas/enviadas. Áudios privados ficam sempre só no painel.</span>
             </div>
           </div>
-          ${(ai.audio_transcription_mode || 'received') !== 'off' && ai.audio_transcription_target === 'chat' ? html`
+          ${!audioOff && ai.audio_transcription_target === 'chat' ? html`
             <div>
               <label class="block text-[12px] text-wa-secondary mb-1">Prefixo (opcional)</label>
               <textarea rows="2" placeholder="Ex: 🎙 Transcrição: "
@@ -158,24 +202,6 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true }) 
           ` : null}
         </div>
 
-        <!-- Alerta sonoro de transferência -->
-        <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
-          <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
-            <input type="checkbox" checked=${ai.transfer_alert_enabled !== false}
-              onChange=${(e) => set('transfer_alert_enabled', e.target.checked)}
-              class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
-            Alerta sonoro ao transferir para humano
-          </label>
-          ${ai.transfer_alert_enabled !== false ? html`
-            <div>
-              <label class="block text-[12px] text-wa-secondary mb-1">Duração do alerta (segundos)</label>
-              <input type="number" min="1" max="30" step="1"
-                class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
-                value=${ai.transfer_alert_duration ?? 5}
-                onInput=${(e) => num('transfer_alert_duration', e.target.value, 5)} />
-            </div>
-          ` : null}
-        </div>
       ` : null}
     </div>
   `;

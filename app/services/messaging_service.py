@@ -36,13 +36,21 @@ import time
 from dataclasses import dataclass
 
 from channels import ai_settings
-from db.repositories import contact_repo, conversation_repo
+from db.repositories import agent_repo, contact_repo, conversation_repo
 from agent import group_mentions
-from server import system_notices
-from server.execution import astart_execution, aend_execution, atrack_step, prune_executions
+from server import sound_catalog, system_notices
+from server.execution import (
+    astart_execution, aend_execution, atrack_step, prune_executions,
+    astamp_execution_channel, aset_execution_texts, set_current_contact_id,
+)
 from server.helpers import parse_split_reply
-from server.transcription import maybe_transcribe, format_media_content
+from server.transcription import (
+    maybe_transcribe,
+    format_media_content,
+    placeholder_for_unrenderable,
+)
 from plugins.events import apply_filter, emit_with_filter
+from app.services.realtime_broadcast import build_inbound_saved_message
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +193,10 @@ class MessagingService:
                          emit_text: str, caption: str = "",
                          filename: str | None = None,
                          error_label: str,
-                         transcribe_audio: bool = False) -> dict:
+                         transcribe_audio: bool = False,
+                         sent_by_user_id: int | None = None,
+                         sent_by_name: str | None = None,
+                         wire_phone: str | None = None) -> dict:
         """Send an operator-uploaded media file and persist/broadcast/emit it (R14).
 
         UNIFIES the three near-duplicate operator send handlers
@@ -207,7 +218,7 @@ class MessagingService:
         media send), ``error_label`` (PT-BR wording), and ``transcribe_audio`` (the
         audio-only tail). ``dest`` is the already-written ``Path``.
 
-        Returns ``{"ok": True, "msg_id": ...}`` on success or
+        Returns ``{"ok": True, "msg_id": ..., "media_path": ...}`` on success or
         ``{"ok": False, "error": ..., "kind": "send"|"unexpected"}`` when the send
         failed (the error bubble was already broadcast). The route maps that to the
         same ``_err``/``_ok`` envelopes it returned before.
@@ -219,11 +230,16 @@ class MessagingService:
         state = self.state
         agent_handler = self.agent_handler
 
+        # Wire target = the JID the conversation actually receives from (real address),
+        # falling back to `phone`. `phone` stays the contact key for save/broadcast;
+        # only the on-the-wire send uses `wire`. Mirrors the text path — fixes the BR
+        # 9th-digit ghost-send where a saved 13-digit number never reached the account.
+        wire = wire_phone or phone
         msg_id = None
         try:
             if not is_sandbox:
                 res = await asyncio.to_thread(
-                    outbound.send_media, channel_id, phone, kind, str(dest),
+                    outbound.send_media, channel_id, wire, kind, str(dest),
                     caption=caption, filename=filename)
                 if not res.ok:
                     raise GOWASendError(res.error or "Falha no envio de mídia")
@@ -252,10 +268,18 @@ class MessagingService:
             "media_path": rel_path,
             "status": "operator",
             "msg_id": msg_id,
+            "sent_by_name": sent_by_name,
         }
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
+        # Regra "ignorar abertura" (plugin): mantém a conversa fechada se a legenda casar
+        # a regex (consistente com on_outbound, que já pula o protocolo). Sem plugin → None.
+        _allow_reopen = await apply_filter(
+            "filter.conversation.before_reopen", True,
+            {"phone": phone, "role": "assistant", "text": emit_text})
         contact.add_message("assistant", content, media_type=kind,
-                            media_path=rel_path, status="operator", msg_id=msg_id)
+                            media_path=rel_path, status="operator", msg_id=msg_id,
+                            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                            reopen=(False if not _allow_reopen else None))
 
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": channel_id, "message": msg_data})
@@ -290,11 +314,12 @@ class MessagingService:
                     },
                 })
 
-        return {"ok": True, "msg_id": msg_id}
+        return {"ok": True, "msg_id": msg_id, "media_path": rel_path}
 
     # ── Reply Splitting & Sending ─────────────────────────────────────────────
 
-    async def send_reply(self, channel_id: str, phone: str, reply: str):
+    async def send_reply(self, channel_id: str, phone: str, reply: str, *,
+                         agent_key: str | None = None):
         """Send reply (possibly split into multiple parts) and broadcast.
 
         Channel-aware (plano 11): every leg goes through ``OutboundRouter`` so the
@@ -315,6 +340,9 @@ class MessagingService:
         if reply is None:
             logger.info("[Batch] reply for %s aborted by filter.reply.raw", phone)
             return
+
+        # Nome exibível do agente (resolvido 1× por resposta) para "IA - <NOME>".
+        agent_name = await asyncio.to_thread(agent_repo.display_name_for, agent_key)
 
         split_enabled = ai_settings.value(
             channel_id, "split_messages", settings.get("split_messages", True))
@@ -365,6 +393,16 @@ class MessagingService:
                 send_text, mentions = await asyncio.to_thread(
                     group_mentions.resolve_outgoing, phone, part)
 
+            # Plugin filter: WIRE-ONLY transform (e.g. signature) — reaches the
+            # contact but NOT the saved/broadcast copy (which keeps using `part`).
+            _wired = await apply_filter(
+                "filter.outbound.text", send_text,
+                {"phone": phone, "channel_id": channel_id, "source": "ai",
+                 "index": i, "total": len(parts)},
+            )
+            if _wired is not None:
+                send_text = _wired
+
             # Track for echo-back filtering (key on the wire text we actually send)
             sent_key = f"{channel_id}:{phone}:{send_text[:120]}"
             state.recently_sent[sent_key] = time.time()
@@ -393,11 +431,16 @@ class MessagingService:
             sent_parts.append((part, part_msg_id))
 
             # Broadcast each part to frontend individually
+            _ai_msg = {"role": "assistant", "content": part, "ts": time.time(),
+                       "status": "sent", "msg_id": part_msg_id}
+            if agent_key:
+                _ai_msg["agent_key"] = agent_key
+            if agent_name:
+                _ai_msg["agent_name"] = agent_name
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
                 "channel_id": channel_id,
-                "message": {"role": "assistant", "content": part, "ts": time.time(),
-                            "status": "sent", "msg_id": part_msg_id},
+                "message": _ai_msg,
             })
 
             # Plugin event: AI reply leg
@@ -409,11 +452,16 @@ class MessagingService:
             })
 
         # Save each part as a separate message to preserve split across page refresh
+        # plano 51 (01 F1): estampa a execução do turno em cada parte — o contextvar
+        # é lido AQUI (contexto async do ciclo) e passado por valor ao to_thread.
+        from agent.execution import get_current_execution_id
+        turn_execution_id = get_current_execution_id()
         for part, part_msg_id in sent_parts:
             try:
                 await asyncio.to_thread(agent_handler.save_assistant_message, phone, part,
                                         msg_id=part_msg_id, status="sent",
-                                        channel_id=channel_id)
+                                        channel_id=channel_id, agent_key=agent_key,
+                                        execution_id=turn_execution_id)
                 # Increment unread AI count (operator hasn't seen this reply yet)
                 contact = agent_handler._get_contact(phone, channel_id=channel_id)
                 if contact:
@@ -430,6 +478,8 @@ class MessagingService:
             "parts": len(parts),
             "reply_preview": full_reply[:200],
         })
+        # Nexus plan: denormalize the final AI reply for the "Msg da IA" search.
+        await aset_execution_texts(output_text=full_reply[:2000] or None)
         logger.info("[Batch] Replied to %s/%s (%d parts): %s",
                     channel_id, phone, len(parts), full_reply[:80])
 
@@ -443,11 +493,17 @@ class MessagingService:
 
     async def broadcast_tool_calls(self, phone: str, tool_calls: list[dict],
                                    contact_info: dict | None = None,
-                                   *, channel_id: str = "default"):
-        """Broadcast private messages for each tool call executed by the LLM."""
+                                   *, channel_id: str = "default",
+                                   agent_key: str | None = None):
+        """Broadcast private messages for each tool call executed by the LLM.
+
+        ``agent_key`` (do ProcessResult do turno) atribui os cards de tool ao agente
+        que os executou, para o painel exibir "Ferramenta IA - <NOME>"."""
         ws_manager = self.ws_manager
         agent_handler = self.agent_handler
         settings = self.settings
+        # Nome exibível do agente (resolvido 1× para todos os cards deste turno).
+        agent_name = await asyncio.to_thread(agent_repo.display_name_for, agent_key)
 
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
         for tc in tool_calls:
@@ -465,14 +521,37 @@ class MessagingService:
                 lines.append(f"→ {result.strip()}")
             content = "\n".join(lines)
 
-            contact.add_message("tool_call", content)
+            # The live payload mirrors the SAVED row (private_note pattern in
+            # server/routes/contacts.py): ``add_message`` resolves the
+            # conversation inbox-aware, so its ``conversation_id`` is the thread
+            # the panel has open. Resolving via ``get_open_for_contact`` here
+            # returned the newest open conversation of ANY channel — with two
+            # open threads the id diverged and the panel dropped the card. The
+            # saved ``ts`` also keeps the panel's ts+role dedupe from colliding.
+            saved = None
+            try:
+                saved = await asyncio.to_thread(
+                    contact.add_message, "tool_call", content, agent_key=agent_key)
+            except Exception as e:
+                logger.error("[ToolCall] failed to save tool_call card for %s: %s",
+                             phone, e)
+            tc_message = {
+                "role": "tool_call",
+                "content": content,
+                "ts": (saved or {}).get("ts", time.time()),
+            }
+            if agent_key:
+                tc_message["agent_key"] = agent_key
+            if agent_name:
+                tc_message["agent_name"] = agent_name
+            if saved and saved.get("conversation_id") is not None:
+                tc_message["conversation_id"] = saved["conversation_id"]
+            if saved and saved.get("id"):
+                tc_message["_id"] = saved["id"]
             await ws_manager.broadcast("new_message", {
                 "phone": phone,
-                "message": {
-                    "role": "tool_call",
-                    "content": content,
-                    "ts": time.time(),
-                },
+                "channel_id": channel_id,
+                "message": tc_message,
             })
 
         # Live-refresh the open info panel after a custom-attribute write (plano 19).
@@ -489,7 +568,7 @@ class MessagingService:
                 await ws_manager.broadcast("contact_info_updated", {
                     "phone": phone, "info": full.get("info")})
         if "conversation" in attr_scopes:
-            conv = await asyncio.to_thread(conversation_repo.get_open_for_contact, contact.id)
+            conv = await asyncio.to_thread(conversation_repo.get_open_for_contact_scoped, contact)
             if conv:
                 await ws_manager.broadcast("conversation_updated", {
                     "conversation_id": conv["id"], "contact_id": contact.id,
@@ -506,15 +585,14 @@ class MessagingService:
 
         # If transfer_to_human was called, broadcast alert + state updates
         if any(tc.get("tool") == "transfer_to_human" for tc in tool_calls):
-            # Per-channel sound alert (plano 21): resolve the channel's setting and
-            # ship it in the payload so the panel respects it even though the
-            # toggle no longer lives in the global config.
-            ta_enabled = bool(ai_settings.value(
-                channel_id, "transfer_alert_enabled",
-                settings.get("transfer_alert_enabled", True)))
-            ta_duration = ai_settings.value(
-                channel_id, "transfer_alert_duration",
-                settings.get("transfer_alert_duration", 5))
+            # Alerta sonoro GLOBAL: ativação/duração moram no padrão da equipe
+            # (``config.sound_settings`` → evento ``ia_to_human``, editável na aba
+            # "Notificações e sons"), com fallback nas keys legadas. Deixou de ser
+            # per-canal — o alerta é sobre QUEM recebe, não sobre o canal.
+            ta_enabled, ta_duration = sound_catalog.event_gate(
+                settings.get("sound_settings", None), "ia_to_human",
+                legacy_enabled=settings.get("transfer_alert_enabled", True),
+                legacy_duration=settings.get("transfer_alert_duration", 5))
             await ws_manager.broadcast("human_transfer_alert", {
                 "phone": phone, "enabled": ta_enabled, "duration": ta_duration})
             await ws_manager.broadcast("contact_ai_toggled", {
@@ -529,7 +607,7 @@ class MessagingService:
             # The conversation was unassigned by the tool — push the change so the
             # row moves to the "Não atribuídas" inbox live (plano 10).
             conv = await asyncio.to_thread(
-                conversation_repo.get_open_for_contact, contact.id)
+                conversation_repo.get_open_for_contact_scoped, contact)
             if conv:
                 await ws_manager.broadcast("conversation_assigned", {
                     "conversation_id": conv["id"],
@@ -540,6 +618,13 @@ class MessagingService:
                     "ai_active": conv.get("ai_active"),
                     "ts": time.time(),
                 })
+                # Card "IA pausada" no fio: a IA se auto-desligou ao transferir para
+                # humano. Sem ``actor`` (não foi um operador) → texto genérico. Gated
+                # pelo grupo ``system_notice_ai``; best-effort (emit engole exceções).
+                await asyncio.to_thread(
+                    system_notices.emit_conversation_notice,
+                    event_type="ai_off", conversation_id=conv["id"],
+                    contact_id=contact.id, phone=phone)
 
     # ── Audio Transcription Delivery ──────────────────────────────────────────
 
@@ -608,12 +693,13 @@ class MessagingService:
         path: str,
         *,
         phone: str,
-        source: str,                # "batch" | "echo" | "group_no_mention"
+        source: str,                # "batch" | "echo" | "operator" | "private" | "group_no_mention"
         is_group: bool = False,
         group_jid: str | None = None,
         file_name: str = "",        # document only — original filename
         mimetype: str = "",         # document only — best-effort mime hint
         channel_id: str = "default",
+        force: bool = False,        # bypass the config gate (still honors plugin should_run)
     ) -> str:
         """Inbound-path wrapper around the shared transcription helper.
 
@@ -628,7 +714,7 @@ class MessagingService:
             settings=ai_settings.view(channel_id, self.settings),
             agent_handler=self.agent_handler,
             phone=phone, source=source, is_group=is_group, group_jid=group_jid,
-            file_name=file_name, mimetype=mimetype,
+            file_name=file_name, mimetype=mimetype, force=force,
         )
 
     # ── Typing-Aware Orchestrator ─────────────────────────────────────────────
@@ -660,14 +746,15 @@ class MessagingService:
                 return
             await asyncio.sleep(0.3)
 
-    async def _send_with_typing_guard(self, channel_id: str, phone: str, reply: str):
+    async def _send_with_typing_guard(self, channel_id: str, phone: str, reply: str, *,
+                                      agent_key: str | None = None):
         """Wait for contact to stop typing, mark sending=True, then send (uncancellable phase)."""
         state = self.state
         key = (channel_id, phone)
         await self._wait_typing_paused(channel_id, phone)
         state.sending[key] = True
         try:
-            await self.send_reply(channel_id, phone, reply)
+            await self.send_reply(channel_id, phone, reply, agent_key=agent_key)
         finally:
             state.sending[key] = False
 
@@ -687,7 +774,7 @@ class MessagingService:
             contact = agent_handler._get_contact(phone, channel_id=channel_id)
             if contact is None:
                 return None
-            conv = conversation_repo.get_open_for_contact(contact.id)
+            conv = conversation_repo.get_open_for_contact_scoped(contact)
             if conv is None or system_notices.has_event(conv["id"], "ai_takeover"):
                 return None
             system_notices.emit_conversation_notice(
@@ -712,9 +799,12 @@ class MessagingService:
         key = (channel_id, phone)
         existing = state.processing_tasks.get(key)
         if existing and not existing.done():
-            if state.sending.get(key):
-                # Mid-send — don't cancel. The current orchestrator will spawn the next
-                # cycle automatically when it finishes sending (sees pending_messages).
+            if state.sending.get(key) or state.processing.get(key):
+                # Mid-send (state.sending) OR mid-cycle (state.processing — the batch
+                # was already popped, plano 33 F6). Don't cancel: cancelling here
+                # discards the popped items → the customer's message is lost from the
+                # DB too. The new message stays in pending_messages and the running
+                # orchestrator's tail re-checks pending and spawns a follow-up cycle.
                 return
             existing.cancel()
         state.processing_tasks[key] = asyncio.create_task(self._orchestrate(channel_id, phone))
@@ -742,6 +832,18 @@ class MessagingService:
 
             contact = agent_handler._get_contact(phone, channel_id=channel_id)
 
+            # plano 36: stamp conversation_id + channel onto the execution (best-effort)
+            # now that the contact/inbox is materialised. Cheap read; failure → NULL.
+            await astamp_execution_channel(contact, channel_id)
+            # Nexus plan: expose the contact of this turn on the contextvar so a deep
+            # call (e.g. the vendas_ia plugin recording embedding usage) can attribute
+            # cost to it without threading the id through every layer.
+            try:
+                if contact is not None and getattr(contact, "id", None):
+                    set_current_contact_id(contact.id)
+            except Exception:
+                pass
+
             text_parts: list[str] = []
             text_msg_ids: list[str] = []
             text_reply_to: str | None = None
@@ -758,13 +860,27 @@ class MessagingService:
                     if item.get("reply_to_msg_id"):
                         text_reply_to = item["reply_to_msg_id"]
 
+            combined_preview = "\n".join(t for t in text_parts if t)
             await atrack_step("batch_accumulated", {
                 "text_count": len(text_parts),
                 "media_count": len(media_items),
-                "combined_preview": "\n".join(t for t in text_parts if t)[:200],
+                "combined_preview": combined_preview[:200],
             })
+            # Nexus plan: denormalize the client message + origin msg_id onto the
+            # execution row so the list can search/filter without scanning steps.
+            await aset_execution_texts(
+                input_text=combined_preview[:2000] or None,
+                msg_id=(text_msg_ids[-1] if text_msg_ids else None),
+            )
 
-            if self._channel_ai_enabled(channel_id):
+            # plano 25 Fase 1: only the AI auto-marking-read (+ real read-receipt) when
+            # it is actually TAKING OVER this conversation. The gate needs all three AI
+            # layers (plano 21): global auto_reply + channel ai_enabled (_channel_ai_enabled)
+            # AND the per-conversation ai_active flag (_conversation_ai_active) — mirror of
+            # the AI-reply gate at the text/media branches below. Without the per-conversation
+            # check, an IA-OFF conversation would still clear the unread badge and send a
+            # bogus "read"/blue-tick to the client on channels that support it.
+            if self._channel_ai_enabled(channel_id) and _conversation_ai_active(contact):
                 msg_ids = await asyncio.to_thread(contact.mark_user_messages_as_read)
                 if msg_ids:
                     for mid in msg_ids:
@@ -778,8 +894,28 @@ class MessagingService:
                     logger.info("[Batch] Processing %d text messages from %s: %s",
                                 len(text_parts), phone, combined[:80])
                     last_msg_id = text_msg_ids[-1] if text_msg_ids else None
-                    contact.add_message("user", combined, msg_id=last_msg_id,
-                                        reply_to_msg_id=text_reply_to)
+                    # Regra "ignorar abertura" (plugin): mantém a conversa fechada se a
+                    # mensagem recebida casar a regex (ela ainda foi salva/exibida). Sem
+                    # plugin registrado → apply_filter devolve True → reopen=None (default).
+                    _allow_reopen = await apply_filter(
+                        "filter.conversation.before_reopen", True,
+                        {"phone": phone, "role": "user", "text": combined})
+                    saved = contact.add_message("user", combined, msg_id=last_msg_id,
+                                        reply_to_msg_id=text_reply_to,
+                                        reopen=(False if not _allow_reopen else None))
+                    # plano 57: re-emite um new_message AUTORITATIVO pós-save (com o _id/ts
+                    # reais da linha) — fecha a janela "broadcast-antes-do-save" em que a 1ª
+                    # mensagem de uma conversa nova (ou quem abre na janela t=0↔save) nunca
+                    # renderiza ao vivo. `supersedes` = os msg_ids que o batch combinou nesta
+                    # única linha, p/ o front colapsar as bolhas otimistas das anteriores.
+                    # Defensivo: nunca quebra o save/IA.
+                    try:
+                        await ws_manager.broadcast("new_message", {
+                            "phone": phone, "channel_id": channel_id,
+                            "message": build_inbound_saved_message(saved, supersedes=text_msg_ids),
+                        })
+                    except Exception:
+                        logger.exception("[Batch] falha ao re-emitir new_message pós-save para %s", phone)
                     await emit_with_filter("message.saved", {
                         "phone": phone, "text": combined, "msg_id": last_msg_id,
                         "media_type": None, "media_path": None,
@@ -807,7 +943,7 @@ class MessagingService:
                                     save_user_message=False, save_response=False,
                                     channel_id=channel_id)
                                 if result.tool_calls:
-                                    await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id)
+                                    await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id, agent_key=result.agent_key)
                                 if result.reply:
                                     if result.reply.startswith("[WhatsBot]"):
                                         contact.add_message("system_notice", result.reply)
@@ -816,8 +952,30 @@ class MessagingService:
                                             "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
                                         })
                                     else:
-                                        await self._send_with_typing_guard(channel_id, phone, result.reply)
+                                        await self._send_with_typing_guard(channel_id, phone, result.reply, agent_key=result.agent_key)
                                         await self.maybe_emit_ai_takeover(phone, channel_id)
+                                elif not result.aborted:
+                                    # A5 (plano 31 F4): reply vazio calava sem rastro —
+                                    # loga e grava um card painel-only pro operador ver.
+                                    # aborted=True (filter/resolução) NÃO gera card: é
+                                    # silêncio intencional ou já sinalizado.
+                                    logger.warning(
+                                        "[Batch] IA não produziu resposta para %s "
+                                        "(nada enviado — possível max_tokens baixo)", phone)
+                                    try:
+                                        empty_msg = contact.add_message(
+                                            "error",
+                                            "⚠️ A IA não produziu resposta para a última "
+                                            "mensagem. Verifique o max_tokens do agente "
+                                            "(modelos de raciocínio precisam de orçamento alto).")
+                                        await ws_manager.broadcast("new_message", {
+                                            "phone": phone, "channel_id": channel_id,
+                                            "message": empty_msg,
+                                        })
+                                    except Exception:
+                                        logger.exception(
+                                            "[Batch] Falha ao gravar card de resposta "
+                                            "vazia para %s", phone)
                             except asyncio.CancelledError:
                                 raise
                             except Exception as e:
@@ -841,13 +999,27 @@ class MessagingService:
                 _saved_text = text or ("[Áudio recebido]" if audio_path else "")
                 _saved_media_type = item.get("media_type") or ("image" if image_path else "audio")
                 _saved_media_path = item.get("media_path") or image_path or audio_path
-                contact.add_message(
+                # plano 75 F3 — safety net: a media_type the panel cannot draw and
+                # with no file would persist an empty body (mute bubble). Real media
+                # without a caption keeps its empty text (it has media_path).
+                _saved_text = placeholder_for_unrenderable(
+                    _saved_text, _saved_media_type, _saved_media_path)
+                saved = contact.add_message(
                     "user", _saved_text,
                     media_type=_saved_media_type,
                     media_path=_saved_media_path,
                     msg_id=item.get("msg_id"),
                     reply_to_msg_id=item.get("reply_to_msg_id"),
                 )
+                # plano 57: new_message autoritativo pós-save (cada mídia é 1 linha própria,
+                # com seu próprio msg_id → reconcilia no lugar; sem supersedes).
+                try:
+                    await ws_manager.broadcast("new_message", {
+                        "phone": phone, "channel_id": channel_id,
+                        "message": build_inbound_saved_message(saved),
+                    })
+                except Exception:
+                    logger.exception("[Batch] falha ao re-emitir new_message (mídia) pós-save para %s", phone)
                 await emit_with_filter("message.saved", {
                     "phone": phone, "text": _saved_text,
                     "msg_id": item.get("msg_id"),
@@ -898,7 +1070,8 @@ class MessagingService:
                         new_content = None
                     if new_content:
                         await asyncio.to_thread(
-                            agent_handler.update_last_user_message_content, phone, new_content
+                            agent_handler.update_last_user_message_content, phone,
+                            new_content, channel_id
                         )
                     if audio_path:
                         await self.deliver_audio_transcription(phone, contact, transcription,
@@ -950,7 +1123,7 @@ class MessagingService:
                         channel_id=channel_id,
                     )
                     if result.tool_calls:
-                        await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id)
+                        await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id, agent_key=result.agent_key)
                     if result.reply:
                         if result.reply.startswith("[WhatsBot]"):
                             contact.add_message("system_notice", result.reply)
@@ -959,8 +1132,29 @@ class MessagingService:
                                 "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
                             })
                         else:
-                            await self._send_with_typing_guard(channel_id, phone, result.reply)
+                            await self._send_with_typing_guard(channel_id, phone, result.reply, agent_key=result.agent_key)
                             await self.maybe_emit_ai_takeover(phone, channel_id)
+                    elif not result.aborted:
+                        # A5 (plano 31 F4): mesmo tratamento do caminho texto
+                        # (aborted intencional não gera card).
+                        logger.warning(
+                            "[Batch] IA não produziu resposta para %s (%s) "
+                            "(nada enviado — possível max_tokens baixo)",
+                            phone, media_label)
+                        try:
+                            empty_msg = contact.add_message(
+                                "error",
+                                "⚠️ A IA não produziu resposta para a última "
+                                "mensagem. Verifique o max_tokens do agente "
+                                "(modelos de raciocínio precisam de orçamento alto).")
+                            await ws_manager.broadcast("new_message", {
+                                "phone": phone, "channel_id": channel_id,
+                                "message": empty_msg,
+                            })
+                        except Exception:
+                            logger.exception(
+                                "[Batch] Falha ao gravar card de resposta "
+                                "vazia para %s", phone)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -979,8 +1173,9 @@ class MessagingService:
             await ws_manager.broadcast("ai_typing", {"phone": phone, "channel_id": channel_id, "active": False})
 
         max_exec = settings.get("max_executions", 200)
+        retention_days = settings.get("execution_retention_days", 0)
         try:
-            await asyncio.to_thread(prune_executions, max_exec)
+            await asyncio.to_thread(prune_executions, max_exec, retention_days)
         except Exception:
             pass
 
@@ -1013,6 +1208,10 @@ class MessagingService:
                 return
             # Consume now: a NEW message arriving during _run_one_cycle goes into a fresh batch
             state.pending_messages.pop(key, None)
+            # Plano 33 F6: from THIS point the batch is popped but not yet persisted.
+            # Mark the cycle as processing so schedule_orchestrator won't cancel us in
+            # the pop→persist window (which would drop `items`). Cleared in `finally`.
+            state.processing[key] = True
 
             # Modo sequencial (plano 21): quando LIGADO no canal, só UM contato
             # roda o ciclo da IA por vez nesse canal. Um asyncio.Lock por canal
@@ -1045,21 +1244,43 @@ class MessagingService:
         except asyncio.CancelledError:
             return
         finally:
+            # Plano 33 F6: clear the mid-cycle guard. The tail spawn (1117) and this
+            # clear run with NO await between them, so a webhook message cannot slip
+            # in unseen: it either arrived earlier (tail spawns a follow-up) or will
+            # arrive after this clears (a fresh orchestrator is scheduled normally).
+            state.processing.pop(key, None)
             cur = asyncio.current_task()
             if state.processing_tasks.get(key) is cur:
                 state.processing_tasks.pop(key, None)
 
 
 def _conversation_ai_active(contact) -> bool:
-    """Per-conversation AI gate (plano 01 Fase 2, fatia 2).
+    """Per-conversation AI gate (plano 01 Fase 2, fatia 2 · plano 29 A5).
 
     Returns the active conversation's ``ai_active`` flag, defaulting to True
     (fail-open) — um erro de resolução ou ausência de conversa NUNCA silencia o
     bot. Permite pausar a IA numa conversa específica sem mexer no contato.
+
+    Plano 29 A5 — gate de humano desacoplado do flag: mesmo com ``ai_active``
+    dessincronizado em 1, a IA NÃO responde quando a conversa aberta tem um humano
+    atribuído (``assignee_user_id``) sem agente de IA vinculado.
+
+    Plano 37 (Cluster D / P1-a): a trava de transferência é 100% POR-CONVERSA. A
+    ``transfer_to_human`` já grava ``ai_active=0`` (+ assignee) na conversa do canal;
+    o gate por-conversa acima cobre o bloqueio. A tag ``transferido_atendente`` deixa
+    de ser lida aqui (era contact-global → transferir num canal silenciava o outro
+    do mesmo número); ela permanece só como RÓTULO visual. Fail-open (D2): sem
+    conversa naquele inbox, ``conv=None`` → ``return True``; erro → ``return True``.
     """
     try:
-        conv = conversation_repo.get_open_for_contact(contact.id)
-        return bool(conv["ai_active"]) if conv else True
+        conv = conversation_repo.get_open_for_contact_scoped(contact)
+        if conv:
+            if not conv["ai_active"]:
+                return False
+            if conv.get("assignee_user_id") is not None \
+                    and not conv.get("active_agent_key"):
+                return False  # humano no comando — flag dessincronizado não fala mais alto
+        return True
     except Exception:
         logger.exception("Falha no gate ai_active para %s", getattr(contact, "phone", "?"))
         return True

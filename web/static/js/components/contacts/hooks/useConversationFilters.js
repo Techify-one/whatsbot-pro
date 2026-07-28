@@ -10,14 +10,20 @@
 // All matching is client-side via the pure helpers in services/conversationRows.
 // Cross-hook wiring: `contacts` + the open-thread keys + `currentUserId` come in;
 // `displayedRef` (owned by the list hook) is kept in sync for "selecionar todas".
-import { useState, useEffect, useCallback, useMemo } from 'preact/hooks';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import {
   listSavedFilters, createSavedFilter, updateSavedFilter, deleteSavedFilter,
+  countConversations,
 } from '../../../services/api.js';
 import {
   isUnassigned, matchesStatus, matchesAssignment, matchesAdvFilters, matchesTags,
-  sortContactsBy, normalizeSpec, specsEqual, isDefaultSpec,
+  isVisibleInSidebar, sortContactsBy, normalizeSpec, specsEqual, isDefaultSpec,
 } from '../../../services/conversationRows.js';
+import {
+  buildCountParams, buildListParams, isServerExpressible, isListServerExpressible,
+} from '../../../services/conversationFilterSpec.js';
+import { draftKeyFor, getDraftAt } from '../../../services/drafts.js';
+import { useDrafts } from '../../../hooks/useDrafts.js';
 
 // Persists which saved conversation-filter preset is applied, so it survives a
 // page reload (per device). Stores the preset id; re-applied once the presets load.
@@ -26,12 +32,15 @@ const ACTIVE_FILTER_KEY = 'whatsbot_active_conv_filter';
 /**
  * @param {Object} opts
  * @param {Record<string, any>[]} opts.contacts
+ * @param {string} [opts.search]
  * @param {string|null} opts.selected
  * @param {number|null} opts.selectedConvId
  * @param {number|null} opts.currentUserId
  * @param {{ current: Record<string, any>[] }} opts.displayedRef
+ * @param {boolean} [opts.searching] - há um termo de busca ativo na barra lateral.
+ * @param {boolean} [opts.showArchived]
  */
-export function useConversationFilters({ contacts, selected, selectedConvId, currentUserId, displayedRef }) {
+export function useConversationFilters({ contacts, search = '', selected, selectedConvId, currentUserId, displayedRef, searching = false, showArchived = false, skipStoredPreset = false, serverFilterRef = null, fetchContacts = null, viewSpecRef = null }) {
   // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
   const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
   const [assignmentTab, setAssignmentTab] = useState('all');  // all|mine|unassigned
@@ -44,44 +53,164 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
   // filters diverge from the saved spec.
   const [savedFilters, setSavedFilters] = useState([]);
   const [activeFilterId, setActiveFilterId] = useState(null);
+  const [serverCounts, setServerCounts] = useState(null);
 
-  // Só entram na sidebar conversas com mensagem real trocada (last_message_ts > 0,
-  // que já exclui eventos painel-only). Um contato recém-criado sem mensagem — ex:
-  // recriado pela importação de chats do GOWA, ou aberto pelo modal sem enviar nada
-  // — não deve poluir a lista. A conversa atualmente ABERTA fica visível mesmo sem
-  // mensagem, pra não sumir enquanto o operador digita a 1ª mensagem.
-  const activeContacts = useMemo(() => {
-    const selKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
-    return contacts.filter(c => {
-      if (c.last_message_ts && c.last_message_ts > 0) return true;
-      const key = c.conversation_id != null ? `conv:${c.conversation_id}` : `phone:${c.phone}`;
-      return key === selKey;
+  // plano 69 F2/F3 — a lista da sidebar (conversa-first, SEM busca) pode ser
+  // server-filtrada pela MESMA query da contagem. `serverMode` = o spec inteiro
+  // (status + aba + tags + avançado) é 100% expressável no servidor. Ligado ⇒ o
+  // servidor já cortou tudo: NÃO re-filtramos no cliente (a lista não encolhe abaixo
+  // do total do servidor) e a contagem também vem do servidor (D4 — nunca uma metade
+  // server e outra client).
+  const serverMode = useMemo(() => {
+    if (searching) return false;
+    return isListServerExpressible({
+      search, searching, statusFilter, tagFilter, advFilters,
+      archived: showArchived, assignmentTab,
     });
-  }, [contacts, selected, selectedConvId]);
+  }, [searching, statusFilter, tagFilter, advFilters, showArchived, assignmentTab]);
+
+  // Mantém o ref lido pelo list-hook SEMPRE fresco. Escrita em RENDER (não em efeito)
+  // de propósito: o efeito `[showArchived]` do list-hook roda ANTES dos efeitos deste
+  // hook, então só uma sincronização síncrona garante que aquele refetch já leia os
+  // params novos. Ref-mirror puro (idempotente, sem efeito colateral externo).
+  if (serverFilterRef) {
+    serverFilterRef.current = serverMode
+      ? { params: buildListParams({
+          search, searching, statusFilter, tagFilter, advFilters,
+          archived: showArchived, assignmentTab }) }
+      : null;
+  }
+
+  // plano 72 F2 — espelho fresco da VIEW p/ os handlers de WS (que só leem refs).
+  // Escrito em RENDER pela mesma razão do `serverFilterRef` acima (idempotente, sem
+  // efeito colateral externo). Carrega `serverMode` + as dimensões que `rowMatchesView`/
+  // `specNeedsServer` precisam para gatear insert/drop das linhas.
+  if (viewSpecRef) {
+    viewSpecRef.current = {
+      serverMode, statusFilter, assignmentTab, tagFilter, advFilters, currentUserId,
+    };
+  }
+
+  // Quais atendimentos entram na sidebar (plano 28) — regra em `isVisibleInSidebar`.
+  //
+  // COM BUSCA o gate é DESLIGADO: digitar um termo é intenção explícita, então tudo
+  // que casa aparece — inclusive contato recém-criado, que não tem mensagem nem
+  // `origin` (o payload de `list_contacts` nem carrega a coluna) e por isso sumia da
+  // busca embora aparecesse na tela Contatos.
+  const activeContacts = useMemo(() => {
+    if (searching) return contacts;
+    const selKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+    return contacts.filter(c => isVisibleInSidebar(c, selKey));
+  }, [contacts, selected, selectedConvId, searching]);
 
   // Derived list: status + tag filter feed the tab counts; the active assignment
   // tab + sort produce what's actually rendered.
   const statusTagFiltered = useMemo(() => {
+    // plano 69 F3: em serverMode o servidor já aplicou status+tags+avançado — não
+    // re-filtrar (senão a lista encolheria abaixo do total server-side ao paginar).
+    if (serverMode) return activeContacts;
     const now = Date.now() / 1000;
     // A status clause in the advanced filter overrides the status chip, so the two
     // never AND into an empty list (e.g. chip "Abertas" + cláusula "Fechada").
     const hasStatusClause = (advFilters || []).some(
       cl => cl.dim === 'status' && cl.value !== '' && cl.value != null);
+    // Com busca ativa o chip de status também é ignorado (default 'open' escondia da
+    // busca todo atendimento fechado). Tag/filtro avançado continuam valendo — são
+    // seleções deliberadas do usuário e nascem vazias, ao contrário do chip.
     return activeContacts.filter(c =>
-      (hasStatusClause || matchesStatus(c, statusFilter))
+      (searching || hasStatusClause || matchesStatus(c, statusFilter))
       && matchesTags(c, tagFilter)
       && matchesAdvFilters(c, advFilters, now));
-  }, [activeContacts, statusFilter, tagFilter, advFilters]);
+  }, [activeContacts, statusFilter, tagFilter, advFilters, searching, serverMode]);
 
-  const tabCounts = useMemo(() => ({
+  const clientTabCounts = useMemo(() => ({
     all: statusTagFiltered.length,
     mine: currentUserId == null ? 0 : statusTagFiltered.filter(c => c.assignee_user_id === currentUserId).length,
     unassigned: statusTagFiltered.filter(isUnassigned).length,
+    mentions: statusTagFiltered.filter(c => c.has_user_mention).length,
   }), [statusTagFiltered, currentUserId]);
+  const tabCounts = serverCounts || clientTabCounts;
 
+  useEffect(() => {
+    const spec = {
+      search, searching, statusFilter, tagFilter, advFilters, archived: showArchived,
+    };
+    // plano 69 F3/D4: a contagem só é server-side quando a LISTA também é (serverMode).
+    // Caso contrário cai no cliente junto com a lista — nunca uma metade server e outra
+    // client (senão o badge da aba não bateria com a lista client-filtrada).
+    if (!serverMode) {
+      setServerCounts(null);
+      return () => {};
+    }
+    setServerCounts(null);
+    let alive = true;
+    const timer = setTimeout(() => {
+      countConversations(buildCountParams(spec)).then((res) => {
+        if (!alive) return;
+        if (res && res.ok && res.data) {
+          setServerCounts({
+            all: Number(res.data.all || 0),
+            mine: Number(res.data.mine || 0),
+            unassigned: Number(res.data.unassigned || 0),
+            mentions: Number(res.data.mentions || 0),
+          });
+        } else {
+          setServerCounts(null);
+        }
+      }).catch(() => {
+        if (alive) setServerCounts(null);
+      });
+    }, 300);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [search, searching, statusFilter, tagFilter, advFilters, showArchived, serverMode, contacts]);
+
+  // plano 69 F2 — refaz a 1ª página da sidebar quando um FILTRO muda (status/aba/
+  // tags/avançado). `serverFilterRef` já foi sincronizado no render acima, então o
+  // fetch lê os params certos. Busca e arquivadas NÃO entram aqui: o list-hook já
+  // refaz nesses casos (evita fetch duplo). Pula o run do mount (o load inicial cobre)
+  // e o modo busca (a busca é dona do próprio fetch).
+  const filterMountRef = useRef(false);
+  useEffect(() => {
+    if (!fetchContacts) return;
+    if (!filterMountRef.current) { filterMountRef.current = true; return; }
+    if (searching) return;
+    fetchContacts('');
+  }, [statusFilter, assignmentTab, tagFilter, advFilters, serverMode]);
+
+  // Com busca ativa a aba de atribuição também não corta (buscar é procurar em tudo,
+  // não só no que está atribuído a mim). As abas seguem visíveis com os contadores
+  // do resultado bruto — clicar numa delas não muda a lista enquanto a busca durar.
+  // Rascunho conta como atividade: a conversa que o operador deixou escrita sobe
+  // na lista. A conversa ABERTA é a exceção — enquanto ele digita ali, a linha
+  // dela não pula de lugar (nem mostra "Rascunho:"); ao sair, `openKey` muda e
+  // este memo recalcula. Em serverMode reordena só o que já está carregado — o
+  // rascunho é local, o servidor não sabe dele (a conversa recém-aberta está na
+  // 1ª página de qualquer forma).
+  const openKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+  const draftsVersion = useDrafts(openKey);
+  // A conversa aberta usa o valor CONGELADO na abertura, não o rascunho ao vivo:
+  // digitar não a faz subir no meio da digitação, e reabrir uma que já tinha
+  // subido não a faz despencar de volta. Ela volta a acompanhar o rascunho ao ser
+  // fechada. (Escrita de ref em render, como o `viewSpecRef` do plano 72.)
+  const frozenOpenRef = useRef({ key: null, ts: 0 });
+  if (frozenOpenRef.current.key !== openKey) {
+    frozenOpenRef.current = { key: openKey, ts: openKey ? getDraftAt(openKey) / 1000 : 0 };
+  }
+  const draftTsFor = useCallback((c) => {
+    const key = draftKeyFor({ conversationId: c.conversation_id, phone: c.phone });
+    if (!key) return 0;
+    if (key === openKey) return frozenOpenRef.current.ts;
+    return getDraftAt(key) / 1000;   // o mapa guarda ms; as rows falam em segundos
+  }, [openKey, draftsVersion]);
   const displayedContacts = useMemo(
-    () => sortContactsBy(statusTagFiltered.filter(c => matchesAssignment(c, assignmentTab, currentUserId)), sortBy),
-    [statusTagFiltered, assignmentTab, currentUserId, sortBy],
+    () => sortContactsBy(
+      // plano 69 F3: em serverMode (e na busca) o servidor/caminho de busca já cortou a
+      // aba de atribuição — só ordenar. Fora disso, filtra a aba no cliente como antes.
+      (searching || serverMode)
+        ? statusTagFiltered
+        : statusTagFiltered.filter(c => matchesAssignment(c, assignmentTab, currentUserId)),
+      sortBy, draftTsFor),
+    [statusTagFiltered, assignmentTab, currentUserId, sortBy, searching, serverMode, draftTsFor],
   );
   useEffect(() => { displayedRef.current = displayedContacts; }, [displayedContacts]);
 
@@ -93,6 +222,10 @@ export function useConversationFilters({ contacts, selected, selectedConvId, cur
     listSavedFilters().then(res => {
       if (!res || !res.ok || !Array.isArray(res.data)) return;
       setSavedFilters(res.data);
+      // Precedência (Plano 24 · D3): quando a URL já carrega filtros ad-hoc, NÃO
+      // auto-aplicar o preset salvo — a URL é a fonte da verdade. Ainda assim
+      // carregamos a lista de presets acima (o chip/menu da toolbar precisa dela).
+      if (skipStoredPreset) return;
       let storedId = null;
       try { storedId = parseInt(localStorage.getItem(ACTIVE_FILTER_KEY) || '', 10); } catch {}
       if (storedId != null && !Number.isNaN(storedId)) {

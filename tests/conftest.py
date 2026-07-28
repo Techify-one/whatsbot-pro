@@ -10,9 +10,9 @@ Key invariants copied verbatim from the legacy bootstrap:
 * ``WHATSBOT_TEST=1`` is set *before* ``server.app`` is imported, so
   ``bootstrap_gowa_upgrade`` is a no-op and the suite never dirties
   ``storages/plugins``.
-* The engine is initialized on a fresh temp SQLite DB, OR — when
-  ``WHATSBOT_TEST_DB_URL`` is set — against that URL (Postgres in CI), running
-  the Alembic upgrade exactly like ``db.connection._run_alembic_upgrade``.
+* The engine is initialized against the Postgres TEST database
+  (``WHATSBOT_TEST_DB_URL``, resolved by ``tests.pg`` — schema reset once per
+  session + Alembic head). Postgres-only (plano 29 C3): no SQLite leg.
 * The GOWA client is a ``MagicMock`` whose lookup methods return *concrete*
   values (not bare Mocks) so contact persistence doesn't try to save a Mock.
 * The app's lifespan is patched to a no-op to avoid background tasks.
@@ -58,7 +58,6 @@ collect_ignore = [
     "test_agent_routing.py",
     "test_events_filters.py",
     "test_gowa_plugin.py",
-    "test_group_mentions.py",
     "test_hooks.py",
     "test_model_factory.py",
     "test_plugin_events.py",
@@ -70,6 +69,8 @@ collect_ignore = [
     "test_dynamic_registry.py",
     "manual_cloud_api_test.py",
 ]
+# NOTE: test_group_mentions.py was removed — its outgoing-mention coverage is a
+# byte-exact subset of tests/characterization/test_group_mentions_characterization.py.
 
 
 # ── Plugin test discovery (Phase G2) ───────────────────────────────────────
@@ -179,25 +180,17 @@ def pytest_configure(config) -> None:
 # ── Engine bootstrap (session-scoped, once per process) ────────────────────
 
 @pytest.fixture(scope="session")
-def _engine_ready() -> Path | None:
-    """Initialize the global engine on a temp SQLite DB (or WHATSBOT_TEST_DB_URL).
+def _engine_ready() -> None:
+    """Initialize the global engine on the Postgres TEST database (plano 29 C3).
 
-    Returns the SQLite db path when used, else None (Postgres leg).
+    Requires ``WHATSBOT_TEST_DB_URL`` (env, or a line in the repo-root ``.env``).
+    The schema is DROPPED and recreated once per session, then migrated to head —
+    the Postgres equivalent of the old per-process temp SQLite. No SQLite leg.
     """
-    from db import init_db, init_engine
+    from tests.pg import init_test_engine
 
-    test_url = os.environ.get("WHATSBOT_TEST_DB_URL", "").strip()
-    if test_url:
-        init_engine(test_url)
-        from db.connection import _run_alembic_upgrade
-
-        _run_alembic_upgrade()
-        return None
-
-    tmpdir = tempfile.mkdtemp(prefix="whatsbot_pytest_")
-    db_path = Path(tmpdir) / "whatsbot.db"
-    init_db(db_path)
-    return db_path
+    init_test_engine(reset=True)
+    return None
 
 
 # ── Canonical seed data (mirrors test_endpoints._seed_data) ────────────────
@@ -291,7 +284,9 @@ def app(_engine_ready, seed, mock_gowa_manager, mock_gowa_client):
     from server.app import create_app
 
     settings = Settings()
-    agent_handler = AgentHandler(api_key="test-key-fake", max_context_messages=10)
+    agent_handler = AgentHandler(
+        api_key="test-key-fake", max_context_messages=10,
+        default_ai_enabled=settings.get("default_ai_enabled", True))
 
     application = create_app(
         settings=settings,

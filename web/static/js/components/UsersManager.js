@@ -241,6 +241,13 @@ export default function UsersManager({ initialEntity }) {
   const [pwUser, setPwUser] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (editing || creating) {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [editing, creating]);
+
   async function load() {
     setLoading(true);
     setError('');
@@ -345,8 +352,10 @@ export default function UsersManager({ initialEntity }) {
 
       ${error ? html`<div class="text-[13px] text-red-500 mb-3">${error}</div>` : null}
 
-      ${creating ? html`<${UserForm} roleDefs=${roleDefs} permCatalog=${permCatalog} inboxes=${inboxes} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
-      ${editing ? html`<${UserForm} editing=${editing} roleDefs=${roleDefs} permCatalog=${permCatalog} inboxes=${inboxes} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      <div ref=${formRef}>
+        ${creating ? html`<${UserForm} roleDefs=${roleDefs} permCatalog=${permCatalog} inboxes=${inboxes} onSubmit=${handleCreate} onCancel=${() => setCreating(false)} busy=${busy} />` : null}
+        ${editing ? html`<${UserForm} editing=${editing} roleDefs=${roleDefs} permCatalog=${permCatalog} inboxes=${inboxes} onSubmit=${handleUpdate} onCancel=${() => setEditing(null)} busy=${busy} />` : null}
+      </div>
 
       ${loading ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 

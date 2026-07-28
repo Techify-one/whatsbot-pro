@@ -12,6 +12,7 @@ from config.settings import LLM_API_BASE_URL
 from db.repositories import usage_repo, contact_repo
 from server.authz import permission_denied
 from server.helpers import _ok
+from server.pagination import CAP_LIST, PAGE_LIST, clamp_limit, clamp_offset
 from server.routes.config import get_models_cache
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ def register_routes(app, deps):
 
     @app.get("/api/usage/summary")
     async def usage_summary_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
-        denied = permission_denied(request, "billing.manage")
+        denied = permission_denied(request, "usage.read")
         if denied:
             return denied
         start_ts, end_ts = _parse_period(period, start, end)
@@ -86,22 +87,40 @@ def register_routes(app, deps):
         return _ok(totals)
 
     @app.get("/api/usage/by-contact")
-    async def usage_by_contact_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
-        denied = permission_denied(request, "billing.manage")
+    async def usage_by_contact_endpoint(request: Request, period: str | None = None, start: float | None = None, end: float | None = None, limit: int | None = None, offset: int = 0, q: str | None = None, sort: str | None = None, order: str | None = None):
+        denied = permission_denied(request, "usage.read")
         if denied:
             return denied
         start_ts, end_ts = _parse_period(period, start, end)
-        rows = await asyncio.to_thread(usage_repo.by_contact, start_ts, end_ts)
-        return _ok(rows)
+        # plano 69 F7: busca (q) + ordenação (sort/order) vão ao SERVIDOR — o ranking
+        # e o filtro valem sobre o conjunto inteiro do período, não só a página carregada.
+        if limit is None:
+            # Legado: lista completa (top gastadores, sem teto).
+            rows = await asyncio.to_thread(
+                usage_repo.by_contact, start_ts, end_ts, q=q, sort=sort, order=order)
+            return _ok(rows)
+        # Paginado (plano 50 F9): top-N + {items, total, has_more} sobre o conjunto filtrado.
+        lim, off = clamp_limit(limit, PAGE_LIST, CAP_LIST), clamp_offset(offset)
+        items = await asyncio.to_thread(
+            usage_repo.by_contact, start_ts, end_ts, limit=lim, offset=off,
+            q=q, sort=sort, order=order)
+        total = await asyncio.to_thread(usage_repo.count_by_contact, start_ts, end_ts, q=q)
+        return _ok({"items": items, "total": total, "has_more": (off + len(items)) < total})
 
     @app.get("/api/usage/contact/{phone}")
-    async def usage_contact_detail(phone: str, request: Request, period: str | None = None, start: float | None = None, end: float | None = None):
-        denied = permission_denied(request, "billing.manage")
+    async def usage_contact_detail(phone: str, request: Request, period: str | None = None, start: float | None = None, end: float | None = None, limit: int | None = None, offset: int = 0):
+        denied = permission_denied(request, "usage.read")
         if denied:
             return denied
         start_ts, end_ts = _parse_period(period, start, end)
         contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
         if contact is None:
-            return _ok([])
-        filtered = await asyncio.to_thread(usage_repo.detail, contact["id"], start_ts, end_ts)
-        return _ok(filtered)
+            return _ok([] if limit is None else {"items": [], "total": 0, "has_more": False})
+        if limit is None:
+            filtered = await asyncio.to_thread(usage_repo.detail, contact["id"], start_ts, end_ts)
+            return _ok(filtered)
+        lim, off = clamp_limit(limit, PAGE_LIST, CAP_LIST), clamp_offset(offset)
+        items = await asyncio.to_thread(
+            usage_repo.detail, contact["id"], start_ts, end_ts, limit=lim, offset=off)
+        total = await asyncio.to_thread(usage_repo.count_detail, contact["id"], start_ts, end_ts)
+        return _ok({"items": items, "total": total, "has_more": (off + len(items)) < total})

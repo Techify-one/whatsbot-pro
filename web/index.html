@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WhatsBot</title>
+  <title>WhatsBot-Pro</title>
   <!-- Apply the saved theme before first paint to avoid a flash of the wrong theme. -->
   <script>try{if(localStorage.getItem('whatsbot_theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}</script>
   <script src="/static/vendor/tailwind.js"></script>
@@ -24,7 +24,6 @@
               bg: 'rgb(var(--wa-bg) / <alpha-value>)',
               panel: 'rgb(var(--wa-panel) / <alpha-value>)',
               chatBg: 'rgb(var(--wa-chatBg) / <alpha-value>)',
-              chatOverlay: 'rgb(var(--wa-chatOverlay) / <alpha-value>)',
               outgoing: 'rgb(var(--wa-outgoing) / <alpha-value>)',
               incoming: 'rgb(var(--wa-incoming) / <alpha-value>)',
               text: 'rgb(var(--wa-text) / <alpha-value>)',
@@ -36,14 +35,21 @@
               badge: 'rgb(var(--wa-badge) / <alpha-value>)',
               icon: 'rgb(var(--wa-icon) / <alpha-value>)',
               iconActive: 'rgb(var(--wa-iconActive) / <alpha-value>)',
+              draft: 'rgb(var(--wa-draft) / <alpha-value>)',
             }
           }
         }
       }
     }
   </script>
+  <!-- Toast UI Editor — WYSIWYG markdown editor (vendored UMD, exposes window.toastui.Editor).
+       Both base + dark themes are loaded; the dark sheet only styles .toastui-editor-dark,
+       toggled per-element by the MarkdownEditor wrapper to follow the app theme. -->
+  <link rel="stylesheet" href="/static/vendor/toastui-editor.min.css">
+  <link rel="stylesheet" href="/static/vendor/toastui-editor-dark.min.css">
   <link rel="stylesheet" href="/static/css/custom.css">
   <script src="/static/vendor/opus-recorder/recorder.min.js"></script>
+  <script src="/static/vendor/toastui-editor-all.min.js"></script>
   <script type="importmap">
   {
     "imports": {

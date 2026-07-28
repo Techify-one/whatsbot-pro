@@ -47,6 +47,13 @@ class MemoryLogHandler(logging.Handler):
 class ConnectionManager:
     """Manages active WebSocket connections and broadcasts events."""
 
+    # Per-client send timeout. A broadcast fans out to every socket CONCURRENTLY
+    # (asyncio.gather) so one slow/half-open client can't stall delivery to the
+    # others (head-of-line blocking). A send that exceeds this is treated as a
+    # dead connection and the socket is pruned — bounding worst-case latency to
+    # this timeout instead of the OS TCP timeout (dezenas de segundos).
+    SEND_TIMEOUT = 5.0
+
     def __init__(self):
         self.active: list[WebSocket] = []
 
@@ -60,11 +67,37 @@ class ConnectionManager:
 
     async def broadcast(self, event: str, data: dict):
         message = json.dumps({"event": event, "data": data})
-        for ws in list(self.active):
+        targets = list(self.active)
+        if not targets:
+            return
+
+        async def _send(ws: WebSocket):
+            # Returns the ws to prune on failure/timeout, else None. Never raises.
             try:
-                await ws.send_text(message)
+                await asyncio.wait_for(ws.send_text(message), timeout=self.SEND_TIMEOUT)
+                return None
             except Exception:
-                self.active.remove(ws)
+                return ws
+
+        # Concurrent fan-out: a stuck client is bounded by SEND_TIMEOUT and does
+        # not delay the others. gather never raises (each _send swallows).
+        dead = await asyncio.gather(*(_send(ws) for ws in targets))
+        for ws in dead:
+            if ws is not None:
+                self.disconnect(ws)
+                # Plano 33 F3: a timed-out/errored send means this socket is
+                # half-open — disconnect() only drops it from the fan-out list, so
+                # the CLIENT still believes it is connected (no close frame reached
+                # it) and never reconnects. Actively close it here so the client's
+                # onclose fires and it reconnects (→ F2 thread resync). Best-effort
+                # with a short timeout: a stuck close must not hold up the fan-out.
+                # NOTE: closing lives ONLY in this prune loop, NOT in disconnect()
+                # (which also runs on a clean WebSocketDisconnect, where an extra
+                # close is redundant / can raise).
+                try:
+                    await asyncio.wait_for(ws.close(), timeout=1.0)
+                except Exception:
+                    pass
 
 
 # ── Messaging State ─────────────────────────────────────────────────────────
@@ -101,6 +134,14 @@ class MessagingState:
         self.channel_ai_locks: dict[str, asyncio.Lock] = {}
         # True while a reply is mid-flight — webhook must NOT cancel during this phase.
         self.sending: dict[tuple, bool] = {}
+        # True while an orchestrator is MID-CYCLE — i.e. it has already POPPED its
+        # batch from pending_messages and is running the LLM/send cycle (plano 33
+        # F6). Broader than ``sending`` (which only covers the final SEND phase):
+        # a message arriving in the pop→persist window used to cancel the task and
+        # DISCARD the already-popped items (message lost). While this flag is set
+        # the webhook must NOT cancel — it leaves the new message in pending and the
+        # running orchestrator's tail spawns a follow-up cycle for it.
+        self.processing: dict[tuple, bool] = {}
         # Track recently sent replies to filter webhook echo-backs.
         # "<channel_id>:<phone>:<wire_text[:120]>" -> timestamp.
         self.recently_sent: dict[str, float] = {}
@@ -175,6 +216,10 @@ class AppState:
     @property
     def sending(self) -> dict:
         return self.messaging.sending
+
+    @property
+    def processing(self) -> dict:
+        return self.messaging.processing
 
     @property
     def recently_sent(self) -> dict:

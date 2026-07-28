@@ -22,6 +22,10 @@ export function MessageBubble({
   message: m, index: i, isFirst,
   isGroup, sandbox, displayName, fmt,
   findQuoted, quotedInfo, focusMessage, openMsgMenu, myReaction, handleRetry,
+  showAgentName = true,
+  // plano 51 (04 F1): batch selection mode. Presentational only — the container
+  // owns the Set; here we just render the checkbox/realce and route the click.
+  selectionMode = false, selected = false, onToggleSelect = null,
 }) {
   const isUser = m.role === 'user';
   const isFailed = m._status === 'failed' || m.status === 'failed';
@@ -41,21 +45,31 @@ export function MessageBubble({
   // so your 'user' messages go right and the IA's replies go left —
   // the opposite of the contact chat (viewed by the operator).
   const isFromMe = sandbox ? isUser : !isUser;
+  // Rótulo da IA: "IA - <nome do agente>" quando o toggle está ligado e a mensagem
+  // carrega o agente que a produziu; senão apenas "IA".
+  const aiLabel = (showAgentName && m.agent_name) ? `IA - ${m.agent_name}` : 'IA';
   const senderLabel = sandbox
-    ? (isUser ? 'Você' : 'IA')
-    : (isUser ? (groupSender || displayName) : (isOperator ? 'Manual' : 'IA'));
+    ? (isUser ? 'Você' : aiLabel)
+    : (isUser ? (groupSender || displayName) : (isOperator ? (m.sent_by_name || 'Manual') : aiLabel));
   const sColor = senderColor(isUser, isOperator);
 
   return html`
-    <div key=${m._localId || i} data-mid=${m._id} class="flex ${isFromMe ? 'justify-end' : 'justify-start'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'} ${(m.reactions && Object.keys(m.reactions).length) ? 'mb-[14px]' : ''}">
+    <div key=${m._localId || i} data-mid=${m._id}
+      onClick=${(selectionMode && onToggleSelect) ? (() => onToggleSelect(m)) : null}
+      class="flex ${isFromMe ? 'justify-end' : 'justify-start'} ${isFirst ? 'mt-[12px]' : 'mt-[2px]'} ${(m.reactions && Object.keys(m.reactions).length) ? 'mb-[14px]' : ''}${selectionMode ? ` relative pl-[34px] cursor-pointer rounded-[8px] ${selected ? 'bg-wa-teal/10' : 'hover:bg-wa-hover/60'}` : ''}">
+      ${selectionMode ? html`
+        <span class="absolute left-[6px] top-1/2 -translate-y-1/2 w-[20px] h-[20px] rounded-full border-2 flex items-center justify-center shrink-0 ${selected ? 'bg-wa-teal border-wa-teal' : 'border-wa-secondary bg-wa-panel'}">
+          ${selected ? html`<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="white" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>` : ''}
+        </span>
+      ` : ''}
       <div
-        onContextMenu=${(e) => openMsgMenu(e, m, isFromMe)}
+        onContextMenu=${selectionMode ? null : ((e) => openMsgMenu(e, m, isFromMe))}
         class="wa-bubble group max-w-[65%] rounded-[7.5px] px-[9px] pt-[6px] pb-[8px] text-[14.2px] leading-[19px] whitespace-pre-wrap relative ${
         !isFromMe
           ? `bg-wa-incoming text-wa-text ${isFirst ? 'msg-tail-in rounded-tl-none' : ''}`
           : `${isFailed ? 'text-wa-text' : 'bg-wa-outgoing text-wa-text'} ${isFirst ? 'msg-tail-out rounded-tr-none' : ''}`
       }" style="${isFailed ? 'background: #fce8e8;' : ''}">
-        <button
+        ${selectionMode ? '' : html`<button
           onClick=${(e) => openMsgMenu(e, m, isFromMe)}
           class="absolute top-[2px] right-[2px] opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity rounded-full p-[1px] hover:bg-black/10"
           title="Opções da mensagem"
@@ -63,13 +77,17 @@ export function MessageBubble({
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="text-wa-secondary">
             <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
           </svg>
-        </button>
+        </button>`}
         <span class="block text-[11px] font-semibold leading-[13px] mb-[2px] truncate" style="color: ${sColor};">${senderLabel}</span>
         ${(!m.revoked && m.reply_to_msg_id) ? (() => {
-          const qmsg = findQuoted(m.reply_to_msg_id);
+          const qmsg = findQuoted(m.reply_to_msg_id, m);
           const q = quotedInfo(qmsg);
           const accent = q ? q.senderColor : '#8696a0';
-          const canJump = !!(qmsg && qmsg._id != null);
+          // Plano 75 F10: a citação hidratada pelo servidor mostra o CONTEÚDO mesmo
+          // com o alvo fora da página — mas não dá para rolar até uma linha ausente
+          // do DOM, então o clique fica desligado (_hydrated). Sem citação nenhuma
+          // (alvo apagado / nunca recebido) segue o texto de indisponível.
+          const canJump = !!(qmsg && qmsg._id != null && !qmsg._hydrated);
           return html`
             <div
               onClick=${canJump ? ((e) => { e.stopPropagation(); focusMessage(qmsg._id, { smooth: true }); }) : null}
@@ -93,6 +111,7 @@ export function MessageBubble({
           </span>
         ` : ''}
         <span class="float-right ml-[8px] mt-[4px] text-[11px] leading-[15px] whitespace-nowrap text-wa-secondary">
+          ${(!m.revoked && m.edited_ts) ? html`<span class="italic mr-[3px]">editada</span>` : ''}
           ${(!isUser && !sandbox) ? (() => {
             if (isFailed) return html`<${FailedIcon} />${!m.media_type && m._localId ? html`<${RetryIcon} onClick=${() => handleRetry(m._localId, m.content)} />` : ''}`;
             if (isSending) return html`<${ClockIcon} />`;

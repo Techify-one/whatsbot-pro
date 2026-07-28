@@ -1,9 +1,38 @@
 import { h } from 'preact';
-import { useState, useEffect, useCallback } from 'preact/hooks';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { getUsageSummary, getUsageByContact, getConfig } from '../services/api.js';
+import { useUrlState } from '../hooks/useUrlState.js';
+import { useInfiniteScroll, useScrollSentinel } from '../hooks/useInfiniteScroll.js';
+import { readParams, writeParams, enumStr, str } from '../services/urlState.js';
 
 const html = htm.bind(h);
+
+// Tamanho de página da paginação server-side (plano 50 F10) — top gastadores.
+const PAGE_SIZE = 25;
+
+// Deep-link do estado da tela de custos (Plano 24): período/ordenação/busca na
+// query-string. `start`/`end` (formato YYYY-MM-DDTHH:mm) só saem no período custom
+// e fazem round-trip com os inputs date+time. Serialize omite tudo no default.
+const COSTS_URL_SCHEMA = [
+  enumStr('period', 'all'),   // 24h|3d|7d|30d|all|custom
+  str('start', ''),           // YYYY-MM-DDTHH:mm — só quando period=custom
+  str('end', ''),
+  enumStr('sort', 'cost_usd'),
+  enumStr('order', 'desc'),   // asc|desc (derivado de sortAsc)
+  str('search', ''),
+];
+
+// Junta data (YYYY-MM-DD) + hora (HH:mm) → 'YYYY-MM-DDTHH:mm' (vazio sem data).
+function joinDateTime(date, time) {
+  return date ? `${date}T${time || '00:00'}` : '';
+}
+// Fatia 'YYYY-MM-DDTHH:mm' de volta em [date, time]; usa `defTime` se faltar hora.
+function splitDateTime(value, defTime) {
+  if (!value) return ['', defTime];
+  const [date, time] = value.split('T');
+  return [date || '', time || defTime];
+}
 
 const PERIODS = [
   { key: '24h', label: '24h' },
@@ -41,12 +70,16 @@ export function CostsDashboard() {
   const [customEndDate, setCustomEndDate] = useState('');
   const [customEndTime, setCustomEndTime] = useState('23:59');
   const [summary, setSummary] = useState(null);
-  const [contacts, setContacts] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [usdBrlRate, setUsdBrlRate] = useState(5.5);
   const [sortField, setSortField] = useState('cost_usd');
   const [sortAsc, setSortAsc] = useState(false);
   const [search, setSearch] = useState('');
+  // plano 69 F7: busca com debounce (300ms) — vai ao SERVIDOR, não filtra no cliente.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
 
   useEffect(() => {
     getConfig().then(res => {
@@ -56,29 +89,45 @@ export function CostsDashboard() {
     });
   }, []);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    const params = {};
+  // Params de período (compartilhados por summary + lista).
+  const periodParams = useMemo(() => {
+    const p = {};
     if (period === 'custom') {
-      if (customStartDate) params.start = toTimestamp(customStartDate, customStartTime);
-      if (customEndDate) params.end = toTimestamp(customEndDate, customEndTime);
+      if (customStartDate) p.start = toTimestamp(customStartDate, customStartTime);
+      if (customEndDate) p.end = toTimestamp(customEndDate, customEndTime);
     } else if (period !== 'all') {
-      params.period = period;
+      p.period = period;
     }
-
-    const [sumRes, conRes] = await Promise.all([
-      getUsageSummary(params),
-      getUsageByContact(params),
-    ]);
-
-    if (sumRes.ok) setSummary(sumRes.data);
-    if (conRes.ok) setContacts(conRes.data || []);
-    setLoading(false);
+    return p;
   }, [period, customStartDate, customStartTime, customEndDate, customEndTime]);
 
+  // Resumo (totais) — recarrega ao mudar o período (não paginado).
+  const periodKey = JSON.stringify(periodParams);
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    getUsageSummary(periodParams).then((res) => { if (res.ok) setSummary(res.data); });
+    // eslint-disable-next-line
+  }, [periodKey]);
+
+  // plano 50 — SCROLL INFINITO com LOTE FIXO. plano 69 F7: busca (q) e ordenação
+  // (sort/order) agora vão ao SERVIDOR, que rankeia/filtra o conjunto INTEIRO do
+  // período e devolve a página certa. Assim buscar um gastador fora da 1ª página o
+  // encontra, e ordenar reordena o ranking todo (não só o carregado).
+  const listKey = `${periodKey}|${debouncedSearch}|${sortField}|${sortAsc ? 'a' : 'd'}`;
+  const fetchPage = useCallback((offset) =>
+    getUsageByContact({ ...periodParams, limit: PAGE_SIZE, offset,
+      q: debouncedSearch || undefined, sort: sortField, order: sortAsc ? 'asc' : 'desc' })
+      .then((res) => ({
+        items: (res && res.ok && res.data && res.data.items) || [],
+        hasMore: !!(res && res.ok && res.data && res.data.has_more),
+      })).catch(() => ({ items: [], hasMore: false })),
+    [listKey]);   // eslint-disable-line
+
+  const {
+    items: contacts, loading, loadingMore, hasMore, loadMore,
+  } = useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey: listKey, keyOf: (c) => c.phone });
+
+  const sentinelRef = useRef(null);
+  useScrollSentinel(sentinelRef, loadMore, hasMore);
 
   function handleSort(field) {
     if (sortField === field) {
@@ -89,22 +138,38 @@ export function CostsDashboard() {
     }
   }
 
-  const filtered = contacts.filter(c => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (c.name || '').toLowerCase().includes(q) || (c.phone || '').includes(q);
+  // Deep-link (Plano 24): hidrata da URL no mount/back-forward e reflete
+  // período/datas custom/ordenação/busca na query (replaceState). start/end só
+  // entram no período custom; serialize omite o que está no default → URL limpa.
+  useUrlState({
+    read: () => readParams(window.location.search, COSTS_URL_SCHEMA),
+    apply: (s) => {
+      setPeriod(s.period);
+      if (s.period === 'custom') {
+        const [sd, st] = splitDateTime(s.start, '00:00');
+        const [ed, et] = splitDateTime(s.end, '23:59');
+        setCustomStartDate(sd); setCustomStartTime(st);
+        setCustomEndDate(ed); setCustomEndTime(et);
+      }
+      setSortField(s.sort);
+      setSortAsc(s.order === 'asc');
+      setSearch(s.search);
+    },
+    serialize: () => writeParams({
+      period,
+      // start/end só fazem sentido com period=custom (senão omitidos).
+      start: period === 'custom' ? joinDateTime(customStartDate, customStartTime) : '',
+      end: period === 'custom' ? joinDateTime(customEndDate, customEndTime) : '',
+      sort: sortField,
+      order: sortAsc ? 'asc' : 'desc',
+      search,
+    }, COSTS_URL_SCHEMA),
+    deps: [period, customStartDate, customStartTime, customEndDate, customEndTime, sortField, sortAsc, search],
   });
 
-  const sorted = [...filtered].sort((a, b) => {
-    const va = a[sortField] || 0;
-    const vb = b[sortField] || 0;
-    if (sortField === 'name') {
-      return sortAsc
-        ? String(va).localeCompare(String(vb))
-        : String(vb).localeCompare(String(va));
-    }
-    return sortAsc ? va - vb : vb - va;
-  });
+  // plano 69 F7: busca + ordenação agora são server-side (ver `fetchPage`) — a lista
+  // já vem filtrada e ordenada + paginada. Nada de re-filtrar/re-ordenar no cliente.
+  const pageItems = contacts;
 
   const typeLabel = { text: 'Texto', audio: 'Audio', image: 'Imagem' };
 
@@ -261,13 +326,13 @@ export function CostsDashboard() {
               </tr>
             </thead>
             <tbody>
-              ${sorted.length === 0 ? html`
+              ${pageItems.length === 0 ? html`
                 <tr>
                   <td colspan="6" class="text-center py-8 text-wa-secondary">
                     ${search ? 'Nenhum contato encontrado.' : 'Nenhum dado de uso encontrado para este periodo.'}
                   </td>
                 </tr>
-              ` : sorted.map(c => html`
+              ` : pageItems.map(c => html`
                 <${ContactRow}
                   key=${c.phone}
                   contact=${c}
@@ -278,6 +343,13 @@ export function CostsDashboard() {
             </tbody>
           </table>
         </div>
+
+        <!-- Scroll infinito (plano 50): sentinela carrega o próximo lote ao rolar (segue
+             ativo durante a busca — busca é client-side, então rolar carrega+filtra mais). -->
+        ${hasMore ? html`
+          <div ref=${sentinelRef} class="text-center text-wa-secondary py-3 text-[12px]">
+            ${loadingMore ? 'Carregando mais…' : ''}
+          </div>` : null}
       `}
     </div>
   `;

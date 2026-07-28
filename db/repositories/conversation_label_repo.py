@@ -101,8 +101,50 @@ def get_for_conversation(conv_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_for_conversations(conv_ids: list[int]) -> dict[int, list[dict]]:
+    """Labels de VÁRIAS conversas em UMA query (plano 50 F13 — mata o fan-out de 1
+    request por atendimento no modo etiqueta). Retorna ``{conv_id: [label,...]}``,
+    ordem idêntica à de :func:`get_for_conversation` (position, name)."""
+    if not conv_ids:
+        return {}
+    out: dict[int, list[dict]] = {cid: [] for cid in conv_ids}
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(links.c.conversation_id, labels)
+            .join(links, links.c.label_id == labels.c.id)
+            .where(links.c.conversation_id.in_(conv_ids))
+            .order_by(labels.c.position, labels.c.name)
+        ).mappings().all()
+    for r in rows:
+        d = dict(r)
+        cid = d.pop("conversation_id")
+        out.setdefault(cid, []).append(d)
+    return out
+
+
 def get_names_for_conversation(conv_id: int) -> list[str]:
     return [r["name"] for r in get_for_conversation(conv_id)]
+
+
+def get_names_for_conversations(conv_ids: list[int]) -> dict[int, list[str]]:
+    """Batch: label names per conversation in ONE query (feeds the sidebar list).
+
+    Returns ``{conversation_id: [name, ...]}`` — only conversations that have at
+    least one label appear; callers default the rest to ``[]``.
+    """
+    if not conv_ids:
+        return {}
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(links.c.conversation_id, labels.c.name)
+            .join(labels, labels.c.id == links.c.label_id)
+            .where(links.c.conversation_id.in_(conv_ids))
+            .order_by(labels.c.position, labels.c.name)
+        ).all()
+    out: dict[int, list[str]] = {}
+    for conv_id, name in rows:
+        out.setdefault(conv_id, []).append(name)
+    return out
 
 
 def set_for_conversation(conv_id: int, names: list[str]) -> list[dict]:

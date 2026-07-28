@@ -17,10 +17,20 @@
 //
 // The @mention / quick-reply autocomplete lives in useTokenAutocomplete; this
 // hook calls `updateMenus(el, val)` on input and `closeMentionMenu()` on send.
-import { useState, useEffect, useRef } from 'preact/hooks';
+//
+// Rascunho: o texto NÃO é mais zerado na troca de conversa — ele é salvo por
+// conversa e por usuário (services/drafts.js) e restaurado ao reabrir a
+// conversa, como no WhatsApp/Chatwoot. Some no envio.
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'preact/hooks';
 import { sendPresence, sendPrivateMessage, retrySend } from '../../../services/api.js';
+import { toWhatsAppMarkup } from '../../../utils/formatWhatsApp.js';
+import { draftKeyFor, getDraft, setDraft, clearDraft, migrateDraft } from '../../../services/drafts.js';
 
 const INPUT_MAX_HEIGHT = 120;
+// De quanto em quanto tempo o 'start' de presença é reemitido enquanto o operador
+// digita sem parar (ver handleInputChange). Precisa ser MENOR que a auto-limpeza do
+// indicador "Fulano está digitando…" no painel dos outros atendentes.
+const PRESENCE_REFRESH_MS = 10000;
 
 /**
  * @param {Object} opts
@@ -37,10 +47,11 @@ const INPUT_MAX_HEIGHT = 120;
  * @param {()=>void} opts.openTemplatePicker
  */
 export function useComposer({
-  api, phone, conversationId, channelId, sandbox, sessionClosed,
+  api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
   setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, openTemplatePicker,
+  collectMentions = null, resetMentions = null,
 }) {
-  const [input, setInput] = useState('');
+  const [input, setInputState] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
   // mode: 'reply' sends to the contact; 'private' stays in the panel only
   const [mode, setMode] = useState('reply');
@@ -53,10 +64,52 @@ export function useComposer({
   const inputRef = useRef(null);
   const emojiRef = useRef(null);
   const presenceTimerRef = useRef(null);
+  // Quando o 'start' de presença mais recente foi enviado (0 = não está digitando).
+  const presenceStartedAtRef = useRef(0);
 
-  // Reset composer state when switching conversation.
+  // ── Rascunho (draft) ──────────────────────────────────────────────────
+  // O texto digitado pertence à CONVERSA e sobrevive à troca de conversa, no
+  // molde do WhatsApp/Chatwoot; a sidebar mostra "Rascunho: …" na linha.
+  // Persistência pessoal, por-dispositivo: services/drafts.js. A chave fica num
+  // ref porque os callbacks abaixo são estáveis (o autocomplete recebe
+  // `setInput` uma vez e não é recriado a cada troca de conversa).
+  // Sandbox é tela de teste (o phone é digitado à mão e não tem linha na
+  // sidebar): não guarda rascunho — troca de número segue limpando o compositor.
+  const draftKey = sandbox ? null : draftKeyFor({ conversationId, phone });
+  const draftKeyRef = useRef(draftKey);
+  const inputValueRef = useRef('');
+
+  // Escreve no state SEM tocar no rascunho salvo (hidratação e limpeza no envio).
+  const applyInput = useCallback((val) => {
+    inputValueRef.current = val;
+    setInputState(val);
+  }, []);
+
+  // Setter público: TODO caminho que muda o texto (digitação, emoji, @menção,
+  // /atalho) passa por aqui, então o rascunho da conversa aberta fica em dia.
+  const setInput = useCallback((next) => {
+    const val = typeof next === 'function' ? next(inputValueRef.current) : next;
+    applyInput(val);
+    setDraft(draftKeyRef.current, val);
+  }, [applyInput]);
+
+  // Troca de conversa: hidrata o compositor com o rascunho salvo (ou esvazia).
+  // Layout effect — o operador nunca vê o texto da conversa anterior piscar.
+  useLayoutEffect(() => {
+    const prev = draftKeyRef.current;
+    draftKeyRef.current = draftKey;
+    if (!draftKey) { applyInput(''); return; }
+    // Conversa recém-criada: a linha só ganha conversation_id depois do 1º
+    // envio — o rascunho vai junto em vez de ser descartado na virada da chave.
+    if (prev && prev !== draftKey && prev === `phone:${phone}` && draftKey.startsWith('conv:')) {
+      migrateDraft(prev, draftKey);
+    }
+    applyInput(getDraft(draftKey));
+  }, [draftKey, phone, applyInput]);
+
+  // Reset composer state when switching conversation. O texto NÃO entra aqui —
+  // ele é restaurado do rascunho pelo layout effect acima.
   useEffect(() => {
-    setInput('');
     setMode('reply');
     setAiReadPrivate(false);
     setAiReplyInChat(true);
@@ -97,7 +150,8 @@ export function useComposer({
       if (presenceTimerRef.current) {
         clearTimeout(presenceTimerRef.current);
         presenceTimerRef.current = null;
-        if (phone) sendPresence(phone, 'stop', conversationId).catch(() => {});
+        presenceStartedAtRef.current = 0;
+        if (phone) sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
       }
     };
   }, [phone]);
@@ -128,25 +182,35 @@ export function useComposer({
     if (!phone || sandbox) return;
     // Send "start" on first keystroke, then debounce "stop" after 3s of inactivity
     if (val.trim()) {
-      if (!presenceTimerRef.current) {
-        sendPresence(phone, 'start', conversationId).catch(() => {});
+      const now = Date.now();
+      // Reemissão periódica ("heartbeat"): sem ela, um texto longo digitado sem
+      // pausas manda UM único 'start' e nada mais — o "Fulano está digitando…" dos
+      // outros atendentes (WS `operator_typing`, que expira sozinho por segurança)
+      // apagaria no meio da digitação. Barato: 1 request a cada PRESENCE_REFRESH_MS.
+      if (!presenceTimerRef.current || (now - presenceStartedAtRef.current) > PRESENCE_REFRESH_MS) {
+        presenceStartedAtRef.current = now;
+        sendPresence(phone, 'start', conversationId, channelId).catch(() => {});
       }
       clearTimeout(presenceTimerRef.current);
       presenceTimerRef.current = setTimeout(() => {
-        sendPresence(phone, 'stop', conversationId).catch(() => {});
+        presenceStartedAtRef.current = 0;
+        sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
         presenceTimerRef.current = null;
       }, 3000);
     } else {
       clearTimeout(presenceTimerRef.current);
       presenceTimerRef.current = null;
-      sendPresence(phone, 'stop', conversationId).catch(() => {});
+      presenceStartedAtRef.current = 0;
+      sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
     }
   }
 
   async function handleSend(e) {
     e.preventDefault();
     closeMentionMenu();
-    const text = input.trim();
+    // Collapse the composer's **bold** authoring markup to WhatsApp's *bold*
+    // wire format so the recipient (and the stored/rendered copy) sees clean bold.
+    const text = toWhatsAppMarkup(input.trim());
     if (!text) return;
 
     // 24h window closed (WhatsApp Cloud): free text can't be sent — steer the
@@ -159,9 +223,12 @@ export function useComposer({
     // Stop typing presence
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
-    if (!sandbox) sendPresence(phone, 'stop', conversationId).catch(() => {});
+    presenceStartedAtRef.current = 0;
+    if (!sandbox) sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
 
-    setInput('');
+    // Enviou → o rascunho morre (e o "Rascunho:" sai da sidebar na hora).
+    applyInput('');
+    clearDraft(draftKeyRef.current);
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const msgTs = Date.now() / 1000;
 
@@ -170,23 +237,51 @@ export function useComposer({
         ...prev,
         messages: [...(prev.messages || []), {
           role: 'private_note', content: text, ts: msgTs, status: null,
+          sent_by_name: (currentUser && currentUser.name) || undefined,
           _localId: localId, _status: 'sending',
         }],
       } : prev);
+      // Menções (@atendente / @time) resolvidas do texto final; zera após enviar.
+      const mm = collectMentions ? collectMentions(text) : { mentions: [], mention_inbox: false };
       try {
         const res = await sendPrivateMessage(phone, text, {
           aiRead: aiReadPrivate,
           aiReply: aiReadPrivate ? aiReplyInChat : true,
           conversationId,
+          channelId,  // plano 37 (C1): conversa nova em canal não-default não misfila
+          mentions: mm.mentions,
+          mentionInbox: mm.mention_inbox,
         });
-        updateMsgByLocalId(localId, () => ({
-          _status: res.ok ? null : 'failed',
-          ...(res.ok && res.data && res.data._id ? { _id: res.data._id } : {}),
-        }));
+        if (res.ok && res.data) {
+          // Plano 53 — mesmo padrão serverCopyArrived do envio normal (abaixo),
+          // com identidade `_id`: se a cópia do broadcast WS já chegou (relógio
+          // do cliente defasado fura a janela de dedup de 30s e ela é apendada
+          // como linha própria), dropa a bolha otimista; senão a bolha adota os
+          // campos do servidor (ts/_id/msg_id/autor) e vira o espelho da row.
+          const saved = res.data;
+          setContactData(prev => {
+            if (!prev || !prev.messages) return prev;
+            const serverCopyArrived = saved._id != null
+              && prev.messages.some(m => m._id === saved._id && m._localId !== localId);
+            const messages = serverCopyArrived
+              ? prev.messages.filter(m => m._localId !== localId)
+              : prev.messages.map(m => m._localId === localId
+                  ? { ...m, _status: null,
+                      ...(saved._id != null ? { _id: saved._id } : {}),
+                      ...(saved.msg_id ? { msg_id: saved.msg_id } : {}),
+                      ...(saved.ts != null ? { ts: saved.ts } : {}),
+                      ...(saved.sent_by_name ? { sent_by_name: saved.sent_by_name } : {}) }
+                  : m);
+            return { ...prev, messages };
+          });
+        } else {
+          updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
+        }
       } catch (err) {
         console.error('Private send error:', err);
         updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
       }
+      if (resetMentions) resetMentions();
       inputRef.current?.focus();
       return;
     }
@@ -203,6 +298,7 @@ export function useComposer({
         ? { role: 'user', content: text, ts: msgTs, _localId: localId, _status: 'sending',
             reply_to_msg_id: replyTo || undefined }
         : { role: 'assistant', content: text, ts: msgTs, status: 'operator',
+            sent_by_name: (currentUser && currentUser.name) || undefined,
             _localId: localId, _status: 'sending', reply_to_msg_id: replyTo || undefined }],
     } : prev);
 
@@ -264,6 +360,7 @@ export function useComposer({
   function stopPresence() {
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
+    presenceStartedAtRef.current = 0;
   }
 
   return {

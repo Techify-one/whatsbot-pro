@@ -61,4 +61,3 @@ export function PluginModalHost() {
   `;
 }
 
-export default PluginModalHost;

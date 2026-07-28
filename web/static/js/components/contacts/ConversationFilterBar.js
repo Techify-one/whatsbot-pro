@@ -4,7 +4,7 @@
 //   - saved-filters bookmark → popover: apply / rename / delete named presets
 //   - save (disk) icon → "Salvar filtro" dialog (only when a filter is active)
 //   - clear (X) icon → reset all filters (only when a filter is active)
-//   - RIGHT icon (tune) → modal "Filtrar conversas" estilo Chatwoot: construtor de
+//   - RIGHT icon (tune) → modal "Filtrar atendimentos" estilo Chatwoot: construtor de
 //     filtros (Canais / Agente / Etiqueta / Última atividade) + Ordenar por
 //   - assignment tabs (Minhas / Não atribuídas / Todas) com contagem ao vivo
 //   - active-preset chip (canto): mostra qual filtro salvo está em uso
@@ -19,6 +19,8 @@ import { h } from 'preact';
 import { useState, useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { ConversationFilterDialog } from './ConversationFilterDialog.js';
+import { getCustomAttributes, getConversationLabels } from '../../services/api.js';
+import { splitSort, combineSort } from '../../services/conversationRows.js';
 
 const html = htm.bind(h);
 
@@ -28,17 +30,25 @@ const STATUS_OPTIONS = [
   { value: 'closed', label: 'Resolvidas' },
   { value: 'all', label: 'Todas' },
 ];
-const SORT_OPTIONS = [
-  { value: 'activity', label: 'Última atividade' },
-  { value: 'oldest', label: 'Mais antigas' },
-  { value: 'unread', label: 'Não lidas primeiro' },
+// Ordenação em DUAS dimensões independentes que se combinam (leitura × recência).
+// Ambas persistem no único token `sortBy` via splitSort/combineSort — a leitura é a
+// chave primária e a recência o desempate. O popover "Ordenar conversas" do cabeçalho
+// e o dropdown do dialog avançado usam as mesmas listas.
+const READ_SORT_CHOICES = [
+  { value: 'none', label: 'Todas' },
+  { value: 'unread', label: 'Não lidas' },
+  { value: 'read', label: 'Lidas' },
+];
+const TIME_SORT_CHOICES = [
+  { value: 'recent', label: 'Recentes primeiro' },
+  { value: 'oldest', label: 'Antigos primeiro' },
 ];
 
 // ── Removable per-dimension filter chips (plano 10 FF6) ─────────────────────────
 // Each active filter dimension renders as its own chip with an individual ✕, so the
 // operator can drop one filter without reopening a dropdown/modal. Labels reuse the
 // same friendly names the advanced dialog shows (status/channel/agent/tag/activity).
-const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', tag: 'Etiqueta', activity: 'Atividade' };
+const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', tag: 'Etiqueta do contato', conv_label: 'Etiqueta da conversa', activity: 'Atividade' };
 
 function _channelLabel(channels, value) {
   const ch = (channels || []).find(c => String(c.id) === String(value));
@@ -56,20 +66,38 @@ function _agentLabel(agentsUsers, agentsAi, value) {
   }
   return value;
 }
-function advClauseLabel(cl, channels, agentsUsers, agentsAi) {
-  const dimLabel = DIM_LABELS[cl.dim] || cl.dim;
+// Rótulo amigável do chip para uma dimensão de atributo personalizado
+// (cattr:<scope>:<key>): "Contato · Plano" / "Atendimento · Plano" pra desambiguar
+// quando o mesmo key existe nos dois escopos. Usa as defs carregadas para o nome.
+function _cattrLabel(cl, attrDefs) {
+  const m = String(cl.dim).match(/^cattr:(contact|conversation):(.+)$/);
+  if (!m) return null;
+  const scope = m[1], key = m[2];
+  const def = (attrDefs || []).find(d => d.attribute_key === key && d.applies_to === scope);
+  const name = def ? (def.display_name || key) : key;
+  const prefix = scope === 'contact' ? 'Contato · ' : 'Conversa · ';
+  return prefix + name;
+}
+function advClauseLabel(cl, channels, agentsUsers, agentsAi, attrDefs) {
+  const cattrLabel = _cattrLabel(cl, attrDefs);
+  const dimLabel = cattrLabel || DIM_LABELS[cl.dim] || cl.dim;
   if (cl.dim === 'activity') {
     const days = `${cl.value} dia${String(cl.value) === '1' ? '' : 's'}`;
     if (cl.op === 'gt') return `Atividade: há mais de ${days}`;
     if (cl.op === 'lt') return `Atividade: há menos de ${days}`;
     return `Atividade: há ${days}`;
   }
-  let val;
-  if (cl.dim === 'status') val = STATUS_LABELS[cl.value] || cl.value;
-  else if (cl.dim === 'channel') val = _channelLabel(channels, cl.value);
-  else if (cl.dim === 'agent') val = _agentLabel(agentsUsers, agentsAi, cl.value);
-  else val = cl.value;   // tag
-  const sep = cl.op === 'ne' ? ' ≠ ' : ': ';
+  // channel/agent/tag e atributos `list` são multi-select (lista). Rotula cada valor.
+  const labelOne = (v) => {
+    if (cl.dim === 'status') return STATUS_LABELS[v] || v;
+    if (cl.dim === 'channel') return _channelLabel(channels, v);
+    if (cl.dim === 'agent') return _agentLabel(agentsUsers, agentsAi, v);
+    return v;   // tag / atributo personalizado
+  };
+  const list = Array.isArray(cl.value) ? cl.value : [cl.value];
+  const val = list.map(labelOne).join(', ');
+  const OP_SEP = { ne: ' ≠ ', contains: ' contém ', not_contains: ' não contém ', gt: ' > ', lt: ' < ' };
+  const sep = OP_SEP[cl.op] || ': ';
   return `${dimLabel}${sep}${val}`;
 }
 
@@ -79,6 +107,11 @@ function TuneIcon() {
 }
 function ChevronDown() {
   return html`<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>`;
+}
+// Sort (swap-vert) arrows — trigger do popover "Ordenar por leitura".
+function SortReadIcon() {
+  return html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M16 17.01V10h-2v7.01h-3L15 21l4-3.99h-3zM9 3L5 6.99h3V14h2V6.99h3L9 3z"/></svg>`;
 }
 // Disk / "save" icon (matches the Chatwoot save-filter affordance).
 function SaveIcon() {
@@ -210,14 +243,44 @@ export function ConversationFilterBar({
   onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
 }) {
   const [statusOpen, setStatusOpen] = useState(false);
+  const [readSortOpen, setReadSortOpen] = useState(false); // popover "Ordenar conversas" (leitura + ordem)
   const [advOpen, setAdvOpen] = useState(false);         // modal avançado (direita)
   const [savedOpen, setSavedOpen] = useState(false);     // popover de filtros salvos
   const [saveDialog, setSaveDialog] = useState(null);    // { mode: 'create'|'rename', id?, name? } | null
   const [confirmDelete, setConfirmDelete] = useState(null); // { id, name } | null — confirmação de exclusão
+  // Definições de atributos personalizados (plano 05) — viram dimensões de filtro
+  // dinâmicas no construtor. Recarrega ao ouvir o evento global de mudança.
+  const [contactAttrDefs, setContactAttrDefs] = useState([]);
+  const [convAttrDefs, setConvAttrDefs] = useState([]);
+  // Etiquetas do atendimento (registro próprio, separado das tags de contato) → opções
+  // da dimensão "Etiqueta do atendimento". Recarrega ao abrir o modal avançado.
+  const [convLabelNames, setConvLabelNames] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      getCustomAttributes('contact').then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setContactAttrDefs(r.data); }).catch(() => {});
+      getCustomAttributes('conversation').then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setConvAttrDefs(r.data); }).catch(() => {});
+      getConversationLabels().then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setConvLabelNames(r.data.map(l => l.name)); }).catch(() => {});
+    };
+    load();
+    window.addEventListener('whatsbot:custom-attributes-changed', load);
+    return () => { alive = false; window.removeEventListener('whatsbot:custom-attributes-changed', load); };
+  }, []);
+  // Refresca as etiquetas do atendimento todo vez que o modal avançado abre (o registro
+  // pode ter mudado em outra tela desde o load inicial).
+  useEffect(() => {
+    if (!advOpen) return;
+    let alive = true;
+    getConversationLabels().then(r => { if (alive && r && r.ok && Array.isArray(r.data)) setConvLabelNames(r.data.map(l => l.name)); }).catch(() => {});
+    return () => { alive = false; };
+  }, [advOpen]);
+  const allAttrDefs = [...contactAttrDefs, ...convAttrDefs];
 
   const tagNames = Object.keys(globalTags || {});
   const advCount = (advFilters || []).length;
   const advActive = advCount > 0;
+  const { read: readSort, time: timeSort } = splitSort(sortBy);  // duas dimensões atuais
+  const sortActive = sortBy !== 'activity';                      // qualquer ordenação != padrão
   const presets = savedFilters || [];
 
   // One removable chip per active filter dimension. Each ✕ drops only that filter,
@@ -236,10 +299,11 @@ export function ConversationFilterBar({
     onRemove: () => onTagFilterChange((tagFilter || []).filter(x => x !== t)),
   }));
   (advFilters || []).forEach(cl => {
-    if (cl.value === '' || cl.value == null) return;   // incomplete clause — not applied
+    // incomplete clause — not applied (escalar vazio OU multi-select sem seleção)
+    if (cl.value === '' || cl.value == null || (Array.isArray(cl.value) && cl.value.length === 0)) return;
     filterChips.push({
       key: `adv:${cl.id}`,
-      label: advClauseLabel(cl, channels, agentsUsers, agentsAi),
+      label: advClauseLabel(cl, channels, agentsUsers, agentsAi, allAttrDefs),
       onRemove: () => onAdvFiltersChange((advFilters || []).filter(c => c.id !== cl.id)),
     });
   });
@@ -303,6 +367,48 @@ export function ConversationFilterBar({
             ><${BookmarkIcon} />${presets.length ? html`<span class="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-wa-secondary text-white text-[10px] font-semibold flex items-center justify-center">${presets.length}</span>` : null}</button>
           </div>
 
+          <!-- Ordenar conversas (↑↓) — 2 filtros que se combinam: Leitura + Ordem -->
+          ${onSortChange ? html`
+            <div class="relative">
+              <button
+                onClick=${() => { setReadSortOpen(o => !o); setStatusOpen(false); setSavedOpen(false); }}
+                class="w-[32px] h-[32px] rounded-md flex items-center justify-center transition-colors ${sortActive ? 'bg-wa-teal/15 text-wa-teal' : 'text-wa-secondary hover:bg-wa-hover'}"
+                title="Ordenar conversas (leitura + recência)"
+              ><${SortReadIcon} /></button>
+              <${Popover} open=${readSortOpen} onClose=${() => setReadSortOpen(false)} align="right" width="min-w-[280px]">
+                <!-- 2 filtros como inputs de seleção (label + dropdown), estilo Chatwoot -->
+                <div class="flex flex-col gap-2.5">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="text-[13px] text-wa-text shrink-0">Leitura</span>
+                    <select
+                      value=${readSort}
+                      onChange=${(e) => onSortChange(combineSort(e.target.value, timeSort))}
+                      class="wa-field px-2 py-1.5 rounded-md text-[13px] border border-wa-border min-w-[160px]"
+                    >
+                      ${READ_SORT_CHOICES.map(o => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+                    </select>
+                  </div>
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="text-[13px] text-wa-text shrink-0">Ordem</span>
+                    <select
+                      value=${timeSort}
+                      onChange=${(e) => onSortChange(combineSort(readSort, e.target.value))}
+                      class="wa-field px-2 py-1.5 rounded-md text-[13px] border border-wa-border min-w-[160px]"
+                    >
+                      ${TIME_SORT_CHOICES.map(o => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+                    </select>
+                  </div>
+                </div>
+                ${sortActive ? html`
+                  <button
+                    onClick=${() => { onSortChange('activity'); setReadSortOpen(false); }}
+                    class="w-full mt-3 pt-2.5 border-t border-wa-border text-left px-1 py-1 text-[13px] text-wa-secondary hover:text-wa-text transition-colors"
+                  >Limpar ordenação</button>
+                ` : null}
+              </${Popover}>
+            </div>
+          ` : null}
+
           <!-- Salvar filtro atual (disk) — só quando há filtro ativo -->
           ${anyFilterActive ? html`
             <button
@@ -365,8 +471,12 @@ export function ConversationFilterBar({
       ` : null}
 
       <!-- Assignment tabs -->
-      <div class="flex items-center gap-1 px-[12px] mt-1 border-b border-wa-border overflow-x-auto wa-scrollbar">
+      <!-- overflow-y-hidden é obrigatório: com overflow-x:auto o navegador promove o
+           outro eixo a auto também, e o -mb-px das abas produzia uma barrinha
+           vertical parasita de poucos pixels. O scroll horizontal continua valendo. -->
+      <div class="flex items-center gap-1 px-[12px] mt-1 border-b border-wa-border overflow-x-auto overflow-y-hidden wa-scrollbar">
         ${hasIdentity ? tabBtn('mine', 'Minhas', counts.mine) : null}
+        ${(hasIdentity && (counts.mentions > 0 || assignmentTab === 'mentions')) ? tabBtn('mentions', 'Menções', counts.mentions) : null}
         ${tabBtn('unassigned', 'Não atribuídas', counts.unassigned)}
         ${tabBtn('all', 'Todas', counts.all)}
       </div>
@@ -431,9 +541,13 @@ export function ConversationFilterBar({
               agentsUsers=${agentsUsers || []}
               agentsAi=${agentsAi || []}
               tagNames=${tagNames}
+              convLabelNames=${convLabelNames}
+              contactAttrDefs=${contactAttrDefs}
+              convAttrDefs=${convAttrDefs}
               sortBy=${sortBy}
               onSortChange=${onSortChange}
-              sortOptions=${SORT_OPTIONS}
+              readSortOptions=${READ_SORT_CHOICES}
+              timeSortOptions=${TIME_SORT_CHOICES}
               onApply=${onAdvFiltersChange}
               onClose=${() => setAdvOpen(false)}
             />
@@ -477,4 +591,3 @@ export function ConversationFilterBar({
   `;
 }
 
-export default ConversationFilterBar;
