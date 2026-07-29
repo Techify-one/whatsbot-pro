@@ -64,6 +64,14 @@ async def append_message(body: dict):
     role = str(body.get("role") or "")
     if not cid or role not in ("user", "assistant", "system", "tool"):
         return _err("conversation_id/role inválidos.")
+    # Choke point do 401 (plano 60 · 2.3): o SDK do executor converte a sessão
+    # expirada em TEXTO e a entrega como resposta da IA, em HTTP 200. Só o papel
+    # ``assistant`` é classificado — o operador que COLE o texto do erro no chat
+    # é persistido por outro caminho (routes.py) e nunca mata a sessão.
+    if role == "assistant" and chat_logic.is_auth_error(body.get("content")):
+        out = await asyncio.to_thread(
+            chat_logic.record_auth_failure, cid, str(body.get("content") or ""))
+        return _ok({"id": out.get("id"), "auth_expired": True})
     mid = await asyncio.to_thread(
         chat_logic.append_chat_message, cid, role,
         content=body.get("content"),

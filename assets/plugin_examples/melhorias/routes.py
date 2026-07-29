@@ -326,6 +326,9 @@ async def relogin_complete(body: dict, request: Request):
             str(body.get("code") or ""))
     except Exception as e:  # noqa: BLE001
         return _err(f"Executor indisponível: {e}", status=502)
+    # Contraparte servidor da ação da UI (plano 60 · 2.5): o código foi aceito ⇒
+    # a sessão está viva de novo; some a faixa em TODOS os painéis abertos.
+    await asyncio.to_thread(chat_logic.clear_session_state)
     return {"ok": True, "data": data}
 
 
@@ -343,7 +346,14 @@ async def relogin_abort(body: dict, request: Request):
 
 @router.post("/admin/test-connection", dependencies=[plugin_permission("configure")])
 async def test_connection(request: Request):
-    """Prova o secret contra /auth-check do executor (não o /health)."""
+    """Duas informações distintas (plano 60 · 2.8): o SEGREDO bate (``/auth-check``)
+    e a SESSÃO do Claude está viva. Dizer "✓ Secret válido" com o Claude deslogado
+    era metade da verdade.
+
+    O estado da sessão vem do que o gateway já sabe (marcado no 1º 401) e, quando
+    o executor implementa ``GET /health``, é confirmado por ele. Executor sem
+    ``/health`` ⇒ ``session.source = "gateway"`` e a UI mostra o que sabe, sem
+    inventar (a camada 3 destrava o probe de verdade)."""
     uid, _name = _actor(request)
     if not ai_client.is_configured():
         return _err("Configure URL e secret (≥32 chars) primeiro.")
@@ -351,7 +361,27 @@ async def test_connection(request: Request):
         data = await ai_client.auth_check(uid)
     except Exception as e:  # noqa: BLE001
         return _err(f"Executor inalcançável: {e}", status=502)
-    return {"ok": True, "data": data}
+
+    state = await asyncio.to_thread(chat_logic.get_session_state)
+    session = {"status": state.get("status") or "ok", "at": state.get("at"),
+               "source": "gateway"}
+    try:
+        probe = await ai_client.health(uid)
+    except Exception:  # noqa: BLE001 — /health é best-effort
+        probe = {"supported": False}
+    if probe.get("supported") and isinstance(probe.get("claude"), dict):
+        authenticated = probe["claude"].get("authenticated")
+        if authenticated is not None:
+            session = {"status": "ok" if authenticated else "expired",
+                       "at": state.get("at"), "source": "health"}
+    elif not probe.get("supported"):
+        session["health_supported"] = False
+        # Nunca vimos um 401 E o executor não sabe responder ⇒ desconhecido, não "ok".
+        if session["status"] == "ok" and not state.get("at"):
+            session["status"] = "unknown"
+
+    return {"ok": True, "data": {**data, "secret_ok": bool(data.get("ok")),
+                                 "session": session}}
 
 
 # ── Config (modelo/prompt da análise + servidor agêntico) ────────────────────
@@ -376,6 +406,9 @@ async def get_config():
         "callback_url_effective": ai_client.callback_url(),
         # plano 58: filtro padrão compartilhado do painel (objeto ou null).
         "default_filter": logic.get_default_filter(),
+        # plano 60: estado GLOBAL da sessão do Claude — o painel lê aqui no boot
+        # e depois acompanha ao vivo pelo WS `plugin_melhorias_ai_session`.
+        "ai_session": chat_logic.get_session_state(),
     }}
 
 

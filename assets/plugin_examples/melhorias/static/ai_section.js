@@ -66,12 +66,25 @@ export function MelhoriaAiSection({ api, can }) {
     setSaving(false);
   }
 
+  // O teste prova DUAS coisas (plano 60 · 2.8): o segredo bate E a sessão do
+  // Claude está viva. Antes dizia só "✓ Secret válido" — com o Claude deslogado,
+  // meia verdade. Sem `GET /health` no executor (camada 3), o veredito da sessão
+  // é o que o gateway sabe; "desconhecido" quando ninguém sabe.
+  const SESSION_LABEL = { ok: 'sessão do Claude ativa', expired: 'SESSÃO DO CLAUDE EXPIRADA',
+                          unknown: 'sessão desconhecida' };
+
   async function testConnection() {
     setTestResult('…');
     try {
       const res = await api.http.post('/admin/test-connection', {});
-      if (res && res.ok && res.data && res.data.ok) setTestResult('✓ Secret válido (auth-check 200)');
-      else setTestResult(`✕ ${(res && (res.error || (res.data && `HTTP ${res.data.status_code}`))) || 'falhou'}`);
+      const data = (res && res.data) || {};
+      if (res && res.ok && (data.secret_ok || data.ok)) {
+        const st = (data.session && data.session.status) || 'unknown';
+        const label = SESSION_LABEL[st] || SESSION_LABEL.unknown;
+        setTestResult(`${st === 'expired' ? '✕' : '✓'} Secret válido · ${label}`);
+      } else {
+        setTestResult(`✕ ${(res && (res.error || (data.status_code && `HTTP ${data.status_code}`))) || 'falhou'}`);
+      }
     } catch (_) { setTestResult('✕ Executor inalcançável'); }
   }
 

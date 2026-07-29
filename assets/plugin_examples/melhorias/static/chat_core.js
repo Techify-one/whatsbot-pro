@@ -95,6 +95,18 @@ export function isAuthError(text) {
     || t.includes('invalid api key');
 }
 
+// A ÚLTIMA mensagem do histórico é uma falha de sessão? (plano 60 · 1.3)
+// Resolve o "morreu enquanto ninguém olhava": quem abre a conversa depois via
+// só os balões do erro, sem oferta de renovar (a detecção era só ao vivo).
+export function authErrorInHistory(messages = []) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const content = ((messages[i] || {}).content || '').trim();
+    if (!content) continue;          // tool call / linha vazia não decide nada
+    return isAuthError(content);
+  }
+  return false;
+}
+
 // Persistido (DB do gateway) → cards, na hidratação ao abrir o detalhe.
 export function persistedToItems(messages = [], approvals = []) {
   const items = [];
@@ -102,6 +114,10 @@ export function persistedToItems(messages = [], approvals = []) {
     if ((m.role === 'user' || m.role === 'assistant') && (m.content || '').trim()) {
       items.push({ kind: 'text', id: `db-${m.id}`, role: m.role,
                    content: m.content, streaming: false });
+    } else if (m.role === 'system' && (m.content || '').trim()) {
+      // O gateway grava a falha de auth como `system` (plano 60 · 2.3) — antes
+      // `system` era descartado em silêncio e o histórico ficava com um buraco.
+      items.push({ kind: 'error', id: `db-${m.id}`, message: m.content });
     } else if (m.role === 'tool' && m.tool_name) {
       items.push({ kind: 'tool', id: `db-tool-${m.id}`, name: m.tool_name,
                    input: m.tool_input, output: m.tool_result, status: 'done' });
