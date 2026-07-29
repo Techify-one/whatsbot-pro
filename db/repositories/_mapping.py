@@ -110,18 +110,71 @@ LIST_PANEL_ONLY_ROLES = (
 _PREVIEW_EXCLUDED = LIST_PANEL_ONLY_ROLES
 
 
-def media_preview(content: str | None, media_type: str | None) -> str:
+# plano 87 — prefixos com que o backend marca o texto PRODUZIDO PELA IA dentro
+# do ``content`` de uma mídia (ver ``server/transcription.py`` ``_MEDIA_PREFIX``).
+# Espelha ``AI_CONTENT_PREFIXES`` do frontend (``services/messageView.js``): as
+# duas listas descrevem o mesmo contrato e mudam juntas.
+_AI_CONTENT_PREFIXES = (
+    "[Descrição da imagem]",
+    "[Transcrição do áudio]",
+    "[Conteúdo do documento]",
+)
+
+# Só os tipos que a IA de fato reescreve (imagem/áudio/documento). Vídeo,
+# sticker & cia. seguem no caminho legado (``content[:80]``) de propósito: o
+# content deles nunca é reescrito, então não há o que vazar e mudar o rótulo
+# seria alteração gratuita de comportamento.
+_MEDIA_PREVIEW_LABELS = {
+    "image": "\U0001f4f7 Imagem",
+    "audio": "\U0001f3a4 Áudio",
+    "document": "\U0001f4c4 Documento",
+}
+
+
+def caption_from_content(content: str | None) -> str:
+    """A legenda do cliente extraída de um ``content`` legado (sem ``media_caption``).
+
+    Gêmeo em Python do ``mediaCaptionOf`` do frontend, e com as MESMAS regras
+    conservadoras — cortes ancorados em marcador exato, nunca em posição:
+
+    * bloco da IA no INÍCIO (imagem/áudio) ⇒ ``""``. Não se tenta resgatar a
+      legenda do fim: a descrição é markdown multilinha e um corte por ``\\n``
+      exporia texto da IA como se fosse do cliente;
+    * bloco da IA no FIM (documento) ⇒ corta em ``\\n<prefixo>``.
+    """
+    body = content or ""
+    if not body:
+        return ""
+    if body.startswith(_AI_CONTENT_PREFIXES):
+        return ""
+    for prefix in _AI_CONTENT_PREFIXES:
+        at = body.find("\n" + prefix)
+        if at != -1:
+            body = body[:at]
+    return body.strip()
+
+
+def media_preview(content: str | None, media_type: str | None,
+                  media_caption: str | None = None) -> str:
     """Short sidebar preview label for the last visible message.
 
-    Mirrors the behavior shared by the contact-centric and conversation-centric
-    list queries: ``None`` content (no visible message) → empty; an ``image`` →
-    the caption trimmed to 80 chars, or "📷 Imagem" when there is none; an
-    ``audio`` → "🎤 Áudio"; anything else → the content trimmed to 80 chars.
+    ``None`` content (no visible message) → empty. For media, the preview is the
+    CLIENT's caption when there is one, else a per-type label; anything else →
+    the content trimmed to 80 chars.
+
+    plano 87: antes o ramo ``image`` devolvia ``content[:80]`` cru, então uma
+    imagem descrita pela IA vazava ``"[Descrição da imagem]: …"`` para a lista de
+    conversas (e o ramo genérico fazia o mesmo com ``"[Conteúdo do documento]"``
+    de um PDF). A legenda agora vem da coluna ``media_caption``; linha legada cai
+    em :func:`caption_from_content`, que esconde em vez de vazar.
     """
     if content is None:
         return ""
-    if media_type == "image":
-        return (content or "")[:80] or "\U0001f4f7 Imagem"
     if media_type == "audio":
-        return "\U0001f3a4 Áudio"
+        # Áudio nunca teve legenda no WhatsApp; o rótulo é sempre o certo.
+        return _MEDIA_PREVIEW_LABELS["audio"]
+    label = _MEDIA_PREVIEW_LABELS.get(media_type or "")
+    if label:
+        caption = (media_caption or "").strip() or caption_from_content(content)
+        return caption[:80] or label
     return (content or "")[:80]

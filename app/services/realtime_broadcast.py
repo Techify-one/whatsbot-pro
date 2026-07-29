@@ -102,6 +102,10 @@ def build_inbound_saved_message(saved: dict,
     if saved.get("media_type"):
         msg["media_type"] = saved["media_type"]
         msg["media_path"] = saved.get("media_path")
+        # plano 87: a legenda verbatim do cliente, para o balão não ter que
+        # adivinhá-la dentro do ``content`` composto. Só sai quando existe.
+        if saved.get("media_caption"):
+            msg["media_caption"] = saved["media_caption"]
     if saved.get("reply_to_msg_id"):
         msg["reply_to_msg_id"] = saved["reply_to_msg_id"]
         # plano 75 (F10 ao vivo): manda também o ALVO da citação. Um único lookup

@@ -1,0 +1,35 @@
+{
+  "events": {
+    "sequence": [
+      "message.received",
+      "execution.started",
+      "message.saved",
+      "execution.ended"
+    ],
+    "set": [
+      "execution.ended",
+      "execution.started",
+      "message.received",
+      "message.saved"
+    ]
+  },
+  "messages": [
+    {
+      "content": "[Documento recebido: contrato.pdf]\nsegue o comprovante\n[Conteúdo do documento]: contrato de prestacao de servicos",
+      "media_path": "statics/media/doc.pdf",
+      "media_type": "document",
+      "msg_id": "<MSGID>",
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "contrato de prestacao de servicos",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "transcription",
+      "status": null
+    }
+  ],
+  "sent": []
+}

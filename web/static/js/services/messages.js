@@ -11,6 +11,10 @@
 //
 // PURE: no DOM, no network, no module state.
 
+// `messageView` também é puro (sem DOM/rede) — importá-lo mantém este módulo
+// testável com `node --test` e evita uma 2ª cópia das regras de legenda.
+import { mediaCaptionOf } from './messageView.js';
+
 /**
  * @typedef {Object} ChatMessage
  * @property {string} [role] - 'user' | 'assistant' | panel-only roles…
@@ -196,6 +200,12 @@ const PREVIEW_PREFERS_CONTENT = new Set([
   'image', 'video', 'document', 'location', 'poll', 'interactive', 'order', 'contact', 'contacts',
 ]);
 
+// Tipos cujo `content` a IA reescreve (server/transcription.py). Para eles o
+// texto exibível NUNCA sai do content cru — sai de `mediaCaptionOf` (plano 87),
+// senão a preview mostra "[Descrição da imagem]: …" em vez do que o cliente
+// escreveu. Espelha `_MEDIA_PREVIEW_LABELS` do backend (db/repositories/_mapping.py).
+const PREVIEW_AI_REWRITTEN = new Set(['image', 'audio', 'document']);
+
 /**
  * One-line sidebar preview for a message: a media-type label (optionally
  * overridden by the message's own caption/content), or the first 80 chars of
@@ -209,6 +219,9 @@ export function mediaPreviewLabel(message) {
   const mt = message.media_type;
   if (mt && MEDIA_PREVIEW_LABELS[mt]) {
     const label = MEDIA_PREVIEW_LABELS[mt];
+    if (PREVIEW_AI_REWRITTEN.has(mt)) {
+      return (PREVIEW_PREFERS_CONTENT.has(mt) ? mediaCaptionOf(message) : '') || label;
+    }
     if (PREVIEW_PREFERS_CONTENT.has(mt) && message.content) return message.content;
     return label;
   }

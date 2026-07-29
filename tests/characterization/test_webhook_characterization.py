@@ -377,6 +377,7 @@ def test_media_contact(build_app):
 # content is byte-stable.
 _CANNED_IMAGE_DESC = "uma foto de um gato laranja"
 _CANNED_AUDIO_TEXT = "olá, gostaria de saber o preço"
+_CANNED_DOC_TEXT = "contrato de prestacao de servicos"
 
 
 def test_media_image_transcription_on(build_app):
@@ -402,6 +403,98 @@ def test_media_image_transcription_on(build_app):
             rec.drain()
     golden_assert("media_image_transcription_on",
                   _capture(phone, rec, built.gowa_client))
+
+
+def _saved_captions(phone: str) -> list[tuple]:
+    """``(media_type, content, media_caption)`` das linhas de mídia do contato.
+
+    Fora do golden de propósito (plano 87 P2): ``_project_messages`` tem uma lista
+    FIXA de colunas e incluir ``media_caption`` nela obrigaria a regravar os 15
+    goldens de mídia existentes. Aqui o golden segue travando o ``content`` (que o
+    plano 87 promete NÃO mudar) e a coluna nova é verificada direto no repo.
+    """
+    from db.repositories import contact_repo, message_repo
+    contact = contact_repo.get_by_phone(phone)
+    assert contact is not None
+    with_media = []
+    for r in message_repo.get_all(contact["id"]):
+        if r.get("media_type"):
+            with_media.append((r["media_type"], r.get("content"), r.get("media_caption")))
+    return with_media
+
+
+def test_media_image_transcription_on_com_legenda(build_app):
+    """plano 87 — imagem COM legenda e descrição ligada.
+
+    Trava as DUAS pontas: o ``content`` continua sendo o campo composto que o LLM
+    lê (``[Descrição da imagem]: <desc>\\n<legenda>``, formato intocado — D3) e a
+    legenda do cliente passa a existir INTEIRA em ``media_caption``, que é o que o
+    painel desenha. Antes do plano 87 esse texto era invisível no painel: o balão
+    suprimia o ``content`` inteiro por ele começar com o prefixo da descrição."""
+    phone = "5511970002003"
+    caption = "olha esse erro que aparece aqui"
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0,
+        "image_transcription_enabled": True,
+    })
+    from unittest.mock import patch
+    with patch.object(built.agent_handler, "describe_image",
+                      return_value=_CANNED_IMAGE_DESC):
+        with EventRecorder() as rec:
+            r = built.client.post("/api/webhook/gowa/default", json={
+                "event": "message", "payload": {
+                    "from": f"{phone}@s.whatsapp.net", "id": "imgtrcap_1",
+                    "from_name": "Cliente",
+                    "image": {"path": "statics/media/cat.jpg", "caption": caption}}})
+            assert r.status_code == 200, r.text
+            _drain_orchestrator(built, "default", phone)
+            rec.drain()
+    golden_assert("media_image_transcription_on_com_legenda",
+                  _capture(phone, rec, built.gowa_client))
+    media = _saved_captions(phone)
+    assert media == [("image", f"[Descrição da imagem]: {_CANNED_IMAGE_DESC}\n{caption}",
+                      caption)], media
+
+
+def test_media_document_transcription_on_com_legenda(build_app):
+    """plano 87 — documento COM legenda e extração ligada.
+
+    Formato INVERTIDO em relação à imagem (texto primeiro, prefixo depois) — ver
+    ``format_media_content``. Aqui o ``media_caption`` prova o ponto do GOWA: o
+    ``text`` do item é o rótulo composto ``[Documento recebido: …]\\n<legenda>``,
+    então a legenda tem que vir de ``media_extras["caption"]``, nunca do texto."""
+    phone = "5511970002004"
+    caption = "segue o comprovante"
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0,
+        "document_transcription_enabled": True,
+    })
+    from unittest.mock import patch
+    with patch.object(built.agent_handler, "transcribe_document",
+                      return_value=_CANNED_DOC_TEXT):
+        with EventRecorder() as rec:
+            r = built.client.post("/api/webhook/gowa/default", json={
+                "event": "message", "payload": {
+                    "from": f"{phone}@s.whatsapp.net", "id": "doctrcap_1",
+                    "from_name": "Cliente",
+                    "document": {"path": "statics/media/doc.pdf",
+                                 "file_name": "contrato.pdf",
+                                 "mimetype": "application/pdf",
+                                 "caption": caption}}})
+            assert r.status_code == 200, r.text
+            _drain_orchestrator(built, "default", phone)
+            rec.drain()
+    golden_assert("media_document_transcription_on_com_legenda",
+                  _capture(phone, rec, built.gowa_client))
+    media = _saved_captions(phone)
+    assert len(media) == 1, media
+    mtype, content, stored_caption = media[0]
+    assert mtype == "document"
+    # O content é composto (legenda + extração da IA) …
+    assert content.endswith(f"[Conteúdo do documento]: {_CANNED_DOC_TEXT}"), content
+    # … e a legenda gravada é SÓ a legenda — nunca o rótulo "[Documento recebido: …]"
+    # nem a extração da IA (que hoje vazava para dentro do balão).
+    assert stored_caption == caption, stored_caption
 
 
 def test_media_audio_transcription_on(build_app):

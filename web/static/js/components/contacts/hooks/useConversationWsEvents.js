@@ -775,6 +775,10 @@ export function useConversationWsEvents(opts) {
               ...updated[byId],
               content: message.content != null ? message.content : updated[byId].content,
               status: message.status || updated[byId].status,
+              // plano 87: o `new_message` do t=0 (pré-save) não carrega a legenda;
+              // só o autoritativo pós-save carrega. Sem adotá-la aqui, a mídia com
+              // legenda ficava muda AO VIVO e só aparecia depois do F5.
+              ...(message.media_caption ? { media_caption: message.media_caption } : {}),
               _status: null,
             };
             return { ...prev, messages: updated };
@@ -798,6 +802,7 @@ export function useConversationWsEvents(opts) {
               ...(message.ts != null ? { ts: message.ts } : {}),
               ...(message.msg_id ? { msg_id: message.msg_id } : {}),
               ...(message.sent_by_name ? { sent_by_name: message.sent_by_name } : {}),
+              ...(message.media_caption ? { media_caption: message.media_caption } : {}),
               _status: null,
             };
             return { ...prev, messages: updated };

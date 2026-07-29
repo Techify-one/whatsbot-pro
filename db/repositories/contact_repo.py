@@ -242,7 +242,11 @@ def _shape_contact_row(row, tags_list: list) -> dict:
     """Row (heavy SELECT) → dict de contato para a sidebar/lista. Shape byte-idêntico
     ao antigo loop inline (plano 50 F5 extraiu para reuso entre list/page)."""
     contact_id = row["id"]
-    last_content = media_preview(row["last_msg_content"], row["last_msg_media_type"])
+    # plano 87: a legenda do cliente entra na preview no lugar do content cru
+    # (que, numa mídia descrita pela IA, é "[Descrição da imagem]: …"). Linha
+    # vinda de query antiga sem a coluna ⇒ ``None`` ⇒ fallback legado.
+    last_content = media_preview(row["last_msg_content"], row["last_msg_media_type"],
+                                 row.get("last_msg_media_caption"))
     is_group = bool(row["is_group"])
     group_name = row["group_name"] or ""
     name = group_name if is_group else (row["name"] or "")

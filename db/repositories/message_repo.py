@@ -14,6 +14,7 @@ from db.tables import messages
 
 def add(contact_id: int, role: str, content: str, *,
         media_type: str | None = None, media_path: str | None = None,
+        media_caption: str | None = None,
         status: str | None = None, msg_id: str | None = None,
         reply_to_msg_id: str | None = None,
         conversation_id: int | None = None,
@@ -30,6 +31,10 @@ def add(contact_id: int, role: str, content: str, *,
     tool_call); NULL para mensagens não-IA.
     ``execution_id`` (plano 51) liga a resposta da IA à execução que a produziu
     (FK lógica, nullable) — link O(1) msg→execution; NULL cai no fuzzy legado.
+    ``media_caption`` (plano 87) guarda a legenda VERBATIM que o cliente digitou
+    junto da mídia. Fica fora do ``content`` de propósito: o content é reescrito
+    depois pela descrição/transcrição da IA e deixa de ser separável. NULL =
+    mídia sem legenda (ou mensagem que não é mídia).
     """
     ts = ts or time.time()
     with get_engine().begin() as conn:
@@ -40,6 +45,7 @@ def add(contact_id: int, role: str, content: str, *,
             ts=ts,
             media_type=media_type,
             media_path=media_path,
+            media_caption=media_caption,
             status=status,
             msg_id=msg_id,
             reply_to_msg_id=reply_to_msg_id,
@@ -57,6 +63,7 @@ def add(contact_id: int, role: str, content: str, *,
         "ts": ts,
         "media_type": media_type,
         "media_path": media_path,
+        "media_caption": media_caption,
         "status": status,
         "msg_id": msg_id,
         "reply_to_msg_id": reply_to_msg_id,
@@ -615,6 +622,11 @@ def _row_to_dict(row) -> dict:
         d["media_type"] = row["media_type"]
     if row["media_path"]:
         d["media_path"] = row["media_path"]
+    # plano 87: a legenda VERBATIM do cliente. Só sai quando existe — linha
+    # legada (anterior à coluna) e mídia sem legenda continuam byte-idênticas,
+    # e o painel cai no fallback conservador por prefixo.
+    if row.get("media_caption"):
+        d["media_caption"] = row["media_caption"]
     # `revoked` may be absent on very old rows read before the column existed.
     # 1 = "para todos", 2 = "para mim" (see _REVOKE_CODE).
     if row.get("revoked"):
@@ -694,7 +706,8 @@ def get_by_msg_ids(msg_ids, *, conversation_id: int | None = None,
         rows = conn.execute(
             select(
                 messages.c.id, messages.c.msg_id, messages.c.role, messages.c.content,
-                messages.c.media_type, messages.c.status, messages.c.sent_by_name,
+                messages.c.media_type, messages.c.media_caption,
+                messages.c.status, messages.c.sent_by_name,
             ).where(cond).order_by(messages.c.id)
         ).mappings().all()
     out: dict[str, dict] = {}
@@ -711,6 +724,9 @@ def get_by_msg_ids(msg_ids, *, conversation_id: int | None = None,
             "role": r["role"],
             "content": body[:QUOTED_SNIPPET_MAX],
             "media_type": r["media_type"],
+            # plano 87: o snippet da citação usa a legenda do cliente; sem ela o
+            # painel mostrava a descrição gerada pela IA (que vem no `content`).
+            "media_caption": (r["media_caption"] or "")[:QUOTED_SNIPPET_MAX] or None,
             # Cheap scalars the panel needs for the sender label of the quoted line
             # ("Manual"/operator name vs "IA"); no media path, no raw payload (R11).
             "status": r["status"],

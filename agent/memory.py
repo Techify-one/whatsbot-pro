@@ -435,6 +435,7 @@ class ContactMemory:
 
     def add_message(self, role: str, content: str, *,
                     media_type: str | None = None, media_path: str | None = None,
+                    media_caption: str | None = None,
                     status: str | None = None, msg_id: str | None = None,
                     reply_to_msg_id: str | None = None,
                     sent_by_user_id: int | None = None,
@@ -463,6 +464,7 @@ class ContactMemory:
         saved = message_repo.add(
             self.id, role, content,
             media_type=media_type, media_path=media_path,
+            media_caption=media_caption,
             status=status, msg_id=msg_id, reply_to_msg_id=reply_to_msg_id,
             conversation_id=conversation_id,
             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,

@@ -680,6 +680,17 @@ def _parse_message(data: dict, *, channel_id: str, client, bot_phone: str,
             cleaned = _strip_bot_mention(text, bot_phone, bot_name)
             if cleaned:
                 display_text = f"[{sender_label}]: {group_mentions.apply_incoming(lookup, cleaned)}"
+        # plano 87: a LEGENDA de uma mídia de grupo passa pelo mesmo tratamento do
+        # texto. Ela é persistida em ``messages.media_caption`` e é o que o painel
+        # desenha, então sem isto a @menção voltaria a aparecer como número cru
+        # (``@5511…`` em vez de ``@Nome``) e a menção ao bot ressuscitaria no
+        # balão — os dois já resolvidos no ``display_text`` acima. Sem prefixo de
+        # remetente: quem o desenha é o cabeçalho da bolha, não a legenda.
+        if media_extras and media_extras.get("caption"):
+            raw_caption = media_extras["caption"]
+            shown = _strip_bot_mention(raw_caption, bot_phone, bot_name) if mentioned else raw_caption
+            media_extras = {**media_extras,
+                            "caption": group_mentions.apply_incoming(lookup, shown or raw_caption)}
         logger.info("[gowa.inbound] Group payload: %s",
                     json.dumps(data, default=str, ensure_ascii=False)[:1000])
     else:

@@ -999,6 +999,15 @@ class MessagingService:
                 _saved_text = text or ("[Áudio recebido]" if audio_path else "")
                 _saved_media_type = item.get("media_type") or ("image" if image_path else "audio")
                 _saved_media_path = item.get("media_path") or image_path or audio_path
+                # plano 87 — a legenda do cliente, VERBATIM, para o painel desenhar
+                # sem ter que garimpá-la dentro do ``content`` (que a reescrita da
+                # descrição/transcrição da IA torna inseparável, mais abaixo).
+                # A fonte é ``media_extras["caption"]``, declarada pelo provider —
+                # NÃO o ``text`` do item: o GOWA compõe o texto do documento como
+                # "[Documento recebido: x.pdf]\n<legenda>" (gowa/inbound.py:197), e
+                # usar o ``text`` faria o rótulo inteiro virar "legenda". Provider
+                # que não declare caption ⇒ NULL, e o painel cai no fallback legado.
+                _saved_caption = (item.get("media_extras") or {}).get("caption") or None
                 # plano 75 F3 — safety net: a media_type the panel cannot draw and
                 # with no file would persist an empty body (mute bubble). Real media
                 # without a caption keeps its empty text (it has media_path).
@@ -1008,6 +1017,7 @@ class MessagingService:
                     "user", _saved_text,
                     media_type=_saved_media_type,
                     media_path=_saved_media_path,
+                    media_caption=_saved_caption,
                     msg_id=item.get("msg_id"),
                     reply_to_msg_id=item.get("reply_to_msg_id"),
                 )
