@@ -12,12 +12,12 @@ import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { subscribe as subscribeWs } from '/static/js/services/wsBus.js';
-import { reduceAiEvent, isAuthError, persistedToItems } from './chat_core.js';
+import { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory } from './chat_core.js';
 import { renderMarkdown } from './markdown.js';
 
 const html = htm.bind(h);
 
-export { reduceAiEvent, isAuthError, persistedToItems };
+export { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory };
 
 // ── Hook: eventos da conversa via /ws ────────────────────────────────────────
 
@@ -127,7 +127,9 @@ function ErrorCard({ item }) {
 // ── Componente principal ─────────────────────────────────────────────────────
 
 export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
-                              onAuthError = null, onConversationEnd = null }) {
+                              onAuthError = null, onConversationEnd = null,
+                              onRenewSession = null, reloadKey = 0, notice = '',
+                              onNoticeClear = null }) {
   const cid = conversation && conversation.id;
   const [items, setItems] = useState([]);
   const [status, setStatus] = useState('idle');
@@ -140,25 +142,50 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
   // entre input e "Continuar conversa" por AQUI.
   const [conv, setConv] = useState(conversation || null);
   const scrollRef = useRef(null);
+  // Oferta de renovar disparada pela HIDRATAÇÃO: uma vez por conversa. Sem isto,
+  // re-hidratar depois de retomar reabriria o modal em loop — o 401 continua
+  // sendo a última linha do histórico (ele não é apagado). Um 401 NOVO chega
+  // pelo evento `auth_expired` ao vivo, que não passa por aqui.
+  const authNotifiedRef = useRef('');
 
   useEffect(() => { setConv(conversation || null); }, [cid]);
 
-  // Hidrata do DB ao abrir.
+  // Hidrata do DB ao abrir — e a cada `reloadKey` (plano 60 · 1.2): sem um
+  // gatilho próprio, nenhuma recuperação (renovar sessão → retomar) seria
+  // possível sem desmontar o chat.
   useEffect(() => {
     if (!cid) return;
     (async () => {
       try {
         const r = await apiJson(`${apiBase}/conversations/${cid}`);
         if (r.ok) {
-          setItems(persistedToItems(r.body.data.messages, r.body.data.approvals));
-          if (r.body.data.conversation) setConv(r.body.data.conversation);
+          const messages = r.body.data.messages || [];
+          setItems(persistedToItems(messages, r.body.data.approvals));
+          const fresh = r.body.data.conversation;
+          if (fresh) setConv(fresh);
+          // Detecta na HIDRATAÇÃO, não só ao vivo: quem abre a conversa depois
+          // do 401 também recebe a oferta de renovar (plano 60 · 1.3).
+          const dead = (fresh && fresh.status === 'AUTH_EXPIRED')
+            || authErrorInHistory(messages);
+          if (dead && onAuthError && authNotifiedRef.current !== cid) {
+            authNotifiedRef.current = cid;
+            onAuthError();
+          }
         }
       } catch (_) { /* ignore */ }
     })();
-  }, [cid]);
+  }, [cid, reloadKey]);
 
   // Eventos ao vivo via /ws.
   useAiChatEvents(cid, (ev) => {
+    // O gateway classificou um 401 (write-through ou frame de erro) — a conversa
+    // já está AUTH_EXPIRED no banco; o chat reflete na hora (plano 60 · 2.3).
+    if (ev.event === 'auth_expired') {
+      setConv((c) => ({ ...(c || {}), status: 'AUTH_EXPIRED' }));
+      setStatus('error');
+      if (onAuthError) onAuthError();
+      return;
+    }
     setItems((prev) => {
       const out = reduceAiEvent(prev, ev, status);
       setStatus(out.status);
@@ -224,6 +251,8 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
           role: 'user', content: text, streaming: false,
           image: pendingImage ? pendingImage.dataUrl : null }]);
         setInput(''); setPendingImage(null); setStatus('streaming');
+        // "Sessão renovada — pode reenviar sua mensagem" cumpriu seu papel.
+        if (onNoticeClear) onNoticeClear();
       } else {
         setError((r.body && r.body.error) || 'Falha ao enviar.');
       }
@@ -303,7 +332,17 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
           </div>` : ''}
       </div>
       ${error ? html`<div class="text-[12px] text-red-500 px-3 py-1 bg-wa-panel border-t border-wa-border">${error}</div>` : ''}
-      ${convStatus === 'ACTIVE' ? html`
+      ${notice ? html`<div class="text-[12px] text-wa-teal px-3 py-1 bg-wa-panel border-t border-wa-border">${notice}</div>` : ''}
+      ${convStatus === 'AUTH_EXPIRED' ? html`
+        <div class="bg-wa-panel border-t border-wa-border p-2 flex items-center justify-between gap-2">
+          <span class="text-[12px] text-wa-secondary">
+            Sessão do Claude expirada — a resposta acima é o erro do executor, não uma análise.
+          </span>
+          <button onClick=${() => onRenewSession && onRenewSession()} disabled=${!onRenewSession}
+            class="px-3 py-1.5 rounded-full bg-wa-teal text-white text-[12px] font-medium hover:opacity-90 disabled:opacity-50 shrink-0">
+            Renovar sessão</button>
+        </div>`
+      : convStatus === 'ACTIVE' ? html`
         <div class="bg-wa-panel border-t border-wa-border p-2">
           ${pendingImage ? html`
             <div class="flex items-center gap-2 mb-2">

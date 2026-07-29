@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { reduceAiEvent, isAuthError, persistedToItems } from './chat_core.js';
+import { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory } from './chat_core.js';
 
 test('message start/chunk/end monta uma bolha assistant em streaming', () => {
   let s = reduceAiEvent([], { event: 'message_start', data: { messageId: 'm1' } });
@@ -71,4 +71,38 @@ test('persistedToItems hidrata mensagens + approvals do DB', () => {
   const approvals = items.filter((c) => c.kind === 'approval');
   assert.equal(approvals[0].decided, null);
   assert.equal(approvals[1].decided, true);
+});
+
+// ── Plano 60 · sessão expirada (camada 1) ────────────────────────────────────
+
+test('system vira cartão de erro (o 401 é gravado assim pelo gateway)', () => {
+  const items = persistedToItems([
+    { id: 1, role: 'user', content: 'analisa' },
+    { id: 2, role: 'system', content: 'API Error: 401 authentication_error' },
+    { id: 3, role: 'system', content: '   ' },   // vazio não vira cartão
+  ]);
+  const errors = items.filter((c) => c.kind === 'error');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].message, 'API Error: 401 authentication_error');
+  assert.equal(errors[0].id, 'db-2');
+  // A mensagem do humano continua sendo bolha, não cartão.
+  assert.equal(items.filter((c) => c.kind === 'text').length, 1);
+});
+
+test('authErrorInHistory olha a ÚLTIMA mensagem com conteúdo', () => {
+  assert.equal(authErrorInHistory([
+    { id: 1, role: 'user', content: 'analisa' },
+    { id: 2, role: 'system', content: 'API Error: 401 · Please run /login' },
+  ]), true);
+  // Linhas sem conteúdo (tool call) não decidem — a busca continua para trás.
+  assert.equal(authErrorInHistory([
+    { id: 1, role: 'system', content: 'API Error: 401' },
+    { id: 2, role: 'tool', tool_name: 'get_agent', content: '' },
+  ]), true);
+  // Erro ANTIGO já superado por uma resposta boa ⇒ não oferece renovar.
+  assert.equal(authErrorInHistory([
+    { id: 1, role: 'system', content: 'API Error: 401' },
+    { id: 2, role: 'assistant', content: 'analisando de novo…' },
+  ]), false);
+  assert.equal(authErrorInHistory([]), false);
 });

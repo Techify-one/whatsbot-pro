@@ -22,11 +22,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 
 from sqlalchemy import text
 
+from db.repositories import config_repo
 from plugins.context import broadcast, make_plugin_db
 
 from . import ai_client
@@ -37,7 +39,10 @@ _CONV = "plugin_melhorias_ai_conversations"
 _MSGS = "plugin_melhorias_ai_messages"
 _APPR = "plugin_melhorias_ai_approvals"
 
-CONV_STATUSES = ("ACTIVE", "COMPLETED", "CANCELLED", "ERRORED")
+# ``AUTH_EXPIRED`` (plano 60) é recuperável — distinto de ``ERRORED``: a conversa
+# volta a viver com um ``resume`` depois que o operador renova a sessão do Claude.
+# Sem migration: ``status`` é TEXT sem CHECK (003_ai_chat.sql).
+CONV_STATUSES = ("ACTIVE", "COMPLETED", "CANCELLED", "ERRORED", "AUTH_EXPIRED")
 
 # Caps do blob de resume (molde do executor de referência).
 RESUME_MAX_TURNS = 20
@@ -68,6 +73,78 @@ def _loads(v):
         return json.loads(v)
     except (TypeError, ValueError):
         return v
+
+
+# ── Sessão do Claude expirada (plano 60 · camada 2) ──────────────────────────
+#
+# O executor entrega o 401 do SDK como se fosse RESPOSTA da IA (``role:
+# assistant``, HTTP 200) — a classificação abaixo é o único ponto de decisão do
+# servidor, espelho fiel do ``isAuthError`` de ``static/chat_core.js``.
+
+AUTH_ERROR_MARKERS = (
+    "authentication_error",
+    "invalid authentication credentials",
+    "please run /login",
+    "invalid api key",
+)
+_AUTH_401_RE = re.compile(r"\b401\b")
+
+# Estado GLOBAL da sessão (não por-conversa): a credencial é do executor inteiro.
+# Sem migration — mesmo padrão key-value do ``logic._setting``.
+SESSION_STATE_KEY = "plugin.melhorias.ai_session_state"
+SESSION_EVENT = "plugin_melhorias_ai_session"
+
+
+def is_auth_error(text_value) -> bool:
+    """A mensagem é o 401 do Claude vestido de conteúdo? (espelho do frontend)"""
+    t = str(text_value or "").lower()
+    if _AUTH_401_RE.search(t):
+        return True
+    return any(marker in t for marker in AUTH_ERROR_MARKERS)
+
+
+def get_session_state() -> dict:
+    """``{status: 'ok'|'expired', at?, conversation_id?}``. Ausente/ilegível ⇒ ok."""
+    raw = str(config_repo.get(SESSION_STATE_KEY, "") or "").strip()
+    if not raw:
+        return {"status": "ok"}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {"status": "ok"}
+    return data if isinstance(data, dict) else {"status": "ok"}
+
+
+def session_expired() -> bool:
+    return str(get_session_state().get("status") or "") == "expired"
+
+
+def _publish_session_state(state: dict, *, persist: str | None) -> dict:
+    """Persiste (``persist`` = string a gravar; ``None`` limpa) e avisa TODOS os
+    painéis abertos — quem chegar depois lê o mesmo estado no ``GET /config``."""
+    try:
+        config_repo.set(SESSION_STATE_KEY, persist or "")
+    except Exception:  # noqa: BLE001 — o aviso ao painel vale mesmo sem persistir
+        logger.warning("melhorias: falha ao gravar o estado da sessão de IA")
+    try:
+        broadcast(SESSION_EVENT, state)
+    except Exception:  # noqa: BLE001
+        logger.debug("melhorias: broadcast de %s falhou", SESSION_EVENT)
+    return state
+
+
+def mark_session_expired(*, conversation_id: str | None = None,
+                         message: str = "") -> dict:
+    state = {"status": "expired", "at": now(),
+             "conversation_id": conversation_id,
+             "message": (message or "")[:500]}
+    return _publish_session_state(
+        state, persist=json.dumps(state, ensure_ascii=False))
+
+
+def clear_session_state() -> dict:
+    """Sessão renovada/retomada: apaga o estado e avisa os painéis."""
+    return _publish_session_state({"status": "ok", "at": now()}, persist=None)
 
 
 # ── Conversas ────────────────────────────────────────────────────────────────
@@ -231,6 +308,11 @@ async def start_conversation(sid: int, *, observation: str = "",
     if not ai_client.is_configured():
         return None, ("Servidor de IA não configurado — defina a URL e o secret do "
                       "executor em Configurações de IA → seção Sugestão de melhoria.")
+    # Portão (plano 60 · 2.6): com a sessão morta, toda conversa nova já nasce
+    # morta — recusar aqui poupa a sugestão em vez de queimá-la.
+    if session_expired():
+        return None, ("Sessão do Claude expirada — renove a sessão antes de "
+                      "iniciar uma nova análise.")
     suggestion = logic.get_suggestion(sid)
     if not suggestion:
         return None, "Sugestão não encontrada."
@@ -299,6 +381,8 @@ async def resume_conversation(cid: str, *, user_id=None) -> tuple[dict | None, s
     except Exception as e:  # noqa: BLE001
         return None, f"Falha ao retomar a conversa no executor: {e}"
     conv = await asyncio.to_thread(set_conversation_status, cid, "ACTIVE")
+    # O executor aceitou a retomada ⇒ a credencial nova está valendo (plano 60 · 2.5).
+    await asyncio.to_thread(clear_session_state)
     ensure_consumer(cid, conv.get("suggestion_id"), user_id=user_id)
     return conv, None
 
@@ -413,6 +497,13 @@ async def _consume_stream(cid: str, suggestion_id: int, user_id=None) -> None:
                         continue
                     parsed = parse_sse_frame(frame)
                     if parsed:
+                        # Mesma classificação do write-through (plano 60 · 2.4):
+                        # um frame `event: error` de auth marca a sessão morta.
+                        if parsed[0] == "error" and is_auth_error(
+                                (parsed[1] or {}).get("message")):
+                            await asyncio.to_thread(
+                                record_auth_failure, cid,
+                                str((parsed[1] or {}).get("message") or ""))
                         _ws_emit(suggestion_id, cid, parsed[0], parsed[1])
         except asyncio.CancelledError:
             raise
@@ -445,11 +536,44 @@ def stop_consumer(cid: str) -> None:
 
 # ── Callbacks do executor (chamados pelas rotas _internal) ───────────────────
 
+def record_auth_failure(cid: str, content: str) -> dict:
+    """Um 401 do Claude chegou vestido de conteúdo — registra como FALHA, não
+    como resposta da IA (plano 60 · 2.3/2.4). UM helper, DOIS pontos de entrada:
+    o write-through do executor e o frame ``event: error`` do stream.
+
+    - persiste com ``role="system"`` ⇒ sai do ``_last_assistant_content`` e
+      nunca vira a "Análise gerada pela IA";
+    - marca a conversa como ``AUTH_EXPIRED`` (recuperável por ``resume``);
+    - grava o estado GLOBAL da sessão e avisa todos os painéis abertos.
+    """
+    mid = None
+    try:
+        mid = append_chat_message(cid, "system", content=content)
+    except Exception:  # noqa: BLE001 — o estado da sessão importa mais
+        logger.warning("melhorias: falha ao persistir o 401 da conversa %s", cid)
+    conv = set_conversation_status(cid, "AUTH_EXPIRED")
+    state = mark_session_expired(conversation_id=cid, message=content)
+    # O chat aberto reage na hora (sem esperar reabrir o modal).
+    _ws_emit((conv or {}).get("suggestion_id"), cid, "auth_expired",
+             {"message": content, "status": "AUTH_EXPIRED"})
+    # NÃO paramos o consumidor aqui: este helper roda DENTRO do próprio
+    # ``_consume_stream`` no caminho do frame de erro (cancelar seria suicídio).
+    # O laço já encerra sozinho na próxima volta — a conversa não está mais ACTIVE.
+    return {"id": mid, "conversation": conv, "session": state}
+
+
 def _last_assistant_content(cid: str) -> str:
-    """Artefato final da conversa = última mensagem assistant com texto."""
+    """Artefato final da conversa = última mensagem assistant com texto.
+
+    Blindagem retroativa (plano 60 · 2.7): linhas de 401 já gravadas como
+    ``assistant`` na base de produção NUNCA podem virar a análise final.
+    """
     for m in reversed(list_chat_messages(cid)):
         if m.get("role") == "assistant" and (m.get("content") or "").strip():
-            return m["content"].strip()
+            content = m["content"].strip()
+            if is_auth_error(content):
+                continue
+            return content
     return ""
 
 

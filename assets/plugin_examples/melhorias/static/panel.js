@@ -154,6 +154,10 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
   const [detail, setDetail] = useState(null);        // suggestion dict | null
   const [confirm, setConfirm] = useState(null);      // {row, action} | null
   const [generating, setGenerating] = useState(false); // aprovando: IA gerando a análise inline (backend direto legado)
+  // plano 60: estado GLOBAL da sessão do Claude no executor ({status:'ok'|'expired'}).
+  const [aiSession, setAiSession] = useState({ status: 'ok' });
+  const [panelRelogin, setPanelRelogin] = useState(false);
+  const sessionExpired = (aiSession || {}).status === 'expired';
 
   // Aplica um conjunto de filtro (do servidor ou o embutido) ao estado da UI.
   const applyDefaultFilter = useCallback((def) => {
@@ -173,6 +177,7 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
         if (r.ok) {
           const data = r.body.data || {};
           setBackend(data.generator_backend || 'external');
+          if (data.ai_session && typeof data.ai_session === 'object') setAiSession(data.ai_session);
           const def = (data.default_filter && typeof data.default_filter === 'object') ? data.default_filter : null;
           setSavedDefault(def);
           if (def) applyDefaultFilter(def);
@@ -212,7 +217,12 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
   // Live: recarrega no broadcast do plugin. Via wsBus do core (conexão única
   // AUTENTICADA — WebSocket cru sem ?token= é fechado com 4401 sob RBAC e a
   // lista só atualizava no F5).
-  useEffect(() => subscribeWs({ plugin_melhorias_changed: () => load() }), [load]);
+  useEffect(() => subscribeWs({
+    plugin_melhorias_changed: () => load(),
+    // plano 60 · 1.6: o servidor avisa TODOS os painéis quando a sessão morre
+    // (ou volta) — mesmo mecanismo já usado para `plugin_melhorias_changed`.
+    plugin_melhorias_ai_session: (d) => setAiSession(d && typeof d === 'object' ? d : { status: 'ok' }),
+  }), [load]);
 
   // Valores distintos p/ os filtros de seleção.
   function distinct(col) {
@@ -343,6 +353,16 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
 
   return html`
     <div class="w-full px-5 py-4">
+      ${sessionExpired ? html`
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-400 bg-amber-50 px-3 py-2">
+          <span class="text-[13px] text-amber-700">
+            <strong>Sessão do Claude expirada no executor.</strong>
+            As conversas em andamento estão paradas e novas análises não podem começar até renovar.
+          </span>
+          ${canApprove ? html`<button onClick=${() => setPanelRelogin(true)}
+            class="shrink-0 px-3 py-1.5 rounded-full bg-wa-teal text-white text-[12px] font-medium hover:opacity-90">
+            Renovar sessão</button>` : ''}
+        </div>` : ''}
       <div class="flex items-center justify-between gap-2 mb-3">
         <h2 class="text-[16px] font-semibold text-wa-text">Filtros</h2>
         <div class="flex items-center gap-2">
@@ -451,7 +471,7 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
         </div>`}
 
       ${detail ? html`<${DetailModal} detail=${detail} canApprove=${canApprove}
-        backend=${backend} apiBase=${apiBase}
+        backend=${backend} apiBase=${apiBase} sessionExpired=${sessionExpired}
         onRefresh=${() => { load(); openDetail(detail.id); }}
         onClose=${() => { setDetail(null); writeUrlParam('detail', null); }}
         onDecide=${(action) => setConfirm({ row: detail, action })} />` : ''}
@@ -468,6 +488,10 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
         onCancel=${() => setConfirm(null)} />` : ''}
 
       ${generating ? html`<${GeneratingModal} />` : ''}
+
+      ${panelRelogin ? html`<${ReloginModal} apiJson=${apiJson} apiBase=${apiBase}
+        onClose=${() => setPanelRelogin(false)}
+        onSuccess=${() => setAiSession({ status: 'ok' })} />` : ''}
     </div>`;
 }
 
@@ -487,7 +511,7 @@ function GeneratingModal() {
 }
 
 function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api/plugins/melhorias',
-                       onClose, onDecide, onRefresh = () => {} }) {
+                       sessionExpired = false, onClose, onDecide, onRefresh = () => {} }) {
   const d = detail;
   const agentic = backend === 'external';
   // Mensagens marcadas: multi-seleção (d.messages) ou a âncora legada.
@@ -501,6 +525,9 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
   const [startError, setStartError] = useState('');
   const [conversation, setConversation] = useState(null);
   const [relogin, setRelogin] = useState(false);
+  // plano 60 · 1.2: gatilho de re-hidratação do chat SEM desmontá-lo.
+  const [reloadKey, setReloadKey] = useState(0);
+  const [chatNotice, setChatNotice] = useState('');
 
   // Sugestão em_chat: carrega a conversa mais recente ao abrir.
   useEffect(() => {
@@ -530,6 +557,27 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
       }
     } catch (e) { setStartError(String(e.message || e)); }
     setStarting(false);
+  }
+
+  // Renovar a sessão RECUPERA a conversa em vez de matá-la (plano 60 · 1.1):
+  // `resume` é a primitiva que reconstrói o runner com a credencial nova. Nada
+  // de auto-reenvio da mensagem que falhou — o executor pode tê-la processado
+  // parcialmente; o operador reenvia, avisado pelo aviso abaixo.
+  async function onReloginSuccess() {
+    setChatNotice(''); setStartError('');
+    const cid = conversation && conversation.id;
+    if (!cid) { onRefresh(); return; }
+    try {
+      const r = await apiJson(`${apiBase}/conversations/${cid}/resume`, { method: 'POST' });
+      if (r.ok && r.body.data) {
+        setConversation(r.body.data);
+        setChatNotice('Sessão renovada — pode reenviar sua mensagem.');
+      } else {
+        setStartError((r.body && r.body.error) || 'Sessão renovada, mas a conversa não retomou.');
+      }
+    } catch (e) { setStartError(String(e.message || e)); }
+    setReloadKey((k) => k + 1);   // re-hidrata mantendo o chat na tela
+    onRefresh();
   }
 
   const showGateA = agentic && canApprove && d.status === 'pendente' && !conversation;
@@ -568,8 +616,15 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
                   placeholder="Observação extra para a IA (opcional)…"
                   value=${observation} onInput=${(e) => setObservation(e.target.value)}></textarea>
                 ${startError ? html`<div class="text-[12px] text-red-500 mb-2">${startError}</div>` : ''}
-                <div class="flex justify-end">
-                  <button onClick=${startChat} disabled=${starting}
+                ${sessionExpired ? html`
+                  <div class="text-[12px] text-amber-700 mb-2">
+                    Sessão do Claude expirada — renove a sessão antes de iniciar (o chat nasceria morto).
+                  </div>` : ''}
+                <div class="flex justify-end gap-2">
+                  ${sessionExpired ? html`<button onClick=${() => setRelogin(true)}
+                    class="px-4 py-2 rounded-full border border-wa-teal text-wa-teal text-[13px] font-medium hover:bg-wa-teal/10">
+                    Renovar sessão</button>` : ''}
+                  <button onClick=${startChat} disabled=${starting || sessionExpired}
                     class="px-4 py-2 rounded-full bg-wa-teal text-white text-[13px] font-medium hover:opacity-90 disabled:opacity-50">
                     ${starting ? 'Iniciando…' : 'Aprovar p/ iniciar'}</button>
                 </div>
@@ -599,9 +654,15 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
               <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1 shrink-0">Chat com a IA de melhoria</div>
               <${AgenticChat} apiJson=${apiJson} apiBase=${apiBase}
                 suggestion=${d} conversation=${conversation}
+                reloadKey=${reloadKey} notice=${chatNotice}
+                onNoticeClear=${() => setChatNotice('')}
                 onAuthError=${() => setRelogin(true)}
+                onRenewSession=${() => setRelogin(true)}
                 onConversationEnd=${onRefresh} />
-              ${(conversation.status === 'ERRORED' || conversation.status === 'CANCELLED') ? html`
+              ${/* AUTH_EXPIRED fica DE FORA de propósito (plano 60 · 1.5): reiniciar
+                    a análise abriria um chat novo, que é justamente a armadilha —
+                    o caminho certo é renovar a sessão e retomar esta conversa. */
+                (conversation.status === 'ERRORED' || conversation.status === 'CANCELLED') ? html`
                 <div class="flex items-center justify-between gap-2 mt-2 shrink-0">
                   <span class="text-[12px] text-wa-secondary">
                     A conversa anterior não foi concluída — dá para reiniciar a análise do zero (novo contexto completo).
@@ -622,7 +683,7 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
 
         ${relogin ? html`<${ReloginModal} apiJson=${apiJson} apiBase=${apiBase}
           onClose=${() => setRelogin(false)}
-          onSuccess=${() => setConversation(null)} />` : ''}
+          onSuccess=${onReloginSuccess} />` : ''}
       </div>
     </div>`;
 }
