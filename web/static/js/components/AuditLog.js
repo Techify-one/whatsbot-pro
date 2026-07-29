@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { listAudit, getAuditActions, downloadAuditExport, getConfig, saveConfig } from '../services/api.js';
 import { auditDiffView } from '../services/auditDiff.js';
+import { ExportConfirmModal } from './audit/ExportConfirmModal.js';
 import { SearchableSelect } from './SearchableSelect.js';
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, str, int } from '../services/urlState.js';
@@ -19,6 +20,11 @@ import { hasPermission } from '../utils/permissions.js';
 const html = htm.bind(h);
 
 const PAGE_SIZE = 50;
+
+// Teto de linhas por exportação — espelha `_EXPORT_CAP` em
+// server/routes/audit.py. Só alimenta o aviso ao operador; quem corta é o
+// backend (que ainda devolve o header `X-Audit-Truncated` com o total real).
+const EXPORT_CAP = 10000;
 
 // Deep-link do estado da tela (Plano 24) — filtros aplicados + paginação + linha
 // expandida na query-string legível. Datas viajam como 'YYYY-MM-DD' (o que os
@@ -224,6 +230,7 @@ export default function AuditLog({ currentUser } = {}) {
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [pendingExport, setPendingExport] = useState(null);   // 'csv' | 'json' | null
 
   // Load distinct actions / resource types for the filter selects.
   useEffect(() => {
@@ -329,8 +336,9 @@ export default function AuditLog({ currentUser } = {}) {
     deps: [applied, offset, expandedId],
   });
 
-  // Export uses the *applied* filters (same as the visible list).
-  async function handleExport(format) {
+  // Export uses the *applied* filters (same as the visible list). O clique só
+  // ABRE o aviso do teto de linhas; quem dispara o download é o modal.
+  async function runExport(format) {
     setExporting(true);
     setError('');
     const params = {};
@@ -343,6 +351,7 @@ export default function AuditLog({ currentUser } = {}) {
     const res = await downloadAuditExport(params, format);
     if (!res || !res.ok) setError((res && res.error) || 'Falha ao exportar.');
     setExporting(false);
+    setPendingExport(null);
   }
 
   const page = Math.floor(offset / PAGE_SIZE) + 1;
@@ -451,9 +460,9 @@ export default function AuditLog({ currentUser } = {}) {
           <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity"
             onClick=${applyFilters}>Filtrar</button>
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors disabled:opacity-50"
-            onClick=${() => handleExport('csv')} disabled=${exporting}>Exportar CSV</button>
+            onClick=${() => setPendingExport('csv')} disabled=${exporting}>Exportar CSV</button>
           <button class="px-3 py-2 rounded-md text-[14px] text-wa-text border border-wa-border hover:bg-wa-hover transition-colors disabled:opacity-50"
-            onClick=${() => handleExport('json')} disabled=${exporting}>Exportar JSON</button>
+            onClick=${() => setPendingExport('json')} disabled=${exporting}>Exportar JSON</button>
         </div>
       </div>
 
@@ -510,6 +519,15 @@ export default function AuditLog({ currentUser } = {}) {
           </div>
         ` : null}
       </div>
+
+      <${ExportConfirmModal}
+        format=${pendingExport}
+        total=${total}
+        cap=${EXPORT_CAP}
+        busy=${exporting}
+        onConfirm=${() => runExport(pendingExport)}
+        onCancel=${() => { if (!exporting) setPendingExport(null); }}
+      />
     </div>
   `;
 }
