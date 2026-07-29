@@ -102,3 +102,72 @@ def test_list_excludes_other_inbox(isolation_env):
     ids = [c["id"] for c in r.json()["data"]["conversations"]]
     assert conv_a in ids
     assert conv_b not in ids
+
+
+# ---------------------------------------------------------------------------
+# Plano 89 · F5 — CONTRATO: dentro do inbox de que o usuário é membro, a leitura
+# de uma conversa NÃO tem noção de DONO.
+#
+# O bloco acima trava o escopo por INBOX (o que é isolamento de verdade). Estes
+# casos travam o oposto e são igualmente importantes: `get_with_channel` filtra
+# SÓ por id — sem `assignee_user_id`, sem `status`, sem `is_archived` — e isso é
+# DELIBERADO, não acidente de implementação.
+#
+# POR QUE é contrato: um link de conversa (`/conversations/<id>`) é um endereço
+# PERMANENTE. Todo permalink do produto depende disso — os que o plugin de
+# protocolos manda no fio da conversa, os de melhorias/agendamento, e o caso mais
+# comum de todos: um atendente colando no chat interno o link de uma conversa que
+# ele está atendendo para um colega olhar. Escopar esta leitura por
+# `assignee_user_id` achando que "conversa alheia é privacidade" quebraria TODOS
+# eles de uma vez, em silêncio (o painel simplesmente não abriria).
+#
+# Privacidade aqui é membership de CANAL (o bloco acima), nunca atribuição.
+# ---------------------------------------------------------------------------
+
+
+def _plain_user(email: str) -> int:
+    """Usuário SEM membership nenhuma — só para ser o dono de uma conversa alheia."""
+    existing = user_repo.get_by_email(email)
+    if existing:
+        return existing["id"]
+    return user_repo.create(
+        email=email, name=email.split("@")[0],
+        password_hash=hash_password_argon2("supersecret"),
+        permission_keys=["conversation.read"], custom=True)["id"]
+
+
+@pytest.fixture
+def ownership_env(build_app):
+    """Quatro conversas no MESMO inbox do usuário, em estados que um leitor
+    desavisado poderia achar que deveriam bloquear a leitura."""
+    built = build_app(["gowa"])
+    inbox_a = _mk_inbox("iso_ch_a")
+    _scoped_user("iso_member_a@test.com", inbox_a)   # membro, sem read_all, não-admin
+    other_id = _plain_user("iso_other_owner@test.com")
+
+    convs = {
+        "assigned_to_other": _mk_conversation("5511977770010", inbox_a),
+        "unassigned": _mk_conversation("5511977770011", inbox_a),
+        "archived": _mk_conversation("5511977770012", inbox_a),
+        "closed": _mk_conversation("5511977770013", inbox_a),
+    }
+    conversation_repo.set_assignee(convs["assigned_to_other"], other_id)
+    conversation_repo.set_assignee(convs["unassigned"], None)
+    conversation_repo.set_archived(convs["archived"], 1)
+    conversation_repo.set_status(convs["closed"], "closed")   # "Resolvida" na UI
+
+    headers = _login(built.client, "iso_member_a@test.com")
+    return built.client, headers, convs
+
+
+@pytest.mark.parametrize("state", ["assigned_to_other", "unassigned",
+                                   "archived", "closed"])
+def test_read_is_not_scoped_by_ownership(ownership_env, state):
+    """200 no GET da conversa E das mensagens — em todos os quatro estados."""
+    client, headers, convs = ownership_env
+    conv_id = convs[state]
+    r = client.get(f"/api/atendimentos/{conv_id}", headers=headers)
+    assert r.status_code == 200, f"{state}: {r.text}"
+    assert r.json()["data"]["conversation"]["id"] == conv_id
+    r = client.get(f"/api/atendimentos/{conv_id}/messages", headers=headers)
+    assert r.status_code == 200, f"{state}: {r.text}"

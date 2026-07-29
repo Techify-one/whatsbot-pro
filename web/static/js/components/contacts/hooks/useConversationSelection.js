@@ -19,6 +19,7 @@ import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { getContact, getConversationMessages } from '../../../services/api.js';
 import { applyThreadResponse, prependOlder } from '../../../services/threadData.js';
 import { shapeConvData } from '../../../services/conversationRows.js';
+import { resolveDeepLink } from '../../../services/deepLinkResolve.js';
 import { emit as emitClientEvent } from '../../../plugins/registry.js';
 
 /**
@@ -164,54 +165,72 @@ export function useConversationSelection({
   }, [contactsRef]);
 
   // Resolve initialConversationId (/conversations/:id) or initialContactId
-  // (/contacts/:id, legacy) → a sidebar row, once the list is loaded. Mirrors the
-  // contact-centric resolution but adds the conversation dimension.
+  // (/contacts/:id, legacy) → a sidebar row. A DECISÃO vive em services/deepLinkResolve.js
+  // (puro, testado — plano 89 F1/F2); aqui só se APLICA a ação e se grava o carimbo.
+  // `wait` não carimba nada, então o efeito fica ARMADO: qualquer coisa que mude as
+  // deps (a lista chegar, uma busca, um upsert de WS) re-tenta sozinha.
   useEffect(() => {
-    if (initialConversationId != null) {
-      if (initialConversationId === lastResolvedConvId.current) return;
-      if (contacts.length === 0 || loading) return;
-      const row = contacts.find(c => c.conversation_id === initialConversationId);
-      if (row) {
-        setSelected(row.phone);
-        setSelectedConvId(row.conversation_id);
-        setSelectedChannelId(row.channel_id || 'default');
-      } else {
-        // Atendimento fora da sidebar (ex: além do limite ou arquivada) — abre direto
-        // por id; o load deriva o telefone/canal da resposta do endpoint.
-        setSelected(null);
-        setSelectedConvId(initialConversationId);
-      }
-      // Permalink (?message=<_id>): foca a mensagem assim que o atendimento renderiza.
-      // Lido no momento da resolução e consumido uma vez (onScrolledToMsg limpa);
-      // o atendimento carrega TODAS as mensagens, então o alvo está sempre no DOM.
-      if (initialScrollMsgId != null) setScrollToMsg(initialScrollMsgId);
-      lastResolvedConvId.current = initialConversationId;
-      lastResolvedId.current = null;
-      return;
-    }
-    if (initialContactId == null) {
-      // popstate back to "/" — deselect without pushing URL again
-      if (lastResolvedId.current != null || lastResolvedConvId.current != null) {
+    const decision = resolveDeepLink({
+      initialConversationId, initialContactId, contacts, loading,
+      lastResolvedConvId: lastResolvedConvId.current,
+      lastResolvedId: lastResolvedId.current,
+    });
+    switch (decision.action) {
+      case 'noop':
+      case 'wait':
+        return;
+      case 'deselect':
         setSelected(null);
         setSelectedConvId(null);
         lastResolvedId.current = null;
         lastResolvedConvId.current = null;
+        return;
+      case 'select':
+      case 'open_by_id': {
+        if (decision.action === 'select') {
+          const row = decision.row;
+          setSelected(row.phone);
+          setSelectedConvId(row.conversation_id ?? null);
+          setSelectedChannelId(row.channel_id || 'default');
+        } else {
+          // Atendimento fora da sidebar (além da 1ª página, arquivado, ou fora da
+          // view/filtro corrente — inclusive a lista inteiramente vazia, plano 89 F2):
+          // abre direto por id; o loader deriva telefone/canal da resposta do endpoint
+          // e a F3 abaixo adota da linha se ela aparecer antes disso.
+          setSelected(null);
+          setSelectedConvId(decision.conversationId);
+        }
+        if (decision.via === 'contact') {
+          lastResolvedId.current = decision.contactId;
+          lastResolvedConvId.current = null;
+          return;
+        }
+        // Permalink (?message=<_id>): foca a mensagem assim que o atendimento renderiza.
+        // Lido no momento da resolução e consumido uma vez (onScrolledToMsg limpa);
+        // o atendimento carrega TODAS as mensagens, então o alvo está sempre no DOM.
+        if (initialScrollMsgId != null) setScrollToMsg(initialScrollMsgId);
+        lastResolvedConvId.current = initialConversationId;
+        lastResolvedId.current = null;
+        return;
       }
-      return;
-    }
-    if (initialContactId === lastResolvedId.current) return;
-    if (contacts.length === 0 || loading) return;
-    // /contacts/:id opens that contact's newest conversation row (rows are sorted).
-    const row = contacts.find(c => c.contact_id === initialContactId)
-      || contacts.find(c => c.id === initialContactId);
-    if (row) {
-      setSelected(row.phone);
-      setSelectedConvId(row.conversation_id ?? null);
-      setSelectedChannelId(row.channel_id || 'default');
-      lastResolvedId.current = initialContactId;
-      lastResolvedConvId.current = null;
     }
   }, [initialContactId, initialConversationId, contacts, loading]);
+
+  // Plano 89 F3 — ADOÇÃO TARDIA de telefone e canal. Com a F2, "abrir por id" deixou
+  // de ser caso raro: entre a resolução e a resposta do endpoint, `selected` é nulo e
+  // `selectedChannelId` fica em 'default' — compositor, presença e as chaves de
+  // digitação (`typingKey`) operariam no canal errado. Se a linha aparecer na lista
+  // nesse meio-tempo (paginação, busca, upsert de WS), adota-se dela na hora.
+  // Sem corrida com o loader: os dois escrevem o MESMO valor, quem chegar primeiro
+  // vence e o outro é no-op. E a chave da thread é conversa-primeiro (`conv:<id>`),
+  // então adotar o telefone depois NÃO troca a chave nem pisca "Carregando..." (85 A2).
+  useEffect(() => {
+    if (selected || selectedConvId == null) return;
+    const row = contacts.find(c => c.conversation_id === selectedConvId);
+    if (!row || !row.phone) return;
+    setSelected(row.phone);
+    if (row.channel_id) setSelectedChannelId(row.channel_id);
+  }, [contacts, selected, selectedConvId]);
 
   // Load chat detail when the open thread changes. Atendimento-cêntrico: prefer the
   // per-conversation endpoint (scoped to one channel); fall back to the legacy
