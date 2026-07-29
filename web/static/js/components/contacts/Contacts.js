@@ -5,6 +5,7 @@ import { useUrlState } from '../../hooks/useUrlState.js';
 import { readParams, writeParams } from '../../services/urlState.js';
 import {
   hasStoredUser, defaultAssignmentTab, buildHubUrlSchema, hubUrlHasParams,
+  shouldYieldAssignmentTab,
 } from '../../services/hubDefaults.js';
 import { ContactList, typingKey, rowKeyFor, operatorTypingFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
@@ -333,6 +334,45 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   const headerChannelName = (selectedRow && selectedRow.channel_name)
     || (selectedChannelOpt && selectedChannelOpt.label) || null;
 
+  // plano 88 · F4 — A ABA CEDE: a conversa ABERTA que a aba de atribuição não consegue
+  // mostrar derruba a aba para "Todas". UMA regra, dois consumidores (o plano 89 · P1
+  // pedia justamente que não virassem duas mitigações parecidas em arquivos diferentes):
+  //   • a conversa que o operador acaba de INICIAR — ela nasce sem responsável (o único
+  //     carimbo automático é o `default_assignee_user_id` do INBOUND, por canal), então
+  //     em "Minhas" o chat abre mas a sidebar fica sem a linha: o servidor não a devolve
+  //     e o insert de WS é gateado de propósito (conversationRows.js `rowMatchesView`);
+  //   • o deep-link de uma conversa que é de outro atendente (o 89 fez o link SEMPRE
+  //     abrir; aqui a sidebar volta a mostrar o contexto dela).
+  // Trocar a aba não descarta nada do operador — ela é uma VIEW, e por isso já é
+  // excluída do spec de preset salvo (useConversationFilters.js "assignmentTab is
+  // intentionally excluded"). A decisão em si é pura e testada (hubDefaults.js).
+  //
+  // UMA decisão por thread aberta, tomada quando o detalhe ASSENTA (`_threadKey` já
+  // casa, sem carregamento em voo): reavaliar a cada mudança de `contactData` faria a
+  // aba ceder no instante em que o operador atribui a si mesmo uma conversa da fila
+  // "Não atribuídas" — isso é o fluxo normal daquela aba, não um contexto escondido.
+  const yieldDecidedRef = useRef(null);
+  useEffect(() => {
+    if (selectedKey == null) { yieldDecidedRef.current = null; return; }
+    if (yieldDecidedRef.current === selectedKey) return;
+    if (loadingDetail || detailStale) return;   // a evidência ainda não assentou
+    // Identidade em voo (`getMe()` é assíncrono): não CARIMBA a decisão, senão a
+    // primeira conversa aberta logo após o boot ficaria decidida com base em "não sei
+    // quem sou" e nunca seria reavaliada.
+    if (assignmentTab === 'mine' && currentUserId == null) return;
+    yieldDecidedRef.current = selectedKey;
+    const openRow = selectedConvId != null
+      ? contacts.find(c => c.conversation_id === selectedConvId)
+      : contacts.find(c => c.conversation_id == null && c.phone === selected);
+    if (shouldYieldAssignmentTab({
+      assignmentTab, currentUserId, hasOpenThread: true,
+      conversation: (contactData && contactData.conversation) || null,
+      row: openRow || null,
+    })) {
+      setAssignmentTab('all');
+    }
+  }, [selectedKey, loadingDetail, detailStale, contactData, contacts,
+      assignmentTab, currentUserId, selected, selectedConvId, setAssignmentTab]);
   const canReadContact = hasPermission(currentUser, 'contact.read');
 
   const autoReply = config ? config.auto_reply : false;

@@ -218,11 +218,16 @@ Por isso virou plano próprio, executado **antes** deste (D1 do 89). Este plano 
 **Pronto quando:** com o hub em "Minhas", "Nova conversa" → escolher canal → enviar: a conversa aparece na sidebar (a aba pula para "Todas") e continua aberta no chat. E abrir por link uma conversa que não é do operador produz o mesmo efeito.
 
 #### Status de execução — Fase 4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-29)
+- **O que foi feito:** a regra `shouldYieldAssignmentTab` (pura, em [hubDefaults.js](../web/static/js/services/hubDefaults.js), 9 casos de teste) + um efeito em [Contacts.js](../web/static/js/components/contacts/Contacts.js) que a aplica **uma vez por thread aberta**, quando o detalhe assenta (`!loadingDetail && !detailStale`), com carimbo em `yieldDecidedRef`. Cedendo, `setAssignmentTab('all')` — o efeito de filtros do hook já refaz a lista.
+- **Como foi feito / decisões (desvios do plano, deliberados):**
+  1. **Onde**: o plano sugeria o call site do `useChannelPicker`; ficou no **container**, disparado pela conversa ABERTA. Assim a regra é uma só e cobre os dois consumidores de graça (conversa nova **e** deep-link — o item 4 da fase e a P1 do plano 89) sem duplicar mitigação, e `useChannelPicker.js` **não foi tocado** (os dois pontos de entrada dele passam por `openInChannel` → `selectContact`, que o efeito já observa).
+  2. **Evidência, não ausência**: em vez de "a linha não está na lista ⇒ cede", julga-se a conversa **carregada** (`contactData.conversation`, que traz `assignee_user_id`/`active_agent_key`), com a linha da sidebar como reserva. Sem isso, uma conversa minha fora das páginas carregadas trocaria a aba à toa.
+  3. **`mentions` não cede**: abrir a menção zera `has_user_mention` na própria linha ([useConversationSelection.js:266](../web/static/js/components/contacts/hooks/useConversationSelection.js#L266)) — julgar ali derrubaria a aba a cada menção lida. A reconciliação dela já é outra (plano 72 F8).
+  4. **Uma decisão por thread**: reavaliar a cada mudança de `contactData` faria a aba ceder no instante em que o operador **atribui a si mesmo** uma conversa vinda da fila "Não atribuídas" — o fluxo normal daquela aba.
+  5. Sem evidência nenhuma (thread nova, sem linha e sem conversa carregada) só `mine` cede: a conversa nasce sem responsável ⇒ nunca é "minha", mas é legitimamente "não atribuída".
+- **Problemas / pendências:** P1 (atribuir a conversa ao criador no backend) segue ADIADO, como o plano determina. Efeito colateral aceito: abrir, **durante uma busca**, uma conversa de outro atendente também faz a aba ceder — ao limpar a busca o operador cai em "Todas" (um clique de volta).
+- **Verificação:** `node --test hubDefaults.test.js` → 19/19; suíte dos 5 módulos puros do hub → **126/126 verde**; `node --input-type=module --check` no `Contacts.js`. Roteiro manual na F5.
 
 ---
 
