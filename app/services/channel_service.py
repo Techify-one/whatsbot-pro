@@ -586,14 +586,20 @@ async def set_members(deps, row: dict, user_ids: list[int]) -> dict:
     previous = await asyncio.to_thread(inbox_member_repo.member_ids, inbox["id"])
     members = await asyncio.to_thread(
         inbox_member_repo.set_members, inbox["id"], user_ids)
-    await _emit_channel_event(deps, "channel.members_changed", {
-        "channel_id": channel_id,
-        "provider": row.get("provider"),
-        "inbox_id": inbox["id"],
-        "ts": time.time(),
-        "_audit_before": {"member_ids": sorted(previous or [])},
-        "_audit_after": {"member_ids": sorted(members or [])},
-    })
+    before, after = sorted(previous or []), sorted(members or [])
+    # Só emite (e portanto só audita) quando a lista de membros REALMENTE mudou.
+    # O form de edição do canal faz PUT /members em todo salvamento — sem esta
+    # guarda, desligar a IA do canal gerava uma linha `channel.members_update`
+    # com antes == depois na trilha.
+    if before != after:
+        await _emit_channel_event(deps, "channel.members_changed", {
+            "channel_id": channel_id,
+            "provider": row.get("provider"),
+            "inbox_id": inbox["id"],
+            "ts": time.time(),
+            "_audit_before": {"member_ids": before},
+            "_audit_after": {"member_ids": after},
+        })
     return {"inbox_id": inbox["id"], "member_ids": members}
 
 

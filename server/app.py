@@ -17,6 +17,7 @@ from server.auth import rbac_enforced, resolve_request_token
 from server.helpers import _get_web_dir
 from server.audit_listener import register_audit_listener
 from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
+from server.client_ip import audit_ip
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import audit_purge_loop, empty_conversation_sweep_loop
 from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes
@@ -598,9 +599,11 @@ def create_app(
         import uuid as _uuid
         _u = request.state.user
         request.state.request_id = _uuid.uuid4().hex
-        _xff = request.headers.get("x-forwarded-for", "")
-        _ip = (_xff.split(",")[0].strip() if _xff
-               else (request.client.host if request.client else None))
+        # IP do NAVEGADOR (não do proxy) — ver server/client_ip.py. `audit_ip`
+        # prefere o IP público que o painel declara em X-Client-Public-IP, e só
+        # a AUDITORIA pode usá-lo: por ser autodeclarado (forjável), o bucket de
+        # rate-limit do login segue em `client_ip` (plano 86 · D4). Não unificar.
+        _ip = audit_ip(request)
         _actor_token = set_current_actor(ActorCtx(
             id=(_u.get("id") if _u else None),
             type=("user" if _u else "system"),
@@ -648,7 +651,11 @@ def create_app(
                 "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: blob:; "
                 "media-src 'self' data: blob:; "
-                "connect-src 'self' ws: wss:; "
+                # www.cloudflare.com: ÚNICA chamada externa do painel — o
+                # /cdn-cgi/trace de onde o navegador descobre o próprio IP
+                # público para a auditoria (plano 86; ver services/publicIp.js).
+                # Host EXATO de propósito — nunca curinga.
+                "connect-src 'self' ws: wss: https://www.cloudflare.com; "
                 "frame-ancestors 'none'"
             )
         return resp

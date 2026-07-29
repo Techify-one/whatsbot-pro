@@ -10,8 +10,12 @@
 //
 // `api.js` keeps every public function but now delegates here, so existing
 // `import { sendImage } from '.../api.js'` etc. keep resolving unchanged.
+//
+// `authHeaders()` também é o ponto onde entra o `X-Client-Public-IP` (plano 86)
+// — ver services/publicIp.js.
 
 import { notifyPermissionDenied } from './notify.js';
+import { getPublicIp } from './publicIp.js';
 
 const BASE = '';
 
@@ -23,8 +27,17 @@ function getToken() {
 }
 
 /**
- * Merge the Authorization header (when a token exists) into `headers`.
- * Mutates and returns the passed object (matches the legacy `_authHeaders`).
+ * Cabeçalhos comuns a TODA chamada do painel: `Authorization` (quando há token)
+ * e `X-Client-Public-IP` (quando o IP público já foi descoberto — plano 86).
+ * Muta e devolve o objeto recebido (mantém o comportamento do `_authHeaders`).
+ *
+ * Este é o SEAM ÚNICO: além do `request`/`uploadRequest` daqui, ~20 call sites
+ * chamam `fetch()` direto e o transporte de plugin (`plugins/api.js`) monta os
+ * cabeçalhos por aqui — então uma linha nesta função cobre core + plugins, sem
+ * monkey-patch de `window.fetch`.
+ *
+ * O IP é omitido (e não mandado vazio) enquanto a descoberta não chega: o
+ * backend cai no IP observado na rede, exatamente como antes.
  *
  * @param {Record<string, string>} [headers]
  * @returns {Record<string, string>}
@@ -32,6 +45,8 @@ function getToken() {
 export function authHeaders(headers = {}) {
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  const ip = getPublicIp();
+  if (ip) headers['X-Client-Public-IP'] = ip;
   return headers;
 }
 
