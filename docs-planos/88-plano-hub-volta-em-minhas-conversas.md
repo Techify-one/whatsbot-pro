@@ -167,11 +167,11 @@ Disciplina do repo a respeitar: **verde a cada fase**; **um refactor por commit*
 **Pronto quando:** abrir `/` (URL sem query) cai na aba **Minhas**; clicar em "Todas" escreve `?assignment=all` na barra de endereços; recarregar nesse link volta em Todas (D3); abrir `?assignment=mine` continua exato.
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-29)
+- **O que foi feito:** [Contacts.js](../web/static/js/components/contacts/Contacts.js) — a constante de módulo `HUB_URL_SCHEMA` e o `hubUrlHasParams` local saíram; entraram `defaultTab = useMemo(() => defaultAssignmentTab(hasStoredUser()), [])` e `hubSchema = useMemo(() => buildHubUrlSchema(defaultTab), [defaultTab])`, usados nos dois lados do `useUrlState` (`readParams`/`writeParams`) e no `hasUrlFilters`. O import de `urlState.js` encolheu para `readParams`/`writeParams` (os codecs agora são consumidos dentro do módulo novo).
+- **Como foi feito / decisões:** deps vazias no `defaultTab` conforme o plano — o hub desmonta a cada troca de tela, então "uma vez por mount" já é "toda vez que o operador volta". `hasUrlFilters` passou a depender de `hubSchema` (mesma identidade estável, o memo não recalcula), então a precedência URL > preset salvo continua avaliada uma vez com a `location.search` da montagem.
+- **Problemas / pendências:** consequência conhecida e aceita: `selectContact` faz `pushState('/conversations/<id>')` **sem** a query, então a aba escolhida à mão não sobrevive a um F5 feito com a conversa aberta — o comportamento é o mesmo de antes, só com o default invertido (é a P2/D4, não regressão).
+- **Verificação:** `node --input-type=module --check` no arquivo; `node --test` nos 5 módulos puros do hub → **126/126 verde**. Validação manual pendente na F5.
 
 ---
 
@@ -187,11 +187,11 @@ Disciplina do repo a respeitar: **verde a cada fase**; **um refactor por commit*
 **Pronto quando:** com o DevTools na aba Network, voltar de outra tela dispara **um** request de lista, já com `assignee=me` (nenhum request com a query de "Todas" antes).
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-29)
+- **O que foi feito:** [useConversationFilters.js](../web/static/js/components/contacts/hooks/useConversationFilters.js) ganhou a opção `defaultAssignmentTab = 'all'` (default preserva qualquer caller antigo byte-idêntico) e o `useState('all')` da aba virou `useState(defaultAssignmentTab)`, com comentário apontando que a fonte da verdade é o schema de URL e que este seed existe só para o 1º frame. `Contacts.js` passa `defaultAssignmentTab: defaultTab` — o **mesmo** valor da F2, um só `hasStoredUser()`.
+- **Como foi feito / decisões:** commitada junto com a F2 (é uma única mudança de comportamento, como o plano previu). O comentário da linha do `useState` também corrigiu a enumeração da aba (`all|mine|unassigned|mentions` — `mentions` existe desde o plano 72 e faltava ali).
+- **Problemas / pendências:** nenhuma. `Contacts.js` é o único caller do hook no repo (verificado por `grep`), então o default `'all'` da opção é só um contrato de compatibilidade.
+- **Verificação:** mesmas suítes da F2 (**126/126 verde**). A prova do "um único request de lista" fica na F5 (DevTools).
 
 ---
 

@@ -2,7 +2,10 @@ import { h } from 'preact';
 import { useState, useRef, useCallback, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { useUrlState } from '../../hooks/useUrlState.js';
-import { readParams, writeParams, enumStr, str, bool, list, json } from '../../services/urlState.js';
+import { readParams, writeParams } from '../../services/urlState.js';
+import {
+  hasStoredUser, defaultAssignmentTab, buildHubUrlSchema, hubUrlHasParams,
+} from '../../services/hubDefaults.js';
 import { ContactList, typingKey, rowKeyFor, operatorTypingFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -25,22 +28,8 @@ const html = htm.bind(h);
 // Deep-link do estado da lista (Plano 24) — filtros/busca/ordenação/painel na
 // query-string legível. `adv` guarda só as cláusulas do filtro avançado (JSON),
 // omitido quando vazio. Serialize omite tudo que está no default → URL limpa.
-const HUB_URL_SCHEMA = [
-  enumStr('status', 'open'),        // open|closed|all
-  enumStr('assignment', 'all'),     // all|mine|unassigned
-  enumStr('sort', 'activity'),      // activity|oldest|unread
-  str('search', ''),
-  bool('archived'),
-  list('tags'),
-  str('panel', ''),                 // ''|contact|conversation
-  json('adv', { isDefault: (v) => !Array.isArray(v) || v.length === 0 }),
-];
-const HUB_URL_KEYS = HUB_URL_SCHEMA.map((f) => f.key);
-// A URL traz algum filtro do hub? (decide a precedência URL > preset salvo).
-const hubUrlHasParams = (search) => {
-  const p = new URLSearchParams(search || '');
-  return HUB_URL_KEYS.some((k) => p.has(k));
-};
+// O schema virou fábrica em services/hubDefaults.js (plano 88 · F1/F2): o default
+// de `assignment` depende de haver usuário logado.
 
 // ── Main Component (conversation hub container) ──────────────────────
 //
@@ -198,12 +187,24 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, [openPanel, setOpenPanel, selectContact, selectedRef, selectedConvIdRef]);
 
   // ── Filters + saved presets + derived sidebar list ──────────────────
+  // plano 88 · F2 — a aba que o hub abre quando a URL não diz nada. Trocar de tela
+  // DESMONTA o hub e voltar é um pushState('/') sem query, então "no mount" é
+  // exatamente "toda vez que o operador volta de outra tela": o default precisa ser
+  // "Minhas" (degradando para "Todas" sem usuário logado — ver hubDefaults.js).
+  // Deps VAZIAS de propósito: a identidade é resolvida UMA vez por mount; um schema
+  // que mudasse no meio da vida do componente reescreveria a URL sem ninguém ter
+  // tocado em nada. Um só cálculo, compartilhado com o seed do hook de filtros (F3).
+  const defaultTab = useMemo(() => defaultAssignmentTab(hasStoredUser()), []);
+  const hubSchema = useMemo(() => buildHubUrlSchema(defaultTab), [defaultTab]);
   // Precedência (Plano 24 · D3): se a URL trouxer filtros, ela vence o preset
   // salvo no localStorage — o hook não auto-aplica o preset armazenado nesse caso.
-  const hasUrlFilters = useMemo(() => hubUrlHasParams(window.location.search), []);
+  const hasUrlFilters = useMemo(() => hubUrlHasParams(window.location.search, hubSchema), [hubSchema]);
   const filters = useConversationFilters({
     contacts, selected, selectedConvId, currentUserId, displayedRef,
     search,
+    // plano 88 · F3 — o MESMO valor do schema, para o 1º frame já nascer na aba certa
+    // (sem piscar "Todas" e sem disparar um fetch de lista que seria refeito).
+    defaultAssignmentTab: defaultTab,
     searching: !!search,
     showArchived,
     skipStoredPreset: hasUrlFilters,
@@ -232,7 +233,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // back/forward; reflete filtros/busca/ordenação/painel na query (replaceState,
   // sem poluir histórico). Serialize omite defaults → link limpo quando nada mexeu.
   useUrlState({
-    read: () => readParams(window.location.search, HUB_URL_SCHEMA),
+    read: () => readParams(window.location.search, hubSchema),
     apply: (s) => {
       setStatusFilter(s.status);
       setAssignmentTab(s.assignment);
@@ -254,7 +255,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       panel: openPanel || '',
       // Descarta o id efêmero das cláusulas p/ a URL ficar estável.
       adv: (advFilters || []).map(({ id, ...rest }) => rest),
-    }, HUB_URL_SCHEMA),
+    }, hubSchema),
     deps: [statusFilter, assignmentTab, sortBy, search, showArchived, tagFilter, openPanel, advFilters],
   });
 
@@ -331,6 +332,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     || (selectedChannelOpt && selectedChannelOpt.provider) || null;
   const headerChannelName = (selectedRow && selectedRow.channel_name)
     || (selectedChannelOpt && selectedChannelOpt.label) || null;
+
   const canReadContact = hasPermission(currentUser, 'contact.read');
 
   const autoReply = config ? config.auto_reply : false;
@@ -344,7 +346,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     <div class="flex flex-col lg:flex-row h-full">
       <!-- Sidebar (largura arrastável no desktop; w-full no mobile) -->
       <div
-        class="shrink-0 border-r border-wa-border overflow-hidden ${isResizing ? '' : 'transition-all duration-300'} ${sidebarHidden ? 'lg:border-r-0' : ''} ${selected ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}"
+        class="shrink-0 border-r border-wa-border overflow-hidden ${isResizing ? '' : 'transition-all duration-300'} ${sidebarHidden ? 'lg:border-r-0' : ''} ${selectedKey ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}"
         style=${isDesktop ? `width:${sidebarHidden ? 0 : sidebarWidth}px` : ''}
       >
         <${ContactList}
@@ -428,16 +430,27 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         <span class="text-wa-secondary text-[11px] pointer-events-none">${sidebarHidden ? '›' : '‹'}</span>
       </div>
       <!-- Chat panel -->
-      <div class="flex-1 min-w-0 min-h-0 ${!selected ? 'hidden lg:flex' : 'flex'} relative">
+      <!-- plano 89 F4 — a visibilidade segue a CHAVE da thread (conversa-primeiro), não o
+           telefone: um deep-link resolvido por id abre com o telefone nulo, e a condição
+           antiga escondia o chat (e o card de erro) abaixo do breakpoint lg. -->
+      <div class="flex-1 min-w-0 min-h-0 ${!selectedKey ? 'hidden lg:flex' : 'flex'} relative">
         <div class="w-full h-full flex flex-col">
           ${detailError && selectedKey
             ? html`<div class="flex flex-col items-center justify-center gap-3 h-full bg-wa-panel px-6 text-center">
                 <div class="text-[15px] text-wa-text">Não foi possível abrir esta conversa</div>
                 <div class="text-[13px] text-wa-secondary max-w-md">${detailError}</div>
-                <button
-                  class="mt-1 px-4 py-2 rounded-lg bg-wa-teal text-white text-[13px] hover:opacity-90 transition-opacity"
-                  onClick=${retryDetail}
-                >Tentar de novo</button>
+                <div class="mt-1 flex items-center gap-2">
+                  <button
+                    class="px-4 py-2 rounded-lg bg-wa-teal text-white text-[13px] hover:opacity-90 transition-opacity"
+                    onClick=${retryDetail}
+                  >Tentar de novo</button>
+                  <!-- Saída no mobile: com a sidebar oculta (selectedKey setado), este card
+                       era um beco sem saída — o "voltar" do ContactDetail não renderiza aqui. -->
+                  <button
+                    class="lg:hidden px-4 py-2 rounded-lg border border-wa-border text-wa-text text-[13px] hover:bg-wa-hover transition-colors"
+                    onClick=${() => selectContact(null)}
+                  >Voltar</button>
+                </div>
               </div>`
           : (loadingDetail || detailStale)
             ? html`<div class="flex items-center justify-center h-full bg-wa-panel text-wa-secondary animate-pulse-slow text-[14px]">Carregando...</div>`
