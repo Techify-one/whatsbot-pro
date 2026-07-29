@@ -1916,6 +1916,23 @@ r = client.put("/api/channels/default/members", json={"user_ids": []}, headers=_
 check("PUT members -> esvazia o conjunto", r.json()["data"]["member_ids"] == [])
 r = client.put("/api/channels/default/members", json={"user_ids": "nope"}, headers=_mem_h)
 check("PUT members tipo inválido -> 400", r.status_code == 400)
+# PUT sem mudança real na lista não gera linha de auditoria (o form de edição do
+# canal chama /members em todo salvamento — ex.: só desligar a IA do canal).
+import plugins.events as _mem_bus  # noqa: E402
+_mem_events = []
+_mem_listener = lambda name, payload: (  # noqa: E731
+    _mem_events.append(payload) if name == "channel.members_changed" else None)
+_mem_bus.register_core_sync_listener(_mem_listener)
+client.put("/api/channels/default/members", json={"user_ids": [_u["id"]]}, headers=_mem_h)
+_mem_events.clear()
+r = client.put("/api/channels/default/members", json={"user_ids": [_u["id"]]}, headers=_mem_h)
+check("PUT members sem mudança -> 200", r.status_code == 200)
+check("PUT members sem mudança não emite channel.members_changed", _mem_events == [])
+client.put("/api/channels/default/members", json={"user_ids": []}, headers=_mem_h)
+check("PUT members com mudança emite channel.members_changed", len(_mem_events) == 1)
+check("evento de members carrega antes != depois",
+      _mem_events and _mem_events[0]["_audit_before"] != _mem_events[0]["_audit_after"])
+_mem_bus._core_sync_listeners.remove(_mem_listener)
 _urepo.delete(_u["id"])
 _urepo.delete(_mem_admin["id"])  # volta a 0 usuários (gate aberto) para o resto da seção
 
@@ -5804,6 +5821,40 @@ r = client.get("/api/audit/export?format=json")
 check("export json content-type", "application/json" in r.headers.get("content-type", ""))
 r = client.get("/api/audit/export?format=xml")
 check("export formato inválido -> erro", r.json().get("ok") is False)
+
+# ── IP público autodeclarado pelo painel (plano 86) ─────────────────────
+# O IP real morre num hop antes do proxy reverso, então o navegador informa o
+# próprio IP público em X-Client-Public-IP. Vale SÓ para a auditoria (D4).
+def _last_export_ip():
+    rows = _audit_repo.query(limit=20, offset=0, action="data.export")
+    return max(rows, key=lambda x: x["id"])["ip_address"] if rows else None
+
+
+_XFF = {"X-Forwarded-For": "10.8.200.4"}   # a cadeia real da instância (só hop privado)
+
+client.get("/api/audit/export?format=csv", headers={**_XFF, "X-Client-Public-IP": "200.1.2.3"})
+check("audit grava o IP público declarado pelo painel", _last_export_ip() == "200.1.2.3")
+
+client.get("/api/audit/export?format=csv", headers=_XFF)
+check("sem o cabeçalho -> IP de rede, idêntico a antes", _last_export_ip() == "10.8.200.4")
+
+client.get("/api/audit/export?format=csv", headers={**_XFF, "X-Client-Public-IP": "192.168.0.7"})
+check("cabeçalho privado é ignorado -> IP de rede", _last_export_ip() == "10.8.200.4")
+
+client.get("/api/audit/export?format=csv", headers={**_XFF, "X-Client-Public-IP": "nao-e-ip"})
+check("cabeçalho com lixo é ignorado -> IP de rede", _last_export_ip() == "10.8.200.4")
+
+# D4: o bucket do rate-limit de login NÃO pode se mover com o cabeçalho — senão
+# bastaria variá-lo a cada tentativa para ganhar tentativas infinitas.
+_rl_xff = {"X-Forwarded-For": "203.0.113.9"}   # bucket isolado dos demais testes
+_rl_status = []
+for _i in range(12):
+    _rl = client.post("/api/auth/login",
+                      json={"email": "admin@test.com", "password": "errada"},
+                      headers={**_rl_xff, "X-Client-Public-IP": f"200.1.2.{_i + 10}"})
+    _rl_status.append(_rl.status_code)
+check("rate-limit de login não se move variando X-Client-Public-IP (D4)",
+      429 in _rl_status, f"status={_rl_status}")
 
 # ═══════════════════════════════════════════════════════════════════
 #  Conversation tabs + unified agent assignment (plano 10)
