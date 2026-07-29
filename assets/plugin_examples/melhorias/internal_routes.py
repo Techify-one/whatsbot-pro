@@ -64,18 +64,32 @@ async def append_message(body: dict):
     role = str(body.get("role") or "")
     if not cid or role not in ("user", "assistant", "system", "tool"):
         return _err("conversation_id/role inválidos.")
-    # Choke point do 401 (plano 60 · 2.3): o SDK do executor converte a sessão
-    # expirada em TEXTO e a entrega como resposta da IA, em HTTP 200. Só o papel
-    # ``assistant`` é classificado — o operador que COLE o texto do erro no chat
-    # é persistido por outro caminho (routes.py) e nunca mata a sessão.
-    if role == "assistant" and chat_logic.is_auth_error(body.get("content")):
-        out = await asyncio.to_thread(
-            chat_logic.record_auth_failure, cid, str(body.get("content") or ""))
-        return _ok({"id": out.get("id"), "auth_expired": True})
+    # Rede de segurança (plano 61): o caminho principal da falha agora é o frame
+    # ``event: error`` da SSE, mas o SDK do executor ainda pode converter a
+    # sessão expirada em TEXTO e entregá-la como resposta da IA, em HTTP 200.
+    # Só o papel ``assistant`` é classificado — o operador que COLE o texto do
+    # erro no chat é persistido por outro caminho (routes.py) e nunca mata a
+    # sessão. O ``kind`` do corpo é opcional; sem ele, cai na heurística de texto
+    # (degradação conhecida: o contrato só põe ``kind`` no frame da SSE).
+    if role == "assistant":
+        kind = chat_logic.derive_kind({"kind": body.get("kind"),
+                                       "message": body.get("content")})
+        if kind:
+            out = await asyncio.to_thread(
+                chat_logic.record_executor_failure, cid,
+                str(body.get("content") or ""), kind=kind,
+                retry_after=body.get("retry_after") or body.get("retryAfter"))
+            return _ok({"id": out.get("id"), "kind": out.get("kind"),
+                        "fatal": out.get("fatal"),
+                        # Chave antiga preservada: o executor pode ramificar nela.
+                        "auth_expired": bool(out.get("fatal"))})
     mid = await asyncio.to_thread(
         chat_logic.append_chat_message, cid, role,
         content=body.get("content"),
-        tool_name=body.get("tool_name") or body.get("toolName"),
+        # ``tool_name`` só faz sentido em linha de tool, e ``failure_kind`` é
+        # escrito exclusivamente pelo helper de falha do gateway — o executor não
+        # pode forjar o slot tipado por aqui.
+        tool_name=(body.get("tool_name") or body.get("toolName")) if role == "tool" else None,
         tool_input=body.get("tool_input") or body.get("toolInput"),
         tool_result=body.get("tool_result") or body.get("toolResult"),
         token_usage=body.get("token_usage") or body.get("tokenUsage"))

@@ -166,8 +166,17 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
   const [generating, setGenerating] = useState(false); // aprovando: IA gerando a análise inline (backend direto legado)
   // plano 60: estado GLOBAL da sessão do Claude no executor ({status:'ok'|'expired'}).
   const [aiSession, setAiSession] = useState({ status: 'ok' });
+  // plano 61: aviso EFÊMERO de falha não-fatal (limite/cota/sobrecarga). Slot
+  // SEPARADO do de cima de propósito: `setAiSession` substitui, então um aviso
+  // transitório no mesmo slot apagaria a faixa de sessão expirada e reabriria o
+  // botão "Aprovar p/ iniciar" contra um servidor que ainda recusa com 400.
+  const [aiNotice, setAiNotice] = useState(null);
   const [panelRelogin, setPanelRelogin] = useState(false);
   const sessionExpired = (aiSession || {}).status === 'expired';
+  const noticeKind = (aiNotice || {}).kind || null;
+  // Falta de crédito não passa sozinha (e relogin não resolve) — merece faixa
+  // própria; limite/sobrecarga são passageiros e só informam.
+  const aiState = { expired: sessionExpired, noticeKind };
 
   // Aplica um conjunto de filtro (do servidor ou o embutido) ao estado da UI.
   const applyDefaultFilter = useCallback((def) => {
@@ -231,8 +240,28 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
     plugin_melhorias_changed: () => load(),
     // plano 60 · 1.6: o servidor avisa TODOS os painéis quando a sessão morre
     // (ou volta) — mesmo mecanismo já usado para `plugin_melhorias_changed`.
-    plugin_melhorias_ai_session: (d) => setAiSession(d && typeof d === 'object' ? d : { status: 'ok' }),
+    plugin_melhorias_ai_session: (d) => {
+      const st = d && typeof d === 'object' ? d : { status: 'ok' };
+      setAiSession(st);
+      if (st.status === 'ok') setAiNotice(null);   // sessão viva zera avisos velhos
+    },
+    // plano 61: avisos não-fatais. Nunca tocam `aiSession` — só um relogin/resume
+    // (que emite `ai_session` com status ok) limpa a faixa vermelha.
+    plugin_melhorias_ai_notice: (d) => {
+      const n = d && typeof d === 'object' ? d : null;
+      setAiNotice(n && n.status === 'degraded' ? n : null);
+    },
   }), [load]);
+
+  // Aviso transitório se apaga sozinho: sem TTL, um limite intermitente deixaria
+  // faixa velha na tela até o próximo evento (que pode nunca vir).
+  useEffect(() => {
+    if (!aiNotice || aiNotice.kind === 'quota_exceeded') return undefined;
+    const secs = Number(aiNotice.retry_after);
+    const ms = (Number.isFinite(secs) && secs > 0 ? secs : 60) * 1000;
+    const t = setTimeout(() => setAiNotice(null), ms);
+    return () => clearTimeout(t);
+  }, [aiNotice]);
 
   // Valores distintos p/ os filtros de seleção.
   function distinct(col) {
@@ -373,6 +402,21 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
             class="shrink-0 px-3 py-1.5 rounded-full bg-wa-teal text-white text-[12px] font-medium hover:opacity-90">
             Renovar sessão</button>` : ''}
         </div>` : ''}
+      ${!sessionExpired && noticeKind === 'quota_exceeded' ? html`
+        <div class="mb-3 rounded-lg border border-amber-400 bg-amber-50 px-3 py-2">
+          <span class="text-[13px] text-amber-700">
+            <strong>Sem crédito no executor.</strong>
+            A IA não vai responder até alguém recarregar — renovar a sessão não resolve.
+          </span>
+        </div>` : ''}
+      ${!sessionExpired && noticeKind && noticeKind !== 'quota_exceeded' ? html`
+        <div class="mb-3 rounded-lg border border-wa-border bg-wa-panel px-3 py-2">
+          <span class="text-[13px] text-wa-secondary">
+            ${noticeKind === 'rate_limited' ? 'Limite de uso do executor atingido'
+              : (noticeKind === 'overloaded' ? 'Executor sobrecarregado' : 'Falha no executor')}
+            — as análises em andamento voltam sozinhas assim que ele liberar.
+          </span>
+        </div>` : ''}
       <div class="flex items-center justify-between gap-2 mb-3">
         <h2 class="text-[16px] font-semibold text-wa-text">Filtros</h2>
         <div class="flex items-center gap-2">
@@ -481,7 +525,7 @@ export default function MelhoriasPanel({ apiBase = '/api/plugins/melhorias', can
         </div>`}
 
       ${detail ? html`<${DetailModal} detail=${detail} canApprove=${canApprove}
-        backend=${backend} apiBase=${apiBase} sessionExpired=${sessionExpired}
+        backend=${backend} apiBase=${apiBase} aiState=${aiState}
         onRefresh=${() => { load(); openDetail(detail.id); }}
         onClose=${() => { setDetail(null); writeUrlParam('detail', null); }}
         onDecide=${(action) => setConfirm({ row: detail, action })} />` : ''}
@@ -521,7 +565,11 @@ function GeneratingModal() {
 }
 
 function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api/plugins/melhorias',
-                       sessionExpired = false, onClose, onDecide, onRefresh = () => {} }) {
+                       aiState = {}, onClose, onDecide, onRefresh = () => {} }) {
+  // Um objeto só em vez do booleano antigo: o modal precisa distinguir "sessão
+  // morta" (bloqueia) de "sem crédito" (avisa, mas não bloqueia — renovar não
+  // resolve, então nem botão de renovar aparece).
+  const sessionExpired = !!aiState.expired;
   const d = detail;
   const agentic = backend === 'external';
   // Mensagens marcadas: multi-seleção (d.messages) ou a âncora legada.
@@ -629,6 +677,10 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
                 ${sessionExpired ? html`
                   <div class="text-[12px] text-amber-700 mb-2">
                     Sessão do Claude expirada — renove a sessão antes de iniciar (o chat nasceria morto).
+                  </div>` : ''}
+                ${!sessionExpired && aiState.noticeKind === 'quota_exceeded' ? html`
+                  <div class="text-[12px] text-amber-700 mb-2">
+                    Sem crédito no executor — a análise pode não sair. Renovar a sessão não resolve.
                   </div>` : ''}
                 <div class="flex justify-end gap-2">
                   ${sessionExpired ? html`<button onClick=${() => setRelogin(true)}

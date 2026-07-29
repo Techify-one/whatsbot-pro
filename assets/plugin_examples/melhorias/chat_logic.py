@@ -75,11 +75,13 @@ def _loads(v):
         return v
 
 
-# ── Sessão do Claude expirada (plano 60 · camada 2) ──────────────────────────
+# ── Falhas do executor (plano 61 — sucessor do plano 60 · camada 2) ──────────
 #
-# O executor entrega o 401 do SDK como se fosse RESPOSTA da IA (``role:
-# assistant``, HTTP 200) — a classificação abaixo é o único ponto de decisão do
-# servidor, espelho fiel do ``isAuthError`` de ``static/chat_core.js``.
+# O executor manda um ``kind`` TIPADO no frame ``event: error`` da SSE. A
+# heurística de texto abaixo continua viva como FALLBACK para executor antigo
+# (e para o balde ``unknown``), nunca como fonte primária: ela dá falso positivo
+# quando a própria IA menciona um 401 numa análise, e é cega para limite de uso,
+# cota e sobrecarga — que acabavam confundidos com sessão expirada.
 
 AUTH_ERROR_MARKERS = (
     "authentication_error",
@@ -89,18 +91,90 @@ AUTH_ERROR_MARKERS = (
 )
 _AUTH_401_RE = re.compile(r"\b401\b")
 
+# A taxonomia. ``fatal`` = mata a sessão GLOBAL (só a credencial inválida mata:
+# é a única que o operador conserta sozinho, num botão). ``durable`` = o aviso
+# precisa sobreviver a um F5 (cota não passa sozinha; um 429 passa em segundos).
+# ``action`` é o que o frontend usa para escolher o rodapé — ele ramifica por
+# AÇÃO, não por nome de kind, então um kind novo degrada para um cartão genérico
+# sem exigir atualização do cliente.
+EXECUTOR_KINDS = {
+    "auth_required":  {"fatal": True,  "action": "relogin", "durable": True},
+    "rate_limited":   {"fatal": False, "action": "wait",    "durable": False},
+    "overloaded":     {"fatal": False, "action": "wait",    "durable": False},
+    "quota_exceeded": {"fatal": False, "action": "billing", "durable": True},
+    "unknown":        {"fatal": False, "action": "none",    "durable": False},
+}
+
+# Teto do ``retry_after``: o contrato não fixa unidade (assumimos segundos) e sem
+# clamp um ``86400`` congelaria um consumidor por um dia.
+RETRY_AFTER_MAX = 300
+# Piso de espera de ``overloaded`` sem ``retry_after`` — religar em 2s num
+# executor sobrecarregado é martelar.
+OVERLOADED_FLOOR = 5.0
+
 # Estado GLOBAL da sessão (não por-conversa): a credencial é do executor inteiro.
 # Sem migration — mesmo padrão key-value do ``logic._setting``.
 SESSION_STATE_KEY = "plugin.melhorias.ai_session_state"
 SESSION_EVENT = "plugin_melhorias_ai_session"
+# Avisos EFÊMEROS (limite/cota/sobrecarga) andam num evento SEPARADO. Reusar o
+# ``SESSION_EVENT`` seria um bug: o painel faz ``setAiSession(d)`` (substitui),
+# então um aviso transitório chegando depois apagaria a faixa de sessão expirada
+# e reabriria o botão "Aprovar p/ iniciar" contra um servidor que ainda recusa.
+# Com evento próprio, painel antigo em cache simplesmente o ignora.
+NOTICE_EVENT = "plugin_melhorias_ai_notice"
 
 
 def is_auth_error(text_value) -> bool:
-    """A mensagem é o 401 do Claude vestido de conteúdo? (espelho do frontend)"""
+    """A mensagem é o 401 do Claude vestido de conteúdo? (espelho do frontend)
+
+    FALLBACK apenas — ver ``derive_kind``.
+    """
     t = str(text_value or "").lower()
     if _AUTH_401_RE.search(t):
         return True
     return any(marker in t for marker in AUTH_ERROR_MARKERS)
+
+
+def normalize_kind(raw) -> str | None:
+    """``kind`` do executor → chave da tabela. Vazio ⇒ ``None`` ("não veio").
+
+    Um kind que a tabela não conhece vira ``unknown`` — NUNCA fatal. Se o
+    executor shipar um `credit_low` antes deste plugin saber o que é, o pior que
+    acontece é um cartão genérico; matar a sessão por acidente, não.
+    """
+    k = str(raw or "").strip().lower()
+    if not k:
+        return None
+    return k if k in EXECUTOR_KINDS else "unknown"
+
+
+def derive_kind(data: dict | None) -> str | None:
+    """A regra de classificação, num lugar só (stream e write-through a usam).
+
+    ``unknown`` é um VALOR, não um vazio — escrever ``kind or heurística`` faria
+    o fluxo parar no ``unknown`` e nunca chegar ao fallback, e uma sessão de fato
+    expirada deixaria de ser detectada. Por isso o teste é explícito.
+    """
+    data = data or {}
+    kind = normalize_kind(data.get("kind"))
+    if kind in (None, "unknown") and is_auth_error(data.get("message")):
+        return "auth_required"
+    return kind
+
+
+def kind_is_fatal(kind: str | None) -> bool:
+    return bool(EXECUTOR_KINDS.get(kind or "", {}).get("fatal"))
+
+
+def clamp_retry_after(v) -> int | None:
+    """Segundos, clampado em ``0..RETRY_AFTER_MAX``. Ilegível ⇒ ``None``."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(n, RETRY_AFTER_MAX))
 
 
 def get_session_state() -> dict:
@@ -119,32 +193,70 @@ def session_expired() -> bool:
     return str(get_session_state().get("status") or "") == "expired"
 
 
-def _publish_session_state(state: dict, *, persist: str | None) -> dict:
-    """Persiste (``persist`` = string a gravar; ``None`` limpa) e avisa TODOS os
-    painéis abertos — quem chegar depois lê o mesmo estado no ``GET /config``."""
+def _write_session_state(raw: str) -> None:
     try:
-        config_repo.set(SESSION_STATE_KEY, persist or "")
+        config_repo.set(SESSION_STATE_KEY, raw)
     except Exception:  # noqa: BLE001 — o aviso ao painel vale mesmo sem persistir
         logger.warning("melhorias: falha ao gravar o estado da sessão de IA")
+
+
+def _announce(event: str, payload: dict) -> dict:
     try:
-        broadcast(SESSION_EVENT, state)
+        broadcast(event, payload)
     except Exception:  # noqa: BLE001
-        logger.debug("melhorias: broadcast de %s falhou", SESSION_EVENT)
-    return state
+        logger.debug("melhorias: broadcast de %s falhou", event)
+    return payload
+
+
+def _persist_session_state(state: dict) -> dict:
+    """Grava o estado GLOBAL e avisa TODOS os painéis abertos — quem chegar
+    depois lê o mesmo estado no ``GET /config``.
+
+    Existe como função separada de propósito: o antigo ``_publish_session_state``
+    tinha a sentinela ``persist=None`` significando **apagar**, e o caminho novo
+    (aviso efêmero, que não deve gravar nada) passaria por ela da forma
+    intuitiva e limparia a sessão expirada em silêncio.
+    """
+    _write_session_state(json.dumps(state, ensure_ascii=False))
+    return _announce(SESSION_EVENT, state)
 
 
 def mark_session_expired(*, conversation_id: str | None = None,
                          message: str = "") -> dict:
-    state = {"status": "expired", "at": now(),
+    state = {"status": "expired", "kind": "auth_required", "at": now(),
              "conversation_id": conversation_id,
              "message": (message or "")[:500]}
-    return _publish_session_state(
-        state, persist=json.dumps(state, ensure_ascii=False))
+    return _persist_session_state(state)
 
 
 def clear_session_state() -> dict:
-    """Sessão renovada/retomada: apaga o estado e avisa os painéis."""
-    return _publish_session_state({"status": "ok", "at": now()}, persist=None)
+    """Sessão renovada/retomada: zera o estado e avisa os painéis.
+
+    O ÚNICO caminho que escreve o estado "vivo". Persiste ``at`` em vez de
+    limpar para string vazia: ``routes.test_connection`` usa a ausência de
+    ``at`` como "nunca vimos nada" e reportava ``unknown`` para sempre depois de
+    um relogin bem-sucedido.
+    """
+    state = {"status": "ok", "at": now()}
+    _persist_session_state(state)
+    # Um relogin/resume também mata qualquer aviso efêmero pendurado no painel.
+    _announce(NOTICE_EVENT, {"status": "ok", "at": state["at"]})
+    return state
+
+
+def notify_executor_issue(kind: str, *, message: str = "",
+                          retry_after=None, conversation_id: str | None = None) -> dict:
+    """Aviso EFÊMERO de falha não-fatal: avisa os painéis e **não grava nada**.
+
+    Transitório por natureza — um 429 passa em segundos, e um estado persistido
+    que ninguém limpa vira aviso fantasma. O caso durável (cota) sobrevive a um
+    F5 pelo histórico da conversa (``failure_kind`` na linha), não por aqui.
+    """
+    return _announce(NOTICE_EVENT, {
+        "status": "degraded", "kind": kind,
+        "message": (message or "")[:500],
+        "retry_after": clamp_retry_after(retry_after),
+        "conversation_id": conversation_id, "at": now()})
 
 
 # ── Conversas ────────────────────────────────────────────────────────────────
@@ -177,17 +289,29 @@ def list_conversations(suggestion_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def set_conversation_status(cid: str, status: str) -> dict | None:
+def set_conversation_status(cid: str, status: str, *,
+                            only_if: str | None = None) -> dict | None:
+    """``only_if`` = só troca se o status ATUAL for esse (UPDATE guardado).
+
+    Usado pelo caminho de falha: um frame de erro atrasado não pode rebaixar uma
+    conversa já ``COMPLETED`` para ``AUTH_EXPIRED`` — o ``finalize_agentic_
+    suggestion`` já rodou e a sugestão está fechada. Também estreita a janela em
+    que uma falha em voo sobrescreve o ``ACTIVE`` que o ``resume`` acabou de
+    gravar, logo depois de o operador clicar "Renovar sessão".
+    """
     if status not in CONV_STATUSES:
         return None
     ts = now()
     done = status in ("COMPLETED", "CANCELLED", "ERRORED")
+    guard = " AND status = :only_if" if only_if else ""
+    params = {"st": status, "ts": ts, "done": done, "id": cid}
+    if only_if:
+        params["only_if"] = only_if
     with make_plugin_db() as conn:
         conn.execute(text(
             f"UPDATE {_CONV} SET status = :st, updated_at = :ts, "
             "completed_at = CASE WHEN :done THEN :ts ELSE completed_at END "
-            "WHERE id = :id"),
-            {"st": status, "ts": ts, "done": done, "id": cid})
+            f"WHERE id = :id{guard}"), params)
     return get_conversation(cid)
 
 
@@ -195,17 +319,22 @@ def set_conversation_status(cid: str, status: str) -> dict | None:
 
 def append_chat_message(cid: str, role: str, *, content: str | None = None,
                         tool_name: str | None = None, tool_input=None,
-                        tool_result=None, token_usage=None) -> int:
+                        tool_result=None, token_usage=None,
+                        failure_kind: str | None = None) -> int:
+    """``failure_kind`` só é escrito por ``record_executor_failure`` (linhas
+    ``role="system"``) — é o que permite à hidratação do chat ler o TIPO da
+    falha em vez de adivinhá-lo pelo texto."""
     with make_plugin_db() as conn:
         mid = conn.execute(text(
             f"INSERT INTO {_MSGS} (conversation_id, role, content, tool_name, "
-            "tool_input, tool_result, token_usage, created_at) VALUES "
-            "(:cid, :role, :content, :tool_name, :tool_input, :tool_result, "
-            ":token_usage, :ts) RETURNING id"), {
+            "tool_input, tool_result, token_usage, failure_kind, created_at) "
+            "VALUES (:cid, :role, :content, :tool_name, :tool_input, "
+            ":tool_result, :token_usage, :failure_kind, :ts) RETURNING id"), {
                 "cid": cid, "role": role, "content": content,
                 "tool_name": tool_name, "tool_input": _dumps(tool_input),
                 "tool_result": _dumps(tool_result),
-                "token_usage": _dumps(token_usage), "ts": now()}).scalar_one()
+                "token_usage": _dumps(token_usage),
+                "failure_kind": failure_kind, "ts": now()}).scalar_one()
     return mid
 
 
@@ -375,17 +504,24 @@ async def resume_conversation(cid: str, *, user_id=None) -> tuple[dict | None, s
     history = [{"role": m["role"], "content": (m["content"] or "")[:RESUME_MAX_CHARS]}
                for m in rows[-RESUME_MAX_TURNS:]]
     target = {"suggestion_id": conv.get("suggestion_id")}
+    # O executor RECRIA o runner ⇒ o stream que ainda está aberto aponta para o
+    # runner ANTIGO e nunca mais entrega nada. ``ensure_consumer`` é idempotente
+    # (não faz nada com uma task viva), então sem este ``stop`` o consumidor
+    # ficaria pendurado no stream morto: a IA responde, o write-through persiste,
+    # e o painel fica em "IA pensando…" para sempre. Retomar SEMPRE reabre o stream.
+    #
+    # Derrubar ANTES da chamada (e não depois) fecha a janela em que o consumidor
+    # velho processa um frame de erro atrasado e grava ``AUTH_EXPIRED`` DEPOIS do
+    # ``ACTIVE`` abaixo — justo quando o operador acabou de renovar a sessão.
+    stop_consumer(cid)
     try:
         await ai_client.resume(cid, user_id=user_id, target=target,
                                history=history, model=conv.get("model") or "")
     except Exception as e:  # noqa: BLE001
+        # Não retomou: devolve o consumidor que acabamos de tirar do ar, senão a
+        # conversa fica ACTIVE sem ninguém escutando.
+        ensure_consumer(cid, conv.get("suggestion_id"), user_id=user_id)
         return None, f"Falha ao retomar a conversa no executor: {e}"
-    # O executor RECRIOU o runner ⇒ o stream que ainda estava aberto aponta para
-    # o runner ANTIGO e nunca mais entrega nada. ``ensure_consumer`` é idempotente
-    # (não faz nada com uma task viva), então sem este ``stop`` o consumidor
-    # ficaria pendurado no stream morto: a IA responde, o write-through persiste,
-    # e o painel fica em "IA pensando…" para sempre. Retomar SEMPRE reabre o stream.
-    stop_consumer(cid)
     conv = await asyncio.to_thread(set_conversation_status, cid, "ACTIVE")
     # O executor aceitou a retomada ⇒ a credencial nova está valendo (plano 60 · 2.5).
     await asyncio.to_thread(clear_session_state)
@@ -484,6 +620,57 @@ def parse_sse_frame(frame: str) -> tuple[str, dict] | None:
     return event, data if isinstance(data, dict) else {}
 
 
+# Espera mínima entre reconexões — sem ela, um stream que entrega e fecha na
+# hora viraria laço quente (o backoff de ``attempts`` zerado dá 0s).
+RECONNECT_FLOOR = 1.0
+# Um stream que entregou algo E viveu isso conta como SAUDÁVEL, não como
+# tentativa gasta. Com o executor falhando em ~8s, é o que separa "o executor
+# respondeu e encerrou" de "a conexão nem subiu".
+STREAM_HEALTHY_SEC = 5.0
+MAX_ATTEMPTS = 5
+
+# Limite de uso e sobrecarga são da CONTA do executor, não de uma conversa: com
+# cinco conversas abertas, cinco laços martelariam em paralelo. Este relógio é
+# compartilhado — quem apanhar segura todo mundo.
+_executor_cooldown_until: float = 0.0
+
+
+def _note_cooldown(seconds) -> None:
+    global _executor_cooldown_until
+    try:
+        s = float(seconds or 0)
+    except (TypeError, ValueError):
+        return
+    if s > 0:
+        _executor_cooldown_until = max(_executor_cooldown_until, now() + s)
+
+
+def _cooldown_remaining() -> float:
+    return max(0.0, _executor_cooldown_until - now())
+
+
+async def _handle_error_frame(cid: str, suggestion_id: int, data: dict) -> float:
+    """Trata um frame ``event: error``. Devolve os segundos de espera sugeridos.
+
+    Só emite o evento TIPADO quando reconhece o kind — emitir também o ``error``
+    cru renderizaria dois cartões para uma falha só. Sem kind reconhecido, o
+    comportamento é exatamente o de antes: repassa o ``error`` e não persiste nada.
+    """
+    kind = derive_kind(data)
+    if kind is None:
+        _ws_emit(suggestion_id, cid, "error", data)
+        return 0.0
+    retry_after = clamp_retry_after((data or {}).get("retry_after"))
+    await asyncio.to_thread(
+        record_executor_failure, cid, str((data or {}).get("message") or ""),
+        kind=kind, retry_after=retry_after)
+    if EXECUTOR_KINDS.get(kind, {}).get("action") != "wait":
+        return 0.0
+    wait = float(retry_after) if retry_after else OVERLOADED_FLOOR
+    _note_cooldown(wait)
+    return wait
+
+
 async def _consume_stream(cid: str, suggestion_id: int, user_id=None) -> None:
     """Consome a SSE do executor e re-emite no /ws. Reconecta com backoff
     enquanto a conversa estiver ACTIVE; termina em COMPLETED/CANCELLED/ERRORED."""
@@ -492,35 +679,53 @@ async def _consume_stream(cid: str, suggestion_id: int, user_id=None) -> None:
         conv = await asyncio.to_thread(get_conversation, cid)
         if not conv or conv.get("status") != "ACTIVE":
             break
+        cooling = _cooldown_remaining()
+        if cooling > 0:
+            await asyncio.sleep(cooling)
+            continue
+        hint = 0.0
+        opened_at = now()
+        delivered = False
         try:
             buffer = ""
             async for chunk in ai_client.open_stream(cid, user_id=user_id):
-                attempts = 0
+                delivered = True
                 buffer += chunk.decode("utf-8", errors="replace")
                 while "\n\n" in buffer:
                     frame, buffer = buffer.split("\n\n", 1)
                     if not frame.strip():
                         continue
                     parsed = parse_sse_frame(frame)
-                    if parsed:
-                        # Mesma classificação do write-through (plano 60 · 2.4):
-                        # um frame `event: error` de auth marca a sessão morta.
-                        if parsed[0] == "error" and is_auth_error(
-                                (parsed[1] or {}).get("message")):
-                            await asyncio.to_thread(
-                                record_auth_failure, cid,
-                                str((parsed[1] or {}).get("message") or ""))
+                    if not parsed:
+                        continue
+                    if parsed[0] == "error":
+                        hint = max(hint, await _handle_error_frame(
+                            cid, suggestion_id, parsed[1]))
+                    else:
                         _ws_emit(suggestion_id, cid, parsed[0], parsed[1])
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             logger.debug("melhorias: stream da conversa %s caiu: %s", cid, e)
-        attempts += 1
-        if attempts > 5:
+        # O contador só zera quando o stream de fato SERVIU. Antes ele zerava
+        # dentro do ``async for``, então um fechamento LIMPO caía direto no
+        # ``attempts += 1``: cinco fechamentos limpos matavam o consumidor em
+        # silêncio e a conversa ficava zumbi (ACTIVE, ninguém escutando, painel
+        # preso em "IA pensando…"). Só não aparecia porque um 401 mudava o status.
+        if delivered and (now() - opened_at) >= STREAM_HEALTHY_SEC:
+            attempts = 0
+        else:
+            attempts += 1
+        if attempts > MAX_ATTEMPTS:
             logger.warning("melhorias: stream %s desistiu após %s tentativas",
                            cid, attempts)
+            # Desistir em silêncio deixa o chat girando para sempre: o fallback
+            # de quiescência do frontend não arma sem uma resposta assentada.
+            _ws_emit(suggestion_id, cid, "executor_failure", {
+                "kind": "unknown", "retry_after": None, "status": "ACTIVE",
+                "message": "Sem conexão com o executor — a análise foi interrompida."})
             break
-        await asyncio.sleep(min(2.0 * attempts, 10.0))
+        await asyncio.sleep(max(RECONNECT_FLOOR, hint, min(2.0 * attempts, 10.0)))
     _consumers.pop(cid, None)
 
 
@@ -542,30 +747,80 @@ def stop_consumer(cid: str) -> None:
 
 # ── Callbacks do executor (chamados pelas rotas _internal) ───────────────────
 
-def record_auth_failure(cid: str, content: str) -> dict:
-    """Um 401 do Claude chegou vestido de conteúdo — registra como FALHA, não
-    como resposta da IA (plano 60 · 2.3/2.4). UM helper, DOIS pontos de entrada:
-    o write-through do executor e o frame ``event: error`` do stream.
+# Anti-rajada: o executor retenta internamente e pode cuspir o mesmo 429 várias
+# vezes seguidas. Sem isso, uma rajada vira cinco linhas no banco e cinco
+# cartões vermelhos no chat para uma falha só.
+FAILURE_THROTTLE_SEC = 10.0
+_failure_seen: dict[tuple[str, str], float] = {}
 
-    - persiste com ``role="system"`` ⇒ sai do ``_last_assistant_content`` e
-      nunca vira a "Análise gerada pela IA";
-    - marca a conversa como ``AUTH_EXPIRED`` (recuperável por ``resume``);
-    - grava o estado GLOBAL da sessão e avisa todos os painéis abertos.
+
+def _throttled(cid: str, kind: str) -> bool:
+    key = (cid, kind)
+    last = _failure_seen.get(key, 0.0)
+    ts = now()
+    if ts - last < FAILURE_THROTTLE_SEC:
+        return True
+    _failure_seen[key] = ts
+    return False
+
+
+def record_executor_failure(cid: str, content: str, *, kind: str,
+                            retry_after=None) -> dict:
+    """Falha do executor registrada como FALHA, nunca como resposta da IA.
+
+    UM helper, DOIS pontos de entrada: o write-through (``_internal/messages``) e
+    o frame ``event: error`` do stream. O que varia por ``kind``:
+
+    - sempre persiste com ``role="system"`` + ``failure_kind`` ⇒ sai do
+      ``_last_assistant_content``, nunca vira a "Análise gerada pela IA", e a
+      hidratação do chat lê o TIPO em vez de adivinhar pelo texto;
+    - ``auth_required`` (o único fatal) marca a conversa ``AUTH_EXPIRED``, grava
+      o estado GLOBAL e emite ``auth_expired``;
+    - os demais NÃO tocam o status da conversa nem o estado global — só emitem o
+      aviso efêmero + ``executor_failure``. Limite/sobrecarga passam sozinhos, e
+      cota não é consertável com o botão "Renovar sessão".
     """
+    kind = normalize_kind(kind) or "unknown"
+    fatal = kind_is_fatal(kind)
+    retry_after = clamp_retry_after(retry_after)
+
     mid = None
-    try:
-        mid = append_chat_message(cid, "system", content=content)
-    except Exception:  # noqa: BLE001 — o estado da sessão importa mais
-        logger.warning("melhorias: falha ao persistir o 401 da conversa %s", cid)
-    conv = set_conversation_status(cid, "AUTH_EXPIRED")
+    if not _throttled(cid, kind):
+        try:
+            mid = append_chat_message(cid, "system", content=content,
+                                      failure_kind=kind)
+        except Exception:  # noqa: BLE001 — o estado da sessão importa mais
+            logger.warning("melhorias: falha ao persistir %s da conversa %s",
+                           kind, cid)
+
+    if not fatal:
+        conv = get_conversation(cid)
+        state = notify_executor_issue(kind, message=content,
+                                      retry_after=retry_after,
+                                      conversation_id=cid)
+        _ws_emit((conv or {}).get("suggestion_id"), cid, "executor_failure",
+                 {"kind": kind, "message": content, "retry_after": retry_after,
+                  "status": (conv or {}).get("status") or "ACTIVE"})
+        return {"id": mid, "conversation": conv, "session": state, "kind": kind,
+                "fatal": False}
+
+    # Guardado: uma falha atrasada não rebaixa conversa já finalizada.
+    conv = set_conversation_status(cid, "AUTH_EXPIRED", only_if="ACTIVE")
     state = mark_session_expired(conversation_id=cid, message=content)
     # O chat aberto reage na hora (sem esperar reabrir o modal).
     _ws_emit((conv or {}).get("suggestion_id"), cid, "auth_expired",
-             {"message": content, "status": "AUTH_EXPIRED"})
+             {"kind": kind, "message": content, "status": "AUTH_EXPIRED"})
     # NÃO paramos o consumidor aqui: este helper roda DENTRO do próprio
     # ``_consume_stream`` no caminho do frame de erro (cancelar seria suicídio).
     # O laço já encerra sozinho na próxima volta — a conversa não está mais ACTIVE.
-    return {"id": mid, "conversation": conv, "session": state}
+    return {"id": mid, "conversation": conv, "session": state, "kind": kind,
+            "fatal": True}
+
+
+def record_auth_failure(cid: str, content: str) -> dict:
+    """Shim do nome antigo. O plugin vive em 4 cópias que derivam entre si — três
+    linhas evitam um chamador fora desta árvore explodir."""
+    return record_executor_failure(cid, content, kind="auth_required")
 
 
 def _last_assistant_content(cid: str) -> str:

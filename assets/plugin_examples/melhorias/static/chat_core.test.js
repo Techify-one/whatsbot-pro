@@ -3,7 +3,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory } from './chat_core.js';
+import { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory,
+         lastFailureFromHistory, footerStateFor } from './chat_core.js';
 
 test('message start/chunk/end monta uma bolha assistant em streaming', () => {
   let s = reduceAiEvent([], { event: 'message_start', data: { messageId: 'm1' } });
@@ -105,4 +106,135 @@ test('authErrorInHistory olha a ÚLTIMA mensagem com conteúdo', () => {
     { id: 2, role: 'assistant', content: 'analisando de novo…' },
   ]), false);
   assert.equal(authErrorInHistory([]), false);
+});
+
+// ── Plano 61 · falhas TIPADAS do executor ────────────────────────────────────
+
+test('lastFailureFromHistory lê o kind GRAVADO, sem adivinhar pelo texto', () => {
+  assert.deepEqual(lastFailureFromHistory([
+    { id: 1, role: 'user', content: 'analisa' },
+    { id: 2, role: 'system', content: 'sua sessão acabou', failure_kind: 'auth_required' },
+  ]), { kind: 'auth_required', message: 'sua sessão acabou' });
+  assert.equal(lastFailureFromHistory([
+    { id: 1, role: 'system', content: 'sem crédito', failure_kind: 'quota_exceeded' },
+  ]).kind, 'quota_exceeded');
+  assert.equal(lastFailureFromHistory([]), null);
+});
+
+test('linha transitória que CITA 401 não é sessão expirada (o falso positivo)', () => {
+  // A regressão que este desenho introduziria se a hidratação seguisse olhando
+  // o texto: o executor manda um limite de uso cujo corpo cita um 401 de
+  // upstream, e o painel oferecia "Renovar sessão" para algo que renovar não
+  // conserta — queimando de quebra o guard `authNotifiedRef` da conversa.
+  const f = lastFailureFromHistory([
+    { id: 1, role: 'user', content: 'analisa' },
+    { id: 2, role: 'system', failure_kind: 'rate_limited',
+      content: 'Rate limit: upstream respondeu 401 authentication_error' },
+  ]);
+  assert.equal(f.kind, 'rate_limited');
+  assert.equal(authErrorInHistory([
+    { id: 2, role: 'system', failure_kind: 'rate_limited',
+      content: 'Rate limit: upstream respondeu 401' },
+  ]), false);
+  assert.equal(footerStateFor({ convStatus: 'ACTIVE', historyFailure: f }).canRenew, false);
+});
+
+test('linha LEGADA (sem failure_kind) cai na heurística de texto', () => {
+  // Linhas gravadas em produção antes do kind tipado existir.
+  assert.equal(lastFailureFromHistory([
+    { id: 1, role: 'system', content: 'API Error: 401 · Please run /login' },
+  ]).kind, 'auth_required');
+  assert.equal(lastFailureFromHistory([
+    { id: 1, role: 'system', content: 'aviso qualquer sem erro' },
+  ]), null);
+});
+
+test('auth seguido de transitório: quem decide é o STATUS da conversa', () => {
+  // O histórico sozinho diz "rate_limited" (é a última linha), mas a conversa
+  // continua AUTH_EXPIRED no banco. Este é o caso que o `convStatus` cobre —
+  // parece redundante com a checagem de histórico e NÃO é.
+  const messages = [
+    { id: 1, role: 'system', content: '401', failure_kind: 'auth_required' },
+    { id: 2, role: 'system', content: 'limite', failure_kind: 'rate_limited' },
+  ];
+  assert.equal(lastFailureFromHistory(messages).kind, 'rate_limited');
+  const f = footerStateFor({ convStatus: 'AUTH_EXPIRED',
+                             historyFailure: lastFailureFromHistory(messages) });
+  assert.equal(f.mode, 'auth_expired');
+  assert.equal(f.canRenew, true);
+});
+
+test('footerStateFor: só auth_required ganha botão de renovar', () => {
+  const live = (kind, extra = {}) => footerStateFor({
+    convStatus: 'ACTIVE', liveFailure: { kind, ...extra } });
+  assert.deepEqual(live('auth_required'),
+    { mode: 'auth_expired', kind: 'auth_required', canRenew: true });
+  assert.deepEqual(live('rate_limited', { retryAfter: 30 }),
+    { mode: 'wait', kind: 'rate_limited', canRenew: false, retryAfter: 30 });
+  assert.equal(live('overloaded').mode, 'wait');
+  assert.equal(live('quota_exceeded').mode, 'quota');
+  assert.equal(live('quota_exceeded').canRenew, false);
+  assert.equal(live('unknown').mode, 'generic');
+  assert.equal(live('coisa_nova_do_executor').mode, 'generic');  // kind novo degrada
+  // Sem falha nenhuma: conversa viva × encerrada.
+  assert.equal(footerStateFor({ convStatus: 'ACTIVE' }).mode, 'live');
+  assert.equal(footerStateFor({ convStatus: 'COMPLETED' }).mode, 'ended');
+});
+
+test('só falha DURÁVEL sobrevive ao F5; transitória some', () => {
+  const after = (kind) => footerStateFor({ convStatus: 'ACTIVE',
+                                           historyFailure: { kind } }).mode;
+  assert.equal(after('quota_exceeded'), 'quota');   // sem crédito não passa sozinho
+  assert.equal(after('auth_required'), 'auth_expired');
+  assert.equal(after('rate_limited'), 'live');      // 429 já passou — não mentir
+  assert.equal(after('overloaded'), 'live');
+});
+
+test('executor_failure vira UM cartão e tira o chat de "streaming"', () => {
+  // Sem sair de `streaming`, o spinner "IA pensando…" giraria para sempre: o
+  // fallback de quiescência do chat.js só arma com uma resposta assentada.
+  const s = reduceAiEvent([], { event: 'executor_failure',
+    data: { kind: 'rate_limited', message: 'limite', retry_after: 30 } }, 'streaming');
+  assert.equal(s.items.length, 1);
+  assert.equal(s.items[0].kind, 'error');
+  assert.equal(s.items[0].failureKind, 'rate_limited');
+  assert.equal(s.items[0].retryAfter, 30);
+  assert.equal(s.status, 'idle');
+  // Sessão expirada é a exceção: o chat de fato parou.
+  assert.equal(reduceAiEvent([], { event: 'executor_failure',
+    data: { kind: 'auth_required' } }, 'streaming').status, 'error');
+});
+
+test('evento desconhecido é inerte (painel antigo em cache não quebra)', () => {
+  const before = [{ kind: 'text', id: 'm1', role: 'assistant', content: 'oi' }];
+  const s = reduceAiEvent(before, { event: 'evento_do_futuro', data: {} }, 'idle');
+  assert.deepEqual(s.items, before);
+  assert.equal(s.status, 'idle');
+});
+
+test('persistedToItems carrega o failure_kind no cartão de erro', () => {
+  const items = persistedToItems([
+    { id: 7, role: 'system', content: 'sem crédito', failure_kind: 'quota_exceeded' },
+    { id: 8, role: 'system', content: '401 legado' },
+  ], []);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].failureKind, 'quota_exceeded');
+  assert.equal(items[1].failureKind, null);
+});
+
+test('análise da IA que MENCIONA 401 não é falha (o bug do /ajuda)', () => {
+  // O texto do `/ajuda` do executor falso lista `/limite401`, e uma análise real
+  // pode citar um erro de API. Nenhum dos dois pode abrir o modal de relogin.
+  assert.equal(lastFailureFromHistory([
+    { id: 1, role: 'user', content: 'analisa' },
+    { id: 2, role: 'assistant', content: 'O endpoint devolveu 401 — oriente o agente.' },
+  ]), null);
+  assert.equal(authErrorInHistory([
+    { id: 1, role: 'assistant', content: 'erro 401 authentication_error no fornecedor' },
+  ]), false);
+  // Mas a linha SYSTEM legada (que existe porque o gateway classificou uma
+  // falha) continua valendo pela heurística.
+  assert.equal(lastFailureFromHistory([
+    { id: 1, role: 'system', content: 'API Error: 401 · Please run /login' },
+  ]).kind, 'auth_required');
 });
