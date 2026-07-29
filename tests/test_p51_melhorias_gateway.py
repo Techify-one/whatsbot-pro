@@ -9,6 +9,7 @@ fluxo external (approve → em_chat com executor stubbado), write-through
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import time
@@ -474,6 +475,39 @@ def test_resume_and_relogin_clear_the_session_state(plugin_app):
                               json={"sessionId": "s1", "code": "abc"})
     assert r.status_code == 200, r.text
     assert chat_logic.session_expired() is False
+
+
+def test_resume_restarts_the_sse_consumer(plugin_app):
+    """Retomar RECRIA o runner no executor — o stream ainda aberto aponta para o
+    runner antigo e não entrega mais nada. Como ``ensure_consumer`` é idempotente
+    (no-op com uma task viva), sem derrubar o consumidor o painel ficaria em
+    "IA pensando…" para sempre enquanto o write-through persiste a resposta."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    sid, cid = _open_conversation(built, chat_logic, "5511960100065")
+
+    async def fake_stream(cid_, suggestion_id, user_id=None):
+        await asyncio.sleep(3600)          # segura a task viva, como o stream real
+
+    async def fake_resume(cid_, **kwargs):
+        return {}
+
+    with patch.object(ai_client, "resume", side_effect=fake_resume), \
+         patch.object(chat_logic, "_consume_stream", side_effect=fake_stream):
+        r = built.client.post(f"/api/plugins/melhorias/conversations/{cid}/resume")
+        assert r.status_code == 200, r.text
+        first = chat_logic._consumers.get(cid)
+        assert first is not None and not first.done()
+
+        # 2º resume com o consumidor AINDA vivo: tem de trocar a task.
+        r = built.client.post(f"/api/plugins/melhorias/conversations/{cid}/resume")
+        assert r.status_code == 200, r.text
+        second = chat_logic._consumers.get(cid)
+
+    assert second is not None
+    assert second is not first, "resume reaproveitou o stream morto"
+    assert first.done(), "o consumidor antigo continuou pendurado no stream morto"
+    chat_logic.stop_consumer(cid)
 
 
 def test_is_auth_error_mirrors_the_frontend(plugin_app):

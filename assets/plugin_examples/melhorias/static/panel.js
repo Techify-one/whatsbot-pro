@@ -106,10 +106,20 @@ function buildCols() {
       render: (r) => html`<span class="line-clamp-2 max-w-[240px] inline-block align-top">${(r.feedback || '').trim() || '—'}</span>` },
     { key: 'conversation', label: 'Conversa', filter: null,
       get: () => '',
-      render: (r) => (r.conversation_url
-        ? html`<a href=${r.conversation_url} onClick=${(e) => navConversation(e, r)}
-            class="text-wa-teal hover:underline whitespace-nowrap">Abrir conversa ↗</a>`
-        : html`<span class="text-wa-secondary">—</span>`) },
+      // O atendimento marcado pode ter sido APAGADO depois do pedido (o histórico
+      // do plugin sobrevive à limpeza do core). Nesse caso o backend devolve o
+      // link do CONTATO — que o core abre no atendimento atual dele — e o rótulo
+      // diz isso, em vez de um "Abrir conversa" que caía na tela principal vazia.
+      render: (r) => {
+        if (!r.conversation_url) {
+          return html`<span class="text-wa-secondary whitespace-nowrap" title="O atendimento marcado foi excluído.">conversa excluída</span>`;
+        }
+        const fallback = r.conversation_link_kind === 'contact';
+        return html`<a href=${r.conversation_url} onClick=${(e) => navConversation(e, r)}
+          title=${fallback ? 'O atendimento marcado foi excluído — abre o atendimento atual deste contato.' : ''}
+          class="text-wa-teal hover:underline whitespace-nowrap">
+          ${fallback ? 'Abrir contato ↗' : 'Abrir conversa ↗'}</a>`;
+      } },
     { key: 'requested_at', label: 'Solicitado em', filter: 'date', nowrap: true,
       get: (r) => r.requested_at || 0, render: (r) => fmtTs(r.requested_at) },
     { key: 'approved_at', label: 'Aprovado em', filter: 'date', nowrap: true,
@@ -639,8 +649,17 @@ function DetailModal({ detail, canApprove, backend = 'external', apiBase = '/api
             <${Field} label="Aprovador" value=${d.status === 'aprovada' ? (d.approver_name || '—') : '—'} />
             ${d.conversation_url ? html`<div class="mt-2">
               <a href=${d.conversation_url} onClick=${(e) => navConversation(e, d)}
-                class="text-wa-teal hover:underline text-[13px]">Abrir conversa nesta mensagem ↗</a>
-            </div>` : ''}
+                class="text-wa-teal hover:underline text-[13px]">
+                ${d.conversation_link_kind === 'contact'
+                  ? 'Abrir atendimento atual deste contato ↗'
+                  : 'Abrir conversa nesta mensagem ↗'}</a>
+              ${d.conversation_link_kind === 'contact' ? html`
+                <div class="text-[11px] text-wa-secondary mt-1">
+                  O atendimento marcado foi excluído — este link leva ao atendimento atual do contato.
+                </div>` : ''}
+            </div>` : html`<div class="mt-2 text-[13px] text-wa-secondary">
+              Conversa excluída — não há mais para onde navegar.
+            </div>`}
             ${canApprove && d.status === 'pendente' ? html`<div class="flex justify-end gap-2 mt-5">
               <button onClick=${() => onDecide('reject')}
                 class="px-4 py-2 rounded-full border border-red-400 text-red-500 text-[13px] hover:bg-red-500/10">Recusar</button>
