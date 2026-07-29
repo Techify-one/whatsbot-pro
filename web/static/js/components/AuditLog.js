@@ -9,6 +9,7 @@ import { h, Fragment } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { listAudit, getAuditActions, downloadAuditExport, getConfig, saveConfig } from '../services/api.js';
+import { auditDiffView } from '../services/auditDiff.js';
 import { SearchableSelect } from './SearchableSelect.js';
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, str, int } from '../services/urlState.js';
@@ -52,17 +53,6 @@ function formatTime(ts) {
   });
 }
 
-// Defensive JSON parse + pretty-print. The stored value may be null, an empty
-// string, or already-invalid — never throw, just fall back to the raw string.
-function prettyJson(raw) {
-  if (raw == null || raw === '') return null;
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch (_) {
-    return String(raw);
-  }
-}
-
 // Convert a `<input type="date">` value (YYYY-MM-DD) to epoch seconds.
 // `edge='start'` → 00:00:00 local; `edge='end'` → 23:59:59 local.
 function dateToEpoch(value, edge) {
@@ -90,14 +80,55 @@ function ActorBadge({ type }) {
   return html`<span class="px-2 py-0.5 rounded-full text-[11px] ${b.bg} ${b.text}">${b.label}</span>`;
 }
 
-function DiffBlock({ title, raw }) {
-  const json = prettyJson(raw);
+function DiffBlock({ title, json }) {
   if (json == null) return null;
   return html`
     <div class="flex-1 min-w-0">
       <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-1">${title}</div>
       <pre class="text-xs bg-wa-panel border border-wa-border rounded p-2 overflow-x-auto text-wa-text whitespace-pre-wrap break-words">${json}</pre>
     </div>
+  `;
+}
+
+// Bloco expandido: por padrão mostra SÓ os campos alterados (o snapshot inteiro
+// costuma ter dezenas de chaves idênticas dos dois lados). O registro completo
+// continua a um clique — a trilha guarda o snapshot inteiro, nada se perde.
+function DiffPanel({ row }) {
+  const [showFull, setShowFull] = useState(false);
+  const view = auditDiffView(row.before_json, row.after_json);
+  const full = view.mode === 'full' || showFull;
+  const before = full ? view.beforeFull : view.before;
+  const after = full ? view.afterFull : view.after;
+  const n = view.paths.length;
+  // Uma edição pode mexer em dezenas de campos — a linha de resumo é um rótulo,
+  // não a lista completa (o diff logo abaixo mostra todos).
+  const shown = view.paths.slice(0, 6).join(', ') + (n > 6 ? `, +${n - 6}` : '');
+
+  return html`
+    <${Fragment}>
+      ${view.mode !== 'full' ? html`
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+          <span class="text-[11px] text-wa-secondary">
+            ${view.mode === 'empty'
+              ? 'Nenhum campo foi alterado.'
+              : `${n} ${n === 1 ? 'campo alterado' : 'campos alterados'}: ${shown}`}
+          </span>
+          <button
+            type="button"
+            onClick=${(e) => { e.stopPropagation(); setShowFull((v) => !v); }}
+            class="text-[11px] text-wa-teal hover:underline"
+          >${showFull ? 'Ver só as alterações' : 'Ver JSON completo'}</button>
+        </div>
+      ` : null}
+      ${(before == null && after == null) ? html`
+        <div class="text-xs text-wa-secondary italic">Sem campos alterados para exibir.</div>
+      ` : html`
+        <div class="flex flex-col md:flex-row gap-3">
+          <${DiffBlock} title="Antes" json=${before} />
+          <${DiffBlock} title="Depois" json=${after} />
+        </div>
+      `}
+    <//>
   `;
 }
 
@@ -133,10 +164,7 @@ function Row({ row, expanded, onToggle, linkPath }) {
         <tr class="border-t border-wa-border bg-wa-panel/40">
           <td colspan="6" class="px-3 py-3">
             ${hasDiff ? html`
-              <div class="flex flex-col md:flex-row gap-3">
-                <${DiffBlock} title="Antes" raw=${row.before_json} />
-                <${DiffBlock} title="Depois" raw=${row.after_json} />
-              </div>
+              <${DiffPanel} row=${row} />
             ` : html`
               <div class="text-xs text-wa-secondary italic">Sem dados de alteração.</div>
             `}
