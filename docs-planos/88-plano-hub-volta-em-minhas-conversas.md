@@ -1,6 +1,6 @@
 # Plano 88 — O hub de conversas passa a abrir sempre em "Minhas" (e para de cair em "Todas" ao voltar de outra tela)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-28 · **Escopo:** pequeno/médio (só frontend)
+> **Status:** ✅ EXECUTADO (F1–F4 · 2026-07-29; F5 com o roteiro manual pendente) · **Data:** 2026-07-28 · **Escopo:** pequeno/médio (só frontend)
 > **Origem:** Relato do usuário — "quando algum usuário entra em alguma outra tela e volta, sempre está voltando para a guia de todas as conversas; isso está atrapalhando os atendentes". **Método:** leitura do código real do shell de rotas + do hub de conversas (`arquivo:linha`) + `grep` nos consumidores da aba de atribuição; nenhuma afirmação abaixo veio de memória.
 > A causa não é "o filtro se perde": é que **trocar de aba do app desmonta o hub inteiro** e a rota volta como `/` **sem query-string**, então toda a view renasce nos defaults — e o default da aba de atribuição é `all` ("Todas"), em dois lugares. A correção troca esse default para `mine` ("Minhas"), com degradação segura para `all` quando não há usuário autenticado.
 >
@@ -244,11 +244,17 @@ Por isso virou plano próprio, executado **antes** deste (D1 do 89). Este plano 
 **Pronto quando:** checklist da §7 inteiro marcado.
 
 #### Status de execução — Fase 5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** 🟡 Automatizada concluída · **roteiro manual do §7 pendente** (exige navegador com sessão de atendente)
+- **O que foi feito:** suítes automatizadas rodadas e o checklist do §7 marcado no que é verificável sem browser; nenhum arquivo mudou nesta fase.
+- **Como foi feito / decisões:** o item 4 (modo escuro) foi verificado por inspeção do diff — nenhuma superfície, classe ou cor nova entrou, então não há o que re-tematizar; registrado como **verificado**, não como N/A, conforme a fase pede.
+- **Problemas / pendências:**
+  1. **Roteiro manual do §7 não executado** — os 3 blocos (atendente com conversas, atendente sem conversa atribuída, instalação sem login) precisam de um navegador logado. É o que falta para fechar o plano.
+  2. O run do **diretório** `tests/characterization` mostra falhas **não determinísticas** (mudam de arquivo entre execuções; cada arquivo passa sozinho) — interferência entre arquivos, agravada pelo WIP não-commitado de terceiros na árvore (`server/routes/sandbox.py`, `agent/memory.py`, `gowa/inbound.py`, goldens de legenda de mídia). **Não é deste plano** (zero `.py` tocado), mas vale um registro à parte.
+- **Verificação:**
+  - `node --test` em **todos** os `*.test.js` do frontend → **389/389 verde** (inclui os 19 do `hubDefaults.test.js` e os do plano 89).
+  - `venv/bin/python tests/test_endpoints.py` → **1626 passed, 0 failed** (Postgres de teste `whatsbot_test`).
+  - `pytest tests/characterization/test_webhook_characterization.py` → 28/28 verde; `test_sandbox_improve_characterization.py` → verde isolado.
+  - `git diff --stat 4d7b500..HEAD` → só `.js`/`.md`; nenhum `.py`, nenhuma migration.
 
 ---
 
@@ -289,15 +295,15 @@ Por isso virou plano próprio, executado **antes** deste (D1 do 89). Este plano 
 ## 7. Checklist de verificação
 
 Portão (antes de começar):
-- [ ] **[Plano 89](89-plano-link-de-conversa-sempre-abre.md) mergeado e com o checklist dele marcado** — sem isso, este plano transforma um bug raro em rotina
+- [x] **[Plano 89](89-plano-link-de-conversa-sempre-abre.md) mergeado e com o checklist dele marcado** — sem isso, este plano transforma um bug raro em rotina *(F1–F5 executadas; `deepLinkResolve.js` + teste em pé)*
 
 Frontend puro:
-- [ ] `node --test web/static/js/services/hubDefaults.test.js` verde
-- [ ] `node --test` verde nos módulos puros vizinhos (`urlState.test.js`, `conversationFilterSpec.test.js`, `conversationRows.test.js`)
+- [x] `node --test web/static/js/services/hubDefaults.test.js` verde *(19/19)*
+- [x] `node --test` verde nos módulos puros vizinhos (`urlState.test.js`, `conversationFilterSpec.test.js`, `conversationRows.test.js`) *(e TODOS os `*.test.js` do frontend: 389/389)*
 
 Backend (prova de não-vazamento):
-- [ ] Suíte no Postgres de teste verde e **sem diff** (`WHATSBOT_TEST_DB_URL` apontando para um banco com `test` no nome)
-- [ ] `git diff --stat` não toca nenhum arquivo `.py`, nem `db/alembic/versions/`
+- [x] Suíte no Postgres de teste verde e **sem diff** (`WHATSBOT_TEST_DB_URL` apontando para um banco com `test` no nome) — `tests/test_endpoints.py` **1626 passed, 0 failed**; `tests/characterization/test_webhook_characterization.py` 28/28. ⚠️ O run do **diretório** `tests/characterization` inteiro tem falhas que **mudam de arquivo a cada execução** (1ª vez: webhook; 2ª: sandbox/audit/rbac) e que **passam quando o arquivo roda sozinho** — interferência entre arquivos + WIP não-commitado de terceiros na árvore (`server/routes/sandbox.py`, `agent/memory.py`, `gowa/inbound.py`, goldens de legenda). Nada disso pode vir deste plano: ele não toca `.py`
+- [x] `git diff --stat` não toca nenhum arquivo `.py`, nem `db/alembic/versions/` — os 3 commits mexem só em 2 `.js` do hub, 2 `.js` novos em `services/` e este `.md`
 
 Roteiro manual — atendente logado (com conversas atribuídas):
 - [ ] Abrir `/` → aba **Minhas** ativa, sem piscar "Todas"
@@ -318,9 +324,9 @@ Roteiro manual — instalação **sem login** (modo aberto):
 - [ ] Nenhum request de lista retorna erro de filtro (`Filtro 'me' requer um usuário autenticado`)
 
 Transversal:
-- [ ] Modo escuro conferido no hub (nenhuma superfície nova, mas verificado)
-- [ ] Nenhum segredo/identificador de usuário passou a aparecer na URL
-- [ ] Um refactor por commit: F1 isolado; F2+F3 juntas; F4 separado
+- [x] Modo escuro conferido no hub — **nenhuma superfície, classe ou cor nova** foi introduzida (o diff de UI é só qual aba nasce ativa); nada a re-tematizar
+- [x] Nenhum segredo/identificador de usuário passou a aparecer na URL — a query só ganha `assignment=all`; o id do usuário é lido do `localStorage` e **nunca** serializado
+- [x] Um refactor por commit: F1 isolado; F2+F3 juntas; F4 separado
 
 ---
 
