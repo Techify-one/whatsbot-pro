@@ -58,6 +58,66 @@ def test_create_lists_pendente_and_posts_notice(plugin_app):
     assert f"/melhorias?detail={data['id']}]]" in content
 
 
+def test_conversation_link_degrades_when_the_conversation_is_deleted(plugin_app):
+    """O histórico do plugin sobrevive à limpeza do core (sem FK cross-table).
+    Com o atendimento marcado APAGADO, "Abrir conversa" apontava para
+    ``/conversations/<id-morto>`` e o hub largava o operador na tela principal
+    sem nada selecionado. Agora cai no CONTATO (que o core abre no atendimento
+    atual dele) e, sem contato, não oferece link nenhum."""
+    built = plugin_app("melhorias", settings_overrides=_STUB)
+    handler = built.agent_handler
+    phone = "5511960000009"
+    contact, saved = _seed_ai_reply(handler, phone)
+
+    r = built.client.post("/api/plugins/melhorias/suggestions", json={
+        "phone": phone,
+        "message": {"content": "resposta marcada", "ts": saved["ts"], "_id": saved["id"]},
+        "feedback": "saiu errado",
+        "conversation_id": saved["conversation_id"],
+    })
+    sid = r.json()["data"]["id"]
+
+    # Conversa viva: link para o atendimento marcado, ancorado na mensagem.
+    data = built.client.get(f"/api/plugins/melhorias/suggestions/{sid}").json()["data"]
+    assert data["conversation_link_kind"] == "conversation"
+    assert f"/conversations/{saved['conversation_id']}" in data["conversation_url"]
+    assert f"message={saved['id']}" in data["conversation_url"]
+
+    logic = importlib.import_module("whatsbot_plugins.melhorias.logic")
+
+    # Atendimento apagado, contato vivo ⇒ cai no contato, SEM a âncora (a
+    # mensagem morreu junto).
+    with patch.object(logic.conversation_repo, "get", return_value=None):
+        data = built.client.get(f"/api/plugins/melhorias/suggestions/{sid}").json()["data"]
+    assert data["conversation_link_kind"] == "contact"
+    assert data["conversation_url"].endswith(f"/contacts/{contact.id}")
+    assert "message=" not in data["conversation_url"]
+
+    # Nem atendimento nem contato ⇒ nenhum link (o painel diz "conversa excluída").
+    with patch.object(logic.conversation_repo, "get", return_value=None), \
+         patch.object(logic.contact_repo, "get", return_value=None):
+        data = built.client.get(f"/api/plugins/melhorias/suggestions/{sid}").json()["data"]
+        listed = built.client.get("/api/plugins/melhorias/suggestions").json()["data"]
+    assert data["conversation_url"] is None
+    assert data["conversation_link_kind"] is None
+    assert all(row["conversation_url"] is None for row in listed if row["id"] == sid)
+
+
+def test_conversation_link_cache_does_not_confuse_ids(plugin_app):
+    """O cache da listagem é compartilhado entre atendimentos e contatos — as
+    chaves precisam levar o tipo junto, senão um contato de id 30 'prova' a
+    existência do atendimento 30."""
+    built = plugin_app("melhorias", settings_overrides=_STUB)  # noqa: F841
+    logic = importlib.import_module("whatsbot_plugins.melhorias.logic")
+    cache: dict = {}
+    with patch.object(logic.conversation_repo, "get", return_value=None), \
+         patch.object(logic.contact_repo, "get", return_value={"id": 30}):
+        url, kind = logic._conversation_deep_link(30, 7, contact_id=30, cache=cache)
+    assert kind == "contact", "id de contato vazou como se fosse atendimento"
+    assert url.endswith("/contacts/30")
+    assert cache == {("conv", 30): False, ("contact", 30): True}
+
+
 def test_list_filters(plugin_app):
     """GET /suggestions filtra por status / q."""
     built = plugin_app("melhorias", settings_overrides=_STUB)

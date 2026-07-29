@@ -380,6 +380,12 @@ async def resume_conversation(cid: str, *, user_id=None) -> tuple[dict | None, s
                                history=history, model=conv.get("model") or "")
     except Exception as e:  # noqa: BLE001
         return None, f"Falha ao retomar a conversa no executor: {e}"
+    # O executor RECRIOU o runner ⇒ o stream que ainda estava aberto aponta para
+    # o runner ANTIGO e nunca mais entrega nada. ``ensure_consumer`` é idempotente
+    # (não faz nada com uma task viva), então sem este ``stop`` o consumidor
+    # ficaria pendurado no stream morto: a IA responde, o write-through persiste,
+    # e o painel fica em "IA pensando…" para sempre. Retomar SEMPRE reabre o stream.
+    stop_consumer(cid)
     conv = await asyncio.to_thread(set_conversation_status, cid, "ACTIVE")
     # O executor aceitou a retomada ⇒ a credencial nova está valendo (plano 60 · 2.5).
     await asyncio.to_thread(clear_session_state)
