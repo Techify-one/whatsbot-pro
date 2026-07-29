@@ -12,12 +12,19 @@ import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { subscribe as subscribeWs } from '/static/js/services/wsBus.js';
-import { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory } from './chat_core.js';
+import { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory,
+         lastFailureFromHistory, footerStateFor, failureAction } from './chat_core.js';
 import { renderMarkdown } from './markdown.js';
 
 const html = htm.bind(h);
 
-export { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory };
+export { reduceAiEvent, isAuthError, persistedToItems, authErrorInHistory,
+         lastFailureFromHistory, footerStateFor };
+
+const WAIT_LABELS = {
+  rate_limited: 'Limite de uso atingido',
+  overloaded: 'Executor sobrecarregado',
+};
 
 // ── Hook: eventos da conversa via /ws ────────────────────────────────────────
 
@@ -141,6 +148,12 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
   // status virou ERRORED no banco) — a hidratação corrige, e o rodapé decide
   // entre input e "Continuar conversa" por AQUI.
   const [conv, setConv] = useState(conversation || null);
+  // Última falha TIPADA vista no histórico (durável: sessão expirada, cota) e a
+  // que chegou ao vivo pelo /ws (efêmera: limite, sobrecarga). Separadas porque
+  // têm tempos de vida diferentes — a segunda vence sozinha.
+  const [historyFailure, setHistoryFailure] = useState(null);
+  const [liveFailure, setLiveFailure] = useState(null); // {kind, message, until}
+  const [, forceTick] = useState(0);
   const scrollRef = useRef(null);
   // Oferta de renovar disparada pela HIDRATAÇÃO: uma vez por conversa. Sem isto,
   // re-hidratar depois de retomar reabriria o modal em loop — o 401 continua
@@ -148,7 +161,19 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
   // pelo evento `auth_expired` ao vivo, que não passa por aqui.
   const authNotifiedRef = useRef('');
 
-  useEffect(() => { setConv(conversation || null); }, [cid]);
+  useEffect(() => {
+    setConv(conversation || null);
+    setHistoryFailure(null);
+    setLiveFailure(null);
+  }, [cid]);
+
+  // Contagem regressiva do aviso transitório: só força o re-render: o tempo que
+  // falta é DERIVADO de `until`, então não há estado para dessincronizar.
+  useEffect(() => {
+    if (!liveFailure || !liveFailure.until) return undefined;
+    const t = setInterval(() => forceTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [liveFailure]);
 
   // Hidrata do DB ao abrir — e a cada `reloadKey` (plano 60 · 1.2): sem um
   // gatilho próprio, nenhuma recuperação (renovar sessão → retomar) seria
@@ -164,9 +189,15 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
           const fresh = r.body.data.conversation;
           if (fresh) setConv(fresh);
           // Detecta na HIDRATAÇÃO, não só ao vivo: quem abre a conversa depois
-          // do 401 também recebe a oferta de renovar (plano 60 · 1.3).
+          // da falha também recebe a oferta de renovar (plano 60 · 1.3).
+          const failure = lastFailureFromHistory(messages);
+          setHistoryFailure(failure);
+          // Só SESSÃO EXPIRADA abre o modal — e só ela queima o guard. Um limite
+          // de uso que por acaso cite um 401 abriria o relogin à toa E gastaria
+          // o guard desta conversa para sempre, deixando uma expiração real
+          // futura sem aviso nenhum (o guard não é reposto).
           const dead = (fresh && fresh.status === 'AUTH_EXPIRED')
-            || authErrorInHistory(messages);
+            || (failure && failure.kind === 'auth_required');
           if (dead && onAuthError && authNotifiedRef.current !== cid) {
             authNotifiedRef.current = cid;
             onAuthError();
@@ -178,23 +209,47 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
 
   // Eventos ao vivo via /ws.
   useAiChatEvents(cid, (ev) => {
-    // O gateway classificou um 401 (write-through ou frame de erro) — a conversa
-    // já está AUTH_EXPIRED no banco; o chat reflete na hora (plano 60 · 2.3).
+    // O gateway classificou uma sessão expirada (write-through ou frame de erro)
+    // — a conversa já está AUTH_EXPIRED no banco; o chat reflete na hora.
     if (ev.event === 'auth_expired') {
       setConv((c) => ({ ...(c || {}), status: 'AUTH_EXPIRED' }));
       setStatus('error');
+      setHistoryFailure({ kind: 'auth_required', message: (ev.data || {}).message || '' });
       if (onAuthError) onAuthError();
       return;
+    }
+    // Falha TIPADA não-fatal (plano 61): a conversa segue viva e o compositor
+    // liberado — só entra um aviso, com contagem quando o executor mandou uma.
+    if (ev.event === 'executor_failure') {
+      const d = ev.data || {};
+      const kind = d.kind || 'unknown';
+      const secs = Number(d.retry_after);
+      setLiveFailure({ kind, message: d.message || '',
+                       until: Number.isFinite(secs) && secs > 0 ? Date.now() + secs * 1000 : null });
+      if (failureAction(kind) === 'billing') {
+        setHistoryFailure({ kind, message: d.message || '' });  // cota não passa sozinha
+      }
     }
     setItems((prev) => {
       const out = reduceAiEvent(prev, ev, status);
       setStatus(out.status);
-      // Auth-error pode vir como texto de message_end OU como evento error.
-      if (ev.event === 'message_end') {
-        const msg = out.items.find((c) => c.kind === 'text' && c.id === ev.data.messageId);
-        if (msg && isAuthError(msg.content) && onAuthError) onAuthError();
-      }
-      if (ev.event === 'error' && isAuthError(ev.data && ev.data.message) && onAuthError) onAuthError();
+      // A IA voltou a falar ⇒ o aviso transitório cumpriu seu papel.
+      if (ev.event === 'message_start') setLiveFailure(null);
+      // NENHUM palpite por texto no caminho ao vivo (plano 61). Havia dois, e os
+      // dois eram dispensáveis:
+      //
+      // - `message_end`: era REDUNDANTE. Um 401 entregue como resposta da IA
+      //   (executor antigo) é classificado no SERVIDOR pelo write-through, que
+      //   emite `auth_expired` — o modal abre pelo canal certo. Enquanto isso o
+      //   palpite abria o relogin para QUALQUER mensagem que citasse "401":
+      //   bastava a IA analisar um erro de API, ou o `/ajuda` do executor falso
+      //   listar o comando `/limite401`.
+      // - `error` cru: era CÓDIGO MORTO. O `error` só chega aqui quando o
+      //   `derive_kind` do gateway devolveu `None`, o que por definição
+      //   significa que a heurística de auth deu falso.
+      //
+      // O texto ainda decide em UM lugar só: `lastFailureFromHistory`, para
+      // linhas LEGADAS do banco (gravadas antes do kind existir).
       if (ev.event === 'done' && onConversationEnd) onConversationEnd();
       return out.items;
     });
@@ -251,6 +306,8 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
           role: 'user', content: text, streaming: false,
           image: pendingImage ? pendingImage.dataUrl : null }]);
         setInput(''); setPendingImage(null); setStatus('streaming');
+        // O operador decidiu tentar de novo: o aviso de espera sai da frente.
+        setLiveFailure(null);
         // "Sessão renovada — pode reenviar sua mensagem" cumpriu seu papel.
         if (onNoticeClear) onNoticeClear();
       } else {
@@ -302,6 +359,13 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
   }
 
   const convStatus = (conv || {}).status || 'ACTIVE';
+  // Quanto falta da espera — DERIVADO de `until`, nunca de um contador paralelo.
+  const waitLeft = liveFailure && liveFailure.until
+    ? Math.max(0, Math.ceil((liveFailure.until - Date.now()) / 1000)) : null;
+  // Espera vencida ⇒ o aviso some sozinho, sem effect nem race.
+  const activeFailure = (waitLeft !== null && waitLeft <= 0) ? null : liveFailure;
+  const footer = footerStateFor({ convStatus, historyFailure,
+                                  liveFailure: activeFailure });
 
   return html`
     <div class="flex flex-col border border-wa-border rounded-lg overflow-hidden flex-1 min-h-[360px]">
@@ -333,7 +397,20 @@ export function AgenticChat({ apiJson, apiBase, suggestion, conversation,
       </div>
       ${error ? html`<div class="text-[12px] text-red-500 px-3 py-1 bg-wa-panel border-t border-wa-border">${error}</div>` : ''}
       ${notice ? html`<div class="text-[12px] text-wa-teal px-3 py-1 bg-wa-panel border-t border-wa-border">${notice}</div>` : ''}
-      ${convStatus === 'AUTH_EXPIRED' ? html`
+      ${footer.mode === 'wait' ? html`
+        <div class="text-[12px] text-amber-700 px-3 py-1 bg-amber-50 border-t border-amber-400">
+          ${`${WAIT_LABELS[footer.kind] || 'Executor indisponível'} — ${
+            waitLeft ? `tentando de novo em ${waitLeft}s…` : 'tentando de novo…'}`}
+        </div>` : ''}
+      ${footer.mode === 'quota' ? html`
+        <div class="text-[12px] text-amber-700 px-3 py-1 bg-amber-50 border-t border-amber-400">
+          Sem crédito no executor — a IA não vai responder até recarregar. Avise o responsável.
+        </div>` : ''}
+      ${footer.mode === 'generic' ? html`
+        <div class="text-[12px] text-wa-secondary px-3 py-1 bg-wa-panel border-t border-wa-border">
+          ${footer.message || 'Falha no executor.'}
+        </div>` : ''}
+      ${footer.mode === 'auth_expired' ? html`
         <div class="bg-wa-panel border-t border-wa-border p-2 flex items-center justify-between gap-2">
           <span class="text-[12px] text-wa-secondary">
             Sessão do Claude expirada — a resposta acima é o erro do executor, não uma análise.

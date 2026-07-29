@@ -11,14 +11,20 @@ stdlib — nenhuma dependência, roda com o python do sistema ou o do venv.
 O que dá para exercitar (comandos digitados no chat do painel):
 
     /ajuda        lista os comandos
-    /auth         responde com o erro 401 do Claude (reproduz a sessão expirada)
+    /auth         frame `auth_required` (reproduz a sessão expirada)
     /morrer       daqui em diante TODO turno responde 401 (até o relogin)
     /viver        volta ao normal sem relogin
+    /limite N     frame `rate_limited` com retry_after=N (default 30s)
+    /cota         frame `quota_exceeded` (sem crédito — relogin não resolve)
+    /sobrecarga   frame `overloaded`
+    /limite401    `rate_limited` cujo TEXTO cita um 401 — o falso positivo que a
+                  heurística antiga tratava como sessão expirada
+    /legado       401 como resposta da IA, sem kind (executor antigo)
     /tool         cartão de ferramenta (running → done)
     /aprovacao    registra uma aprovação ✓/✕ e espera a decisão
     /mutacao      lê os agentes pelo bridge _internal e propõe mudar um prompt
                   (só grava de verdade com --allow-mutations)
-    /erro         evento `error` não-relacionado a auth
+    /erro         evento `error` sem kind (cai na heurística, como antes)
     /lento N      demora N segundos antes de responder ("IA pensando…")
     /fim          fecha a conversa (conversation-status COMPLETED)
 
@@ -66,10 +72,15 @@ HELP = """**Executor falso** — comandos disponíveis:
 
 - `/auth` — responde com o erro 401 do Claude (uma vez)
 - `/morrer` / `/viver` — liga/desliga a sessão expirada para TODOS os turnos
+- `/limite 30` — frame `rate_limited` com `retry_after` (default 30s)
+- `/cota` — frame `quota_exceeded` (sem crédito)
+- `/sobrecarga` — frame `overloaded`
+- `/limite401` — `rate_limited` cujo TEXTO cita um 401 (teste do falso positivo)
+- `/legado` — 401 como resposta da IA, sem `kind` (executor antigo)
 - `/tool` — cartão de ferramenta
 - `/aprovacao` — cartão de aprovação ✓/✕
 - `/mutacao` — lê os agentes pelo bridge e propõe mudar um prompt
-- `/erro` — evento de erro genérico
+- `/erro` — evento de erro sem `kind` (executor antigo — cai na heurística)
 - `/lento 8` — demora 8s para responder
 - `/fim` — encerra a conversa (COMPLETED)
 
@@ -109,15 +120,27 @@ class Conversation:
         self.auth_error_idx = 0
 
 
+# TTL fictício do token OAuth. O executor real não renova sozinho (decisão do
+# operador), então a expiração é evento RECORRENTE — é o que o monitor
+# preventivo (fase 2) sonda pelo /health.
+TOKEN_TTL_SEC = 8 * 3600
+
+
 class State:
     def __init__(self):
         self.lock = threading.RLock()
         self.convs: dict[str, Conversation] = {}
         self.authenticated = True
+        self.expires_at = time.time() + TOKEN_TTL_SEC
         self.relogins: dict[str, float] = {}
         self.secret = ""
         self.allow_mutations = False
         self.verify = True
+
+    def renew(self) -> None:
+        """Sessão viva de novo: o relógio do TTL recomeça."""
+        self.authenticated = True
+        self.expires_at = time.time() + TOKEN_TTL_SEC
 
     def get(self, cid: str) -> Conversation | None:
         with self.lock:
@@ -208,6 +231,17 @@ def auth_error_text(conv: Conversation) -> str:
     return text
 
 
+def fail(conv: Conversation, kind: str, message: str, retry_after=None) -> None:
+    """Frame de erro TIPADO — o caminho novo do executor real (plano 61).
+
+    O `kind` é derivado de `SDKAssistantMessage.error`, NÃO do `subtype`: um 401
+    chega do SDK como `subtype: "success"` com `is_error: true`, então `subtype`
+    diria "success" para uma falha. Por isso ele nunca entra no payload.
+    """
+    emit(conv, "error", {"kind": kind, "message": message,
+                         "retry_after": retry_after})
+
+
 def run_turn(conv: Conversation, text: str) -> None:
     """Produz a resposta de um turno (roda numa thread própria)."""
     try:
@@ -229,7 +263,7 @@ def _run_turn(conv: Conversation, text: str) -> None:
     # Sessão morta: todo turno vira 401 (menos /ajuda, para não trancar o teste).
     if not STATE.authenticated and cmd != "/ajuda":
         logger.info("conversa %s: turno com sessão EXPIRADA → 401", conv.id)
-        say(conv, auth_error_text(conv))
+        fail(conv, "auth_required", auth_error_text(conv))
         return
 
     if cmd == "/ajuda":
@@ -237,19 +271,58 @@ def _run_turn(conv: Conversation, text: str) -> None:
         return
 
     if cmd == "/auth":
-        say(conv, auth_error_text(conv))
+        fail(conv, "auth_required", auth_error_text(conv))
+        return
+
+    if cmd == "/limite":
+        parts = lower.split()
+        secs = 30
+        if len(parts) > 1:
+            try:
+                secs = max(1, min(300, int(parts[1])))
+            except ValueError:
+                pass
+        fail(conv, "rate_limited",
+             "Limite de uso da conta atingido. Tente novamente em instantes.",
+             retry_after=secs)
+        return
+
+    if cmd == "/limite401":
+        # O caso que a heurística de texto errava: limite de uso cujo corpo cita
+        # um 401 de upstream. Com o kind tipado, NÃO pode virar sessão expirada.
+        fail(conv, "rate_limited",
+             'Rate limit: upstream respondeu 401 {"type":"authentication_error"} '
+             "durante o throttling. Tente de novo.", retry_after=20)
+        return
+
+    if cmd == "/cota":
+        fail(conv, "quota_exceeded",
+             "Sem crédito na conta do executor. Recarregue para continuar.")
+        return
+
+    if cmd == "/sobrecarga":
+        fail(conv, "overloaded", "Executor sobrecarregado (529). Tentando de novo.")
         return
 
     if cmd == "/morrer":
         with STATE.lock:
             STATE.authenticated = False
         logger.info("modo DEAD ligado pelo chat")
+        # Caminho NOVO: a falha vai pelo frame tipado, não mais como resposta da
+        # IA persistida. `/legado` continua exercitando o write-through antigo.
+        fail(conv, "auth_required", auth_error_text(conv))
+        return
+
+    if cmd == "/legado":
+        # Executor ANTIGO: 401 entregue como resposta da IA, em HTTP 200, sem
+        # kind nenhum — exercita a rede de segurança do write-through.
+        logger.info("conversa %s: 401 pelo caminho legado (write-through)", conv.id)
         say(conv, auth_error_text(conv))
         return
 
     if cmd == "/viver":
         with STATE.lock:
-            STATE.authenticated = True
+            STATE.renew()
         logger.info("modo OK religado pelo chat")
         say(conv, "Sessão restaurada (sem relogin). Pode continuar.", persist=False)
         return
@@ -435,7 +508,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         path = self.path.split("?")[0]
         if path == "/health":
-            self._json({"ok": True, "claude": {"authenticated": STATE.authenticated}})
+            # `expires_at` (epoch, segundos) é o que destrava o monitor
+            # preventivo: dá para avisar ANTES de o token morrer em vez de
+            # reagir depois. `None` quando a sessão já está morta.
+            self._json({"ok": True, "claude": {
+                "authenticated": STATE.authenticated,
+                "expires_at": STATE.expires_at if STATE.authenticated else None}})
             return
         if path == "/_fake/state":
             with STATE.lock:
@@ -561,7 +639,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with STATE.lock:
                 STATE.relogins.pop(sid, None)
-                STATE.authenticated = True
+                STATE.renew()
                 stale = list(STATE.convs)
             # O executor REAL não faz isto hoje — os runners antigos continuam
             # com a credencial morta. Aqui reconstruímos, que é o comportamento
@@ -588,7 +666,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "mode deve ser 'ok' ou 'dead'"}, 400)
                 return
             with STATE.lock:
-                STATE.authenticated = (mode == "ok")
+                if mode == "ok":
+                    STATE.renew()
+                else:
+                    STATE.authenticated = False
             logger.info("modo alterado para %s", mode.upper())
             self._json({"ok": True, "authenticated": STATE.authenticated})
             return
@@ -649,7 +730,10 @@ def main() -> None:
                         format="%(asctime)s %(levelname)-7s %(message)s",
                         datefmt="%H:%M:%S")
     STATE.secret = args.secret
-    STATE.authenticated = args.mode == "ok"
+    if args.mode == "ok":
+        STATE.renew()
+    else:
+        STATE.authenticated = False
     STATE.allow_mutations = args.allow_mutations
     STATE.verify = not args.insecure
 

@@ -535,3 +535,553 @@ def test_parse_sse_frame(plugin_app):
     # data inválido não explode.
     ev = chat_logic.parse_sse_frame("event: done\ndata: not-json")
     assert ev == ("done", {})
+
+
+# ── Plano 61 · falhas TIPADAS do executor ────────────────────────────────────
+#
+# A classificação deixou de ser adivinhação por TEXTO: o executor manda um
+# ``kind``. A heurística sobrevive só como fallback (executor antigo / balde
+# ``unknown``). O que estes testes travam é a fronteira entre as duas.
+
+def _reset_failure_state(chat_logic):
+    """Zera o que é módulo-global entre casos (throttle + cooldown)."""
+    chat_logic._failure_seen.clear()
+    chat_logic._executor_cooldown_until = 0.0
+    chat_logic.clear_session_state()
+
+
+def _frame(kind=None, message="", retry_after=None) -> str:
+    data = {"message": message}
+    if kind is not None:
+        data["kind"] = kind
+    if retry_after is not None:
+        data["retry_after"] = retry_after
+    return f"event: error\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def test_typed_auth_required_kills_the_session_without_401_text(plugin_app):
+    """O kind manda: sessão expirada é reconhecida mesmo num texto que não tem
+    401 nem marcador nenhum — o que a heurística sozinha jamais pegaria."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    _, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100070")
+
+    out = chat_logic.record_executor_failure(
+        cid, "sua sessão acabou, refaça o login", kind="auth_required")
+
+    assert out["fatal"] is True
+    assert chat_logic.get_conversation(cid)["status"] == "AUTH_EXPIRED"
+    assert chat_logic.session_expired() is True
+    rows = [m for m in chat_logic.list_chat_messages(cid) if m["role"] == "system"]
+    assert rows and rows[-1]["failure_kind"] == "auth_required"
+    chat_logic.clear_session_state()
+
+
+def test_typed_rate_limited_ignores_a_401_in_the_text(plugin_app):
+    """A correção-título: limite de uso cujo corpo cita um 401 de upstream NÃO
+    pode virar sessão expirada — era o falso positivo que fazia o painel
+    oferecer "Renovar sessão" para algo que renovar não conserta."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    _, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100071")
+
+    out = chat_logic.record_executor_failure(
+        cid, 'Rate limit: upstream 401 {"type":"authentication_error"}',
+        kind="rate_limited", retry_after=30)
+
+    assert out["fatal"] is False
+    assert chat_logic.session_expired() is False
+    assert chat_logic.get_conversation(cid)["status"] == "ACTIVE"
+    rows = [m for m in chat_logic.list_chat_messages(cid) if m["role"] == "system"]
+    assert rows[-1]["failure_kind"] == "rate_limited"
+
+
+def test_derive_kind_falls_back_to_the_heuristic(plugin_app):
+    """A linha da retrocompatibilidade, incluindo o balde ``unknown``.
+
+    ``unknown`` é um VALOR, não um vazio: escrever ``kind or heurística`` faria o
+    fluxo parar nele e uma sessão de fato expirada deixaria de ser detectada.
+    """
+    built = plugin_app("melhorias", settings_overrides=_EXT)  # noqa: F841
+    _, chat_logic, _ = _mods()
+    d = chat_logic.derive_kind
+    # Sem kind (executor antigo): decide o texto.
+    assert d({"message": _AUTH_401}) == "auth_required"
+    assert d({"message": "análise normal"}) is None
+    # kind == unknown: o executor não soube classificar ⇒ o texto ainda decide.
+    assert d({"kind": "unknown", "message": _AUTH_401}) == "auth_required"
+    assert d({"kind": "unknown", "message": "coisa qualquer"}) == "unknown"
+    # kind reconhecido: manda nele, texto IGNORADO.
+    assert d({"kind": "rate_limited", "message": _AUTH_401}) == "rate_limited"
+    # kind que este plugin não conhece nunca é fatal.
+    assert d({"kind": "credit_low", "message": "x"}) == "unknown"
+    assert chat_logic.kind_is_fatal("credit_low") is False
+    assert chat_logic.kind_is_fatal("unknown") is False
+    assert chat_logic.kind_is_fatal("auth_required") is True
+
+
+def test_clamp_retry_after(plugin_app):
+    """Sem clamp, um ``retry_after`` absurdo congelaria um consumidor por um dia."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)  # noqa: F841
+    _, chat_logic, _ = _mods()
+    c = chat_logic.clamp_retry_after
+    assert c(30) == 30 and c("45") == 45 and c(12.7) == 12
+    assert c(86400) == chat_logic.RETRY_AFTER_MAX
+    assert c(-5) == 0
+    assert c(None) is None and c("depois") is None and c(True) is None
+
+
+def test_transient_failure_never_writes_the_global_state(plugin_app):
+    """Isolamento duro: o caminho não-fatal não pode ENCOSTAR na config.
+
+    O publicador antigo tinha a sentinela ``persist=None`` significando *apagar*
+    — um aviso transitório roteado por ali limparia a sessão expirada em silêncio
+    e reabriria o portão de conversa nova.
+    """
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    _, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100072")
+
+    with patch.object(chat_logic.config_repo, "set") as cfg_set:
+        chat_logic.record_executor_failure(cid, "limite", kind="rate_limited")
+        chat_logic.record_executor_failure(cid, "sem crédito", kind="quota_exceeded")
+        chat_logic.record_executor_failure(cid, "sobrecarga", kind="overloaded")
+    assert cfg_set.call_count == 0, "falha não-fatal gravou estado global"
+
+
+def test_transient_failure_cannot_resurrect_an_expired_session(plugin_app):
+    """Um frame transitório atrasado, chegando depois do 401, não pode dizer que
+    está tudo bem — no painel isso apagaria a faixa e reabriria o botão."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    _, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100073")
+
+    chat_logic.record_executor_failure(cid, _AUTH_401, kind="auth_required")
+    assert chat_logic.session_expired() is True
+    chat_logic.record_executor_failure(cid, "limite", kind="rate_limited")
+    assert chat_logic.session_expired() is True
+    assert chat_logic.get_conversation(cid)["status"] == "AUTH_EXPIRED"
+    chat_logic.clear_session_state()
+
+
+def test_broadcast_matrix_per_kind(plugin_app):
+    """Quem avisa quem, por kind — e UM cartão por falha, nunca dois."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    _, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100074")
+
+    def events_for(kind):
+        with patch.object(chat_logic, "broadcast") as bc:
+            chat_logic._failure_seen.clear()
+            chat_logic.record_executor_failure(cid, "msg", kind=kind)
+            return [c.args[0] for c in bc.call_args_list], bc.call_args_list
+
+    names, calls = events_for("auth_required")
+    assert chat_logic.SESSION_EVENT in names          # faixa persistida
+    assert "plugin_melhorias_ai_event" in names
+    conv_ev = [c.args[1] for c in calls if c.args[0] == "plugin_melhorias_ai_event"]
+    assert conv_ev[0]["event"] == "auth_expired"
+    assert conv_ev[0]["data"]["kind"] == "auth_required"
+    chat_logic.clear_session_state()
+
+    for kind in ("rate_limited", "quota_exceeded", "overloaded", "unknown"):
+        names, calls = events_for(kind)
+        assert chat_logic.SESSION_EVENT not in names, f"{kind} mexeu na sessão global"
+        assert chat_logic.NOTICE_EVENT in names, kind
+        conv_ev = [c.args[1] for c in calls if c.args[0] == "plugin_melhorias_ai_event"]
+        assert conv_ev[0]["event"] == "executor_failure", kind
+        assert conv_ev[0]["data"]["kind"] == kind
+    assert chat_logic.session_expired() is False
+
+
+def test_quota_exceeded_does_not_block_new_conversations(plugin_app):
+    """Sem crédito avisa, mas não fecha a porta: o gateway não tem como saber que
+    a cota voltou (o ``/health`` só responde por autenticação), então bloquear
+    sem sinal de liberação prenderia o operador até alguém mexer na config."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    handler = built.agent_handler
+    phone = "5511960100075"
+    _, saved = _seed_ai_reply(handler, phone)
+    r = built.client.post("/api/plugins/melhorias/suggestions", json={
+        "phone": phone,
+        "message": {"content": "resposta marcada", "ts": saved["ts"],
+                    "_id": saved["id"]},
+        "feedback": "errada"})
+    sid = r.json()["data"]["id"]
+    cid0 = chat_logic.create_conversation(sid)["id"]
+    chat_logic.record_executor_failure(cid0, "sem crédito", kind="quota_exceeded")
+
+    async def fake_start(cid, **kwargs):
+        return {}
+
+    async def fake_send(cid, **kwargs):
+        return {}
+
+    with patch.object(ai_client, "start", side_effect=fake_start), \
+         patch.object(ai_client, "send", side_effect=fake_send), \
+         patch.object(chat_logic, "ensure_consumer", lambda *a, **k: None):
+        r = built.client.post(
+            f"/api/plugins/melhorias/suggestions/{sid}/conversations",
+            json={"observation": ""})
+    assert r.status_code == 200, r.text
+    cfg = built.client.get("/api/plugins/melhorias/config").json()["data"]
+    assert cfg["ai_session"]["status"] == "ok"
+
+
+def test_failure_rows_carry_the_kind_and_stay_out_of_the_resume(plugin_app):
+    """A linha de falha guarda o tipo (é o que a hidratação lê) e NUNCA volta ao
+    executor no histórico do resume."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100076")
+    chat_logic.append_chat_message(cid, "assistant", content="## Diagnóstico\nok")
+    chat_logic.record_executor_failure(cid, "sem crédito", kind="quota_exceeded")
+    # Linha LEGADA (gravada antes do kind existir) continua válida com NULL.
+    legacy = chat_logic.append_chat_message(cid, "system", content=_AUTH_401)
+
+    rows = {m["id"]: m for m in chat_logic.list_chat_messages(cid)}
+    assert rows[legacy]["failure_kind"] is None
+    kinds = [m["failure_kind"] for m in rows.values() if m["failure_kind"]]
+    assert kinds == ["quota_exceeded"]
+    # A falha não pode virar a "Análise gerada pela IA".
+    assert chat_logic._last_assistant_content(cid) == "## Diagnóstico\nok"
+
+    seen = {}
+
+    async def fake_resume(cid_, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    with patch.object(ai_client, "resume", side_effect=fake_resume), \
+         patch.object(chat_logic, "ensure_consumer", lambda *a, **k: None):
+        asyncio.get_event_loop().run_until_complete(
+            chat_logic.resume_conversation(cid))
+    assert all(h["role"] in ("user", "assistant") for h in seen["history"])
+    chat_logic.clear_session_state()
+
+
+def test_repeated_transient_frames_are_throttled(plugin_app):
+    """O executor retenta internamente e cospe o mesmo 429 várias vezes: uma
+    falha só não pode virar cinco linhas no banco e cinco cartões na tela."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    _, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100077")
+
+    for _ in range(5):
+        chat_logic.record_executor_failure(cid, "limite", kind="rate_limited")
+    rows = [m for m in chat_logic.list_chat_messages(cid)
+            if m.get("failure_kind") == "rate_limited"]
+    assert len(rows) == 1
+    # Kind DIFERENTE não é abafado pelo throttle do anterior.
+    chat_logic.record_executor_failure(cid, "sem crédito", kind="quota_exceeded")
+    assert [m for m in chat_logic.list_chat_messages(cid)
+            if m.get("failure_kind") == "quota_exceeded"]
+
+
+def test_late_failure_cannot_downgrade_a_finished_conversation(plugin_app):
+    """Bug latente que este trabalho fecha: um frame de erro atrasado virava uma
+    conversa já COMPLETED em AUTH_EXPIRED, DEPOIS de a sugestão ter sido
+    finalizada."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    _, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100078")
+    chat_logic.set_conversation_status(cid, "COMPLETED")
+
+    chat_logic.record_executor_failure(cid, _AUTH_401, kind="auth_required")
+    assert chat_logic.get_conversation(cid)["status"] == "COMPLETED"
+    chat_logic.clear_session_state()
+
+
+def test_resume_stops_the_consumer_before_calling_the_executor(plugin_app):
+    """Ordem importa: enquanto o ``resume`` está na rede, o consumidor VELHO
+    ainda roda e pode gravar AUTH_EXPIRED depois do ACTIVE — justo quando o
+    operador acabou de clicar "Renovar sessão"."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100079")
+    order = []
+
+    async def fake_resume(cid_, **kwargs):
+        order.append("resume")
+        return {}
+
+    with patch.object(ai_client, "resume", side_effect=fake_resume), \
+         patch.object(chat_logic, "stop_consumer",
+                      side_effect=lambda c: order.append("stop")), \
+         patch.object(chat_logic, "ensure_consumer", lambda *a, **k: None):
+        r = built.client.post(f"/api/plugins/melhorias/conversations/{cid}/resume")
+    assert r.status_code == 200, r.text
+    assert order == ["stop", "resume"]
+
+
+def test_resume_restores_the_consumer_when_the_executor_refuses(plugin_app):
+    """Derrubar antes de chamar tem um preço: se o executor recusar, a conversa
+    ficaria ACTIVE sem ninguém escutando. O consumidor volta."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100080")
+    restored = []
+
+    async def boom(cid_, **kwargs):
+        raise RuntimeError("executor fora do ar")
+
+    with patch.object(ai_client, "resume", side_effect=boom), \
+         patch.object(chat_logic, "ensure_consumer",
+                      side_effect=lambda *a, **k: restored.append(a)):
+        r = built.client.post(f"/api/plugins/melhorias/conversations/{cid}/resume")
+    assert r.status_code == 502, r.text
+    assert restored, "consumidor não foi devolvido após o resume falhar"
+
+
+# ── Consumidor SSE ───────────────────────────────────────────────────────────
+
+class _Clock:
+    """Relógio falso: ``sleep`` avança o tempo em vez de queimar wall-clock.
+
+    Sem ele o teste do cooldown esperaria 30s REAIS por reconexão (o laço
+    re-checa ``_cooldown_remaining()``, que só encolhe com o tempo de verdade).
+    """
+
+    def __init__(self, t=1_700_000_000.0):
+        self.t = t
+
+    def now(self):
+        return self.t
+
+    def advance(self, secs):
+        self.t += max(0.0, float(secs or 0))
+
+
+def _drive_stream(chat_logic, ai_client, cid, sid, frames, *, rounds=2, clock=None):
+    """Roda ``_consume_stream`` por N reconexões, capturando a ordem dos eventos.
+
+    Cada abertura entrega ``frames`` e fecha LIMPO (sem exceção) — que é
+    exatamente o caso que matava o consumidor em silêncio.
+    """
+    clock = clock or _Clock()
+    events: list[tuple] = []
+    opens = {"n": 0}
+
+    async def fake_open(cid_, **kwargs):
+        opens["n"] += 1
+        if opens["n"] > rounds:
+            raise asyncio.CancelledError
+        events.append(("open", opens["n"]))
+        for f in frames:
+            yield f.encode("utf-8")
+
+    async def fake_sleep(secs):
+        events.append(("sleep", secs))
+        clock.advance(secs)
+
+    with patch.object(ai_client, "open_stream", fake_open), \
+         patch.object(chat_logic, "now", clock.now), \
+         patch.object(chat_logic.asyncio, "sleep", side_effect=fake_sleep):
+        try:
+            asyncio.get_event_loop().run_until_complete(
+                chat_logic._consume_stream(cid, sid))
+        except asyncio.CancelledError:
+            pass
+    waits = [s for kind, s in events if kind == "sleep"]
+    return waits, opens["n"], events
+
+
+def test_consumer_survives_clean_closes_and_honors_retry_after(plugin_app):
+    """Os dois furos do laço, num caso só.
+
+    (a) o contador só zerava DENTRO do ``async for``, então um fechamento limpo
+        caía direto no ``attempts += 1`` e cinco deles matavam o consumidor —
+        conversa zumbi presa em "IA pensando…";
+    (b) religar em 2s num executor que acabou de dizer "espere 30s" é martelar.
+    """
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100081")
+    # Qualquer stream que entregou algo conta como saudável neste teste.
+    with patch.object(chat_logic, "STREAM_HEALTHY_SEC", 0.0):
+        waits, opens, _ = _drive_stream(
+            chat_logic, ai_client, cid, sid,
+            [_frame("rate_limited", "limite", retry_after=30)], rounds=8)
+
+    # Sobreviveu a MUITO mais que as 5 tentativas do orçamento antigo.
+    assert opens > 6, "o consumidor desistiu depois de fechamentos limpos"
+    # E cada religada respeitou o "espere 30s" em vez do backoff de 2s.
+    assert waits and all(w == 30 for w in waits), waits
+    assert chat_logic.session_expired() is False
+
+
+def test_consumer_shares_a_cooldown_across_conversations(plugin_app):
+    """Limite/sobrecarga são da CONTA do executor: com cinco conversas abertas,
+    cinco laços martelariam em paralelo."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid_a, cid_a = _open_conversation(built, chat_logic, "5511960100082")
+    sid_b, cid_b = _open_conversation(built, chat_logic, "5511960100083")
+
+    clock = _Clock()
+    # A conversa A apanha do executor (sem rodar o laço: o sleep pós-rodada
+    # consumiria justamente o cooldown que queremos observar na B).
+    with patch.object(chat_logic, "now", clock.now):
+        asyncio.get_event_loop().run_until_complete(chat_logic._handle_error_frame(
+            cid_a, sid_a, {"kind": "overloaded", "message": "529"}))
+        assert chat_logic._cooldown_remaining() == chat_logic.OVERLOADED_FLOOR
+
+    # A conversa B ESPERA antes de sequer abrir o stream — o relógio é comum.
+    _waits, _opens, events = _drive_stream(chat_logic, ai_client, cid_b, sid_b,
+                                           [], rounds=1, clock=clock)
+    assert events and events[0][0] == "sleep", \
+        "a outra conversa ignorou o cooldown compartilhado"
+    assert events[0][1] == chat_logic.OVERLOADED_FLOOR
+    assert events[1][0] == "open"       # e só então abre
+    chat_logic._executor_cooldown_until = 0.0
+
+
+def test_untyped_error_frame_keeps_todays_behavior(plugin_app):
+    """Executor antigo: o ``error`` cru é repassado ao painel e NADA é
+    persistido — exatamente como antes."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100084")
+
+    with patch.object(chat_logic, "broadcast") as bc:
+        _drive_stream(chat_logic, ai_client, cid, sid,
+                      [_frame(None, "falha simulada no runner")], rounds=1)
+        evs = [c.args[1] for c in bc.call_args_list
+               if c.args[0] == "plugin_melhorias_ai_event"]
+    assert [e["event"] for e in evs] == ["error"]
+    assert not [m for m in chat_logic.list_chat_messages(cid) if m["role"] == "system"]
+    assert chat_logic.session_expired() is False
+
+
+def test_recognized_kind_emits_only_the_typed_event(plugin_app):
+    """Kind reconhecido não pode emitir o ``error`` cru TAMBÉM — seriam dois
+    cartões vermelhos para uma falha só."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100085")
+
+    with patch.object(chat_logic, "broadcast") as bc:
+        _drive_stream(chat_logic, ai_client, cid, sid,
+                      [_frame("quota_exceeded", "sem crédito")], rounds=1)
+        evs = [c.args[1] for c in bc.call_args_list
+               if c.args[0] == "plugin_melhorias_ai_event"]
+    assert [e["event"] for e in evs] == ["executor_failure"]
+
+
+def test_consumer_gives_up_loudly(plugin_app):
+    """Desistir em silêncio deixava o chat girando para sempre."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100086")
+
+    async def dead_open(cid_, **kwargs):
+        raise RuntimeError("connection refused")
+        yield b""  # pragma: no cover — mantém a função geradora
+
+    async def fake_sleep(secs):
+        return None
+
+    with patch.object(ai_client, "open_stream", dead_open), \
+         patch.object(chat_logic.asyncio, "sleep", side_effect=fake_sleep), \
+         patch.object(chat_logic, "broadcast") as bc:
+        asyncio.get_event_loop().run_until_complete(
+            chat_logic._consume_stream(cid, sid))
+        evs = [c.args[1] for c in bc.call_args_list
+               if c.args[0] == "plugin_melhorias_ai_event"]
+    assert evs and evs[-1]["event"] == "executor_failure"
+    assert cid not in chat_logic._consumers
+
+
+# ── Write-through (rede de segurança) ────────────────────────────────────────
+
+def test_write_through_typed_kind_is_not_fatal(plugin_app):
+    """Com ``kind`` no corpo, o write-through também para de adivinhar."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100087")
+
+    path = "/api/plugins/melhorias/public/_internal/messages"
+    body = json.dumps({"conversation_id": cid, "role": "assistant",
+                       "kind": "rate_limited", "retry_after": 20,
+                       "content": f"limite atingido — upstream disse {_AUTH_401}"},
+                      ensure_ascii=False, separators=(",", ":"))
+    r = built.client.post(path, content=body,
+                          headers=_signed_headers(ai_client, "POST", path, body))
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["kind"] == "rate_limited"
+    assert data["fatal"] is False
+    assert data["auth_expired"] is False      # chave antiga preservada
+    assert chat_logic.session_expired() is False
+    assert chat_logic.get_conversation(cid)["status"] == "ACTIVE"
+
+
+def test_write_through_cannot_forge_the_typed_slot(plugin_app):
+    """Só o helper do gateway escreve ``failure_kind``; o executor não pode
+    carimbar uma linha comum como se fosse falha."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100088")
+
+    path = "/api/plugins/melhorias/public/_internal/messages"
+    body = json.dumps({"conversation_id": cid, "role": "system",
+                       "failure_kind": "auth_required", "tool_name": "forjado",
+                       "content": "aviso qualquer"},
+                      ensure_ascii=False, separators=(",", ":"))
+    r = built.client.post(path, content=body,
+                          headers=_signed_headers(ai_client, "POST", path, body))
+    assert r.status_code == 200, r.text
+    row = chat_logic.list_chat_messages(cid)[-1]
+    assert row["failure_kind"] is None
+    assert row["tool_name"] is None
+    assert chat_logic.session_expired() is False
+
+
+def test_human_pasting_a_rate_limit_message_does_nothing(plugin_app):
+    """Extensão da garantia do plano 60 aos kinds novos."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100089")
+
+    path = "/api/plugins/melhorias/public/_internal/messages"
+    body = json.dumps({"conversation_id": cid, "role": "user",
+                       "kind": "auth_required", "content": _AUTH_401},
+                      ensure_ascii=False, separators=(",", ":"))
+    r = built.client.post(path, content=body,
+                          headers=_signed_headers(ai_client, "POST", path, body))
+    assert r.status_code == 200, r.text
+    assert chat_logic.session_expired() is False
+    assert chat_logic.get_conversation(cid)["status"] == "ACTIVE"
+
+
+def test_clear_session_state_keeps_an_ok_marker(plugin_app):
+    """``clear`` gravava string vazia, então ``get_session_state`` voltava sem
+    ``at`` e o test-connection reportava "desconhecido" para SEMPRE depois de um
+    relogin bem-sucedido."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)  # noqa: F841
+    _, chat_logic, _ = _mods()
+    chat_logic.mark_session_expired(conversation_id=None, message=_AUTH_401)
+    chat_logic.clear_session_state()
+    state = chat_logic.get_session_state()
+    assert state["status"] == "ok"
+    assert state.get("at")

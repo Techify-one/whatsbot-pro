@@ -79,9 +79,36 @@ export function reduceAiEvent(items, ev, status = 'streaming') {
                   message: data.message || 'Erro no executor.' });
       return { items: next, status: 'error' };
     }
+    case 'executor_failure': {
+      // Falha TIPADA (plano 61). Precisa passar pelo reducer, e não só pelo
+      // rodapé: o fallback de quiescência do chat.js só desarma o "IA
+      // pensando…" quando a última linha é uma resposta assistant assentada —
+      // um cartão de erro nunca o arma, e o spinner giraria para sempre.
+      // `idle` é o valor honesto num transitório: a conversa segue utilizável.
+      const kind = data.kind || 'unknown';
+      next.push({ kind: 'error', id: `fail-${kind}-${next.length}`,
+                  failureKind: kind, retryAfter: data.retry_after ?? null,
+                  message: data.message || 'Erro no executor.' });
+      return { items: next, status: kind === 'auth_required' ? 'error' : 'idle' };
+    }
     default:
       return { items: next, status };
   }
+}
+
+// Catálogo espelhado de chat_logic.EXECUTOR_KINDS. O frontend ramifica por AÇÃO,
+// não por nome de kind — um kind novo do executor degrada para um cartão
+// genérico sem botão em vez de exigir atualização do cliente.
+export const FAILURE_ACTIONS = {
+  auth_required: 'relogin',
+  rate_limited: 'wait',
+  overloaded: 'wait',
+  quota_exceeded: 'billing',
+  unknown: 'none',
+};
+
+export function failureAction(kind) {
+  return FAILURE_ACTIONS[kind] || 'none';
 }
 
 // Heurística de sessão Claude expirada (porta de use-ai-chat.ts:352-360) — roda
@@ -95,16 +122,76 @@ export function isAuthError(text) {
     || t.includes('invalid api key');
 }
 
-// A ÚLTIMA mensagem do histórico é uma falha de sessão? (plano 60 · 1.3)
-// Resolve o "morreu enquanto ninguém olhava": quem abre a conversa depois via
-// só os balões do erro, sem oferta de renovar (a detecção era só ao vivo).
-export function authErrorInHistory(messages = []) {
+// Qual foi a última falha do executor no histórico? (plano 61 — sucessor do
+// `authErrorInHistory`). Resolve o "morreu enquanto ninguém olhava" E para de
+// adivinhar pelo texto: sem isto, uma linha de limite de uso que por acaso cite
+// um 401 abriria o modal de relogin — e queimaria o guard `authNotifiedRef`
+// daquela conversa de forma PERMANENTE, deixando uma expiração real futura sem
+// aviso nenhum.
+export function lastFailureFromHistory(messages = []) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const content = ((messages[i] || {}).content || '').trim();
-    if (!content) continue;          // tool call / linha vazia não decide nada
-    return isAuthError(content);
+    const m = messages[i] || {};
+    const content = (m.content || '').trim();
+    if (!content) continue;              // tool call / linha vazia não decide nada
+    if (m.role === 'system') {
+      // Caminho normal: o tipo veio gravado, sem chute.
+      if (m.failure_kind) return { kind: m.failure_kind, message: content };
+      // Linha legada (gravada antes do kind tipado existir): sobrou a heurística.
+      return isAuthError(content)
+        ? { kind: 'auth_required', message: content, legacy: true } : null;
+    }
+    if (m.role === 'assistant') {
+      // Uma resposta da IA NUNCA é lida como falha, nem que cite um "401".
+      // Uma linha `system` existe PORQUE o gateway classificou uma falha —
+      // olhar o texto dela é razoável. Uma linha `assistant` é conteúdo da IA:
+      // tratar o texto como sinal é exatamente o palpite que este plano remove
+      // (uma análise que mencione um erro 401 abriria o relogin a cada F5).
+      // O 401 legado gravado como `assistant` já é neutralizado no servidor —
+      // `_last_assistant_content` o pula e ele nunca vira a análise final.
+      return null;
+    }
+    // `user`: o operador ter escrito depois da falha não prova nada sobre o
+    // executor — segue procurando para trás.
   }
-  return false;
+  return null;
+}
+
+// Shim do nome antigo (o painel e testes externos podem usá-lo).
+export function authErrorInHistory(messages = []) {
+  return (lastFailureFromHistory(messages) || {}).kind === 'auth_required';
+}
+
+// Falhas cujo registro no histórico continua valendo depois de um F5. Um 429
+// passa em segundos (mostrar de novo seria mentira); falta de crédito e sessão
+// expirada não passam sozinhas.
+const DURABLE_FAILURES = ['auth_required', 'quota_exceeded'];
+
+// Qual rodapé o chat deve renderizar. Puro de propósito: é aqui que mora a
+// regra de "quem ganha botão de Renovar sessão", e ela é testável sem DOM.
+export function footerStateFor({ convStatus = 'ACTIVE', historyFailure = null,
+                                 liveFailure = null } = {}) {
+  const asFooter = (f) => {
+    const action = failureAction(f.kind);
+    if (action === 'relogin') return { mode: 'auth_expired', kind: f.kind, canRenew: true };
+    if (action === 'wait') {
+      return { mode: 'wait', kind: f.kind, canRenew: false,
+               retryAfter: f.retryAfter ?? null };
+    }
+    if (action === 'billing') return { mode: 'quota', kind: f.kind, canRenew: false };
+    return { mode: 'generic', kind: f.kind, canRenew: false, message: f.message || '' };
+  };
+
+  // O status é o sinal autoritativo: é o que cobre o caso em que a linha de auth
+  // não é mais a última do histórico. Parece redundante com a checagem de
+  // histórico abaixo, e não é — não "simplifique" removendo.
+  if (convStatus === 'AUTH_EXPIRED') {
+    return { mode: 'auth_expired', kind: 'auth_required', canRenew: true };
+  }
+  if (liveFailure && liveFailure.kind) return asFooter(liveFailure);
+  if (historyFailure && DURABLE_FAILURES.includes(historyFailure.kind)) {
+    return asFooter(historyFailure);
+  }
+  return { mode: convStatus === 'ACTIVE' ? 'live' : 'ended', kind: null, canRenew: false };
 }
 
 // Persistido (DB do gateway) → cards, na hidratação ao abrir o detalhe.
@@ -115,9 +202,11 @@ export function persistedToItems(messages = [], approvals = []) {
       items.push({ kind: 'text', id: `db-${m.id}`, role: m.role,
                    content: m.content, streaming: false });
     } else if (m.role === 'system' && (m.content || '').trim()) {
-      // O gateway grava a falha de auth como `system` (plano 60 · 2.3) — antes
-      // `system` era descartado em silêncio e o histórico ficava com um buraco.
-      items.push({ kind: 'error', id: `db-${m.id}`, message: m.content });
+      // O gateway grava a falha do executor como `system` (plano 60 · 2.3) —
+      // antes `system` era descartado em silêncio e o histórico ficava com um
+      // buraco. `failure_kind` (plano 61) diz de QUAL falha se trata.
+      items.push({ kind: 'error', id: `db-${m.id}`, message: m.content,
+                   failureKind: m.failure_kind || null });
     } else if (m.role === 'tool' && m.tool_name) {
       items.push({ kind: 'tool', id: `db-tool-${m.id}`, name: m.tool_name,
                    input: m.tool_input, output: m.tool_result, status: 'done' });
