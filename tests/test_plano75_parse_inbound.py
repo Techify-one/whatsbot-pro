@@ -264,11 +264,21 @@ def test_tipo_inventado_nunca_vira_bolha_muda(cloud):
 
 
 def test_todos_os_tipos_do_apendice_produzem_texto(cloud):
-    for msg in (CONTACTS_MSG, ORDER_MSG, SYSTEM_MSG, UNSUPPORTED_MSG,
+    # ⚠️ ``UNSUPPORTED_MSG`` sai desta lista desde o plano 95: ele é justamente
+    # a mensagem que a Meta entrega SEM conteúdo, e o ``parse_inbound`` passou a
+    # descartá-la antes de virar evento (o formatter dela continua coberto por
+    # ``test_unsupported_explica_o_motivo``, que chama ``_parse_message`` direto,
+    # e o descarte por ``tests/test_whatsapp_cloud_ignore_empty.py``).
+    for msg in (CONTACTS_MSG, ORDER_MSG, SYSTEM_MSG,
                 LIST_REPLY_MSG, BUTTON_REPLY_MSG, TEMPLATE_BUTTON_MSG, TEXT_MSG):
         events = cloud.parse_inbound(_envelope(msg))
         assert len(events) == 1, msg["type"]
         assert events[0].text.strip(), f"texto vazio para type={msg['type']}"
+
+
+def test_unsupported_e_descartado_pelo_parse_inbound(cloud):
+    """Plano 95: a mensagem sem conteúdo não vira evento nenhum."""
+    assert cloud.parse_inbound(_envelope(UNSUPPORTED_MSG)) == []
 
 
 # ══════════════════════════════════════════════════════════════════════════

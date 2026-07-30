@@ -227,6 +227,30 @@ except Exception:  # noqa: BLE001 — pragma: no cover (plugin sem o módulo nov
     def describe_message(msg: dict) -> str:  # type: ignore[misc]
         return ""
 
+# ── Descarte da mensagem que a Meta entrega SEM conteúdo (plano 95) ─────────
+# A regra pura mora em ``inbound_ignore``; aqui só ligamos ela no laço de
+# ``messages[]``. Import defensivo pelo mesmo motivo dos dois blocos acima: um
+# zip antigo (sem o arquivo novo) tem que continuar CARREGANDO — sem o módulo,
+# ``should_ignore`` vira um no-op e o comportamento é o de antes do plano.
+try:
+    from .inbound_ignore import (
+        DEFAULT_IGNORED_ERROR_CODES,
+        describe_ignored,
+        parse_codes,
+        should_ignore,
+    )
+except Exception:  # noqa: BLE001 — pragma: no cover (plugin sem o módulo novo)
+    DEFAULT_IGNORED_ERROR_CODES: tuple[int, ...] = ()  # type: ignore[misc,no-redef]
+
+    def should_ignore(msg, codes=()) -> bool:  # type: ignore[misc]
+        return False  # fail-open
+
+    def parse_codes(raw) -> tuple:  # type: ignore[misc]
+        return ()
+
+    def describe_ignored(msg) -> str:  # type: ignore[misc]
+        return ""
+
 GRAPH_BASE = "https://graph.facebook.com"
 DEFAULT_GRAPH_VERSION = "v21.0"
 HTTP_TIMEOUT = 20.0
@@ -236,6 +260,58 @@ def _unsupported_text(msg_type: str) -> str:
     """Fallback genérico: um tipo que ninguém sabe descrever NUNCA vira bolha
     vazia — o operador ao menos vê que algo chegou e de que tipo era."""
     return f'⚠️ Mensagem do tipo "{msg_type or "desconhecido"}" não suportada'
+
+
+# ── Config do descarte (plano 95 F3) ────────────────────────────────────────
+# Settings DECLARATIVAS do plugin (``settings.py`` → ``plugin.whatsapp_cloud.*``),
+# globais e não por-canal (D6): o defeito é da plataforma, não do número.
+# Cache em variável de MÓDULO porque ``parse_inbound`` roda por webhook — sem
+# ele seria 1 SELECT por mensagem recebida.
+_IGNORE_CFG_TTL = 30.0
+_ignore_cfg_cache: Optional[tuple] = None  # (monotonic, enabled, codes)
+
+
+def reset_ignore_settings_cache() -> None:
+    """Zera o cache do toggle (usado pelos testes; inofensivo em produção)."""
+    global _ignore_cfg_cache
+    _ignore_cfg_cache = None
+
+
+def _as_bool(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    return str(val).strip().lower() not in ("", "0", "false", "no", "off", "nao", "não")
+
+
+def _ignore_settings() -> tuple:
+    """``(enabled, codes)`` do descarte, com TTL de ~30 s.
+
+    Fail-open na LEITURA significa manter o comportamento PRETENDIDO (toggle
+    ligado, lista default) — a decisão "passa" pertence a ``should_ignore``,
+    que é onde um erro de regra vira mensagem preservada.
+    """
+    global _ignore_cfg_cache
+    now = time.monotonic()
+    cached = _ignore_cfg_cache
+    if cached is not None and (now - cached[0]) < _IGNORE_CFG_TTL:
+        return cached[1], cached[2]
+
+    enabled = True
+    codes = DEFAULT_IGNORED_ERROR_CODES
+    try:
+        from db.repositories import config_repo
+
+        raw_enabled = config_repo.get("plugin.whatsapp_cloud.ignore_empty_meta_messages")
+        if raw_enabled is not None:
+            enabled = _as_bool(raw_enabled)
+        codes = parse_codes(config_repo.get("plugin.whatsapp_cloud.ignore_error_codes"))
+    except Exception:  # noqa: BLE001 — config indisponível ⇒ default do plano
+        enabled, codes = True, DEFAULT_IGNORED_ERROR_CODES
+
+    _ignore_cfg_cache = (now, enabled, codes)
+    return enabled, codes
 
 
 class WhatsAppCloudChannel(Channel):
@@ -1040,7 +1116,26 @@ class WhatsAppCloudChannel(Channel):
                         name_by_wa[wa_id] = profile["name"]
 
                 # ── messages ──────────────────────────────────────────
+                # Plano 95: a Meta às vezes entrega um item SEM conteúdo algum
+                # (``type: "unsupported"`` + ``errors[].code`` — caso real: os
+                # códigos 2FA que ela manda para um número na API oficial). Não
+                # emitir o evento é o ÚNICO ponto que evita contato-fantasma e
+                # badge de não-lida: ``filter.message.before_save`` já roda
+                # depois dos dois. O corte é POR ITEM — um lote misto (vazia +
+                # texto) perde só a vazia — e não toca em ``statuses[]``.
+                ignore_enabled, ignore_codes = _ignore_settings()
                 for msg in value.get("messages") or []:
+                    if ignore_enabled and should_ignore(msg, ignore_codes):
+                        # Único rastro em texto do descarte: telefone + wamid são
+                        # o que permite investigar um "eu te mandei!". O payload
+                        # cru continua em /api/channel-webhook-payloads.
+                        logger.warning(
+                            "[whatsapp_cloud] mensagem sem conteúdo descartada — "
+                            "canal=%s de=%s wamid=%s %s",
+                            channel_id, (msg or {}).get("from", ""),
+                            (msg or {}).get("id", ""), describe_ignored(msg),
+                        )
+                        continue
                     events.append(
                         self._parse_message(
                             msg, channel_id, phone_number_id, name_by_wa, change

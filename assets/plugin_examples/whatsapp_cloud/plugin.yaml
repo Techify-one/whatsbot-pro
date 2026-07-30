@@ -1,6 +1,6 @@
 id: whatsapp_cloud
 name: WhatsApp Cloud API
-version: 1.8.0
+version: 1.9.0
 whatsbot_api_version: ">=1.0,<2.0"
 frontend_extends: /plugins/whatsapp_cloud/static/extends.js
 frontend_api_version: "1.0"
@@ -8,6 +8,14 @@ description: >-
   Provider de canal para a WhatsApp Cloud API oficial da Meta (Graph API).
   Adiciona o provider "whatsapp_cloud" à tela Canais do core — sem QR, com
   suporte a templates (HSM) para mensagens fora da janela de 24h.
+  A 1.9.0 para de abrir atendimento por mensagem VAZIA da Meta: de vez em
+  quando a plataforma entrega no webhook uma mensagem sem texto nenhum, só com
+  o aviso "Message type unknown" — o caso típico é o código de verificação do
+  Facebook mandado para um número que está na API oficial. Antes isso reabria a
+  conversa, marcava não lida, abria protocolo e ainda fazia a IA responder a um
+  sistema da Meta. Agora nada é aberto por elas, e o registro fica no log do
+  servidor (com telefone e id da mensagem). Dá para desligar, ou restringir a
+  códigos específicos, no botão Configurar.
   A 1.8.0 assume o modal "Enviar template" (que era do core) e acrescenta três
   coisas nele: templates FAVORITOS por atendente (ficam no servidor, seguem o
   login em qualquer navegador e sobem para o topo da lista); ARQUIVAR os que não

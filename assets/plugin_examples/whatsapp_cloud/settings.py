@@ -1,7 +1,9 @@
 """Settings declarativas do plugin whatsapp_cloud (Plano 02 Fase 2).
 
-Apenas a preferência NÃO-secreta (versão da Graph API) vive aqui — o form
-auto-gerado pelo ``PluginSettingsForm`` persiste em ``plugin.whatsapp_cloud.*``.
+Só preferências NÃO-secretas vivem aqui (versão da Graph API e o descarte da
+mensagem sem conteúdo do plano 95) — o form auto-gerado pelo
+``PluginSettingsForm`` persiste em ``plugin.whatsapp_cloud.*``. São GLOBAIS do
+plugin: valem para todo canal Cloud desta instalação.
 
 Os segredos do provider (access_token, phone_number_id, waba_id, verify_token,
 app_secret) NÃO ficam nas settings do plugin: eles são credenciais por-canal,
@@ -20,4 +22,23 @@ class Settings(BaseModel):
         default="v21.0",
         description="Versão da Graph API da Meta usada nas chamadas "
         "(ex.: v21.0). Mude apenas se a Meta depreciar a versão atual.",
+    )
+    ignore_empty_meta_messages: bool = Field(
+        default=True,
+        title="Ignorar mensagens que a Meta entrega sem conteúdo",
+        description="Às vezes a Meta entrega no webhook uma mensagem SEM texto "
+        "nenhum — só o aviso \"Message type unknown\". O caso típico é o código "
+        "de verificação do Facebook enviado para um número que está na API "
+        "oficial: chega uma bolha vazia, e o WhatsBot trata como se fosse fala "
+        "de cliente. Com esta opção ligada, essas mensagens não abrem NADA — "
+        "sem atendimento, sem protocolo, sem resposta da IA e sem marcador de "
+        "não lida. O registro fica só no log do servidor (com telefone e id da "
+        "mensagem). Desligue para voltar ao comportamento antigo.",
+    )
+    ignore_error_codes: str = Field(
+        default="",
+        title="Códigos de erro ignorados",
+        description="Restringe a opção acima a códigos específicos da Meta, "
+        "separados por vírgula (ex.: 131051). Deixe VAZIO (padrão) para ignorar "
+        "toda mensagem entregue sem conteúdo, qualquer que seja o código.",
     )
