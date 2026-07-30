@@ -41,6 +41,7 @@ LEGACY_FILES = [
     "test_subprocess.py",
     "test_tool_runner.py",
     "test_dynamic_registry.py",
+    "test_media_caption.py",
 ]
 
 

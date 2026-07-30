@@ -67,6 +67,7 @@ collect_ignore = [
     "test_subprocess.py",
     "test_tool_runner.py",
     "test_dynamic_registry.py",
+    "test_media_caption.py",
     "manual_cloud_api_test.py",
 ]
 # NOTE: test_group_mentions.py was removed — its outgoing-mention coverage is a

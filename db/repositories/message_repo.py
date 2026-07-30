@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import time
 
-from sqlalchemy import and_, delete as sa_delete, insert as sa_insert, select, update as sa_update
+from sqlalchemy import (and_, case as sa_case, delete as sa_delete, insert as sa_insert,
+                        select, update as sa_update)
 
 from db.engine import get_engine
 from db.repositories._mapping import coerce_json
@@ -329,15 +330,34 @@ def update_content(message_id: int, content: str) -> None:
 def mark_edited(message_id: int, content: str) -> float | None:
     """Edit a sent message: update its content and stamp ``edited_ts`` (epoch now).
 
-    Used by the operator/AI message-edit flow. Returns the new ``edited_ts`` on a
-    matched row (so the caller can broadcast it), or ``None`` if nothing matched."""
+    Used by the operator/AI message-edit flow AND pelo espelho de edição INBOUND
+    (o cliente editou a própria mensagem do lado dele — server/routes/channel_webhook.py).
+
+    plano 87: quando a linha editada é uma MÍDIA que já tinha legenda, a coluna
+    ``media_caption`` anda junto com o ``content``. Ela tem precedência absoluta
+    no painel (``mediaCaptionOf`` em services/messageView.js), então deixá-la
+    para trás faria o balão desenhar a legenda ANTIGA com o selo "editada" ao
+    lado — e o erro sobreviveria ao F5, porque a coluna é o que fica no banco.
+    ``NULL`` continua ``NULL``: linha legada ou mídia sem legenda segue no
+    fallback por prefixo, e a edição de uma mensagem de TEXTO não ganha legenda
+    do nada.
+
+    Returns the new ``edited_ts`` on a matched row (so the caller can broadcast
+    it), or ``None`` if nothing matched."""
     if not message_id:
         return None
     ts = time.time()
     with get_engine().begin() as conn:
         result = conn.execute(
             sa_update(messages).where(messages.c.id == message_id)
-            .values(content=content, edited_ts=ts)
+            .values(
+                content=content,
+                edited_ts=ts,
+                media_caption=sa_case(
+                    (messages.c.media_caption.is_(None), None),
+                    else_=content,
+                ),
+            )
         )
     return ts if (result.rowcount or 0) > 0 else None
 
