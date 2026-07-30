@@ -1,6 +1,6 @@
 # Plano 92 — Templates: favoritos por atendente, arquivar o que não se usa, busca por conteúdo — com o modal migrando para o plugin
 
-> **Status:** EM EXECUÇÃO (A0·A1·B1·C1·D1·E1·E2·E3·F1 ✅ · F2 🟡 publicação pendente · G1 ⬜ release seguinte) · **Data:** 2026-07-29 · **Escopo:** grande (frontend + plugin + 1 seam de core + 1 migration de plugin)
+> **Status:** EM EXECUÇÃO (A0·A1·B1·C1·D1·E1·E2·E3·F1 ✅ · F2 🟡 publicado, falta o deploy · G1 ⬜ release seguinte) · **Data:** 2026-07-29 · **Escopo:** grande (frontend + plugin + 1 seam de core + 1 migration de plugin)
 > **Origem:** pedido do usuário (2026-07-29) na tela "Enviar template" de um canal WhatsApp Cloud em produção. **Método:** leitura do código real com `arquivo:linha` verificado, `wc -l`/`grep -c` para toda medição, e consulta ao banco de desenvolvimento para a contagem de canais/usuários. Nenhum código foi alterado.
 > Três funcionalidades pedidas (favoritos pessoais, marcar template morto, buscar pelo conteúdo) esbarram no mesmo fato: a tela é **do core** ([TemplatePicker.js](../web/static/js/components/contacts/TemplatePicker.js), 825 linhas) e o plugin `whatsapp_cloud` **não tem nenhum seam** para alcançá-la. O usuário decidiu resolver a causa: o modal inteiro passa a ser do plugin, e o vocabulário da Meta sai do core.
 >
@@ -535,10 +535,10 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** produção roda a versão nova, o modal é o do plugin e a permissão nova aparece na tela de Usuários.
 
 #### Status de execução — Fase F2
-**Estado:** 🟡 Parcial (2026-07-30) — zip regerado; **publicação e deploy pendentes com o usuário**
-- **O que foi feito:** `assets/channel_plugins/whatsapp_cloud-plugin.zip` regerado da fonte (32.771 → **56.011 bytes**), agora com `migrations/001_template_prefs.sql` e os 4 arquivos novos de `static/`.
-- **Problemas / pendências:** **(a)** publicar em `Techify-one/whatsbot-pro-plugins` — lembrando o achado da A1: o publicado (1.4.0) é estritamente mais velho e **não pode** ser a base; **(b)** instalar em produção pelo botão **Atualizar**; **(c)** conceder `plugin.whatsapp_cloud.template_archive` aos cargos — a chave nasce sem dono (D3), então até isso ninguém arquiva; **(d)** atualizar o CLAUDE.md com o `overrideComponent` e a mudança de dono do modal.
-- **Verificação:** estrutura do zip conferida arquivo a arquivo.
+**Estado:** 🟡 Parcial (2026-07-30) — **publicado**; falta o deploy em produção, que é do usuário
+- **O que foi feito:** **(1)** `assets/channel_plugins/whatsapp_cloud-plugin.zip` regerado da fonte (32.771 → **56.959 bytes**), com `migrations/001_template_prefs.sql` e os 4 arquivos novos de `static/`. **(2)** Publicado em `Techify-one/whatsbot-pro-plugins@a1a2a1b` — `plugins/whatsapp_cloud/{whatsapp_cloud.zip,whatsapp_cloud.json}` + `catalog.json` (1.4.0 → 1.8.0). **(3)** CLAUDE.md ganhou a seção "Override de componente (plano 92 · B1)" com a tabela de nomes, o congelamento na montagem, o aviso do fallback congelado e a `TemplateSpec`. **(4)** A descrição do `plugin.yaml` passou a citar as três funcionalidades (é o texto que o operador lê na tela Plugins), espelhada no `.json` publicado.
+- **Problemas / pendências:** **(a)** instalar em produção pelo botão **Atualizar**; **(b)** conceder `plugin.whatsapp_cloud.template_archive` aos cargos — a chave nasce sem dono (D3), então até isso ninguém arquiva.
+- **Verificação:** o zip foi validado pelos parsers REAIS antes de subir — `plugins.manifest.load_manifest` (id/versão/`migrations`/screens) e `plugins.migrator._split_statements` (5 statements, nenhum `;` de comentário partindo no lugar errado). Paridade contra o publicado conferida por símbolo: **nenhuma** rota ou função da 1.4.0 sumiu na 1.8.0 (`comm -23` sobre `def`/`@router.*` dos dois `routes.py`/`channels.py`).
 
 ---
 
