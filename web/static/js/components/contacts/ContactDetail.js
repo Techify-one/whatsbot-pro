@@ -5,7 +5,10 @@ import { sendMessage, sendImage, sendAudio, sendDocument, sendVideo } from '../.
 import { BackArrowIcon, DefaultAvatar, GroupAvatar, InfoIcon } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
-import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon } from './MessageContextMenu.js';
+import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon,
+         MailIcon, PhoneIcon, OpenExternalIcon, copyToClipboard } from './MessageContextMenu.js';
+import { entityFromElement, entityActions } from '../../services/messageEntities.js';
+import { notify } from '../../services/notify.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePickerHost } from './TemplatePickerHost.js';
 import { Slot } from '../../plugins/Slot.js';
@@ -39,6 +42,65 @@ const SelectManyIcon = () => html`
   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
     <path d="M3 5h2V3c-1.1 0-2 .9-2 2zm0 8h2v-2H3v2zm4 8h2v-2H7v2zM3 9h2V7H3v2zm10-6h-2v2h2V3zm6 0v2h2c0-1.1-.9-2-2-2zM5 21v-2H3c0 1.1.9 2 2 2zm-2-4h2v-2H3v2zM9 3H7v2h2V3zm2 18h2v-2h-2v2zm8-8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2zm0-12h2V7h-2v2zm0 8h2v-2h-2v2zm-4 4h2v-2h-2v2zm0-16h2V3h-2v2zM7 17h10V7H7v10zm2-8h6v6H9V9z"/>
   </svg>`;
+
+// ── Ações de ENTIDADE no menu da mensagem (plano 97 · F3) ────────
+//
+// O módulo puro `services/messageEntities.js` decide O QUE dá para fazer com o
+// link / e-mail / telefone sob o cursor; aqui só resolvemos a chave do ícone e
+// executamos (abrir / copiar). Sem entidade sob o cursor, nada disso aparece e o
+// menu fica byte-idêntico ao de sempre.
+const ENTITY_ICONS = { open: OpenExternalIcon, copy: CopyIcon, mail: MailIcon, phone: PhoneIcon };
+const COPY_TOASTS = {
+  'copy-url': 'Link copiado.',
+  'copy-email': 'E-mail copiado.',
+  'copy-phone': 'Número copiado.',
+  'copy-jid': 'Número copiado.',
+};
+
+// `mailto:` / `tel:` são entregues ao handler do sistema pela navegação normal —
+// abrir aba para eles deixaria uma janela em branco. Só http(s) vira aba nova.
+function openEntityHref(href) {
+  if (/^https?:/i.test(href)) window.open(href, '_blank', 'noopener,noreferrer');
+  else window.location.href = href;
+}
+
+function entityMenuItems(entity) {
+  return entityActions(entity).map((a) => ({
+    label: a.label,
+    icon: ENTITY_ICONS[a.icon] || LinkIcon,
+    onClick: () => {
+      if (a.href) { openEntityHref(a.href); return; }
+      copyToClipboard(a.copy);
+      notify(COPY_TOASTS[a.id] || 'Copiado.', { kind: 'success' });
+    },
+  }));
+}
+
+// A entidade sob o cursor. `e.target` pode ser um nó de texto (sem `closest`) ou
+// um `<svg>` da setinha de hover — os dois degradam para "nenhuma entidade".
+function entityUnderCursor(e) {
+  try {
+    const t = e && e.target;
+    if (!t) return null;
+    const el = typeof t.closest === 'function'
+      ? t.closest('[data-entity]')
+      : (t.parentElement ? t.parentElement.closest('[data-entity]') : null);
+    return entityFromElement(el);
+  } catch (_) { return null; }
+}
+
+// Texto selecionado DENTRO da bolha em que o menu abriu. Precisa ser lido no
+// momento da abertura (o clique fora fecha o menu e desfaz a seleção).
+const SELECTION_CAP = 5000;
+function selectionInside(e) {
+  try {
+    const sel = window.getSelection ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed) return '';
+    const container = e && e.currentTarget;
+    if (container && container.contains && sel.anchorNode && !container.contains(sel.anchorNode)) return '';
+    return String(sel.toString() || '').trim().slice(0, SELECTION_CAP);
+  } catch (_) { return ''; }
+}
 
 // Três pontinhos pulsando — a assinatura visual de "digitando" (Chatwoot/WhatsApp).
 // O atraso escalonado é inline porque o valor não existe como classe do Tailwind.
@@ -322,7 +384,16 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     const names = (contact && contact.is_group)
       ? autocomplete.members.map(m => m.name).filter(Boolean)
       : [];
-    return formatWhatsApp(text, names);
+    const out = formatWhatsApp(text, names);
+    // Em modo de seleção em lote o clique tem UM significado só: marcar a
+    // mensagem. Sem isto, clicar numa âncora marcaria a mensagem E abriria uma
+    // aba (a navegação é o default do <a>, que o onClick do container não
+    // cancela). Já valia para URL antes do plano 97; com e-mail e telefone
+    // linkificados, ficaria fácil de esbarrar. `pointer-events:none` entra no
+    // COMEÇO do style para não depender da ordem dos atributos.
+    return actions.selectionMode
+      ? out.replace(/(<a\b[^>]*\bstyle=")/g, '$1pointer-events:none;')
+      : out;
   }
 
   // Locate a quoted message by its provider msg_id (plano 75 F10).
@@ -399,8 +470,19 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // Plugins append their own items via the `filter.message.contextMenu.items`
   // seam (e.g. the "melhorias" plugin adds "Gerar melhoria"). Kept as a builder so
   // the filter runs on the CURRENT message each time the menu opens.
-  function buildBaseItems(message, isFromMe) {
+  function buildBaseItems(message, isFromMe, ctx = {}) {
+    // Bloco CONTEXTUAL (plano 97): só existe quando o botão direito caiu em cima
+    // de uma entidade ou havia texto selecionado. Vem ANTES dos itens da
+    // mensagem, separado por uma divisória.
+    const entityItems = entityMenuItems(ctx.entity || null);
+    const selectionText = ctx.selectionText || '';
     return [
+      ...(entityItems.length ? [...entityItems, { separator: true }] : []),
+      ...(selectionText ? [
+        { label: 'Copiar seleção', icon: CopyIcon,
+          onClick: () => { copyToClipboard(selectionText); notify('Seleção copiada.', { kind: 'success' }); } },
+        { separator: true },
+      ] : []),
       ...((canReply && !message.revoked && composer.mode !== 'private'
            && message.role !== 'private_note') ? [
         { label: 'Responder', icon: ReplyIcon,
@@ -440,7 +522,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     e.stopPropagation();
     const x = e.clientX || (e.currentTarget && e.currentTarget.getBoundingClientRect().left) || 0;
     const y = e.clientY || (e.currentTarget && e.currentTarget.getBoundingClientRect().bottom) || 0;
-    const base = buildBaseItems(message, isFromMe);
+    // Contexto do CLIQUE (plano 97 · F3) — lido AGORA, síncrono: depois do
+    // `await` abaixo o evento nativo já perdeu o `currentTarget`, e o clique que
+    // fecha o menu desfaria a seleção. Pela setinha de hover, o alvo é o botão
+    // (fora de qualquer entidade) → menu idêntico ao de sempre.
+    const entity = entityUnderCursor(e);
+    const selectionText = selectionInside(e);
+    const base = buildBaseItems(message, isFromMe, { entity, selectionText });
     let items = base;
     try {
       const out = await applyFilter('filter.message.contextMenu.items', base,
