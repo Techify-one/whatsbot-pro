@@ -495,13 +495,32 @@ def _visible_extras(scope: str, owner_ids: list[int]) -> dict[int, dict]:
 
 # ── Mapeamento de linhas ──────────────────────────────────────────────────────
 
+def _attach_effective_assignee(d: dict) -> dict:
+    """Atendente EFETIVO = definitivo (``assignee_user_id``) ?? provisório.
+
+    Derivado aqui, na borda, para que nenhum consumidor (lista, card do Kanban, detalhe,
+    tabela de atendimentos) re-implemente a regra. ``assignee_is_provisional`` é o que
+    liga o marcador visual "provisório" — e o filtro "Vínculo do atendente"."""
+    definitivo = d.get("assignee_user_id")
+    prov = d.get("provisional_assignee_user_id")
+    if definitivo is not None:
+        d["effective_assignee_user_id"] = definitivo
+        d["effective_assignee_name"] = d.get("assignee_name") or ""
+        d["assignee_is_provisional"] = False
+    else:
+        d["effective_assignee_user_id"] = prov
+        d["effective_assignee_name"] = d.get("provisional_assignee_name") or ""
+        d["assignee_is_provisional"] = prov is not None
+    return d
+
+
 def _proto_dict(row, extras: dict | None = None) -> dict:
     d = dict(row)
     d["obs"] = d.get("obs") or ""
     if extras is None:
         extras = _visible_extras("protocolo", [d["id"]]).get(d["id"], {})
     d["fields"] = extras  # só extras (do protocolo) com def atual (key → value)
-    return d
+    return _attach_effective_assignee(d)
 
 
 def _atendimento_dict(row, extras: dict | None = None) -> dict:
@@ -510,7 +529,7 @@ def _atendimento_dict(row, extras: dict | None = None) -> dict:
     if extras is None:
         extras = _visible_extras("atendimento", [d["id"]]).get(d["id"], {})
     d["fields"] = extras  # só extras (da atendimento) com def atual (key → value)
-    return d
+    return _attach_effective_assignee(d)
 
 
 # ── Espelho no core (conversations.custom_attributes) ─────────────────────────
@@ -1113,6 +1132,14 @@ def reopen_protocolo(atid: int) -> tuple[dict | None, str | None]:
     # Reabrir o protocolo é o atendente RETOMANDO o atendimento: cancela a devolução
     # automática à IA que estivesse pendente nas conversas deste protocolo.
     clear_ai_holds_of_protocolo(atid)
+    # Um protocolo FECHADO nunca é carimbado com o provisório (o histórico congela), então
+    # ao reabrir ele nasce sem — ressincroniza pela conversa mais recente. Também cobre o
+    # relink/merge, que reabrem o protocolo anterior depois de mover os ciclos.
+    _cv = _latest_conversation_of_protocolo(atid)
+    if _cv is not None:
+        _conv = conversation_repo.get(_cv) or {}
+        stamp_provisional_assignee(_cv, _conv.get("assignee_user_id"),
+                                   broadcast_changed=False)
     _broadcast_changed(at["contact_id"], atid)
     return get_protocolo(atid), None
 
@@ -1495,6 +1522,114 @@ def _conversation_ids_of_protocolo(atid: int) -> list[int]:
     return [int(r[0]) for r in rows]
 
 
+# ── Atendente PROVISÓRIO (espelho do atendente da CONVERSA) ───────────────────
+# O rótulo "Atendente" só vira DEFINITIVO (``assignee_user_id``) quando alguém salva o
+# formulário de Resolver/Finalizar (ou arrasta o card no Kanban). Enquanto isso, quem de
+# fato está cuidando do atendimento é o dono da CONVERSA no core — e o quadro mostrava
+# "Não atribuído". As colunas ``provisional_*`` (migration 019) espelham esse dono, o
+# agrupamento/filtro passam a usar o EFETIVO = COALESCE(definitivo, provisório) e o filtro
+# "Vínculo do atendente" isola os abertos que ainda não foram salvos com ninguém.
+#
+# O provisório é SÓ leitura/filtro: nunca entra em ``_effective_values``/``_missing_required``
+# (o campo obrigatório continua exigindo preenchimento consciente) e nunca semeia o form.
+
+def _user_display_name(uid) -> str:
+    """Nome do usuário do core p/ snapshot (name → email → '')."""
+    if uid is None:
+        return ""
+    try:
+        u = user_repo.get(int(uid)) or {}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: nome do usuário %s não resolvido: %s", uid, e)
+        return ""
+    return str(u.get("name") or u.get("email") or "")
+
+
+def _write_provisional(sql_tail: str, params: dict, uid, name: str, ts: float) -> bool:
+    """UPDATE do provisório em uma das duas tabelas. Devolve se ALGUMA linha mudou.
+
+    O ``IS DISTINCT FROM`` no WHERE é o que torna a sincronização idempotente e barata:
+    no caminho quente (uma mensagem qualquer) nada muda ⇒ nenhuma linha é escrita e o
+    índice do Kanban não é invalidado."""
+    try:
+        with make_plugin_db() as conn:
+            res = conn.execute(text(sql_tail), {**params, "puid": uid,
+                                                "pname": name or "", "ts": ts})
+        return bool(res.rowcount)
+    except Exception as e:  # noqa: BLE001 — sincronizar provisório nunca quebra o caller
+        logger.debug("protocolos: gravar atendente provisório falhou: %s", e)
+        return False
+
+
+def _write_provisional_protocolo(atid: int, uid, name: str, ts: float) -> bool:
+    """Protocolo ABERTO — um fechado nunca é re-carimbado (o histórico congela)."""
+    return _write_provisional(
+        "UPDATE plugin_protocolos_protocolos SET provisional_assignee_user_id = :puid, "
+        "provisional_assignee_name = :pname, provisional_set_at = :ts WHERE id = :id "
+        "AND status = 'aberto' AND provisional_assignee_user_id IS DISTINCT FROM :puid",
+        {"id": int(atid)}, uid, name, ts)
+
+
+def _write_provisional_cycles(conversation_id: int, uid, name: str, ts: float) -> bool:
+    """Ciclo(s) ABERTO(s) desta conversa (``ended_at IS NULL``)."""
+    return _write_provisional(
+        "UPDATE plugin_protocolos_atendimentos SET provisional_assignee_user_id = :puid, "
+        "provisional_assignee_name = :pname, provisional_set_at = :ts "
+        "WHERE conversation_id = :cv AND ended_at IS NULL "
+        "AND provisional_assignee_user_id IS DISTINCT FROM :puid",
+        {"cv": int(conversation_id)}, uid, name, ts)
+
+
+def stamp_provisional_assignee(conversation_id: int, assignee_user_id,
+                               *, broadcast_changed: bool = True) -> bool:
+    """Espelha nas entidades do plugin o atendente NATIVO da conversa (o "provisório").
+
+    Toca o protocolo ABERTO dono da conversa + o(s) ciclo(s) ABERTO(s) dela.
+    ``assignee_user_id=None`` LIMPA (conversa desatribuída / assumida pela IA).
+    Devolve se algo de fato mudou. Nunca levanta.
+
+    O broadcast só sai quando alguma linha mudou: bumpar a geração do índice a cada
+    mensagem derrubaria o cache do Kanban de todas as réplicas sem motivo."""
+    try:
+        cid = int(conversation_id)
+    except (TypeError, ValueError):
+        return False
+    uid = None
+    if assignee_user_id is not None and str(assignee_user_id).strip() != "":
+        try:
+            uid = int(assignee_user_id)
+        except (TypeError, ValueError):
+            return False
+    name = _user_display_name(uid)
+    ts = now()
+    atid = _protocolo_id_of_conversation(cid)
+    changed = _write_provisional_cycles(cid, uid, name, ts)
+    if atid is not None:
+        changed = _write_provisional_protocolo(atid, uid, name, ts) or changed
+    if changed and broadcast_changed:
+        at = get_protocolo(atid) if atid is not None else None
+        _broadcast_changed((at or {}).get("contact_id"), atid)
+    return changed
+
+
+def _sync_provisional_from_conv(conv: dict, proto: dict | None, cycle: dict | None) -> None:
+    """Sincroniza o provisório comparando EM MEMÓRIA — sem query extra no caminho quente.
+
+    Existe porque nem toda atribuição emite evento: o "atendente padrão do canal" é
+    carimbado direto no repo do core (``conversation_repo.resolve_for_contact_ex``), no
+    NASCIMENTO e na REABERTURA da conversa. Como ``on_inbound``/``on_outbound`` já têm a
+    conversa e as entidades em mãos, basta comparar e só então escrever."""
+    try:
+        conv = conv or {}
+        want = conv.get("assignee_user_id")
+        stale = [e for e in (proto, cycle) if e is not None
+                 and e.get("provisional_assignee_user_id") != want]
+        if stale:
+            stamp_provisional_assignee(conv.get("id"), want)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: sincronizar provisório falhou: %s", e)
+
+
 def _propagate_assignee_to_conversations(atend_ids: list[int],
                                          assignee_user_id: int | None) -> None:
     """Espelha o atendente do protocolo nas ATENDIMENTOS do core (``assignee_user_id``)
@@ -1506,6 +1641,11 @@ def _propagate_assignee_to_conversations(atend_ids: list[int],
             atend = conversation_repo.set_assignee(cid, assignee_user_id)
             if not atend:
                 continue
+            # O core NÃO emite evento de atribuição aqui (``set_assignee`` é um UPDATE
+            # puro), então o provisório precisa ser sincronizado na mão — senão um card
+            # arrastado para "Não atribuído" voltaria para a coluna do provisório antigo.
+            # Sem broadcast: os dois call sites já chamam ``_broadcast_changed``.
+            stamp_provisional_assignee(cid, assignee_user_id, broadcast_changed=False)
             broadcast("conversation_assigned", {
                 "conversation_id": atend.get("id"),
                 "display_id": atend.get("display_id"),
@@ -1664,7 +1804,7 @@ def _list_clause(sql: str, params: dict):
 def list_protocolos(*, status=None, assignee_user_id=None,
                       contact_id: int | None = None, q: str | None = None,
                       opened_from: float | None = None, opened_to: float | None = None,
-                      attr_filters: dict | None = None, nota=None,
+                      attr_filters: dict | None = None, nota=None, vinculo=None,
                       include_archived: bool = False,
                       limit: int = 200, offset: int = 0) -> dict:
     """Página de protocolos como envelope ``{items, total, has_more}`` (plano 50).
@@ -1679,16 +1819,27 @@ def list_protocolos(*, status=None, assignee_user_id=None,
     off = clamp_offset(offset)
     where, params = _build_list_where(
         status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
-        opened_from=opened_from, opened_to=opened_to, nota=nota,
+        opened_from=opened_from, opened_to=opened_to, nota=nota, vinculo=vinculo,
         include_archived=include_archived)
     base = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
             + " ORDER BY (status = 'aberto') DESC, opened_at DESC")
     return _list_page(base, where, params, af_src=attr_filters, lim=lim, off=off)
 
 
+# Filtro "Vínculo do atendente" — allowlist fechada (o SQL é interpolado, nunca bindado).
+# Combina com ``status=aberto`` para o recorte pedido: "abertos ainda não salvos com
+# ninguém, mas com a conversa atribuída".
+_VINCULO_SQL = {
+    "definitivo": "assignee_user_id IS NOT NULL",
+    "provisorio": "(assignee_user_id IS NULL AND provisional_assignee_user_id IS NOT NULL)",
+    "sem": "(assignee_user_id IS NULL AND provisional_assignee_user_id IS NULL)",
+}
+
+
 def _build_list_where(*, status=None, assignee_user_id=None, contact_id=None,
                       q: str | None = None, opened_from=None, opened_to=None,
-                      nota=None, include_archived: bool = False) -> tuple[list[str], dict]:
+                      nota=None, vinculo=None,
+                      include_archived: bool = False) -> tuple[list[str], dict]:
     """WHERE + params da listagem de protocolos.
 
     Extraído de ``list_protocolos`` para ser COMPARTILHADO com o índice de agrupamento
@@ -1732,8 +1883,18 @@ def _build_list_where(*, status=None, assignee_user_id=None, contact_id=None,
         except (TypeError, ValueError):
             pass
     if auids:
-        where.append("assignee_user_id IN :auids")
+        # Atendente EFETIVO: o filtro nativo acha também os protocolos que só têm o
+        # atendente PROVISÓRIO (conversa atribuída, formulário ainda não salvo). Coberto
+        # pelo índice de expressão da migration 019.
+        where.append("COALESCE(assignee_user_id, provisional_assignee_user_id) IN :auids")
         params["auids"] = auids
+    # Vínculo do atendente (multi-seleção → OR). Fica no SQL, e não no avaliador Python de
+    # `attr_filters`: é predicado puro de coluna, e em Python ligaria o caminho de scan-cap
+    # (total/has_more virariam limite-inferior) e precisaria ser replicado no índice.
+    vincs = [v for v in (vinculo if isinstance(vinculo, list) else [vinculo])
+             if v in _VINCULO_SQL]
+    if vincs:
+        where.append("(" + " OR ".join(_VINCULO_SQL[v] for v in dict.fromkeys(vincs)) + ")")
     if contact_id is not None:
         where.append("contact_id = :cid")
         params["cid"] = contact_id
@@ -1830,7 +1991,8 @@ def scan_protocolos(filters: dict, cap: int):
         status=f.get("status"), assignee_user_id=f.get("assignee_user_id"),
         contact_id=f.get("contact_id"), q=f.get("q"),
         opened_from=f.get("opened_from"), opened_to=f.get("opened_to"),
-        nota=f.get("nota"), include_archived=bool(f.get("include_archived")))
+        nota=f.get("nota"), vinculo=f.get("vinculo"),
+        include_archived=bool(f.get("include_archived")))
     sql = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
            + " ORDER BY (status = 'aberto') DESC, opened_at DESC LIMIT :scan")
     with make_plugin_db() as conn:
@@ -2687,7 +2849,8 @@ def on_inbound(ctx, payload: dict) -> None:
         at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
             conversation_id=atend["id"], announce_open=True, opener=opener)
-        ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
+        cyc = ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
+        _sync_provisional_from_conv(atend, at, cyc)
     except Exception as e:  # noqa: BLE001 — um handler que falha nunca quebra o pipeline
         logger.debug("protocolos.on_inbound falhou: %s", e)
 
@@ -2720,9 +2883,13 @@ def on_outbound(ctx, payload: dict) -> None:
         # Conversa FECHADA (ex.: a mensagem de avaliação do fechar, enviada com
         # reopen=False) → só bootstrap: nunca abre ciclo logo após uma resolução.
         if (atend.get("status") or "") != "closed":
-            ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
+            cyc = ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
         else:
+            # Conversa fechada: o ciclo (se existir) já foi resolvido, então só o
+            # protocolo entra na sincronização do provisório.
             ensure_cycle_exists(atend["id"], contact["id"], at["id"], opener=opener)
+            cyc = None
+        _sync_provisional_from_conv(atend, at, cyc)
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos.on_outbound falhou: %s", e)
 
@@ -4142,7 +4309,48 @@ def on_conversation_ai_toggled(ctx, payload: dict) -> None:
 
 
 def on_conversation_assigned(ctx, payload: dict) -> None:
-    """``conversation.assigned`` → alguém mexeu na posse durante a janela.
+    """``conversation.assigned`` E ``conversation.unassigned`` — DOIS efeitos independentes,
+    cada um no seu ``try`` (um não pode calar o outro):
+
+    1. posse temporária (hold da IA) — comportamento 1.22.0, inalterado;
+    2. atendente PROVISÓRIO — espelha ``assignee_user_id`` no protocolo + ciclo aberto.
+
+    Os dois nomes de evento carregam o MESMO payload (``conversation_service._broadcast``)
+    e o único discriminante é o valor de ``assignee_user_id``: ``None`` (desatribuir,
+    ``assign_unified(kind="none")`` ou a IA assumindo) LIMPA o provisório."""
+    payload = payload or {}
+    conv_id = payload.get("conversation_id") or payload.get("id")
+    if not conv_id:
+        return
+    try:
+        _ai_hold_on_assigned(payload)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_assigned (hold) falhou: %s", e)
+    try:
+        stamp_provisional_assignee(int(conv_id), payload.get("assignee_user_id"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_assigned (provisório) falhou: %s", e)
+
+
+def on_conversation_transferred_to_human(ctx, payload: dict) -> None:
+    """``conversation.transferred_to_human`` — o único caminho de atribuição que grava
+    direto no repo do core (``agent/tools/transfer_to_human.py``) sem emitir evento de
+    atribuição. O payload não carrega ``assignee_user_id``, então relemos a conversa: o
+    default da tool é DESATRIBUIR, mas o filtro ``filter.conversation.assignment`` pode
+    redirecionar a um humano."""
+    try:
+        payload = payload or {}
+        conv_id = payload.get("conversation_id") or payload.get("id")
+        if not conv_id:
+            return
+        conv = conversation_repo.get(int(conv_id)) or {}
+        stamp_provisional_assignee(int(conv_id), conv.get("assignee_user_id"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_transferred_to_human falhou: %s", e)
+
+
+def _ai_hold_on_assigned(payload: dict) -> None:
+    """Alguém mexeu na posse durante a janela do hold.
 
     Passou para um AGENTE de IA (``active_agent_key``) ⇒ o hold perdeu a razão de ser.
     Passou para outro humano ⇒ atualiza o dono e mantém o prazo (a conversa continua

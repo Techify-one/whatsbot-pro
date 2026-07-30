@@ -124,10 +124,11 @@ def _normalized_filters(filters) -> dict:
         "status": f.get("status"), "assignee_user_id": f.get("assignee_user_id"),
         "contact_id": f.get("contact_id"), "q": f.get("q"),
         "opened_from": f.get("opened_from"), "opened_to": f.get("opened_to"),
-        # `nota` e `include_archived` entram na CHAVE porque mudam o recorte varrido por
-        # `scan_protocolos`; fora daqui, trocar o filtro de avaliação serviria o índice
-        # antigo do cache.
-        "nota": f.get("nota"), "include_archived": bool(f.get("include_archived")),
+        # `nota`, `vinculo` e `include_archived` entram na CHAVE porque mudam o recorte
+        # varrido por `scan_protocolos`; fora daqui, trocar o filtro de avaliação (ou o de
+        # vínculo do atendente) serviria o índice antigo do cache.
+        "nota": f.get("nota"), "vinculo": f.get("vinculo"),
+        "include_archived": bool(f.get("include_archived")),
         "attr_filters": {str(k): af[k] for k in sorted(af)} if af else {},
     }
 

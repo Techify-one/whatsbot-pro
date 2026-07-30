@@ -1,7 +1,7 @@
 // node --test storages/plugins/protocolos/static/proto_fields.test.js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { seedProtocolValues, seedResolveValues, mergeSeed, isMultiDef } from './proto_fields.js';
+import { seedProtocolValues, seedResolveValues, mergeSeed, isMultiDef, effectiveAssignee } from './proto_fields.js';
 
 const ATENDENTE = { key: 'atendente', label: 'Atendente', type: 'atendente', required: true };
 const OBS = { key: 'obs', label: 'Observações', type: 'textarea' };
@@ -141,4 +141,50 @@ test('mergeSeed é idempotente e devolve a MESMA referência quando não há o q
 test('mergeSeed tolera current nulo', () => {
   assert.deepEqual(mergeSeed(null, { a: '1' }), { a: '1' });
   assert.deepEqual(mergeSeed(undefined, {}), {});
+});
+
+// ── effectiveAssignee (atendente provisório) ────────────────────────────────
+test('effectiveAssignee: definitivo ganha do provisório', () => {
+  assert.deepEqual(effectiveAssignee({
+    assignee_user_id: 3, assignee_name: 'Ana',
+    provisional_assignee_user_id: 7, provisional_assignee_name: 'Bia',
+  }), { id: 3, name: 'Ana', provisional: false });
+});
+
+test('effectiveAssignee: só provisório marca provisional', () => {
+  assert.deepEqual(effectiveAssignee({
+    assignee_user_id: null, provisional_assignee_user_id: 7, provisional_assignee_name: 'Bia',
+  }), { id: 7, name: 'Bia', provisional: true });
+});
+
+test('effectiveAssignee: nenhum dos dois → vazio', () => {
+  assert.deepEqual(effectiveAssignee({ assignee_user_id: null, provisional_assignee_user_id: null }),
+    { id: null, name: '', provisional: false });
+  assert.deepEqual(effectiveAssignee({}), { id: null, name: '', provisional: false });
+  assert.deepEqual(effectiveAssignee(null), { id: null, name: '', provisional: false });
+});
+
+test('effectiveAssignee: string vazia conta como ausente', () => {
+  assert.deepEqual(effectiveAssignee({ assignee_user_id: '', provisional_assignee_user_id: 7 }),
+    { id: 7, name: '', provisional: true });
+  assert.deepEqual(effectiveAssignee({ assignee_user_id: '  ', provisional_assignee_user_id: '  ' }),
+    { id: null, name: '', provisional: false });
+});
+
+// REGRESSÃO (decisão de produto): o provisório NUNCA semeia o formulário. Ele existe só
+// para ver/filtrar — o rótulo obrigatório "Atendente" continua exigindo escolha consciente.
+test('seedProtocolValues IGNORA o atendente provisório', () => {
+  const at = { assignee_user_id: null, provisional_assignee_user_id: 9, provisional_assignee_name: 'Bia' };
+  assert.equal(seedProtocolValues([ATENDENTE], at, { defaultAssignee: 7 }).atendente, '7');
+  // Sem usuário logado o campo nasce VAZIO (e não com o provisório) → segue bloqueando.
+  assert.equal(seedProtocolValues([ATENDENTE], at, {}).atendente, '');
+});
+
+test('seedResolveValues IGNORA o atendente provisório', () => {
+  // O popup de resolver só enxerga `initialValues` + `defaultAssignee` — nunca a linha do
+  // protocolo/ciclo. Estruturalmente não há por onde o provisório entrar; o teste trava
+  // isso. (Aqui o valor sai como NÚMERO: seedResolveValues repassa o defaultAssignee cru,
+  // ao contrário de seedProtocolValues, que stringifica.)
+  assert.equal(seedResolveValues([ATENDENTE], { defaultAssignee: 7 }).atendente, 7);
+  assert.equal(seedResolveValues([ATENDENTE], {}).atendente, '');
 });

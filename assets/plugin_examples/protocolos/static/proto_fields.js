@@ -18,6 +18,30 @@
 export const isMultiDef = (d) => (d && (d.type === 'checkboxes'
   || (d.type === 'select' && d.multiple)));
 
+// Atendente EFETIVO de uma linha de protocolo ou de ciclo: o DEFINITIVO
+// (`assignee_user_id`, salvo no formulário de Resolver/Finalizar) e, na falta dele, o
+// PROVISÓRIO (`provisional_assignee_user_id` — o dono da CONVERSA no core, espelhado pelo
+// backend). Espelha `logic._attach_effective_assignee` e `grouping._grouping_atendente`.
+//
+// Fica NESTE módulo (puro, sem imports) para ser testável em `node --test`: o
+// agrupamento do Kanban do frontend precisa da mesma regra do backend, e o
+// `protocolos_tab.js` arrasta preact/htm.
+//
+// `provisional: true` é o que liga o marcador visual "provisório" na UI. String vazia
+// conta como ausente (o backend devolve inteiro ou null, mas o form devolve string).
+export function effectiveAssignee(row) {
+  const r = row || {};
+  const def = r.assignee_user_id;
+  if (def != null && String(def).trim() !== '') {
+    return { id: def, name: r.assignee_name || '', provisional: false };
+  }
+  const prov = r.provisional_assignee_user_id;
+  if (prov != null && String(prov).trim() !== '') {
+    return { id: prov, name: r.provisional_assignee_name || '', provisional: true };
+  }
+  return { id: null, name: '', provisional: false };
+}
+
 // Valores iniciais do form a partir das definições + do protocolo carregado.
 // Regras (idênticas às que rodavam inline no DetailModal):
 //  - `atendente`: mantém o assignee JÁ salvo; só sugere o usuário logado

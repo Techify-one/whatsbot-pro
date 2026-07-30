@@ -177,7 +177,13 @@ def _grouping_status() -> Grouping:
 
 
 def _grouping_atendente(users) -> Grouping:
-    """Colunas = "Não atribuído" + UMA por usuário ativo (não só os assignees presentes)."""
+    """Colunas = "Não atribuído" + UMA por usuário ativo (não só os assignees presentes).
+
+    Classifica pelo atendente EFETIVO: o definitivo (``assignee_user_id``, salvo no
+    formulário de Resolver/Finalizar) e, na falta dele, o PROVISÓRIO (o dono da conversa
+    no core). Lê as colunas CRUAS de propósito — este módulo é puro e recebe dicts
+    montados à mão nos testes. Ids de coluna ficam inalterados (``u:<id>``/``__none__``),
+    então o ``column_order`` das views salvas continua válido."""
     cols = [{"id": COL_NONE, "label": "Não atribuído"}]
     for u in (users or []):
         uid = u.get("id")
@@ -185,6 +191,8 @@ def _grouping_atendente(users) -> Grouping:
 
     def _cid(row):
         a = row.get("assignee_user_id")
+        if a is None:
+            a = row.get("provisional_assignee_user_id")
         return f"u:{a}" if a is not None else COL_NONE
 
     def _label_for(col_id):   # usuário fora da lista (inativo/removido) ainda ganha coluna
