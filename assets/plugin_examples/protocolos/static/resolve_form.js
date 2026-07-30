@@ -11,8 +11,8 @@ import htm from 'htm';
 import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
 // Lista de atendentes atribuíveis (mesma de "Atribuir atendente") p/ o tipo "atendente".
 import { getAssignableAgents } from '/static/js/services/api.js';
-// Regra "o valor deste campo é uma lista?" — módulo puro, compartilhado com o seed.
-import { isMultiDef } from '/plugins/protocolos/static/proto_fields.js';
+// Regra "o valor deste campo é uma lista?" + a semeadura do formulário — módulo puro.
+import { isMultiDef, seedResolveValues } from '/plugins/protocolos/static/proto_fields.js';
 
 const html = htm.bind(h);
 
@@ -128,32 +128,17 @@ function isFilled(def, v) {
 }
 
 // Popup do beforeResolve. Mostra só os rótulos do protocolo (`defs` — escopo atendimento:
-// OBS + extras), pré-preenchidos com os valores atuais da atendimento (`initialValues` =
-// conversations.custom_attributes, o que foi salvo na aba "Informações do atendimento").
-// Os atributos personalizados de CONVERSA do core não fazem mais parte do plugin.
+// OBS + extras) e nasce SEMPRE EM BRANCO: o call site não passa `initialValues`, porque
+// semear com os valores da conversa fazia cada atendimento herdar o anterior (ver o
+// comentário no extends.js). `initialValues` fica como seam para quem queira semear algo
+// explicitamente. Os atributos personalizados de CONVERSA do core não fazem mais parte do
+// plugin. O rótulo "Atendente" nasce em `defaultAssignee` = quem clicou em Resolver.
 // Os botões de finalizar ("Resolver" e "Resolver e ir ao protocolo") só habilitam
 // quando todos os obrigatórios estão preenchidos. onOk devolve { fields, goTo } —
 // goTo=true só no botão "ir ao protocolo".
 export function ResolveForm({ defs = [], initialValues = {}, defaultAssignee = null,
                               defaultAssigneeName = null, onOk, onCancel }) {
-  const init0 = initialValues || {};
-  const [vals, setVals] = useState(() => {
-    const init = {};
-    for (const d of defs) {
-      const cur = init0[d.key];
-      if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
-      else if (d.type === 'atendente') {
-        // Valor PADRÃO = usuário conectado quando não há atendente já definido. Não impede
-        // trocar de atendente nem escolher "Não atribuído" depois — só semeia o campo.
-        const seeded = (cur == null || String(cur).trim() === '') ? defaultAssignee : cur;
-        init[d.key] = (seeded == null ? '' : seeded);
-      }
-      else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
-        ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
-      else init[d.key] = (cur == null ? '' : String(cur));
-    }
-    return init;
-  });
+  const [vals, setVals] = useState(() => seedResolveValues(defs, { initialValues, defaultAssignee }));
 
   const missing = defs.filter((d) => d.required && !isFilled(d, vals[d.key])).map((d) => d.label || d.key);
   const allRequired = missing.length === 0;

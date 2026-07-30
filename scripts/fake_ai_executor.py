@@ -19,6 +19,8 @@ O que dá para exercitar (comandos digitados no chat do painel):
     /sobrecarga   frame `overloaded`
     /limite401    `rate_limited` cujo TEXTO cita um 401 — o falso positivo que a
                   heurística antiga tratava como sessão expirada
+    /prosa401     análise LEGÍTIMA que cita um 401 em prosa, persistida pelo
+                  write-through — antes matava a sessão global, hoje é bolha comum
     /legado       401 como resposta da IA, sem kind (executor antigo)
     /tool         cartão de ferramenta (running → done)
     /aprovacao    registra uma aprovação ✓/✕ e espera a decisão
@@ -37,6 +39,12 @@ Controle em runtime, sem reiniciar (não exige HMAC, só localhost):
 
     curl -X POST 127.0.0.1:8099/_fake/mode -d '{"mode":"dead"}'
     curl 127.0.0.1:8099/_fake/state
+
+Tipagem do write-through (plano 62 · B): por padrão todo ``POST /messages``
+carrega a chave ``kind`` — com ``null`` quando não é falha —, que é como o
+executor TIPADO declara "confie na etiqueta, não leia o texto". A flag
+``--legacy-untyped`` OMITE a chave e simula o executor antigo, sem precisar de um
+executor antigo de verdade. (``/legado`` omite a chave sempre: ele É o antigo.)
 """
 
 from __future__ import annotations
@@ -52,6 +60,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 logger = logging.getLogger("fake-executor")
@@ -76,6 +85,7 @@ HELP = """**Executor falso** — comandos disponíveis:
 - `/cota` — frame `quota_exceeded` (sem crédito)
 - `/sobrecarga` — frame `overloaded`
 - `/limite401` — `rate_limited` cujo TEXTO cita um 401 (teste do falso positivo)
+- `/prosa401` — análise LEGÍTIMA citando um 401 em prosa (NÃO é falha)
 - `/legado` — 401 como resposta da IA, sem `kind` (executor antigo)
 - `/tool` — cartão de ferramenta
 - `/aprovacao` — cartão de aprovação ✓/✕
@@ -126,6 +136,12 @@ class Conversation:
 TOKEN_TTL_SEC = 8 * 3600
 
 
+def iso_utc(ts: float) -> str:
+    """Epoch → ISO 8601 UTC com milissegundos e `Z`, como o executor real."""
+    return (datetime.fromtimestamp(ts, timezone.utc)
+            .isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+
+
 class State:
     def __init__(self):
         self.lock = threading.RLock()
@@ -136,6 +152,9 @@ class State:
         self.secret = ""
         self.allow_mutations = False
         self.verify = True
+        # Plano 62 · B: ligada, OMITE a chave ``kind`` do write-through e finge
+        # ser o executor antigo (o gateway cai na heurística estrita).
+        self.legacy_untyped = False
 
     def renew(self) -> None:
         """Sessão viva de novo: o relógio do TTL recomeça."""
@@ -206,8 +225,27 @@ def emit(conv: Conversation, event: str, data: dict) -> None:
     conv.events.put((event, data))
 
 
+def persist_message(conv: Conversation, payload: dict, *,
+                    typed: bool | None = None) -> dict | None:
+    """Write-through de mensagem, com a declaração de tipagem do plano 62 · B.
+
+    O executor TIPADO manda a chave ``kind`` SEMPRE — ``null`` quando não é falha
+    — e é a PRESENÇA dela que diz ao gateway "confie na etiqueta, não leia o
+    texto". ``typed=False`` omite a chave (executor antigo); ``typed=None`` segue
+    a flag global ``--legacy-untyped``.
+    """
+    if typed is None:
+        typed = not STATE.legacy_untyped
+    body = dict(payload)
+    if typed:
+        body.setdefault("kind", None)
+    else:
+        body.pop("kind", None)
+    return call_gateway(conv, "/messages", body)
+
+
 def say(conv: Conversation, text: str, *, persist: bool = True,
-        chunk_delay: float = 0.03) -> None:
+        chunk_delay: float = 0.03, typed: bool | None = None) -> None:
     """Streama uma mensagem do assistant e a persiste via write-through — o
     mesmo par (SSE + POST /messages) que o executor real faz."""
     mid = "m-" + secrets.token_hex(5)
@@ -219,8 +257,8 @@ def say(conv: Conversation, text: str, *, persist: bool = True,
         time.sleep(chunk_delay)
     emit(conv, "message_end", {"messageId": mid, "content": text})
     if persist:
-        call_gateway(conv, "/messages", {
-            "conversation_id": conv.id, "role": "assistant", "content": text})
+        persist_message(conv, {"conversation_id": conv.id, "role": "assistant",
+                               "content": text}, typed=typed)
 
 
 # ── Turnos ───────────────────────────────────────────────────────────────────
@@ -313,11 +351,27 @@ def _run_turn(conv: Conversation, text: str) -> None:
         fail(conv, "auth_required", auth_error_text(conv))
         return
 
+    if cmd == "/prosa401":
+        # Reprodução do bug do plano 62: análise LEGÍTIMA que cita um 401 como
+        # ASSUNTO. Antes, a regex sobre o conteúdo da IA concluía "sessão
+        # expirada", derrubava a sessão GLOBAL e bloqueava conversa nova. Hoje
+        # tem de virar uma bolha comum — nos dois modos (tipado e legado, porque
+        # o texto não tem marcador literal do SDK).
+        say(conv, "**Diagnóstico**\n\nO problema não é do agente: o endpoint do "
+                  "cliente devolveu 401 durante a consulta de pedido, então a "
+                  "tool falhou e o agente improvisou.\n\n**Recomendações**\n\n"
+                  "- Oriente o agente a avisar que a consulta está indisponível "
+                  "em vez de inventar prazo.\n- Peça ao time de integração para "
+                  "revalidar a credencial que está retornando 401.")
+        return
+
     if cmd == "/legado":
         # Executor ANTIGO: 401 entregue como resposta da IA, em HTTP 200, sem
-        # kind nenhum — exercita a rede de segurança do write-through.
+        # kind nenhum — exercita a rede de segurança do write-through. A chave é
+        # omitida SEMPRE (`typed=False`): este comando É o executor antigo, então
+        # não segue a flag global.
         logger.info("conversa %s: 401 pelo caminho legado (write-through)", conv.id)
-        say(conv, auth_error_text(conv))
+        say(conv, auth_error_text(conv), typed=False)
         return
 
     if cmd == "/viver":
@@ -361,7 +415,7 @@ def _run_turn(conv: Conversation, text: str) -> None:
             "toolCallId": tid,
             "output": f"{len(agents)} agente(s)" if ok else None,
             "error": None if ok else (res or {}).get("error", "falhou")})
-        call_gateway(conv, "/messages", {
+        persist_message(conv, {
             "conversation_id": conv.id, "role": "tool", "tool_name": "listar_agentes",
             "tool_input": {"scope": "todos"},
             "tool_result": f"{len(agents)} agente(s)" if ok else "erro"})
@@ -508,17 +562,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         path = self.path.split("?")[0]
         if path == "/health":
-            # `expires_at` (epoch, segundos) é o que destrava o monitor
-            # preventivo: dá para avisar ANTES de o token morrer em vez de
-            # reagir depois. `None` quando a sessão já está morta.
-            self._json({"ok": True, "claude": {
+            # `expires_at` é o que destrava o monitor preventivo (fase 2): dá
+            # para avisar ANTES de o token morrer em vez de reagir depois.
+            # `None` quando a sessão já está morta.
+            #
+            # FORMATO ESPELHA O EXECUTOR REAL: string ISO 8601 em UTC com
+            # milissegundos e sufixo `Z` (ex.: "2026-07-29T19:09:18.334Z"), NÃO
+            # epoch. O real também manda `service`. Se este falso divergir, o
+            # monitor da fase 2 nasce testado contra o formato errado.
+            self._json({"ok": True, "service": "whatsbot-ai-server", "claude": {
                 "authenticated": STATE.authenticated,
-                "expires_at": STATE.expires_at if STATE.authenticated else None}})
+                "mode": "oauth",
+                "expires_at": iso_utc(STATE.expires_at) if STATE.authenticated else None,
+                **({} if STATE.authenticated else {"reason": "token_expired"})}})
             return
         if path == "/_fake/state":
             with STATE.lock:
                 self._json({"authenticated": STATE.authenticated,
                             "allow_mutations": STATE.allow_mutations,
+                            "legacy_untyped": STATE.legacy_untyped,
                             "conversations": list(STATE.convs)})
             return
         if not self._check_hmac(""):
@@ -724,6 +786,9 @@ def main() -> None:
                     help="deixa o /mutacao GRAVAR o prompt do agente de verdade")
     ap.add_argument("--insecure", action="store_true",
                     help="não valida a assinatura HMAC de entrada (debug)")
+    ap.add_argument("--legacy-untyped", action="store_true",
+                    help="OMITE a chave 'kind' do write-through (finge ser o "
+                         "executor antigo, sem declaração de tipagem)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -736,12 +801,15 @@ def main() -> None:
         STATE.authenticated = False
     STATE.allow_mutations = args.allow_mutations
     STATE.verify = not args.insecure
+    STATE.legacy_untyped = args.legacy_untyped
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
-    logger.info("executor FALSO em http://%s:%s (modo=%s, mutações=%s)",
+    logger.info("executor FALSO em http://%s:%s (modo=%s, mutações=%s, "
+                "write-through=%s)",
                 args.host, args.port, args.mode,
-                "ON" if args.allow_mutations else "OFF")
+                "ON" if args.allow_mutations else "OFF",
+                "SEM kind (legado)" if args.legacy_untyped else "tipado")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

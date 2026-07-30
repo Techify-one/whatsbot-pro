@@ -1,7 +1,7 @@
 // node --test storages/plugins/protocolos/static/proto_fields.test.js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { seedProtocolValues, mergeSeed, isMultiDef } from './proto_fields.js';
+import { seedProtocolValues, seedResolveValues, mergeSeed, isMultiDef } from './proto_fields.js';
 
 const ATENDENTE = { key: 'atendente', label: 'Atendente', type: 'atendente', required: true };
 const OBS = { key: 'obs', label: 'Observações', type: 'textarea' };
@@ -76,6 +76,46 @@ test('campos comuns viram string; nulo vira vazio', () => {
 
 test('def sem key é ignorada (defesa contra config corrompida)', () => {
   assert.deepEqual(seedProtocolValues([null, {}, { key: 'a', type: 'text' }], {}), { a: '' });
+});
+
+// ── seedResolveValues (popup "Resolver atendimento") ────────────────────────
+// Regressão: o popup semeava com conversations.custom_attributes (o espelho da
+// resolução ANTERIOR, acumulativo e compartilhado entre operadores na mesma conversa),
+// então "Observações = teste 2" reaparecia no atendimento seguinte. Agora nasce vazio.
+const RESULTADO = { key: 'resultado', label: 'Resultado', type: 'select', options: ['Resolvido'] };
+const TIPOS = { key: 'tipos', label: 'Tipos', type: 'checkboxes', options: ['a', 'b'] };
+const FLAG = { key: 'ok', label: 'Ok', type: 'checkbox' };
+
+test('sem initialValues todo campo nasce vazio — nada é herdado do atendimento anterior', () => {
+  const vals = seedResolveValues([OBS, RESULTADO, TIPOS, FLAG], { defaultAssignee: 7 });
+  assert.deepEqual(vals, { obs: '', resultado: '', tipos: [], ok: false });
+});
+
+test('atendente nasce com o usuário logado (quem clicou em Resolver)', () => {
+  assert.equal(seedResolveValues([ATENDENTE], { defaultAssignee: 7 }).atendente, 7);
+  // Vazio explícito ('' / null) também cai no logado — é o caso do beforeResolve, que
+  // deixou de semear o assignee da conversa de propósito.
+  assert.equal(seedResolveValues([ATENDENTE],
+    { initialValues: { atendente: '' }, defaultAssignee: 7 }).atendente, 7);
+  assert.equal(seedResolveValues([ATENDENTE],
+    { initialValues: { atendente: null }, defaultAssignee: 7 }).atendente, 7);
+});
+
+test('sem usuário logado o atendente cai em "Não atribuído"', () => {
+  assert.equal(seedResolveValues([ATENDENTE], {}).atendente, '');
+});
+
+test('initialValues continua sendo um seam (semeadura explícita ainda funciona)', () => {
+  const vals = seedResolveValues([OBS, TIPOS, FLAG, ATENDENTE], {
+    initialValues: { obs: 'x', tipos: 'a, b', ok: 'true', atendente: 3 }, defaultAssignee: 7,
+  });
+  assert.deepEqual(vals, { obs: 'x', tipos: ['a', 'b'], ok: true, atendente: 3 });
+});
+
+test('seedResolveValues tolera defs vazias/corrompidas', () => {
+  assert.deepEqual(seedResolveValues([], {}), {});
+  assert.deepEqual(seedResolveValues([null, {}, { key: 'a', type: 'text' }], {}), { a: '' });
+  assert.deepEqual(seedResolveValues(null, {}), {});
 });
 
 // ── mergeSeed ───────────────────────────────────────────────────────────────

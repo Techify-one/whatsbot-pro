@@ -124,15 +124,26 @@ SESSION_EVENT = "plugin_melhorias_ai_session"
 NOTICE_EVENT = "plugin_melhorias_ai_notice"
 
 
-def is_auth_error(text_value) -> bool:
+def is_auth_error(text_value, *, strict: bool = False) -> bool:
     """A mensagem é o 401 do Claude vestido de conteúdo? (espelho do frontend)
 
     FALLBACK apenas — ver ``derive_kind``.
+
+    ``strict=True`` descarta o ``401`` solto e exige marcador LITERAL do SDK
+    (plano 62 · A). Estrito sobre CONTEÚDO DA IA, onde um 401 pode ser só o
+    assunto da análise ("o endpoint do cliente devolveu 401") e um falso
+    positivo mata a sessão global; frouxo sobre texto que já se SABE ser um erro
+    (frame ``event: error``), onde a única dúvida é QUAL falha é, não SE é falha.
+
+    Cobertura preservada: as duas variantes reais do SDK quando o OAuth morre
+    (``scripts/fake_ai_executor.py``, constante ``AUTH_ERRORS``) trazem
+    ``authentication_error`` E ``Please run /login`` — o modo estrito continua
+    pegando 100% das falhas reais, só deixa de reagir ao número sozinho.
     """
     t = str(text_value or "").lower()
-    if _AUTH_401_RE.search(t):
+    if any(marker in t for marker in AUTH_ERROR_MARKERS):
         return True
-    return any(marker in t for marker in AUTH_ERROR_MARKERS)
+    return (not strict) and bool(_AUTH_401_RE.search(t))
 
 
 def normalize_kind(raw) -> str | None:
@@ -148,16 +159,20 @@ def normalize_kind(raw) -> str | None:
     return k if k in EXECUTOR_KINDS else "unknown"
 
 
-def derive_kind(data: dict | None) -> str | None:
+def derive_kind(data: dict | None, *, strict: bool = False) -> str | None:
     """A regra de classificação, num lugar só (stream e write-through a usam).
 
     ``unknown`` é um VALOR, não um vazio — escrever ``kind or heurística`` faria
     o fluxo parar no ``unknown`` e nunca chegar ao fallback, e uma sessão de fato
     expirada deixaria de ser detectada. Por isso o teste é explícito.
+
+    ``strict`` é repassado à heurística: **frouxo** no frame ``event: error`` (já
+    É um erro), **estrito** sobre conteúdo da IA (write-through, análise final).
     """
     data = data or {}
     kind = normalize_kind(data.get("kind"))
-    if kind in (None, "unknown") and is_auth_error(data.get("message")):
+    if kind in (None, "unknown") and is_auth_error(data.get("message"),
+                                                   strict=strict):
         return "auth_required"
     return kind
 
@@ -828,11 +843,15 @@ def _last_assistant_content(cid: str) -> str:
 
     Blindagem retroativa (plano 60 · 2.7): linhas de 401 já gravadas como
     ``assistant`` na base de produção NUNCA podem virar a análise final.
+
+    Heurística ESTRITA (plano 62 · A): isto varre CONTEÚDO DA IA, e a versão
+    frouxa descartava toda análise que por acaso mencionasse um ``401`` — a
+    conversa terminava exibindo a resposta ANTERIOR como artefato final.
     """
     for m in reversed(list_chat_messages(cid)):
         if m.get("role") == "assistant" and (m.get("content") or "").strip():
             content = m["content"].strip()
-            if is_auth_error(content):
+            if is_auth_error(content, strict=True):
                 continue
             return content
     return ""

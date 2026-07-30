@@ -622,6 +622,52 @@ def test_derive_kind_falls_back_to_the_heuristic(plugin_app):
     assert chat_logic.kind_is_fatal("auth_required") is True
 
 
+# ── Plano 62 · A — o texto para de decidir sobre CONTEÚDO DA IA ──────────────
+
+def test_is_auth_error_strict_drops_the_lone_401(plugin_app):
+    """O par que DEFINE o modo estrito: um 401 solto na prosa deixa de ser sinal.
+
+    ``strict`` existe porque a mesma função serve dois canais de qualidade
+    diferente — texto que já se sabe ser erro (frame ``event: error``) × conteúdo
+    da IA, onde o 401 pode ser só o assunto da análise.
+    """
+    built = plugin_app("melhorias", settings_overrides=_EXT)  # noqa: F841
+    _, chat_logic, _ = _mods()
+    f = chat_logic.is_auth_error
+
+    for prosa in ("o total foi de 401 reais",
+                  "o endpoint do cliente devolveu 401, oriente o agente",
+                  "HTTP 401 Unauthorized"):
+        assert f(prosa) is True, prosa            # frouxo: o número basta
+        assert f(prosa, strict=True) is False, prosa   # estrito: não basta
+
+    # A string REAL do SDK é pega nos DOIS modos — estrito não perde cobertura.
+    assert f(_AUTH_401) is True
+    assert f(_AUTH_401, strict=True) is True
+    for marker in ("authentication_error: invalid", "Please run /login para seguir",
+                   "Invalid API key", "invalid authentication credentials"):
+        assert f(marker, strict=True) is True, marker
+    for vazio in ("resposta normal do modelo", "", None):
+        assert f(vazio, strict=True) is False, vazio
+
+
+def test_derive_kind_strict_ignores_a_401_in_prose(plugin_app):
+    """O modo estrito atravessa o ``derive_kind`` (é ele que os call sites usam)."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)  # noqa: F841
+    _, chat_logic, _ = _mods()
+    d = chat_logic.derive_kind
+    assert d({"message": _AUTH_401}, strict=True) == "auth_required"
+    assert d({"message": "o endpoint devolveu 401 na consulta"},
+             strict=True) is None
+    # Sem strict o canal da SSE fica intacto: o 401 solto ainda classifica.
+    assert d({"message": "o endpoint devolveu 401 na consulta"}) == "auth_required"
+    # E o balde ``unknown`` continua caindo na heurística, agora estrita.
+    assert d({"kind": "unknown", "message": _AUTH_401},
+             strict=True) == "auth_required"
+    assert d({"kind": "unknown", "message": "deu 401 lá"},
+             strict=True) == "unknown"
+
+
 def test_clamp_retry_after(plugin_app):
     """Sem clamp, um ``retry_after`` absurdo congelaria um consumidor por um dia."""
     built = plugin_app("melhorias", settings_overrides=_EXT)  # noqa: F841
@@ -1070,6 +1116,158 @@ def test_human_pasting_a_rate_limit_message_does_nothing(plugin_app):
     r = built.client.post(path, content=body,
                           headers=_signed_headers(ai_client, "POST", path, body))
     assert r.status_code == 200, r.text
+    assert chat_logic.session_expired() is False
+    assert chat_logic.get_conversation(cid)["status"] == "ACTIVE"
+
+
+# ── Plano 62 · o texto sai do circuito no write-through ──────────────────────
+
+_MSG_PATH = "/api/plugins/melhorias/public/_internal/messages"
+
+
+def _post_message(built, ai_client, body_dict: dict):
+    """POST assinado em ``_internal/messages`` — o canal do write-through."""
+    body = json.dumps(body_dict, ensure_ascii=False, separators=(",", ":"))
+    return built.client.post(
+        _MSG_PATH, content=body,
+        headers=_signed_headers(ai_client, "POST", _MSG_PATH, body))
+
+
+def test_write_through_prose_401_stays_a_normal_message(plugin_app):
+    """O TESTE-TÍTULO deste trabalho.
+
+    Este plugin analisa atendimentos: citar um erro 401 em prosa é assunto
+    plausível de uma análise. A regex frouxa concluía "sessão expirada" a partir
+    do CONTEÚDO DA IA — derrubava a sessão GLOBAL e bloqueava conversa nova. É o
+    bug original no lugar de maior consequência.
+    """
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100090")
+    analise = ("**Diagnóstico**\n\nO endpoint do cliente devolveu 401 na consulta "
+               "de pedido, então a tool falhou e o agente improvisou um prazo.")
+
+    r = _post_message(built, ai_client, {"conversation_id": cid,
+                                         "role": "assistant", "content": analise})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert "kind" not in data, "análise legítima foi classificada como falha"
+
+    row = chat_logic.list_chat_messages(cid)[-1]
+    assert row["role"] == "assistant"      # bolha comum, não linha de falha
+    assert row["failure_kind"] is None
+    assert chat_logic.session_expired() is False
+    assert chat_logic.get_conversation(cid)["status"] == "ACTIVE"
+    # E ela é elegível como análise final (a frouxa a descartava).
+    assert chat_logic._last_assistant_content(cid) == analise
+
+
+def test_write_through_literal_sdk_marker_is_still_fatal(plugin_app):
+    """A rede de segurança NÃO foi desmontada: sem etiqueta, marcador literal do
+    SDK no conteúdo da IA continua sendo sessão expirada (executor antigo)."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100091")
+
+    r = _post_message(built, ai_client, {
+        "conversation_id": cid, "role": "assistant",
+        "content": "OAuth token has expired · Please run /login"})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["auth_expired"] is True
+    assert chat_logic.get_conversation(cid)["status"] == "AUTH_EXPIRED"
+    assert chat_logic.session_expired() is True
+    chat_logic.clear_session_state()
+
+
+def test_error_frame_without_kind_still_reads_the_lone_401(plugin_app):
+    """O canal da SSE ficou INTACTO no modo frouxo: o frame já É um erro, a única
+    dúvida é QUAL falha é — ali o 401 solto continua sendo informação boa."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    _, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100092")
+
+    asyncio.get_event_loop().run_until_complete(
+        chat_logic._handle_error_frame(cid, sid, {"message": "HTTP 401 na sessão"}))
+    assert chat_logic.get_conversation(cid)["status"] == "AUTH_EXPIRED"
+    assert chat_logic.session_expired() is True
+    chat_logic.clear_session_state()
+
+
+def test_last_assistant_content_keeps_an_analysis_mentioning_401(plugin_app):
+    """S2 ficou estrito: a análise que cita um 401 volta a ser elegível, e a
+    linha LEGADA com a string real do SDK continua sendo pulada."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)  # noqa: F841
+    _, chat_logic, _ = _mods()
+    sid, cid = _open_conversation(built, chat_logic, "5511960100093")
+    chat_logic.append_chat_message(cid, "assistant", content="análise anterior")
+    boa = "A integração devolveu 401 — peça ao time para revalidar a credencial."
+    chat_logic.append_chat_message(cid, "assistant", content=boa)
+    assert chat_logic._last_assistant_content(cid) == boa
+
+    # Linha legada de 401 gravada como assistant: continua fora.
+    chat_logic.append_chat_message(cid, "assistant", content=_AUTH_401)
+    assert chat_logic._last_assistant_content(cid) == boa
+
+
+def test_write_through_presence_of_kind_decides_not_its_value(plugin_app):
+    """A armadilha do plano 62 · B, travada.
+
+    Com a chave SEMPRE no corpo, *presença* significa "executor tipado" e
+    *ausência* "executor antigo" — o ``null`` é sinal de CAPACIDADE, não valor a
+    interpretar. Testar ``body.get("kind")`` (que devolve ``None`` nos dois casos)
+    anularia o ramo em silêncio; por isso os dois corpos, com o MESMO conteúdo,
+    têm de produzir resultados DIFERENTES.
+    """
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+
+    # (a) chave PRESENTE e null ⇒ executor tipado: o texto nunca é lido.
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100094")
+    r = _post_message(built, ai_client, {"conversation_id": cid,
+                                         "role": "assistant", "kind": None,
+                                         "content": _AUTH_401})
+    assert r.status_code == 200, r.text
+    tipado = r.json()["data"]
+    assert "kind" not in tipado
+    assert chat_logic.list_chat_messages(cid)[-1]["role"] == "assistant"
+    assert chat_logic.session_expired() is False
+    assert chat_logic.get_conversation(cid)["status"] == "ACTIVE"
+
+    # (b) chave AUSENTE, mesmo conteúdo ⇒ caminho antigo preservado.
+    _reset_failure_state(chat_logic)
+    sid2, cid2 = _open_conversation(built, chat_logic, "5511960100095")
+    r = _post_message(built, ai_client, {"conversation_id": cid2,
+                                         "role": "assistant",
+                                         "content": _AUTH_401})
+    assert r.status_code == 200, r.text
+    legado = r.json()["data"]
+    assert legado["kind"] == "auth_required" and legado["fatal"] is True
+    assert chat_logic.get_conversation(cid2)["status"] == "AUTH_EXPIRED"
+
+    assert tipado != legado, "presença da chave não mudou nada — B é no-op"
+    chat_logic.clear_session_state()
+
+
+def test_write_through_typed_non_fatal_kind_keeps_the_compat_key(plugin_app):
+    """Etiqueta não-fatal é honrada e a chave antiga ``auth_expired`` sobrevive
+    (o executor pode ramificar nela)."""
+    built = plugin_app("melhorias", settings_overrides=_EXT)
+    ai_client, chat_logic, _ = _mods()
+    _reset_failure_state(chat_logic)
+    sid, cid = _open_conversation(built, chat_logic, "5511960100096")
+
+    r = _post_message(built, ai_client, {
+        "conversation_id": cid, "role": "assistant", "kind": "quota_exceeded",
+        "content": f"sem crédito — upstream mandou {_AUTH_401}"})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["kind"] == "quota_exceeded"
+    assert data["fatal"] is False
+    assert data["auth_expired"] is False
     assert chat_logic.session_expired() is False
     assert chat_logic.get_conversation(cid)["status"] == "ACTIVE"
 

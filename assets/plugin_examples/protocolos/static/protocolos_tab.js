@@ -1082,7 +1082,7 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     let fields = {};
     if (atendResolveDefs.length) {
       const picked = await api.ui.openModal((close) => html`
-        <${ResolveForm} defs=${atendResolveDefs} atend=${{ id: openCycle.conversation_id }}
+        <${ResolveForm} defs=${atendResolveDefs}
           defaultAssignee=${currentUser && currentUser.id}
           defaultAssigneeName=${currentUser && (currentUser.name || currentUser.email)}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);

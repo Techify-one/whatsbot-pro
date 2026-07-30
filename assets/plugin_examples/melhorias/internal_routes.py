@@ -69,11 +69,27 @@ async def append_message(body: dict):
     # sessão expirada em TEXTO e entregá-la como resposta da IA, em HTTP 200.
     # Só o papel ``assistant`` é classificado — o operador que COLE o texto do
     # erro no chat é persistido por outro caminho (routes.py) e nunca mata a
-    # sessão. O ``kind`` do corpo é opcional; sem ele, cai na heurística de texto
-    # (degradação conhecida: o contrato só põe ``kind`` no frame da SSE).
+    # sessão.
+    #
+    # Plano 62 · B — a decisão é pela PRESENÇA da chave ``kind``, nunca pelo
+    # valor: um executor tipado a manda SEMPRE (``null`` quando não é falha),
+    # então presença ⇒ "executor tipado" e ausência ⇒ "executor antigo". O
+    # ``null`` é sinal de CAPACIDADE, não valor a interpretar. ⚠️ Usar
+    # ``body.get("kind")`` aqui anularia o ramo em silêncio (devolve ``None``
+    # tanto para ``null`` explícito quanto para chave ausente).
     if role == "assistant":
-        kind = chat_logic.derive_kind({"kind": body.get("kind"),
-                                       "message": body.get("content")})
+        if "kind" in body:
+            # Executor TIPADO: a etiqueta é a ÚNICA fonte, o texto nunca é lido.
+            # Preço aceito: um executor mal-etiquetado (``kind: null`` num
+            # conteúdo que É falha) passa batido por aqui — o caminho real da
+            # falha é o frame da SSE, que é tipado, e a alternativa seria
+            # justamente a adivinhação que este plano remove.
+            kind = chat_logic.normalize_kind(body.get("kind"))
+        else:
+            # Executor ANTIGO: heurística ESTRITA sobre o conteúdo (plano 62 · A)
+            # — marcador literal do SDK, sem reagir a um ``401`` solto na prosa.
+            kind = chat_logic.derive_kind({"message": body.get("content")},
+                                          strict=True)
         if kind:
             out = await asyncio.to_thread(
                 chat_logic.record_executor_failure, cid,

@@ -188,7 +188,20 @@ export function footerStateFor({ convStatus = 'ACTIVE', historyFailure = null,
     return { mode: 'auth_expired', kind: 'auth_required', canRenew: true };
   }
   if (liveFailure && liveFailure.kind) return asFooter(liveFailure);
-  if (historyFailure && DURABLE_FAILURES.includes(historyFailure.kind)) {
+  // Uma sessão expirada vinda do HISTÓRICO só vale enquanto a conversa não
+  // voltou a viver. `auth_required` é o ÚNICO kind que o gateway carimba no
+  // STATUS da conversa (AUTH_EXPIRED) — e é exatamente esse carimbo que o
+  // `resume` do relogin desfaz. Sem esta porta o rodapé ficava preso em
+  // "Renovar sessão" DEPOIS de renovar, para sempre: a linha de falha continua
+  // sendo a última do histórico e nada consumia o "sessão renovada". Pior, o
+  // rodapé ocupa o lugar do COMPOSITOR, então o operador não tinha como
+  // reenviar a mensagem que o próprio aviso mandava reenviar.
+  // `quota_exceeded` NÃO passa por aqui: é não-fatal, nunca mexe no status, e
+  // por isso segue durável em qualquer status (recarregar é fora do painel).
+  const staleAuth = convStatus === 'ACTIVE' && historyFailure
+    && historyFailure.kind === 'auth_required';
+  if (historyFailure && !staleAuth
+      && DURABLE_FAILURES.includes(historyFailure.kind)) {
     return asFooter(historyFailure);
   }
   return { mode: convStatus === 'ACTIVE' ? 'live' : 'ended', kind: null, canRenew: false };
