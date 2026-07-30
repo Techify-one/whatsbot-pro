@@ -182,12 +182,37 @@ test('footerStateFor: só auth_required ganha botão de renovar', () => {
 });
 
 test('só falha DURÁVEL sobrevive ao F5; transitória some', () => {
-  const after = (kind) => footerStateFor({ convStatus: 'ACTIVE',
-                                           historyFailure: { kind } }).mode;
-  assert.equal(after('quota_exceeded'), 'quota');   // sem crédito não passa sozinho
+  const after = (kind, convStatus = 'AUTH_EXPIRED') =>
+    footerStateFor({ convStatus, historyFailure: { kind } }).mode;
+  // Sem crédito não passa sozinho — e não mexe no status, então dura em ACTIVE.
+  assert.equal(after('quota_exceeded', 'ACTIVE'), 'quota');
   assert.equal(after('auth_required'), 'auth_expired');
-  assert.equal(after('rate_limited'), 'live');      // 429 já passou — não mentir
-  assert.equal(after('overloaded'), 'live');
+  assert.equal(after('rate_limited', 'ACTIVE'), 'live');  // 429 já passou
+  assert.equal(after('overloaded', 'ACTIVE'), 'live');
+});
+
+test('sessão RENOVADA solta o rodapé: auth do histórico não vale em ACTIVE', () => {
+  // O bug que isto fecha: renovar a sessão devolvia a conversa a ACTIVE, mas a
+  // linha de falha continuava sendo a última do histórico e o rodapé ficava
+  // preso em "Renovar sessão". Como ele ocupa o lugar do COMPOSITOR, o operador
+  // não conseguia reenviar a mensagem que o aviso "sessão renovada — pode
+  // reenviar" acabara de pedir. Só saía encerrando a melhoria.
+  const historyFailure = { kind: 'auth_required', message: 'API Error: 401' };
+  // Antes do relogin: a conversa está AUTH_EXPIRED ⇒ oferece renovar.
+  assert.equal(footerStateFor({ convStatus: 'AUTH_EXPIRED', historyFailure }).mode,
+               'auth_expired');
+  // Depois do relogin (o `resume` devolveu a conversa a ACTIVE): compositor.
+  const f = footerStateFor({ convStatus: 'ACTIVE', historyFailure });
+  assert.equal(f.mode, 'live');
+  assert.equal(f.canRenew, false);
+  // Uma falha AO VIVO depois da renovação ainda manda — a porta é só do histórico.
+  assert.equal(footerStateFor({ convStatus: 'ACTIVE', historyFailure,
+                                liveFailure: { kind: 'auth_required' } }).mode,
+               'auth_expired');
+  // E `quota_exceeded` não é afetado: segue durável mesmo em ACTIVE.
+  assert.equal(footerStateFor({ convStatus: 'ACTIVE',
+                                historyFailure: { kind: 'quota_exceeded' } }).mode,
+               'quota');
 });
 
 test('executor_failure vira UM cartão e tira o chat de "streaming"', () => {

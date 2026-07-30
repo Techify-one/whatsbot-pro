@@ -45,6 +45,33 @@ export function seedProtocolValues(protoDefs, protocolo, opts = {}) {
   return init;
 }
 
+// Valores iniciais do popup "Resolver atendimento" (ResolveForm). Irmão do
+// seedProtocolValues acima, com UMA diferença de política: aqui o rótulo `atendente`
+// cai SEMPRE em `defaultAssignee` (o usuário conectado, quem clicou em Resolver) quando
+// `initialValues` não traz um valor — e o call site do beforeResolve não traz nenhum de
+// propósito, porque cada atendimento começa do zero. `initialValues` continua sendo um
+// seam (usado pelos testes e por call sites que queiram semear algo explicitamente).
+//
+// Demais regras idênticas: checkbox → bool (aceita o legado 'true'), multi → array (CSV
+// vira lista), resto → string ('' quando nulo).
+export function seedResolveValues(defs, opts = {}) {
+  const { initialValues = {}, defaultAssignee = null } = opts;
+  const init0 = initialValues || {};
+  const init = {};
+  for (const d of (defs || [])) {
+    if (!d || !d.key) continue;
+    const cur = init0[d.key];
+    if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
+    else if (d.type === 'atendente') {
+      const seeded = (cur == null || String(cur).trim() === '') ? defaultAssignee : cur;
+      init[d.key] = (seeded == null ? '' : seeded);
+    } else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
+      ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
+    else init[d.key] = (cur == null ? '' : String(cur));
+  }
+  return init;
+}
+
 // Completa `current` com as chaves do `seed` que ele ainda NÃO tem. Nunca sobrescreve:
 //  - o que o operador digitou fica;
 //  - campo limpo de propósito (a chave existe com '' / [] / false) NÃO ressuscita.
