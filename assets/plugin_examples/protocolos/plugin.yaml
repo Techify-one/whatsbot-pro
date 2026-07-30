@@ -29,6 +29,15 @@ description: >-
   protocolo", ?detail=<id>) montava o detalhe antes das definições de campo chegarem: o
   formulário nascia vazio, os valores salvos sumiam e o obrigatório Atendente travava o
   "Finalizar protocolo".
+  A 1.22.2 tira o card de sistema "Protocolo aberto" do fio: a abertura passa a ser
+  anunciada só pela nota PRIVADA com o ID pesquisável (o card era redundante). Finalizar
+  e re-vincular seguem com card.
+  A 1.23.0 faz o popup de resolver NASCER SEMPRE EM BRANCO: semear com o espelho em
+  conversations.custom_attributes fazia cada atendimento herdar os valores do anterior —
+  inclusive entre operadores diferentes, porque a linha de conversa é REUTILIZADA quando o
+  cliente volta a falar. O que já foi resolvido continua no protocolo (extras por ciclo) e
+  na aba "Informações do atendimento". O rótulo "Atendente" segue semeado com quem clicou
+  em Resolver, e a semeadura virou módulo puro testado (proto_fields.js).
   Permissões: ver, editar/resolver/configurar, criar visualizações e gerenciar visualizações
   de equipe. Desative e a tela volta ao padrão — os dados ficam nas tabelas do plugin e no
   custom_attributes do core.
