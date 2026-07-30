@@ -229,11 +229,18 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** baseline registrado (nº de checagens e falhas) num banco isolado, e o teste de caracterização passa contra o código atual.
 
 #### Status de execução — Fase 0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:**
+  - Criado o banco de teste **exclusivo** `whatsbot_test_91` (`ENCODING 'UTF8' TEMPLATE template0`, host 10.8.200.13) — nenhuma outra IA/sessão o usa.
+  - Baseline registrado: `tests/test_endpoints.py` → **1633 checagens, 2 falhas**; `pytest storages/plugins/vendas_ia/tests/ -q` → **74 passed, 0 falhas**.
+  - Criado `storages/plugins/vendas_ia/tests/test_search.py` (6 testes) — **primeiro teste que `search.py` tem**.
+- **Como foi feito / decisões:**
+  - A caracterização do `ORDER BY` é feita **capturando o SQL emitido** (`nexus_db.run_read` monkeypatchado por um `_Recorder`), não executando contra o Nexus: é determinístico, DB-free e mostra a mudança de F3 como diff de teste explícito. Os 3 testes afirmam a cláusula de HOJE (`COALESCE(<id/nome>), score DESC`) e trazem um comentário mandando **atualizar, não apagar** em F3.
+  - Fixture `_no_db` (autouse) troca `_config.setting` pelos `DEFAULTS` — sem ela `_weights()` bate no engine do core, que não existe em teste DB-free.
+  - Já entraram os 3 testes de fallback (sem chave / embedding levanta / `_ofertas_hybrid` cai no ILIKE) que F1 e F8 vão reusar.
+- **Problemas / pendências:**
+  - As **2 falhas** do baseline (`skip_attrs round-trip na protocol-config`, `sanitize aceita scope protocolo`) são **pré-existentes e do plugin `protocolos`** — fora do escopo deste plano (e há outra IA no plano 93 nesse plugin). Não foram tocadas; servem de linha de base: F8 tem de terminar com as MESMAS 2, nem mais nem menos.
+- **Verificação:** `venv/bin/python -m pytest storages/plugins/vendas_ia/tests/test_search.py -q` → 6 passed contra o código **atual** (sem nenhuma mudança de produção ainda).
 
 ---
 
@@ -251,11 +258,17 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** com o OpenRouter artificialmente lento (ou o timeout baixado a 0,1 s para o teste), `pesquisar_ofertas` retorna resultado do fallback léxico **dentro do orçamento**, e o log mostra a linha de fallback — nunca `[tool … excedeu o tempo limite]`.
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:**
+  - `embeddings.py` — `OpenAI(..., timeout=http_timeout())`, com a constante nomeada `_DEFAULT_TIMEOUT = 3.0` (valor sugerido pelo plano) e override por env `VENDAS_IA_EMBEDDING_TIMEOUT` para diagnóstico. Docstring do módulo explica **por que** o timeout é obrigatório (teto duro de 10 s do subprocesso).
+  - O cache do cliente passou a considerar o timeout além da chave (`_client_timeout`) — sem isso, mudar a env não teria efeito enquanto o processo vivesse.
+  - `search.py:52` — o `logger.warning` agora nomeia a exceção **e o teto vigente** (`embedding falhou (ofertas: APITimeoutError, teto 3.0s), fallback léxico`), para não confundir "OpenRouter lento" com "teto apertado demais".
+- **Como foi feito / decisões:**
+  - **Env em vez de setting do plugin** para o teto: é botão de diagnóstico, não de operação; setting nova exige restart para aparecer no formulário (R7) e poluiria a tela com um número que ninguém deve mexer no dia a dia.
+  - Entrada inválida (`0`, negativo, texto) cai no default — nunca em "sem teto", que é justamente o bug.
+  - Nenhuma outra mudança: o `except Exception` de `search.py` já capturava e caía no fallback, como o plano previa (F1·2).
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** 4 testes novos, incluindo um **ponta a ponta real** (`test_openrouter_lento_degrada_para_o_lexico_dentro_do_orcamento`): sobe um servidor HTTP local que nunca responde, aponta o base URL do OpenRouter para ele e afirma que `_ofertas_hybrid` volta com resultado do **léxico em 3,6 s** (teto de 0,5 s × retries do SDK) em vez de pendurar. O log da execução mostra `APITimeoutError, teto 0.5s` — exatamente a linha de fallback que o plano pede, e nenhum `[tool … excedeu o tempo limite]`. `pytest storages/plugins/vendas_ia/tests/test_search.py -q` → 10 passed.
 
 ---
 
@@ -283,11 +296,27 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** o modo `catalogo` devolve as 4 ofertas ativas sem nenhuma chamada de rede; `hibrida` devolve as mesmas ofertas **em ordem de score** (teste de caracterização de F0 muda de resultado, deliberadamente); trocar o modo vale na leitura seguinte sem restart.
 
 #### Status de execução — Fases 2+3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+
+**Decisão do usuário (P3, 2026-07-30): padrão = `lexica`.** O usuário pediu explicitamente que o embedding saísse do caminho por padrão, com botão para religar — que é o modo `hibrida` no mesmo seletor.
+
+- **O que foi feito:**
+  - **F2 · seletor** — `settings.py` ganhou `search_mode: Literal["lexica","catalogo","hibrida"]` (default `lexica`; o schema sai com `enum`, então o `PluginSettingsForm` renderiza um `<select>`) e `_config.DEFAULTS` o espelha. `search.search_mode()` lê a cada busca (trocar vale na seguinte, sem restart) e **valor inválido cai no default com WARNING** — fail-open (P2).
+  - **F2 · gargalo único** — `_query_vector` recusa gerar embedding quando o modo ≠ `hibrida`, **antes** de olhar a chave e antes de qualquer rede, reusando o caminho de degradação que já existia.
+  - **F2 · modo `catalogo`** — `_ofertas_catalogo()` / `_cursos_catalogo()` e o caminho já existente da FAQ devolvem o conjunto ativo inteiro. Os recortes **estruturais** (`offercode` → cursos daquela oferta; `id_oferta` → FAQ daquela oferta) continuam valendo em todos os modos: são relacionais, não busca textual.
+  - **F3 · ordenação** — as três buscas passaram a `SELECT * FROM ranked ORDER BY score DESC, <id|nome> LIMIT :lim`, com o `DISTINCT ON` (que obriga o `ORDER BY` a começar pelo id) isolado dentro da CTE `ranked`. A dedup continua; o `LIMIT` passa a cortar pelos melhores. Na FAQ o `id` desempata mas **não é projetado** — o payload da tool não muda de forma.
+- **Como foi feito / decisões:**
+  - **A híbrida e a léxica compartilham o corpo da query.** Só a CTE de 1ª posição muda (semântica × ILIKE), montada por `_ofertas_sql()/_cursos_sql()/_faq_sql()`. É o que garante, por construção, que a léxica **mantenha a CTE full-text** em vez de degradar para o ILIKE ingênuo (R6) — e mantém uma cópia só do corpo, em vez de seis.
+  - ⚠️ **Achado ao testar contra o catálogo real — a léxica "óbvia" não funcionaria.** Com o CTE ILIKE de frase inteira que o plano descrevia, `'script de load balance'` devolvia **0 linhas**: `plainto_tsquery` exige TODAS as palavras e a oferta se chama "SCRIPTS DE FAILOVER E LOADBALANCE" (uma palavra), e o ILIKE da frase inteira também não casa. Ou seja, o padrão escolhido seria pior que o de hoje justamente na consulta que motivou o plano. Corrigido com `tokens_for()`: o ILIKE casa por **palavra** (descartando conectivos de 1–2 letras) e o `sem_score` da léxica é a **fração de palavras casadas** — ranking de verdade, não um zero constante. Medido depois: `'script de load balance'` → SCRIPTS DE FAILOVER E LOADBALANCE em 1º (0,70).
+  - **Teto do modo `catalogo`** (`_CATALOGO_MAX_ROWS = 100`, com WARNING ao truncar): "mandar tudo" é adequado a 4 ofertas, não a um catálogo que cresceu. Truncar em silêncio seria pior que truncar avisando.
+  - O fallback de qualquer modo sem vetor passa a ser a **variante léxica ranqueada**, não o ILIKE puro — que sobrou só para o caso de a própria SQL quebrar. Isso melhora também a degradação da F1.
+  - **F2·4 · diagnóstico honesto** — `/status` devolve `search_mode` + `embedding_used`, e a tela mostra uma linha "Modo de busca"; a linha da chave OpenRouter só é **vermelha** quando o modo é `hibrida` — nos outros dois vira um badge **neutro** "não usada neste modo". Antes, um embedding desligado por escolha aparecia como defeito.
+- **Problemas / pendências:**
+  - `unnest(:tokens)` exigiu `CAST(... AS text[])` explícito (`function unnest(unknown) is not unique`) — pego só no teste contra o Postgres real, não pelos testes de forma de SQL.
+  - Recomendação registrada para o pós-deploy: experimentar `catalogo` numa conversa controlada. Com 4 ofertas ele é imbatível em custo e nunca "não acha"; `lexica` é a escolha conservadora enquanto isso.
+- **Verificação:**
+  - **Contra o Nexus de produção (somente leitura)**: `EXPLAIN` nas **6** variantes de SQL (3 domínios × semântica/léxica) — todas aceitas pelo planner. Depois, execução real das léxicas: `'script de load balance'` → SCRIPTS DE FAILOVER E LOADBALANCE (0,70) > Zabbix+Grafana (0,23); `'quanto custa o combo de roteamento'` → Combo de Roteamento (0,35) > COMBO DE MONITORAMENTO (0,17); FAQ `'tem certificado?'` → "Tem certificado?" (0,72) em 1º. **Ordenação por score confirmada em dados reais.**
+  - Testes: os 3 de caracterização de F0 foram **atualizados** (não apagados) para a cláusula nova, com o comentário explicando a transição; mais 11 testes novos (modo padrão, modo inválido, léxica não toca a rede, léxica mantém o full-text, catálogo nos 3 domínios, filtro estrutural preservado, tokenização). Suíte do plugin: **94 passed**.
 
 ---
 
@@ -303,11 +332,16 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** teste que simula uma chamada bloqueada de `save_contact_info` e verifica que `updated_info` fica `None`; suíte do core verde.
 
 #### Status de execução — Fase 5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:**
+  - `app/services/agent_run_service.py:397` — a detecção de `save_contact_info` passou a filtrar `and not tc.get("skipped")`, com comentário explicando de onde vem o marcador (os 2 pontos de bloqueio de `agno_engine`) e por que importa (o payload de `llm.after` que os plugins leem).
+  - **I8 (opcional, feito)** — `agent/memory.py` `_custom_attr_lines`: `logger.debug` nos **4** caminhos de lista vazia, cada um dizendo QUAL deles foi (sem definições × contato sem id × sem conversa aberta *naquele inbox* × nada renderizado × exceção com `exc_info`). Nenhuma mudança de comportamento.
+  - Teste novo `tests/test_plano91_skipped_save_contact_info.py` (3 casos).
+- **Como foi feito / decisões:**
+  - Os 3 casos cobrem os três desfechos que importam: bloqueada ⇒ `contact_info is None`; executada ⇒ continua reportando (regressão do caminho feliz); **bloqueada + executada no mesmo turno** ⇒ reporta — o modelo pode reinvocar depois de um bloqueio, e se uma rodou houve save de verdade.
+  - O contato do teste nasce com `name` preenchido de propósito: com o bug, `contact_info` volta **populado** (não vazio), então o falso-positivo é inequívoco.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** 3 passed. **Prova de que o teste pega o bug**: revertendo o filtro no fonte, `test_save_contact_info_bloqueado_nao_reporta_info_salva` **falha**; com o filtro, passa (fix restaurado e reconferido na linha 402).
 
 ---
 
@@ -329,11 +363,22 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** salvar 2/12 na tela e, no turno seguinte, uma 3ª chamada de `pesquisar_ofertas` receber a mensagem de bloqueio em vez de rodar; subir para 5 pela tela volta a permitir; nada de restart necessário.
 
 #### Status de execução — Fase 4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+
+**Decisão do usuário (P1, 2026-07-30): `per_tool = 5`, `total = 15` "por enquanto"** — mais folgado que os 2/12 sugeridos, o que é coerente com o campo existir para apertar depois.
+
+- **O que foi feito:**
+  - Bloco novo **"Limites de chamadas de ferramenta"** em [GeneralSettings.js](../web/static/js/components/ai/GeneralSettings.js) com os três guardrails da mesma família: **Por ferramenta** (`ai_tool_call_limit_per_tool`), **Total** (`ai_tool_call_limit_total`) e **Trocas de agente** (`ai_max_route_depth`). Carrega no `populate()` e vai no PUT parcial do `handleSave()`.
+  - **Backend: zero mudança**, como o plano previa — as três chaves já eram `exposed=True, writable=True` (conferido em `config/settings.py:208,211,214`) e o `GET/PUT /api/config` as serve genericamente.
+- **Como foi feito / decisões:**
+  - `intOrDefault()` em vez do idiomático `parseInt(x) || default`: com `|| `, digitar **0** (que é justamente "desligado") ressuscitaria o default e o usuário não conseguiria DESLIGAR o freio pela tela. Travado por teste.
+  - **Texto de ajuda honesto (F4·4)**, em linguagem de operador: o rótulo diz que o limite conta **"por etapa do atendimento — cada vez que a conversa passa para outro agente, a contagem recomeça"**, que é a verdade (o contador é por run do AGNO = por hop), e que **0 desliga**. O campo *Total* carrega o aviso do **R2** em destaque: ao estourar, a IA perde junto as ferramentas de transferir, ficando **sem rota de saída** — por isso não baixar demais.
+  - Modo escuro (R11): só classes `wa-*` e `.wa-field` nos inputs.
+  - Os **valores** não foram cravados como default do core de propósito: o escopo autorizado desta execução são 3 arquivos do core, e `config/settings.py` não é um deles. Aplicar 5/15 é o passo **F9·6**, pela tela.
+- **Problemas / pendências:**
+  - ⏳ **Aplicar 5 / 15 pela tela após o deploy** (F9·6). Hoje a instalação segue em `per_tool = 0` (desligado) e `total = 25`.
+  - A **mensagem que o LLM recebe** ao ser bloqueado ainda diz "o limite é por mensagem e reseta na próxima mensagem do cliente", o que é impreciso (§3.4). Corrigir exigiria editar `ai_engine/hooks.py`, **fora do escopo de arquivos** desta execução — anotado para um plano futuro. A imprecisão é só para o modelo; o texto que o **operador** lê já está correto.
+- **Verificação:** `tests/test_plano91_limites_pela_ui.py` — 5 casos, todos verdes: o GET expõe as 3 chaves; o PUT com 5/15 persiste e **vale sem restart** (`_resolve_tool_call_limit() == 15` logo após o PUT, e a 6ª chamada da mesma tool é bloqueada enquanto a 5ª ainda passa); `0` desliga de verdade nos dois níveis; a mensagem de bloqueio **cita `transferir_agente`** (R2); chamada `skipped` **não** consome cota (o gotcha do §3.4 que justifica ligar os dois limites juntos). `node --check` no componente.
 
 ---
 
@@ -351,11 +396,14 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** uma conversa em que o comercial identifica a oferta grava `oferta_atual` **sem** card de erro no fio, e `plugin_vendas_ia_conversa` recebe o offercode.
 
 #### Status de execução — Fase 6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ⏸️ **ADIADA por decisão do usuário** (P2, 2026-07-30) — não executada.
+- **O que foi feito:** nada, deliberadamente. Perguntado entre (a) recriar a definição `codigo_oferta`, (b) migrar prompt + plugin juntos e (c) adiar, o usuário escolheu **adiar**.
+- **Como foi feito / decisões:** nem o prompt do BIA Comercial nem `state.CODE_ATTR_KEY`/`events._offercode_from_payload` foram tocados — D4 exige mover os dois lados juntos ou nenhum, e adiar é a única opção que respeita isso sem trabalho pela metade.
+- **Problemas / pendências:**
+  - O ruído **continua**: a instrução manda `set_custom_attribute(key="codigo_oferta", …)`, a definição não existe, a tool devolve erro e o card vermelho aparece no fio — custo de ~1 chamada desperdiçada (≈15k tokens) nos turnos em que o comercial identifica a oferta.
+  - ⚠️ **A fixação de oferta segue funcionando** e depende justamente dessa chamada com erro (`tool.after` é emitido com os `args` originais mesmo quando a tool falha). Quem for retomar esta fase: **não apague só a instrução do prompt** — isso quebraria a fixação. Ver D4 e §3.5.
+  - Com a F4, a chamada com erro passa a consumir cota do limite por-tool. Como `set_custom_attribute` é chamada 1–2× por turno e o valor acordado é 5, não há conflito prático hoje.
+- **Verificação:** n/a (nada mudou).
 
 ---
 
@@ -371,11 +419,23 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** resposta documentada da Techify + decisão registrada (usar / não usar / adiar).
 
 #### Status de execução — Fase 7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30) — **investigação respondida por medição, não por pergunta.**
+
+> 🟢 **Resultado: o proxy da Techify repassa `cached_tokens` E o prompt caching JÁ ESTÁ FUNCIONANDO hoje**, sem nenhuma mudança de código. Nada a implementar.
+
+- **O que foi feito:**
+  - Em vez de esperar resposta da Techify (F7·1), **medi**: duas chamadas idênticas ao proxy com um prefixo estável de ~2k tokens, inspecionando o `usage` cru devolvido.
+  - Conferido o schema de `usage` (F7·2) e a ordem de montagem do prompt (F7·3).
+- **Como foi feito / decisões:**
+  - Medição com a chave da instalação, `max_tokens=5`, prompt sintético (nenhum dado de cliente saiu). Custo: frações de centavo.
+  - **`openai/gpt-5.2`** (o de produção): 1ª chamada `cached_tokens: 0`; 2ª chamada **`cached_tokens: 1792`** de 1932 (**93 %**).
+  - **`deepseek/deepseek-v4-pro`** (o configurado neste checkout): 2ª chamada **`cached_tokens: 2048`** de 2287 (**90 %**).
+  - O campo vem em `prompt_tokens_details` (junto de `cache_write_tokens`), exatamente no formato OpenAI — o proxy é transparente.
+  - **F7·3 · a ordem já é a certa**: `prompt_builder.build_system_prompt` começa pelo `base_prompt` do agente (os 35k chars estáveis do BIA Comercial) e **só depois** acrescenta o dinâmico — contexto de grupo, info do contato, tags, fragmentos de plugin e, por último, a seção "Data e hora atual" (a que muda a cada minuto). Como o cache é por PREFIXO, o trecho caro é justamente o que fica cacheável. Nada a reordenar.
+- **Problemas / pendências:**
+  - **F7·2 confirmado**: `usage` (`id, contact_id, call_type, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, ts`) **não tem** coluna de tokens cacheados, então o cache hit é invisível nos relatórios locais. Acrescentá-la exigiria migration + `agent/llm.py`, ambos **fora do escopo de arquivos** desta execução. Recomendação para um plano futuro, agora com a justificativa medida.
+  - ⚠️ **Pergunta que sobra para a Techify — a COBRANÇA.** O `cost_usd` do WhatsBot é calculado como `prompt_tokens × preço` ([agent/llm.py:120](../agent/llm.py#L120)), **sem** desconto de cache. Se a Techify cobra o token cacheado mais barato (como o provedor upstream), o custo real é **menor** que o registrado no painel e os US$ 1,86/7 dias do §3.3 são teto, não conta fechada. Se cobra cheio, o benefício do cache é só de latência. Isso é política comercial — só a Techify responde.
+- **Verificação:** medição reproduzível acima (duas execuções seguidas, `cached_tokens` 0 → 1792/2048). Ordem do prompt conferida em `agent/prompt_builder.py:59` (base primeiro) e na seção de data/hora (última).
 
 ---
 
@@ -394,11 +454,21 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** testes do plugin verdes + `tests/test_endpoints.py` verde no Postgres (`WHATSBOT_TEST_DB_URL`).
 
 #### Status de execução — Fase 8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** consolidação e execução de tudo no banco isolado `whatsbot_test_91`.
+  - `storages/plugins/vendas_ia/tests/test_search.py` — **21 testes novos** onde antes não havia nenhum: ordenação por score nos 3 domínios (F3), modo padrão / modo inválido / léxica sem rede / léxica com full-text preservado / catálogo nos 3 domínios / filtro estrutural por `offercode` (F2), tokenização (acento, pontuação, query curta, teto), timeout do cliente + recriação ao mudar o teto + **degradação ponta a ponta com servidor HTTP lento** (F1), e degradação da SQL ranqueada quebrada para o ILIKE puro.
+  - `tests/test_plano91_skipped_save_contact_info.py` (3) e `tests/test_plano91_limites_pela_ui.py` (5) no core.
+- **Como foi feito / decisões:**
+  - **Fail-open (F8·5) coberto nos três eixos**: OpenRouter fora (o teste com servidor lento + o de exceção no gerador), modo inválido (cai no default com WARNING) e SQL quebrada (cai no ILIKE puro sem levantar).
+  - Os testes de F1 que dependem do caminho semântico foram forçados a `modo("hibrida")`: com o novo padrão `lexica` eles passariam **por engano** (o gate de modo devolveria `None` antes de o embedding sequer ser tentado).
+  - `tests/test_hooks.py`, `test_routing_engine.py` e `test_agent_routing.py` são scripts standalone (`sys.exit` no fim quebra a coleta do pytest) — rodados direto pelo interpretador, como manda a prática do repo.
+- **Problemas / pendências:**
+  - ⚠️ **Interferência de suíte pré-existente, NÃO causada por este plano**: rodar `pytest storages/plugins/vendas_ia/tests/ tests/test_melhorias_plugin.py` na MESMA invocação faz 5 testes do `melhorias` falharem com `ModuleNotFoundError` (o `conftest.py` do plugin insere `storages/plugins` no `sys.path`). Reproduzido usando **apenas testes antigos** do plugin (`test_triage_filter.py`), sem nenhum arquivo deste plano. Separadamente ambos passam. Anotado para um plano de higiene de testes.
+- **Verificação (banco isolado `whatsbot_test_91`, nenhum outro `pytest` no mesmo banco):**
+  - `tests/test_endpoints.py` → **1633 passed, 2 failed** — **idêntico ao baseline de F0**, e as 2 falhas são as mesmas pré-existentes do `protocolos` (fora do escopo). **Zero regressão.**
+  - `pytest storages/plugins/vendas_ia/tests/` → **95 passed** (74 no baseline + 21 novos).
+  - `pytest` do bloco do core (plano 91 + memória de tool + routing + melhorias + ad_store) → **58 passed**.
+  - Standalone: `test_hooks` 32 · `test_routing_engine` 26 · `test_agent_routing` 29 — todos 0 falhas.
 
 ---
 
@@ -417,11 +487,19 @@ WAVE 5   F9 (zip + deploy)  🔴  [dep: F8]
 **Pronto quando:** um turno real com pergunta de preço resolve em ≤2 chamadas de tool, sem timeout, e o custo do turno cai para a faixa de 1 chamada (~17k tokens) em vez de 167k.
 
 #### Status de execução — Fase 9
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** 🟡 **Parcial** — F9·1 e F9·2 feitos (artefato pronto); F9·3 a F9·6 **aguardando autorização** (são ações fora deste repo / em produção).
+- **O que foi feito:**
+  - **F9·1 · bump** — `plugin.yaml` do `vendas_ia`: **1.5.1 → 1.6.0** (feature nova + correção de comportamento). A `description` ganhou o parágrafo da 1.6.0 em linguagem de operador: o loop caro, o teto de tempo do embedding, os três modos de busca e a correção da ordenação. A frase "sem o DSN **e a chave OpenRouter** é no-op" foi corrigida — a chave só é necessária no modo `hibrida`.
+  - **F9·2 · zip** — gerado **sem `tests/`**, sem `__pycache__`, sem `.pyc`/`.db`, e com o manifest **na raiz** (não dentro de uma pasta `vendas_ia/`, que o import recusaria): **32 arquivos, 222 KB**.
+    `/tmp/claude-1000/-home-thiago-whatsbot-pro-whatsbot-pro/96b6ff9c-e367-4fc7-9dbc-da6b4c368945/scratchpad/vendas_ia.zip`
+- **Como foi feito / decisões:**
+  - O zip foi validado **pelo próprio código de import do core** (`_read_zip_manifest` + `_reject_unsafe_zip_paths` de `server/routes/plugins.py`), não só por inspeção: devolve `id=vendas_ia, version=1.6.0` e passa na checagem de path traversal. Na primeira tentativa o zip saiu com tudo sob `vendas_ia/` e **teria sido recusado** ("manifest ausente na raiz do zip") — conferido contra o formato dos zips de canal já publicados.
+- **Problemas / pendências (todas dependem de você):**
+  - ⏳ **F9·3 — publicar no repo de plugins do Pro** (`Techify-one/whatsbot-pro-plugins`: `plugins/vendas_ia/vendas_ia.zip` + `.json` + `catalog.json`). **Não há checkout local** deste repo nesta máquina, e publicar é ação externa — não foi feito.
+  - ⏳ **F9·4 — deploy em produção pela tela: "Atualizar (.zip)", NUNCA "Importar"**. O import recusa plugin já instalado, e desinstalar derrubaria `plugin_vendas_ia_*` + as settings `plugin.vendas_ia.*` (DSN do Nexus, chave OpenRouter, token da Meta, janelas armadas).
+  - ⏳ **F9·5 — core por `git push`**: as mudanças versionadas deste plano são `app/services/agent_run_service.py`, `agent/memory.py`, `web/static/js/components/ai/GeneralSettings.js`, os 2 testes novos em `tests/` e este plano. **Nada foi commitado** (há outras IAs trabalhando neste checkout — um commit meu levaria arquivos dos planos 93/94/95/97 junto).
+  - ⏳ **F9·6 — pós-deploy**: aplicar **5 / 15** nos limites e confirmar o **modo de busca** (nasce em `lexica`) pela tela.
+- **Verificação:** artefato validado como importável (acima). O "pronto quando" da fase — turno real de pergunta de preço resolvendo em ≤2 chamadas e saindo da faixa de 60k tokens — **só pode ser medido depois do deploy**; ver o checklist §10.
 
 ---
 
@@ -471,19 +549,19 @@ A composição (bootstrap × embedding × consulta) foi inferida por eliminaçã
 
 ## 10. Checklist de verificação
 
-- [ ] Baseline de F0 registrado num **banco de teste isolado** (nunca dois `pytest` no mesmo banco)
-- [ ] Busca lenta **degrada** para léxico em vez de morrer aos 10 s (nenhum `[tool … excedeu o tempo limite]` no log)
-- [ ] Modo de busca configurável pela tela, com os 3 estados funcionando e o diagnóstico refletindo o modo (não "chave ausente")
-- [ ] `LIMIT` das três híbridas corta por **score**, não por id/nome
-- [ ] `save_contact_info` bloqueado ⇒ `updated_info is None`
-- [ ] Campo dos limites salva pela UI e pega no turno seguinte, **sem restart**
-- [ ] Teto global permite escapar: com o limite atingido, o agente ainda conseguiu transferir antes de travar
-- [ ] Oferta continua sendo **fixada** depois da F6 (`plugin_vendas_ia_conversa.offercode` + `oferta_atual` no painel)
-- [ ] Nexus fora / OpenRouter fora / modo inválido ⇒ turno normal (fail-open) nos três
-- [ ] Testes do plugin verdes + `tests/test_endpoints.py` verde no **Postgres** (`WHATSBOT_TEST_DB_URL`)
-- [ ] Campo novo legível no **modo escuro** (`wa-*` / `.wa-field`)
-- [ ] Deploy do plugin por **Atualizar (.zip)**, nunca Importar; core por `git push`
-- [ ] Turno real de pergunta de preço resolve em ≤2 chamadas e sai da faixa de 60k+ tokens
+- [x] Baseline de F0 registrado num **banco de teste isolado** (`whatsbot_test_91`, exclusivo — nunca dois `pytest` no mesmo banco)
+- [x] Busca lenta **degrada** para léxico em vez de morrer aos 10 s — provado ponta a ponta com servidor HTTP que nunca responde (3,6 s, log `APITimeoutError, teto 0.5s`)
+- [x] Modo de busca configurável pela tela, com os 3 estados funcionando e o diagnóstico refletindo o modo (badge **neutro** "não usada neste modo", não mais vermelho "ausente")
+- [x] `LIMIT` das três buscas corta por **score**, não por id/nome — conferido em SQL e **executado contra o Nexus real**
+- [x] `save_contact_info` bloqueado ⇒ `updated_info is None` (e o teste falha se o filtro for revertido)
+- [x] Campo dos limites salva pela UI e pega no turno seguinte, **sem restart** (PUT → `_resolve_tool_call_limit()` já devolve o valor novo)
+- [x] Teto global permite escapar: a mensagem de bloqueio cita `transferir_agente` (travado por teste)
+- [ ] ⏸️ Oferta continua sendo **fixada** depois da F6 — **n/a: F6 adiada** por decisão do usuário; a fixação segue como está hoje
+- [x] Nexus fora / OpenRouter fora / modo inválido ⇒ turno normal (fail-open) nos três
+- [x] Testes do plugin verdes (**95**) + `tests/test_endpoints.py` no **Postgres**: 1633 passed / as mesmas 2 falhas pré-existentes do baseline
+- [x] Campo novo legível no **modo escuro** (só `wa-*` / `.wa-field`)
+- [ ] ⏳ Deploy do plugin por **Atualizar (.zip)**, nunca Importar; core por `git push` — **aguardando autorização** (F9·3–F9·5)
+- [ ] ⏳ Turno real de pergunta de preço resolve em ≤2 chamadas e sai da faixa de 60k+ tokens — **só medível após o deploy**
 
 ---
 
