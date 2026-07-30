@@ -1,6 +1,6 @@
 # Plano 46 — Novos canais: Instagram, Messenger, E-mail e Widget de site (mestre)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-09 · **Escopo:** grande (4 canais + habilitadores no core)
+> **Status:** 🟨 PARCIAL — Messenger, Instagram e Widget concluídos; **falta só o canal E-mail** (§5, §11) · **Data:** 2026-07-09 · **Escopo:** grande (4 canais + habilitadores no core)
 > **Origem:** pedido do usuário ("colocar Instagram e Messenger", depois "email também (uso Gmail)", depois "widget de chat de site como o Chatwoot"). **Método:** engenharia reversa do Chatwoot (clone local lido `arquivo:linha`), pesquisa das APIs atuais da Meta/Google com verificação adversarial (21/24 afirmações confirmadas; 3 corrigidas — ver D-corr), e mapeamento do core do WhatsBot (`arquivo:linha` verificado por sub-agente Explore).
 > Os 4 canais entram como **plugins de canal** no ponto de extensão já existente (subclasse de `channels.base.Channel`), no mesmo molde de `whatsapp_cloud` e `telegram`. O core muda pouco e **sem `if provider ==`**: só ganha 1 costura de segurança (validação de assinatura Meta) + 1 infra nova (entrega via WebSocket p/ o widget). Instagram e Messenger são quase idênticos ao `whatsapp_cloud`; E-mail espelha o long-poll do `telegram`; o Widget é o **inverso** de todos (entrada = navegador POSTa num endpoint público; saída = empurra pro navegador via WS).
 > **Como usar este plano:** ao executar cada fase, preencha o "Status de execução" dela ANTES de passar para a próxima — nunca avance deixando a anterior sem registro. Este mestre indexa 5 sub-planos; execute pelas Waves (§6).
@@ -104,14 +104,17 @@ A forma da solução: **Wave 0** cria os habilitadores no core (assinatura Meta,
 
 ## 5. Índice dos sub-planos
 
-| Sub-plano | Arquivo | Cobre | Depende de |
-|-----------|---------|-------|------------|
-| **01 — Core & base Meta** | `46-plano-canais-meta-email-widget-01-core-prep.md` | Assinatura Meta no core, base `meta_graph`, URL pública de mídia, hook de refresh, infra de WS público | — |
-| **02 — Messenger** | `46-plano-canais-meta-email-widget-02-messenger.md` | Provider `facebook_messenger` | 01 |
-| **03 — Instagram** | `46-plano-canais-meta-email-widget-03-instagram.md` | Provider `instagram` (Instagram Login) + refresh 60d | 01 |
-| **04 — E-mail** | `46-plano-canais-meta-email-widget-04-email.md` | Provider `email` (IMAP poll + SMTP; OAuth opt-in; inbound-parse opcional) | (independente; toca só `spawn_task`) |
-| **05 — Widget** | `46-plano-canais-meta-email-widget-05-widget.md` | Provider `website` (SDK + WS + identidade) | 01 (infra WS público) |
-| **Guia de operador** | `46-guia-configuracao-provedores-meta-gmail-widget.md` | Passo-a-passo Meta (app, webhook, review, verificação), Gmail/OAuth, embed do widget | — (documento à parte, não-plano) |
+| Sub-plano | Arquivo | Cobre | Estado |
+|-----------|---------|-------|--------|
+| **01 — Core & base Meta** | ~~`…-01-core-prep.md`~~ (apagado) | Assinatura Meta no core, base `meta_graph`, URL pública de mídia, hook de refresh, infra de WS público | ✅ **concluído** (2026-07-22). ⚠️ A base `meta_graph`/`media_urls` foi depois **movida do core para dentro dos plugins** pelo plano 76·F9 (`37c8f19`) — cada canal Meta carrega a própria cópia. O hook `token_refresh` do 01-C ficou **sem consumidor** (o Instagram reverteu o refresh de 60 dias) |
+| **02 — Messenger** | ~~`…-02-messenger.md`~~ (apagado) | Provider `facebook_messenger` | ✅ **concluído** (2026-07-22). Falta só validação em campo com app/Página reais. Fase 02.3 (embedded signup) adiada por decisão |
+| **03 — Instagram** | ~~`…-03-instagram.md`~~ (apagado) | Provider `instagram` — **login via Facebook** (pivot de 2026-07-24), não Instagram Login | ✅ **concluído** (v2.2.0 em `assets/`, `storages/` e zip). Fase 03.3 (comentários/story/OAuth) adiada. Pendência menor: ação "Reautorizar" no card do canal |
+| **04 — E-mail** | [`…-04-email.md`](46-plano-canais-meta-email-widget-04-email.md) | Provider `email` (IMAP poll + SMTP; OAuth opt-in; inbound-parse opcional) | ⬜ **o único pendente** — zero linhas escritas. Independente (toca só `spawn_task`) |
+| **05 — Widget** | ~~`…-05-widget.md`~~ (apagado) | Provider `website` (SDK + WS + identidade) | ✅ **concluído** |
+| **Guia de operador** | [`46-guia-…`](46-guia-configuracao-provedores-meta-gmail-widget.md) | Passo-a-passo Meta (app, webhook, review, verificação), Gmail/OAuth, embed do widget | — (documento à parte, não-plano; **fica**) |
+
+> Os sub-planos concluídos foram apagados em 2026-07-30 depois de auditados contra o código. O texto integral
+> continua recuperável no git: `git show 0e84e09 -- docs-planos/…-01-core-prep.md` (idem 02), `f096f73` (03).
 
 ---
 
@@ -222,8 +225,20 @@ WAVE 1' 04 E-mail 🟢  ─── independente das outras (só usa spawn_task; p
 
 ## 11. Status de execução — Mestre
 
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(desvios do plano; sub-planos concluídos)_
-- **Problemas / pendências:** _(bloqueios, decisões pendentes)_
-- **Verificação:** _(waves concluídas + testes verdes)_
+**Estado:** 🟨 **Parcial — 3 dos 4 canais no ar; falta só o E-mail** (auditado contra o código em 2026-07-30)
+- **O que foi feito:** Wave 0 (sub-plano 01: as 4 costuras do core) concluída em 2026-07-22; Wave 1 Messenger (02) em
+  2026-07-22 e Instagram (03) em 2026-07-23, com pivot para login via Facebook em 2026-07-24; Widget (05) concluído.
+  Ver a coluna "Estado" do §5 — os sub-planos concluídos foram apagados, o texto está no git.
+- **Como foi feito / decisões:** dois desvios relevantes ao que este mestre especifica. **(1)** D2/P-01B1 previa a base
+  `meta_graph` como módulo **compartilhado do core**; o plano 76·F9 a moveu para **dentro de cada plugin** (`37c8f19`),
+  em nome de zips autossuficientes — hoje há duas cópias (`facebook_messenger` e `instagram`), e um fix na API da Meta
+  precisa ser aplicado nas duas. **(2)** D1 previa Instagram por "Instagram API with Instagram Login"
+  (`graph.instagram.com` + token de 60 dias com refresh); o usuário decidiu em 2026-07-24 seguir o caminho do Chatwoot
+  (Página do Facebook + Page Access Token em `graph.facebook.com`), o que **eliminou** o refresh de token e deixou o
+  hook `ChannelCapabilities.token_refresh` do 01-C no core **sem nenhum consumidor**.
+- **Problemas / pendências:** o sub-plano **04 (E-mail) não tem uma linha escrita** — é todo o trabalho restante deste
+  plano. Pendências menores herdadas: validação em campo do Messenger (app/Página reais), ação "Reautorizar" no card do
+  canal Instagram, e decidir o destino do hook `token_refresh` órfão (manter documentado como seam ou remover).
+  As fases opcionais 02.3 (embedded signup) e 03.3 (comentários/story/OAuth) seguem **adiadas por decisão**, não por falha.
+- **Verificação:** `tests/test_facebook_messenger.py` + `tests/test_meta_graph_core.py` (38 testes) e
+  `tests/test_instagram.py` (28 testes) verdes; paridade `assets/` ↔ `storages/` ↔ zip conferida por `diff -r` no Instagram.
