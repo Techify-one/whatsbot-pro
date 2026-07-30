@@ -832,7 +832,6 @@ def register_routes(app, deps):
         })
         return _ok({"message": "Template enviado.", "msg_id": msg_id})
 
-    _TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
 
     @app.post("/api/atendimentos/{conv_id}/templates")
     async def create_conversation_template(conv_id: int, body: dict, request: Request):
@@ -853,8 +852,6 @@ def register_routes(app, deps):
         if not body_text:
             return _err("body_text é obrigatório.", status=400)
         category = (body.get("category") or "UTILITY").strip().upper()
-        if category not in _TEMPLATE_CATEGORIES:
-            return _err(f"category deve ser uma de {sorted(_TEMPLATE_CATEGORIES)}.", status=400)
         language = (body.get("language") or "pt_BR").strip() or "pt_BR"
         body_examples = body.get("body_examples")
         header_examples = body.get("header_examples")
@@ -862,13 +859,6 @@ def register_routes(app, deps):
             return _err("body_examples deve ser uma lista.", status=400)
         if header_examples is not None and not isinstance(header_examples, list):
             return _err("header_examples deve ser uma lista.", status=400)
-        header_format, header_handle, media_err = tpl_svc.normalize_header_media(
-            body.get("header_format"), body.get("header_handle"))
-        if media_err:
-            return _err(media_err, status=400)
-        buttons, btn_err = tpl_svc.normalize_buttons(body.get("buttons"))
-        if btn_err:
-            return _err(btn_err, status=400)
 
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
@@ -876,6 +866,22 @@ def register_routes(app, deps):
         channel_id = conv.get("channel_id") or "default"
         if not outbound.supports(channel_id, "templates"):
             return _err("Este canal não suporta templates.", status=400)
+
+        # As regras de FORMA (categoria, cabeçalho de mídia, botões) são do
+        # PROVIDER, não do core (plano 92 · F1) — por isso a validação vem depois
+        # de saber qual é o canal. Canal sem spec declarada não é restringido
+        # aqui: quem recusa passa a ser o provedor.
+        spec = tpl_svc.spec_for(deps, channel_id)
+        cat_err = tpl_svc.validate_category(spec, category)
+        if cat_err:
+            return _err(cat_err, status=400)
+        header_format, header_handle, media_err = tpl_svc.normalize_header_media(
+            spec, body.get("header_format"), body.get("header_handle"))
+        if media_err:
+            return _err(media_err, status=400)
+        buttons, btn_err = tpl_svc.normalize_buttons(spec, body.get("buttons"))
+        if btn_err:
+            return _err(btn_err, status=400)
 
         result = await asyncio.to_thread(
             outbound.create_template, channel_id, name,
@@ -911,7 +917,8 @@ def register_routes(app, deps):
         if not outbound.supports(channel_id, "templates"):
             return _err("Este canal não suporta templates.", status=400)
         data_bytes = await file.read()
-        err = tpl_svc.validate_example_upload(file.content_type or "",
+        err = tpl_svc.validate_example_upload(tpl_svc.spec_for(deps, channel_id),
+                                              file.content_type or "",
                                               len(data_bytes or b""))
         if err:
             return _err(err, status=400)

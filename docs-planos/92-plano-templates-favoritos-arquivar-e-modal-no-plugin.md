@@ -1,6 +1,6 @@
 # Plano 92 — Templates: favoritos por atendente, arquivar o que não se usa, busca por conteúdo — com o modal migrando para o plugin
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-29 · **Escopo:** grande (frontend + plugin + 1 seam de core + 1 migration de plugin)
+> **Status:** EM EXECUÇÃO (A0·A1·B1·C1·D1·E1·E2·E3·F1 ✅ · F2 🟡 publicação pendente · G1 ⬜ release seguinte) · **Data:** 2026-07-29 · **Escopo:** grande (frontend + plugin + 1 seam de core + 1 migration de plugin)
 > **Origem:** pedido do usuário (2026-07-29) na tela "Enviar template" de um canal WhatsApp Cloud em produção. **Método:** leitura do código real com `arquivo:linha` verificado, `wc -l`/`grep -c` para toda medição, e consulta ao banco de desenvolvimento para a contagem de canais/usuários. Nenhum código foi alterado.
 > Três funcionalidades pedidas (favoritos pessoais, marcar template morto, buscar pelo conteúdo) esbarram no mesmo fato: a tela é **do core** ([TemplatePicker.js](../web/static/js/components/contacts/TemplatePicker.js), 825 linhas) e o plugin `whatsapp_cloud` **não tem nenhum seam** para alcançá-la. O usuário decidiu resolver a causa: o modal inteiro passa a ser do plugin, e o vocabulário da Meta sai do core.
 >
@@ -121,7 +121,7 @@ return (t.name || '').toLowerCase().includes(q) || (t.category || '').toLowerCas
 
 | Candidato | Por que NÃO é trabalho deste plano |
 |---|---|
-| As 5 rotas conv-scoped + 6 channel-scoped de template | São **genéricas por capability** (`outbound.supports(channel_id, "templates")`), sem um `if provider ==`. Movê-las para `/api/plugins/whatsapp_cloud/` obrigaria o plugin a fazer `save_operator_message` + broadcast + emit do bus, quebraria **60 checks** de `tests/test_endpoints.py` e a compatibilidade de API. Ficam no core |
+| As 5 rotas conv-scoped + 6 channel-scoped de template | São **genéricas por capability** (`outbound.supports(channel_id, "templates")`), sem um `if provider ==`. Movê-las para `/api/plugins/whatsapp_cloud/` obrigaria o plugin a fazer `save_operator_message` + broadcast + emit do bus, quebraria **92 checks** de `tests/test_endpoints.py` e a compatibilidade de API. Ficam no core |
 | `server/message_errors.py` (7 menções à Meta) | O próprio arquivo **documenta a decisão** de ficar no core ([message_errors.py:8-15](../server/message_errors.py#L8)): *"dicionário inerte — vocabulário do protocolo, não comportamento de provider… quando um 2º provider trouxer um espaço de códigos próprio, isto vira um gancho `describe_status_error()`"*. Reabrir isso exige o 2º provider, que não existe. Ver P3 |
 | `LEGACY_CLOUD_VIDEO_LIMITS` ([video_validate.py:36](../channels/video_validate.py#L36)) + [video_transcode.py:30](../channels/video_transcode.py#L30) | O plano 83 §F5 declara: *"Fica no core, e **está certo que fique** — são valores duplicados, não import do plugin"* (fallback retrocompat para plugin anterior ao plano 65) |
 | As ~50 menções a "WhatsApp Cloud"/"Meta" em [base.py](../channels/base.py), [channel_webhook.py](../server/routes/channel_webhook.py), [contacts.py](../server/routes/contacts.py), [outbound.py](../channels/outbound.py) | Medidas uma a uma: são **comentários e docstrings** citando o Cloud como exemplo do porquê de uma regra genérica. Zero comportamento. Reescrevê-las é ruído de diff sem ganho |
@@ -276,18 +276,21 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 
 **Itens**
 1. `[paralelo]` Rodar `venv/bin/python tests/test_endpoints.py` e registrar o total de checks e falhas. ⚠️ `pytest tests/` **não roda inteiro** (vários arquivos são scripts com `sys.exit`) — rodar por arquivo.
-2. `[paralelo]` Registrar os **60 checks** da seção de templates ([test_endpoints.py:6180-6460](../tests/test_endpoints.py#L6180)) como o contrato do backend: eles usam `_FakeTplChannel`, **não** o plugin real ⇒ continuam válidos depois da migração do modal.
+2. `[paralelo]` Registrar os **92 checks** da seção de templates ([test_endpoints.py:6180-6667](../tests/test_endpoints.py#L6180)) como o contrato do backend: eles usam `_FakeTplChannel`, **não** o plugin real ⇒ continuam válidos depois da migração do modal.
 3. `[paralelo]` Confirmar que não existe teste JS do `TemplatePicker` (`ls web/static/js/components/contacts/*.test.js`) — a migração de I3 **não tem rede de segurança automatizada**; o roteiro manual do item 4 é a rede.
 4. `[sequencial]` Escrever o roteiro manual dos 5 fluxos que a Wave 2 tem de preservar: **listar · enviar (com variáveis) · criar · upload de exemplo de mídia · apagar**, nos **dois** modos (conversa aberta e "Novo atendimento").
 
 **Pronto quando:** o baseline está escrito no bloco de status abaixo, com número de checks e o roteiro dos 5 fluxos × 2 modos.
 
 #### Status de execução — Fase A0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-29 18:10) — **nenhum arquivo de produto tocado**
+- **O que foi feito:** baseline medido; seção de contrato delimitada; ausência de cobertura JS confirmada; roteiro manual escrito (§9.1).
+- **Como foi feito / decisões:**
+  1. `venv/bin/python tests/test_endpoints.py` → **1626 passed, 0 failed**. Rodado como script (não por `pytest tests/`, que não coleta — vários arquivos são scripts com `sys.exit`).
+  2. Seção de templates delimitada e **medida**: **92 checks** em `:6180-6667` (o número no rascunho do plano, 60, estava subestimado — a seção segue além de `:6460`, onde começa o bloco channel-scoped do plano 21), mais **11 checks** de mídia/janela 24h em `:6668-6772`. Todos exercitam o `_FakeTplChannel` (`:6180-6250`), **não** o plugin real ⇒ permanecem válidos depois da migração do modal (confirma o falso positivo da §3.1).
+  3. Cobertura JS: o único `*.test.js` em `components/contacts/` é `menuLayout.test.js`. **Confirmado: não há teste do `TemplatePicker`** — a C1 não tem rede automatizada, o roteiro da §9.1 é obrigatório.
+- **Problemas / pendências:** a execução do plano 88 registrou falhas **não determinísticas** ao rodar o *diretório* `tests/characterization` (interferência entre arquivos, agravada pelo WIP não-commitado de terceiros na árvore). Não afeta esta fase — `test_endpoints.py` roda isolado e deu verde limpo. Se a suíte de caracterização for usada como gate em alguma fase, rodar **por arquivo**.
+- **Verificação:** 1626/1626 verde, registrado como o número a reproduzir ao fim de cada fase deste plano.
 
 ---
 
@@ -304,11 +307,20 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** existe uma linha por origem dizendo qual conteúdo é o mais novo, e a decisão de qual é a base para o bump deste plano.
 
 #### Status de execução — Fase A1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-29 18:10) — **veredito: linhagem única, A1 NÃO bloqueia**
+- **O que foi feito:** as 5 origens comparadas por **conteúdo**, não por número de versão.
+
+| Origem | Versão | Conteúdo |
+|---|---|---|
+| `assets/plugin_examples/whatsapp_cloud/` (git HEAD) | **1.7.0** | **BASE** |
+| `storages/plugins/whatsapp_cloud/` (dev instalado) | 1.7.0 | idêntico (`diff -rq` limpo) |
+| `assets/channel_plugins/whatsapp_cloud-plugin.zip` (27/07 19:55) | 1.7.0 | idêntico |
+| repo de plugins publicado (`f3e3bf0`) | **1.4.0** | **estritamente mais velho**: `channels.py` 1117×1214, `routes.py` 301×335, e **não tem** `static/extends.js` nem `static/WebhookHealthRow.js` |
+| **produção** (`whatsbot@10.8.100.5`, tabela `plugins`) | **1.6.0** | **ancestral limpo**: `git diff afdb503 HEAD` = só `routes.py` +33 linhas (seam de auditoria, `42a9aac`) + o bump |
+
+- **Como foi feito / decisões:** clone raso do `Techify-one/whatsbot-pro-plugins` no scratchpad + `unzip` + `diff -rq`; produção consultada por `SELECT id, version, enabled FROM plugins` (read-only, via MCP do cofre).
+- **Problemas / pendências:** 🚨 **o publicado (1.4.0) não é candidato a base** — publicar a partir dele apagaria o `WebhookHealthRow` e o `extends.js`, ou seja, desfaria o frontend do **plano 76** e ~131 linhas de backend. Registrar isso na F2. Produção (1.6.0) perde só o seam de auditoria; o **Atualizar** da F2.4 a leva para a versão deste plano.
+- **Verificação:** ao contrário de `telegram` e `protocolos` (que divergiram nos dois sentidos), aqui a linhagem é **unidirecional**: `1.4.0 (publicado) ⊂ 1.6.0 (produção) ⊂ 1.7.0 (local)`. Nenhum trabalho a resgatar.
 
 ---
 
@@ -327,11 +339,26 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** com o plugin **sem** registrar nada, abrir uma conversa Cloud e percorrer os 5 fluxos do roteiro A0.4 — comportamento idêntico. `window.__whatsbotExtensions` mostra a nova categoria vazia.
 
 #### Status de execução — Fase B1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída no código (2026-07-29 18:30) · ⏸️ **validação em navegador pendente** (roteiro §9.1)
+- **O que foi feito:**
+
+| Arquivo | Mudança |
+|---|---|
+| `web/static/js/plugins/registry.js` | mapa `_components`; `overrideComponent`/`getComponentOverride` (exclusivos, espelhando `overrideRoute`); entram no `reset()` e no `inventory()`; contrato documentado no cabeçalho |
+| `web/static/js/plugins/api.js` | `api.overrideComponent(name, C)` no `buildPluginApi` |
+| `web/static/js/components/contacts/TemplatePickerHost.js` | **novo** (52 linhas): resolve override → fallback; exporta `TEMPLATE_PICKER_SLOT` e `templatePickerAvailable()` |
+| `ContactDetail.js` · `NewConversationModal.js` | as duas montagens passam a usar o host |
+| `Composer.js` | botão gated por `templatesSupported && templatePickerAvailable()`; a faixa de 24h degrada o link para texto |
+
+- **Como foi feito / decisões:**
+  1. **Override exclusivo, não slot aditivo** — um modal não pode ser renderizado N vezes; a semântica correta é a do `overrideRoute` (1º registra vence, conflito logado).
+  2. `templatePickerAvailable()` hoje devolve **sempre `true`** (o fallback do core existe) ⇒ a B1 é um no-op observável, como o plano exige. Na G1 a mudança fica em **uma constante** (`CORE_FALLBACK`).
+  3. A faixa "Fora da janela de 24h" **degrada o link para texto simples** em vez de sumir: a informação continua verdadeira mesmo sem tela para abrir.
+  4. `FRONTEND_API_VERSION` **não** mudou — a adição é pura e o guard é major-only ([api.js:151-158](../web/static/js/plugins/api.js#L151)).
+- **Problemas / pendências:**
+  1. 🔎 **Achado para a G1 — 4 call sites além do botão** chamam `openTemplatePicker()`: [useComposer.js:219](../web/static/js/components/contacts/hooks/useComposer.js#L219) e [:334](../web/static/js/components/contacts/hooks/useComposer.js#L334), [useMediaUpload.js:436](../web/static/js/components/contacts/hooks/useMediaUpload.js#L436) e [:457](../web/static/js/components/contacts/hooks/useMediaUpload.js#L457) — são os desvios de "texto/mídia fora da janela de 24h", que **abortam o envio** e abrem o modal. Hoje inócuos (há fallback). **Depois da G1, com o plugin desativado**, eles abortariam o envio e abririam um host que renderiza `null` ⇒ o operador fica sem feedback. A G1 tem de tratar: ou o host renderiza um aviso quando não há picker, ou esses 4 sites consultam `templatePickerAvailable()` antes de desviar. **Adicionado ao escopo da G1.**
+  2. Roteiro §9.1 não executado (precisa de navegador logado).
+- **Verificação:** `node --test` **363/363**; `tests/test_endpoints.py` **1635/1635**; `node --input-type=module --check` verde nos 6 módulos; `grep` confirma que nenhuma referência ao `TemplatePicker` sobrou fora do host. ⚠️ O baseline subiu de 1626 (A0) para 1635 porque outro agente commitou os planos 87/89 e o teste do `vendas_ia` durante a execução — **a B1 não tocou em nenhum `.py`**, então a variação não é dela.
 
 ---
 
@@ -353,11 +380,15 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** com o plugin ativo, o modal que abre é o do plugin (`window.__whatsbotExtensions` confirma o dono) e os 5 fluxos × 2 modos passam; com o plugin desativado, o fallback do core assume sem erro no console.
 
 #### Status de execução — Fase C1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída no código (2026-07-30) · ⏸️ roteiro §9.1 pendente em navegador
+- **O que foi feito:** `static/TemplatePicker.js` (825 linhas) migrado para o plugin; `static/phone.js` + `phone.test.js` (cópia autossuficiente do formatador); `extends.js` reivindica `template.picker`; `plugin.yaml` **1.7.0 → 1.8.0**; espelhado em `storages/`. O `diff -u` contra o original acusa **51 linhas**, todas intencionais.
+- **Como foi feito / decisões:** um **workflow de pré-voo** (4 frentes paralelas + síntese) produziu o contrato de migração ANTES da edição, e a reescrita dos 12 call sites foi feita por script (regex ancorada em `(?<![\w.])nome\(`), não à mão. Três decisões vieram de lá e **corrigiram erros meus**:
+  1. **O host remontava o modal.** Eu re-resolvia o override a cada `bump()`. Como `loadPluginExtensions` limpa o registry de forma SÍNCRONA e só repovoa após N `await import()` — e `whatsapp_cloud` é o último dos 14 na ordem alfabética — um toggle de plugin trocaria o tipo do vnode **com o modal aberto**, descartando o formulário preenchido. Agora congela na montagem; a única transição permitida é "nada → alguma coisa".
+  2. **IDs de DOM colidiriam na coexistência.** `datalist` casa por `id` global e rádios de mesmo `name` formam UM grupo no documento: com o fallback do core e o do plugin montados, mexer num desmarcaria o outro. Prefixados com `wac-`.
+  3. **Uploads não podiam ir por `api.http`** (JSON-only ⇒ `FormData` viraria `"{}"` e o FastAPI devolveria 422). Vão por `api.services`, onde a função já vem ligada ao módulo do core.
+- **Desvio do plano (antecipação consciente):** o gate `templatePickerAvailable()` foi aplicado também ao `canPickTemplate` do `NewConversationModal` — o plano o listava só na G1. É no-op hoje (o fallback existe) e evita um botão órfão depois. Os 4 desvios automáticos (`useComposer`/`useMediaUpload`) **continuam** na G1 (item 3b).
+- **Problemas / pendências:** o `plugin.yaml` bumpado não reflete no banco de dev (1.7.0) porque o watcher do uvicorn só observa `*.py` — cosmético, corrige no próximo restart. Os estáticos servem a versão nova na hora (StaticFiles lê do disco).
+- **Verificação:** `node --test` **369/369** (363 do core + 6 do `phone.test.js` novo) · `tests/test_endpoints.py` **1635/1635** · `--check` verde nos 5 módulos · `curl` nos 4 estáticos do plugin → **200** (`TemplatePicker.js` 39.709 b) · nenhum `../` sobrando no arquivo migrado. Verificação **adversarial** (4 lentes tentando refutar fidelidade, runtime, regressão do core e coexistência) rodando em paralelo.
 
 ---
 
@@ -377,11 +408,17 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** `GET /api/plugins/whatsapp_cloud/template-prefs?channel_id=…` responde; um usuário sem a permissão recebe 403 no archive; a chave nova aparece no `PermissionPicker` sob "Templates (WhatsApp Cloud)".
 
 #### Status de execução — Fase D1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `migrations/001_template_prefs.sql` (2 tabelas + 3 índices); `rbac:` no `plugin.yaml` com `template_archive` no grupo "Templates (WhatsApp Cloud)"; 3 rotas em `routes.py` (`GET /template-prefs`, `POST /template-prefs/favorite`, `POST /template-prefs/archive`); auditoria no arquivar como recurso de CANAL; 10 testes.
+- **Como foi feito / decisões:**
+  1. **`can_archive` como FLAG, não só como 403.** A dependency `plugin_permission` barra a rota, mas a tela precisa do booleano para ESCONDER o botão (padrão do repo). Resolvido com `server.authz.acheck` em import defensivo — sem o helper, devolve `True` e o enforcement continua sendo o da rota.
+  2. **Favoritar não é auditado**, arquivar é. O guia manda não auditar preferência pessoal por usuário; arquivar é mudança de estado com dono e vai para o recurso `channel:<id>`, junto dos eventos `channel.*` do core.
+  3. Escrita idempotente por `SELECT` + `INSERT` (o índice único é a autoridade), para o toggle otimista da tela não gerar 500 numa corrida.
+- **Dois erros meus, pegos por verificação e não por revisão:**
+  - **`;` dentro de comentário SQL** — eu escrevi o alerta sobre isso e caí nele na linha seguinte. O `_split_statements` divide em `;` sem consciência de comentário (o `';'` entre aspas escapa, o solto não), então a migration teria quebrado. Achado rodando o splitter de verdade contra o arquivo.
+  - **`migrations: migrations` faltando no manifest** — sem a linha, `run_pending_migrations` retorna `[]` na primeira linha e as tabelas nunca nascem, **sem erro nenhum**. O sintoma foi silencioso: versão 1.8.0 no banco, permissão registrada, zero tabela.
+- **Problemas / pendências:** os testes tiveram de ir para `tests/` do core, não para `<plugin>/tests/` — a fixture `plugin_app` vem de `tests/conftest.py` e não alcança teste fora daquela árvore. É o **P2 do plano 83**, ainda aberto; quando cair, o arquivo viaja com o zip.
+- **Verificação:** migration aplicada no banco de dev (`plugin_migrations` = [1], 2 tabelas criadas, `load_error` nulo) · permissão no catálogo · **10/10** testes.
 
 ---
 
@@ -399,11 +436,14 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** favoritar, recarregar (F5) e ver a estrela mantida; entrar com outro usuário no mesmo navegador e ver a lista **sem** aquela estrela.
 
 #### Status de execução — Fase E1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** estrela por linha (contorno/preenchida), favoritos ao topo, busca das preferências assim que o canal é conhecido, toggle otimista com rollback.
+- **Como foi feito / decisões:**
+  1. **O canal em modo conversa só é conhecido DEPOIS da lista** — ele vem no payload como `channel`. Por isso as preferências são um efeito à parte, disparado por `prefsChannelId`, e não uma segunda chamada no mesmo `useEffect`.
+  2. **Falha ao buscar preferências degrada em silêncio**: a lista continua utilizável, só sem estrela. O que o atendente precisa é enviar template.
+  3. Sem `user_id` (instalação aberta) a estrela **não renderiza** — não há a quem pertencer.
+  4. A ordenação é **estável**: favoritos primeiro, mas dentro de cada grupo a ordem da Meta é preservada, senão o atendente perde a referência visual da lista.
+- **Verificação:** coberta pelos testes puros de `templateFilter` (ordem estável, aba "favoritas", composição com busca).
 
 ---
 
@@ -421,11 +461,14 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** arquivar num navegador e ver sumir **no navegador de outro operador** após reabrir o modal; o chip "Arquivadas" devolve e permite desarquivar; sem a permissão, o ícone não existe.
 
 #### Status de execução — Fase E2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** ícone de arquivar por linha (só com a permissão), abas `Todas · Favoritas · Arquivadas` com contadores, desarquivar pela aba, mensagens de lista vazia por aba.
+- **Como foi feito / decisões:**
+  1. **Ícone deliberadamente diferente da lixeira** (caixa com seta × lata de lixo): as duas ações ficam lado a lado e têm risco oposto — arquivar é reversível e local, apagar é irreversível e vai à Meta. O `title` diz isso em texto.
+  2. **Abas só aparecem quando há o que separar** — sem login não há "Favoritas", e sem nada arquivado a aba seria uma lista vazia permanente.
+  3. **Arquivado não volta pela busca** (só na aba "Arquivadas"). É a regra que dá sentido a "arquivar", e está travada por teste.
+- **Erro meu, pego na hora:** ao trocar o gate da coluna de ações para `canArchive || canDelete`, a lixeira ficou fora do próprio gate — quem só pudesse arquivar veria o botão de apagar. Corrigido com gate próprio em `canDelete`.
+- **Verificação:** testes puros de `templateFilter` (arquivado some de "todas", não volta pela busca, não aparece em "favoritas" mesmo sendo favorito, estrela não reordena a aba "arquivadas") + os 10 testes de rota (global, idempotente, por canal).
 
 ---
 
@@ -442,11 +485,14 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** buscar uma palavra que só existe no corpo de um template e achá-lo; buscar com/sem acento dá o mesmo resultado; `node --test` do módulo puro verde.
 
 #### Status de execução — Fase E3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** busca passa a casar nome, categoria **e conteúdo** (cabeçalho, corpo, rodapé, texto e URL de botão); quando o casamento é por conteúdo, a linha mostra **onde** casou e o trecho.
+- **Como foi feito / decisões:**
+  1. Extraído como módulo **puro** `static/templateFilter.js` (sem preact/rede/DOM) com **19 testes** `node --test` — a ordem de aplicação não é óbvia e é exatamente o que se quebra numa refatoração.
+  2. **Normalização de acento E caixa**: buscar "cartao" acha "cartão". É a lição do `protocolos`, onde a mesma falta virou um bug que parecia problema de collation.
+  3. **Trecho com o campo de origem** — sem mostrar que casou no corpo, a linha parece falso positivo (o termo não está no nome nem na categoria).
+- **Erro meu, pego pelo `--check`:** o intervalo de combining marks ficou gravado como bytes literais invisíveis no arquivo; trocado pelo escape explícito `\u0300-\u036f`.
+- **Verificação:** **19/19** em `templateFilter.test.js`.
 
 ---
 
@@ -462,14 +508,19 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 5. `[sequencial]` `_FakeTplChannel` ([test_endpoints.py:6180](../tests/test_endpoints.py#L6180)) declara um spec; os 3 checks de 400 ([:6306-6313](../tests/test_endpoints.py#L6306)) continuam verdes por outro caminho.
 6. `[paralelo]` Rótulos em [permission_catalog.py:51-52](../domain/permission_catalog.py#L51) e `:143-144`: **manter** o grupo "Templates (WhatsApp Cloud)" (é o que o teste [:2402-2404](../tests/test_endpoints.py#L2402) trava e o que agrupa a chave nova do plugin).
 
-**Pronto quando:** `grep -nE "UTILITY|COPY_CODE|16 \* 1024|application/vnd" app/services/template_service.py` não retorna nada e os 60 checks continuam verdes.
+**Pronto quando:** `grep -nE "UTILITY|COPY_CODE|16 \* 1024|application/vnd" app/services/template_service.py` não retorna nada e os 92 checks continuam verdes.
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `TemplateSpec` em [channels/base.py](../channels/base.py) + `ChannelCapabilities.template_spec`; `template_service.py` perdeu as 7 constantes da Meta e ganhou `spec_for()`/`validate_category()`, com os 3 validadores recebendo o spec; as 2 rotas de criação e as 2 de upload passam o spec; o `whatsapp_cloud` declara o seu; `_FakeTplChannel` declara o dele.
+- **Como foi feito / decisões:**
+  1. **`P2` decidida como (a): sem spec, o core NÃO restringe** — deixa passar e quem recusa é o provedor, com `logger.warning` uma vez por canal. Não recriar no core uma cópia envelhecida das regras da Meta era o ponto da fase.
+  2. **A ordem de validação mudou**: a forma (categoria/cabeçalho/botões) só pode ser checada DEPOIS de saber qual é o canal, então a resolução do canal subiu. Verificado antes de mexer que nenhum teste combina input inválido com canal/conversa inexistente — a precedência observável não muda.
+  3. **A validação de NOME ficou no core** (não virou campo do spec, como o plano previa): "letras, números e `_`" é regra genérica de identificador, sem vocabulário da Meta. Mover só adicionaria acoplamento.
+  4. O ramo por tipo de botão deixou de usar os nomes literais da Meta como fluxo de controle: um tipo que este core não conhece cai num ramo genérico e é repassado, em vez de sumir silenciosamente.
+- **Problemas / pendências:** `grep` confirma **zero** ocorrências de `TEMPLATE_CATEGORIES`, `BUTTON_TYPE_MAX`, `UPLOAD_EXAMPLE_MIMES` e irmãs no core.
+- **⚠️ Achado de infraestrutura (custou 3 execuções da suíte):** o `WHATSBOT_TEST_DB_URL` aponta para um banco **compartilhado entre máquinas**. No meio desta fase apareceram falhas que pareciam regressão da F1 — primeiro no envio de vídeo, depois em contagens de RBAC, **diferentes a cada execução**. `pg_stat_activity` mostrou duas conexões de **10.8.200.103** rodando `DROP SCHEMA` + `alembic upgrade` no mesmo `whatsbot_test`. Criei `whatsbot_test_p92` (`ENCODING 'UTF8' TEMPLATE template0` — o servidor herda SQL_ASCII e o `postgres` dele nem conecta por SQLAlchemy) e a suíte deu **1635/1635**. **Qualquer execução paralela precisa de banco próprio**; ler falha de suíte sem antes checar `pg_stat_activity` leva a conclusão errada.
+- **Verificação:** `tests/test_endpoints.py` **1635/1635** em banco exclusivo · `node --test` **388/388** · 10/10 do `template-prefs` · zip regerado (56.638 bytes) com o provider já declarando o spec.
 
 ---
 
@@ -484,11 +535,10 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Pronto quando:** produção roda a versão nova, o modal é o do plugin e a permissão nova aparece na tela de Usuários.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** 🟡 Parcial (2026-07-30) — zip regerado; **publicação e deploy pendentes com o usuário**
+- **O que foi feito:** `assets/channel_plugins/whatsapp_cloud-plugin.zip` regerado da fonte (32.771 → **56.011 bytes**), agora com `migrations/001_template_prefs.sql` e os 4 arquivos novos de `static/`.
+- **Problemas / pendências:** **(a)** publicar em `Techify-one/whatsbot-pro-plugins` — lembrando o achado da A1: o publicado (1.4.0) é estritamente mais velho e **não pode** ser a base; **(b)** instalar em produção pelo botão **Atualizar**; **(c)** conceder `plugin.whatsapp_cloud.template_archive` aos cargos — a chave nasce sem dono (D3), então até isso ninguém arquiva; **(d)** atualizar o CLAUDE.md com o `overrideComponent` e a mudança de dono do modal.
+- **Verificação:** estrutura do zip conferida arquivo a arquivo.
 
 ---
 
@@ -499,7 +549,8 @@ WAVE 5   G1(remover fallback do core)                           🔴 sozinha —
 **Itens**
 1. `[sequencial]` Confirmar em produção que o modal ativo é o do plugin.
 2. `[sequencial]` `git rm web/static/js/components/contacts/TemplatePicker.js`; o host passa a renderizar `null` sem override.
-3. `[sequencial]` O gate do botão ([Composer.js:274](../web/static/js/components/contacts/Composer.js#L274)) passa a depender **só** do override.
+3. `[sequencial]` O gate do botão ([Composer.js:274](../web/static/js/components/contacts/Composer.js#L274)) passa a depender **só** do override — trocar `CORE_FALLBACK` para `null` no host.
+3b. `[sequencial]` **(achado da B1)** Tratar os 4 desvios automáticos para o picker — [useComposer.js:219](../web/static/js/components/contacts/hooks/useComposer.js#L219)/[:334](../web/static/js/components/contacts/hooks/useComposer.js#L334) e [useMediaUpload.js:436](../web/static/js/components/contacts/hooks/useMediaUpload.js#L436)/[:457](../web/static/js/components/contacts/hooks/useMediaUpload.js#L457): sem picker, hoje eles abortariam o envio e abririam nada. Ou o host renderiza um aviso, ou os 4 consultam `templatePickerAvailable()` antes de desviar.
 4. `[paralelo]` As 10 funções de template em [api.js:654-719](../web/static/js/services/api.js#L654) **ficam** — são o transporte que o plugin consome via `api.services`.
 
 **Pronto quando:** com o plugin desativado, o botão de template **não aparece** (em vez de abrir vazio); com ele ativo, tudo funciona.
@@ -592,8 +643,33 @@ Contexto: no modo channel-scoped o operador está iniciando conversa fria, onde 
 - `migrations/001_template_prefs.sql` *(novo)* · `tests/` *(novo)*
 
 **Testes**
-- [tests/test_endpoints.py:6180-6460](../tests/test_endpoints.py#L6180) — 60 checks, `_FakeTplChannel`
+- [tests/test_endpoints.py:6180-6667](../tests/test_endpoints.py#L6180) — 92 checks, `_FakeTplChannel` (:6180-6250); +11 checks de mídia/janela 24h em :6668-6772
 - [tests/support.py:74-78](../tests/support.py#L74) — `_copy_plugin` (limitação P2 do plano 83)
+
+---
+
+### 9.1 Roteiro manual de regressão do modal (produzido na A0.4)
+
+⚠️ **Obrigatório na C1** (migração do modal) — é a única rede de segurança: não existe teste automatizado do `TemplatePicker` (verificado na A0.3). Executar **os 5 fluxos nos 2 modos**; qualquer divergência de comportamento reprova a fase.
+
+**Pré-condições:** canal WhatsApp Cloud ativo com `waba_id` configurado; usuário logado com `conversation.reply`, `template.create` e `template.delete`.
+
+| # | Fluxo | Passos | Resultado esperado |
+|---|---|---|---|
+| 1 | **Listar** | Abrir o modal | Lista carrega; cada linha tem selo de status (Aprovado/Pendente/…) e `categoria · idioma`; não-aprovado mostra "não enviável"; cabeçalho mostra "Enviando por `<canal>` · `<número>`" |
+| 2 | **Buscar** | Digitar parte de um nome e de uma categoria | Filtra por nome **e** categoria (comportamento de hoje — a busca por conteúdo só entra na E3) |
+| 3 | **Enviar** | Escolher um APROVADO com variável `{{1}}` | Form pede as variáveis; prévia substitui ao digitar; "Enviar" desabilitado enquanto faltar variável; ao enviar, o modal fecha e a mensagem aparece no fio |
+| 3b | **Enviar (bloqueio)** | Escolher um PENDENTE | Faixa âmbar "apenas templates aprovados podem ser enviados"; botão Enviar desabilitado |
+| 4 | **Criar** | "＋ Novo" → nome inválido (maiúscula/espaço) | Aviso vermelho sob o campo; "Criar template" desabilitado |
+| 4b | **Criar (feliz)** | nome válido + corpo com `{{1}}` + exemplo | "Template enviado para aprovação da Meta"; volta à lista já recarregada |
+| 5 | **Upload de exemplo** | "＋ Novo" → cabeçalho IMAGE → escolher JPG | "Enviando…" e depois "Pronto ✓ `<arquivo>`"; sem o handle, "Criar template" fica desabilitado |
+| 6 | **Apagar** | Lixeira numa linha | Confirmação inline "Apagar / Não"; confirmando, some da lista |
+
+**Os 2 modos:**
+- **A — conversa aberta:** botão de template no compositor de uma conversa Cloud ([Composer.js:274](../web/static/js/components/contacts/Composer.js#L274)). Repetir **fora da janela de 24h** e conferir a faixa "Fora da janela de 24h: só é possível enviar um template aprovado" com o link abrindo o mesmo modal.
+- **B — "Novo atendimento":** botão "Enviar como template" ([NewConversationModal.js:547-552](../web/static/js/components/contacts/NewConversationModal.js#L547)) para um número **sem conversa** naquele canal. Ao enviar, a conversa nasce e aparece na sidebar.
+
+**Controle da C1.5 (fallback):** desativar o plugin `whatsapp_cloud` em `/plugins`, aguardar o restart e repetir os fluxos 1 e 3 — enquanto o fallback do core existir (até a G1), tudo deve continuar funcionando; após a G1, o **botão não deve aparecer**.
 
 ---
 

@@ -120,6 +120,40 @@ try:
 except ImportError:  # pragma: no cover - core antigo
     _MEDIA_LIMITS = None
 
+# ── Forma de um template: o que a Graph API aceita (plano 92 · F1) ───────────
+# Estes valores viviam no CORE (``app/services/template_service.py``) até o plano
+# 92. São vocabulário da Meta — categorias, formatos de cabeçalho, os 4 tipos de
+# botão com seus limites de mistura, a whitelist de MIME do exemplo e o teto de
+# 16 MiB —, então o dono é este plugin. O core apenas AVALIA o que declaramos.
+# Import defensivo: num core anterior ao plano 92 ``TemplateSpec`` não existe; o
+# plugin continua carregando e o core simplesmente não valida a forma (quem
+# recusa passa a ser a própria Meta, com a mensagem dela).
+try:
+    from channels.base import TemplateSpec
+
+    _TEMPLATE_SPEC = TemplateSpec(
+        categories=frozenset({"UTILITY", "MARKETING", "AUTHENTICATION"}),
+        header_formats=frozenset({"IMAGE", "VIDEO", "DOCUMENT"}),
+        button_types=frozenset({"QUICK_REPLY", "URL", "PHONE_NUMBER", "COPY_CODE"}),
+        # Limites de MISTURA da Meta: no máximo 2 de URL, 1 de telefone, 1 de
+        # copiar-código. Validar aqui só antecipa o erro com uma frase legível —
+        # a Meta continua sendo a fonte da verdade.
+        button_type_max={"URL": 2, "PHONE_NUMBER": 1, "COPY_CODE": 1},
+        button_text_max=25,
+        buttons_max=10,
+        upload_mimes=frozenset({
+            "image/jpeg", "image/png",
+            "video/mp4", "video/3gpp",
+            "application/pdf", "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }),
+        upload_max_bytes=16 * 1024 * 1024,
+    )
+except ImportError:  # pragma: no cover - core anterior ao plano 92
+    _TEMPLATE_SPEC = None
+
 # ── MIME por extensão (o upload NÃO pode depender de ``mimetypes``) ──────────
 # ``mimetypes.guess_type`` consulta ``/etc/mime.types``, que NÃO existe numa
 # imagem slim (o pacote ``media-types`` não é instalado). Sem esse arquivo o
@@ -240,6 +274,7 @@ class WhatsAppCloudChannel(Channel):
                 # Limites de vídeo da Meta — o core valida/recomprime a partir daqui
                 # (plano 65). ``**`` para não passar a chave em core antigo.
                 **({"media_limits": _MEDIA_LIMITS} if _MEDIA_LIMITS else {}),
+                **({"template_spec": _TEMPLATE_SPEC} if _TEMPLATE_SPEC else {}),
             ),
         )
         self.registry = registry

@@ -6236,11 +6236,30 @@ from channels.base import Channel as _Ch, ChannelCapabilities as _Caps, SendResu
 from db.repositories import inbox_repo as _ibx_repo
 
 
+# Spec de forma do template. Antes do plano 92 estas regras eram constantes do
+# CORE; agora quem as declara é o provider, e o core só avalia — então o fake
+# precisa declarar as suas para os 400 de validação continuarem existindo.
+from channels.base import TemplateSpec
+
+_FAKE_TPL_SPEC = TemplateSpec(
+    categories=frozenset({"UTILITY", "MARKETING", "AUTHENTICATION"}),
+    header_formats=frozenset({"IMAGE", "VIDEO", "DOCUMENT"}),
+    button_types=frozenset({"QUICK_REPLY", "URL", "PHONE_NUMBER", "COPY_CODE"}),
+    button_type_max={"URL": 2, "PHONE_NUMBER": 1, "COPY_CODE": 1},
+    button_text_max=25,
+    buttons_max=10,
+    upload_mimes=frozenset({"image/jpeg", "image/png", "video/mp4", "video/3gpp",
+                            "application/pdf"}),
+    upload_max_bytes=16 * 1024 * 1024,
+)
+
+
 class _FakeTplChannel(_Ch):
     provider = "fake_cloud"
 
     def __init__(self, channel_id):
-        super().__init__(channel_id, _Caps(templates=True, session_window_hours=24))
+        super().__init__(channel_id, _Caps(templates=True, session_window_hours=24,
+                                           template_spec=_FAKE_TPL_SPEC))
         self.sent = []
         self.created = None
         self.deleted = None

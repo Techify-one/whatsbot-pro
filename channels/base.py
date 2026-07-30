@@ -31,6 +31,36 @@ class MediaLimits:
 
 
 @dataclasses.dataclass(frozen=True)
+class TemplateSpec:
+    """As regras de FORMA de um template, declaradas pelo provider (plano 92 · F1).
+
+    Irmão de :class:`MediaLimits`, mesma política: o PROVIDER declara os valores,
+    o core só avalia (``app.services.template_service``) — nenhum ``if provider ==``
+    e, principalmente, nenhum vocabulário de um provedor específico no core. O que
+    é "categoria válida", "tipo de botão" ou "quantos MB o exemplo pode ter" é da
+    API de quem envia, não do WhatsBot.
+
+    ``template_spec = None`` (o default) significa **sem restrição**: o core deixa
+    passar e quem recusa é o provedor, com a mensagem dele. É a escolha
+    consciente de não recriar no core uma cópia velha das regras da Meta — um zip
+    de plugin anterior a este plano simplesmente perde a validação antecipada, não
+    a funcionalidade.
+
+    Campo vazio (``frozenset()``/``0``) = aquela dimensão não é restringida.
+    """
+    categories: frozenset = frozenset()
+    header_formats: frozenset = frozenset()
+    button_types: frozenset = frozenset()
+    # {tipo: máximo}, para provedores que limitam a MISTURA de botões.
+    button_type_max: dict = dataclasses.field(default_factory=dict)
+    button_text_max: int = 0
+    buttons_max: int = 0
+    # MIMEs aceitos como EXEMPLO de cabeçalho de mídia, e o teto em bytes.
+    upload_mimes: frozenset = frozenset()
+    upload_max_bytes: int = 0
+
+
+@dataclasses.dataclass(frozen=True)
 class AudioLimits:
     """The audio constraints a provider's API enforces — codec-aware.
 
@@ -149,6 +179,9 @@ class ChannelCapabilities:
     # Providers that predate this field fall back to the legacy Cloud defaults in
     # ``channels.video_validate`` when they are windowed (retrocompat).
     media_limits: Optional[dict] = None
+    # Regras de forma dos templates (plano 92 · F1), quando ``templates=True``.
+    # ``None`` = o core não restringe e o provedor é quem recusa.
+    template_spec: Optional[TemplateSpec] = None
 
 
 @dataclasses.dataclass

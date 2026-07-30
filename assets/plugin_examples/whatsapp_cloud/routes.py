@@ -18,13 +18,14 @@ loader; ver comentário histórico abaixo). Segredos (``access_token`` /
 from __future__ import annotations
 
 import asyncio
+import time
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from db.repositories import channel_credential_repo, config_repo
-from plugins.context import core_permission
+from plugins.context import core_permission, make_plugin_db, plugin_permission
 
 # Default Graph API version. Kept in sync with settings.Settings.graph_api_version
 # (the real configured value is read from plugin settings by the core). Avoids a
@@ -325,6 +326,163 @@ async def delete_webhook(body: dict):
     _audit("webhook.delete", channel_id,
            after={"waba_id": waba_id, "override_removido": True})
     return {"ok": True, "error": None}
+
+
+# ── Preferências de template: favoritos (pessoais) e arquivados (globais) ────
+#
+# Plano 92 · D1. A LISTA de templates continua vindo do core (Graph API); aqui
+# mora só a marcação local, que o modal funde no cliente. Duas semânticas:
+#
+#   favoritos  → PESSOAIS. Chave (user_id, channel_id, template_name). Sem
+#                usuário logado (instalação aberta) não há a quem pertencer:
+#                a leitura devolve vazio e a escrita responde 400, e a tela
+#                simplesmente não mostra a estrela.
+#   arquivados → GLOBAIS. Um atendente marca, some para todos. Por isso exige a
+#                permissão `plugin.whatsapp_cloud.template_archive`, que nasce
+#                sem dono (o administrador concede em Usuários → Cargos).
+#
+# Nada aqui chama a Graph API — é só banco, então não esbarra na restrição de
+# import do loader descrita no topo do arquivo.
+
+def _now() -> float:
+    return time.time()
+
+
+def _user_of(request) -> tuple:
+    """``(id, nome)`` do usuário da request. ``(None, "")`` em instalação aberta."""
+    user = getattr(request.state, "user", None) or {}
+    uid = user.get("id")
+    name = (user.get("name") or user.get("email") or "").strip()
+    return (uid if isinstance(uid, int) else None, name)
+
+
+async def _can_archive(request) -> bool:
+    """A permissão de arquivar, como FLAG (sem levantar 403).
+
+    ``plugin_permission`` é a dependency que barra a rota; aqui precisamos do
+    booleano para a tela esconder o botão — o padrão do repo é "esconder, não
+    desabilitar". Import defensivo: num core sem o helper, devolve True e o
+    enforcement continua sendo o da rota.
+    """
+    try:
+        from server.authz import acheck
+    except ImportError:  # pragma: no cover — core antigo
+        return True
+    try:
+        return await acheck(request, f"plugin.{PLUGIN_ID}.template_archive")
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _read_prefs(channel_id: str, user_id) -> dict:
+    from sqlalchemy import text as _sql
+    favorites: list = []
+    archived: list = []
+    with make_plugin_db() as conn:
+        if user_id is not None:
+            favorites = [r[0] for r in conn.execute(_sql(
+                "SELECT template_name FROM plugin_whatsapp_cloud_template_favorites "
+                "WHERE user_id = :u AND channel_id = :c"),
+                {"u": user_id, "c": channel_id}).fetchall()]
+        archived = [r[0] for r in conn.execute(_sql(
+            "SELECT template_name FROM plugin_whatsapp_cloud_template_archived "
+            "WHERE channel_id = :c"), {"c": channel_id}).fetchall()]
+    return {"favorites": favorites, "archived": archived}
+
+
+@router.get("/template-prefs")
+async def template_prefs(request: Request, channel_id: str = ""):
+    """Favoritos do usuário + arquivados do canal. Leitura, sem gate próprio."""
+    channel_id = (channel_id or "").strip()
+    if not channel_id:
+        return {"ok": False, "error": "channel_id é obrigatório"}
+    user_id, _ = _user_of(request)
+    data = await asyncio.to_thread(_read_prefs, channel_id, user_id)
+    data["can_archive"] = await _can_archive(request)
+    data["can_favorite"] = user_id is not None
+    return {"ok": True, "data": data, "error": None}
+
+
+def _set_favorite(channel_id: str, user_id: int, name: str, on: bool) -> None:
+    from sqlalchemy import text as _sql
+    with make_plugin_db() as conn:
+        if on:
+            # Idempotente: o índice único é a autoridade, o SELECT evita o erro.
+            exists = conn.execute(_sql(
+                "SELECT 1 FROM plugin_whatsapp_cloud_template_favorites "
+                "WHERE user_id = :u AND channel_id = :c AND template_name = :n"),
+                {"u": user_id, "c": channel_id, "n": name}).first()
+            if not exists:
+                conn.execute(_sql(
+                    "INSERT INTO plugin_whatsapp_cloud_template_favorites "
+                    "(user_id, channel_id, template_name, created_at) "
+                    "VALUES (:u, :c, :n, :t)"),
+                    {"u": user_id, "c": channel_id, "n": name, "t": _now()})
+        else:
+            conn.execute(_sql(
+                "DELETE FROM plugin_whatsapp_cloud_template_favorites "
+                "WHERE user_id = :u AND channel_id = :c AND template_name = :n"),
+                {"u": user_id, "c": channel_id, "n": name})
+
+
+@router.post("/template-prefs/favorite")
+async def set_template_favorite(body: dict, request: Request):
+    """Liga/desliga o favorito do USUÁRIO da request. Preferência pessoal ⇒ sem
+    permissão e **sem auditoria** (o guia manda não auditar preferência por
+    usuário)."""
+    channel_id = (body.get("channel_id") or "").strip()
+    name = (body.get("template_name") or body.get("name") or "").strip()
+    if not channel_id or not name:
+        return {"ok": False, "error": "channel_id e template_name são obrigatórios"}
+    user_id, _ = _user_of(request)
+    if user_id is None:
+        return {"ok": False, "error": "Favoritos exigem um usuário logado."}
+    on = bool(body.get("favorite", True))
+    await asyncio.to_thread(_set_favorite, channel_id, user_id, name, on)
+    return {"ok": True, "data": {"template_name": name, "favorite": on}, "error": None}
+
+
+def _set_archived(channel_id: str, name: str, on: bool, user_id, user_name: str) -> None:
+    from sqlalchemy import text as _sql
+    with make_plugin_db() as conn:
+        if on:
+            exists = conn.execute(_sql(
+                "SELECT 1 FROM plugin_whatsapp_cloud_template_archived "
+                "WHERE channel_id = :c AND template_name = :n"),
+                {"c": channel_id, "n": name}).first()
+            if not exists:
+                conn.execute(_sql(
+                    "INSERT INTO plugin_whatsapp_cloud_template_archived "
+                    "(channel_id, template_name, archived_by, archived_by_name, archived_at) "
+                    "VALUES (:c, :n, :u, :un, :t)"),
+                    {"c": channel_id, "n": name, "u": user_id,
+                     "un": user_name, "t": _now()})
+        else:
+            conn.execute(_sql(
+                "DELETE FROM plugin_whatsapp_cloud_template_archived "
+                "WHERE channel_id = :c AND template_name = :n"),
+                {"c": channel_id, "n": name})
+
+
+@router.post("/template-prefs/archive",
+             dependencies=[plugin_permission("template_archive")])
+async def set_template_archived(body: dict, request: Request):
+    """Arquiva/desarquiva um template para TODO MUNDO naquele canal.
+
+    Não apaga nada na Meta — quem apaga de verdade é a lixeira do modal, gated
+    em `template.delete` no core. Auditado como ação de CANAL (o filtro por canal
+    devolve a história inteira dele, junto com os eventos `channel.*` do core).
+    """
+    channel_id = (body.get("channel_id") or "").strip()
+    name = (body.get("template_name") or body.get("name") or "").strip()
+    if not channel_id or not name:
+        return {"ok": False, "error": "channel_id e template_name são obrigatórios"}
+    on = bool(body.get("archived", True))
+    user_id, user_name = _user_of(request)
+    await asyncio.to_thread(_set_archived, channel_id, name, on, user_id, user_name)
+    _audit("template.archive" if on else "template.unarchive", channel_id,
+           after={"template": name, "arquivado": on})
+    return {"ok": True, "data": {"template_name": name, "archived": on}, "error": None}
 
 
 # NOTE: template listing/sending/creation is NOT here. It lives in the CORE,

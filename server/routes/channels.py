@@ -169,8 +169,6 @@ def register_routes(app, deps):
         if not body_text:
             return _err("body_text é obrigatório.", status=400)
         category = (body.get("category") or "UTILITY").strip().upper()
-        if category not in tpl_svc.TEMPLATE_CATEGORIES:
-            return _err(f"category deve ser uma de {sorted(tpl_svc.TEMPLATE_CATEGORIES)}.", status=400)
         language = (body.get("language") or "pt_BR").strip() or "pt_BR"
         body_examples = body.get("body_examples")
         header_examples = body.get("header_examples")
@@ -178,18 +176,25 @@ def register_routes(app, deps):
             return _err("body_examples deve ser uma lista.", status=400)
         if header_examples is not None and not isinstance(header_examples, list):
             return _err("header_examples deve ser uma lista.", status=400)
-        header_format, header_handle, media_err = tpl_svc.normalize_header_media(
-            body.get("header_format"), body.get("header_handle"))
-        if media_err:
-            return _err(media_err, status=400)
-        buttons, btn_err = tpl_svc.normalize_buttons(body.get("buttons"))
-        if btn_err:
-            return _err(btn_err, status=400)
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
         if not tpl_svc.supports_templates(deps, channel_id):
             return _err("Este canal não suporta templates.", status=400)
+
+        # Regras de forma vêm do PROVIDER (plano 92 · F1) — ver o gêmeo
+        # conv-scoped em server/routes/conversations.py.
+        spec = tpl_svc.spec_for(deps, channel_id)
+        cat_err = tpl_svc.validate_category(spec, category)
+        if cat_err:
+            return _err(cat_err, status=400)
+        header_format, header_handle, media_err = tpl_svc.normalize_header_media(
+            spec, body.get("header_format"), body.get("header_handle"))
+        if media_err:
+            return _err(media_err, status=400)
+        buttons, btn_err = tpl_svc.normalize_buttons(spec, body.get("buttons"))
+        if btn_err:
+            return _err(btn_err, status=400)
         kind, data = await tpl_svc.create_template(
             deps, channel_id, name=name, category=category, language=language,
             body_text=body_text,
@@ -220,7 +225,8 @@ def register_routes(app, deps):
         if not tpl_svc.supports_templates(deps, channel_id):
             return _err("Este canal não suporta templates.", status=400)
         data_bytes = await file.read()
-        err = tpl_svc.validate_example_upload(file.content_type or "",
+        err = tpl_svc.validate_example_upload(tpl_svc.spec_for(deps, channel_id),
+                                              file.content_type or "",
                                               len(data_bytes or b""))
         if err:
             return _err(err, status=400)

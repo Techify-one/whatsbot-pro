@@ -16,40 +16,74 @@ its session is open.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 from db.repositories import (channel_repo, contact_repo, conversation_repo,
                              inbox_repo, message_repo)
 from plugins.events import emit_with_filter
 
-TEMPLATE_CATEGORIES = {"UTILITY", "MARKETING", "AUTHENTICATION"}
+# ── Regras de forma: DECLARADAS PELO PROVIDER (plano 92 · F1) ────────────
+#
+# Até o plano 92 estas constantes viviam aqui: categorias, formatos de
+# cabeçalho, tipos de botão, limites de mistura, whitelist de MIME e o teto de
+# 16 MiB. Todas são vocabulário da Graph API da Meta — e o core não deve
+# conhecer o vocabulário de um provedor. Agora quem as declara é o próprio
+# canal, em ``ChannelCapabilities.template_spec`` (:class:`channels.base.TemplateSpec`),
+# e este módulo apenas AVALIA. Mesma política/mecanismo de ``MediaLimits``.
+#
+# ``spec = None`` ⇒ o core NÃO restringe: deixa passar e quem recusa é o
+# provedor, com a mensagem dele. É a escolha consciente de não manter no core
+# uma cópia envelhecida das regras da Meta.
 
-# ── Criação estendida: cabeçalho de mídia + botões (plano 73) ────────────
-# O contrato é do CORE (nenhuma forma Graph aqui — o provider converte). Estes
-# validadores são compartilhados pelas duas rotas de criação (conv-scoped e
-# channel-scoped) para que as regras não divirjam.
+logger = logging.getLogger(__name__)
 
-TEMPLATE_HEADER_FORMATS = {"IMAGE", "VIDEO", "DOCUMENT"}
-TEMPLATE_BUTTON_TYPES = {"QUICK_REPLY", "URL", "PHONE_NUMBER", "COPY_CODE"}
-BUTTON_TEXT_MAX = 25
-BUTTONS_MAX = 10
-# Limites de mistura da Meta (P9): validados aqui só para dar erro cedo e
-# legível; a Meta continua sendo a fonte da verdade (o erro dela é repassado).
-BUTTON_TYPE_MAX = {"URL": 2, "PHONE_NUMBER": 1, "COPY_CODE": 1}
-
-# Whitelist de mídia aceita como EXEMPLO de cabeçalho (upload resumável).
-UPLOAD_EXAMPLE_MIMES = {
-    "image/jpeg", "image/png",
-    "video/mp4", "video/3gpp",
-    "application/pdf", "application/msword",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-}
-UPLOAD_EXAMPLE_MAX_BYTES = 16 * 1024 * 1024  # 16 MiB (limite da Meta)
+# Avisado UMA vez por canal, para um zip de plugin velho (sem spec) não passar
+# despercebido nem poluir o log a cada request.
+_SPEC_WARNED: set = set()
 
 
-def normalize_header_media(header_format, header_handle):
+def spec_for(deps, channel_id: str):
+    """A :class:`TemplateSpec` do canal, ou ``None`` quando ele não declara."""
+    try:
+        inst = deps.outbound_router.get(channel_id)
+        spec = getattr(getattr(inst, "capabilities", None), "template_spec", None)
+    except Exception:  # noqa: BLE001 — falta de spec nunca derruba a rota
+        spec = None
+    if spec is None and channel_id not in _SPEC_WARNED:
+        _SPEC_WARNED.add(channel_id)
+        logger.warning(
+            "Canal %s não declara template_spec: o core não validará a forma do "
+            "template (categoria, botões, upload) — quem recusa passa a ser o "
+            "provedor. Atualize o plugin do canal.", channel_id)
+    return spec
+
+
+def _allowed(spec, campo: str) -> frozenset:
+    """O conjunto declarado para ``campo``, ou vazio (= não restringe)."""
+    return frozenset(getattr(spec, campo, None) or ()) if spec is not None else frozenset()
+
+
+def _cap(spec, campo: str) -> int:
+    return int(getattr(spec, campo, 0) or 0) if spec is not None else 0
+
+
+def validate_name(name: str):
+    """Nome do template. Genérico DE PROPÓSITO — o formato aceito é do provedor,
+    mas um nome vazio nunca serve, então este piso fica no core."""
+    if not name:
+        return "Nome inválido: informe um nome."
+    return None
+
+
+def validate_category(spec, category: str):
+    permitidas = _allowed(spec, "categories")
+    if permitidas and category not in permitidas:
+        return f"category deve ser uma de {sorted(permitidas)}."
+    return None
+
+
+def normalize_header_media(spec, header_format, header_handle):
     """Validate the media-header pair. Returns ``(format, handle, error)``.
 
     Both empty ⇒ ``(None, None, None)`` (text header path, unchanged). Only one
@@ -60,16 +94,17 @@ def normalize_header_media(header_format, header_handle):
     handle = (header_handle or "").strip() or None
     if fmt is None and handle is None:
         return (None, None, None)
-    if fmt is not None and fmt not in TEMPLATE_HEADER_FORMATS:
+    permitidos = _allowed(spec, "header_formats")
+    if fmt is not None and permitidos and fmt not in permitidos:
         return (None, None,
-                f"header_format deve ser um de {sorted(TEMPLATE_HEADER_FORMATS)}.")
+                f"header_format deve ser um de {sorted(permitidos)}.")
     if fmt is None or handle is None:
         return (None, None,
                 "Cabeçalho de mídia exige header_format e header_handle juntos.")
     return (fmt, handle, None)
 
 
-def normalize_buttons(raw):
+def normalize_buttons(spec, raw):
     """Validate/normalize the button list. Returns ``(buttons, error)``.
 
     ``buttons`` is ``None`` when nothing was sent (no BUTTONS component). Each
@@ -82,8 +117,12 @@ def normalize_buttons(raw):
         return (None, "buttons deve ser uma lista.")
     if not raw:
         return (None, None)
-    if len(raw) > BUTTONS_MAX:
-        return (None, f"No máximo {BUTTONS_MAX} botões por template.")
+    max_botoes = _cap(spec, "buttons_max")
+    if max_botoes and len(raw) > max_botoes:
+        return (None, f"No máximo {max_botoes} botões por template.")
+    tipos_ok = _allowed(spec, "button_types")
+    max_por_tipo = (getattr(spec, "button_type_max", None) or {}) if spec is not None else {}
+    max_texto = _cap(spec, "button_text_max")
 
     out: list[dict] = []
     counts: dict[str, int] = {}
@@ -91,11 +130,13 @@ def normalize_buttons(raw):
         if not isinstance(item, dict):
             return (None, f"Botão {i}: formato inválido.")
         btype = (item.get("type") or "").strip().upper()
-        if btype not in TEMPLATE_BUTTON_TYPES:
+        if not btype:
+            return (None, f"Botão {i}: type é obrigatório.")
+        if tipos_ok and btype not in tipos_ok:
             return (None,
-                    f"Botão {i}: type deve ser um de {sorted(TEMPLATE_BUTTON_TYPES)}.")
+                    f"Botão {i}: type deve ser um de {sorted(tipos_ok)}.")
         counts[btype] = counts.get(btype, 0) + 1
-        limit = BUTTON_TYPE_MAX.get(btype)
+        limit = max_por_tipo.get(btype)
         if limit is not None and counts[btype] > limit:
             return (None, f"No máximo {limit} botão(ões) do tipo {btype}.")
 
@@ -103,9 +144,9 @@ def normalize_buttons(raw):
         if btype != "COPY_CODE":
             if not text:
                 return (None, f"Botão {i}: texto é obrigatório.")
-            if len(text) > BUTTON_TEXT_MAX:
+            if max_texto and len(text) > max_texto:
                 return (None,
-                        f"Botão {i}: texto deve ter até {BUTTON_TEXT_MAX} caracteres.")
+                        f"Botão {i}: texto deve ter até {max_texto} caracteres.")
 
         btn: dict = {"type": btype}
         if btype == "QUICK_REPLY":
@@ -132,7 +173,7 @@ def normalize_buttons(raw):
                 return (None, f"Botão {i}: phone_number é obrigatório.")
             btn["text"] = text
             btn["phone_number"] = phone
-        else:  # COPY_CODE
+        elif btype == "COPY_CODE":
             example = item.get("example")
             if isinstance(example, list):
                 example = example[0] if example else ""
@@ -140,23 +181,30 @@ def normalize_buttons(raw):
             if not example:
                 return (None, f"Botão {i}: código de exemplo é obrigatório.")
             btn["example"] = example
+        else:
+            # Tipo que este core não conhece (o provider declarou, o core não
+            # precisa entender): repassa o texto e deixa o provedor decidir.
+            if text:
+                btn["text"] = text
         out.append(btn)
     return (out, None)
 
 
-def validate_example_upload(mime: str, size: int):
+def validate_example_upload(spec, mime: str, size: int):
     """Validate a header-example upload BEFORE hitting the provider.
 
     Returns an error string, or ``None`` when acceptable.
     """
     mime = (mime or "").split(";")[0].strip().lower()
-    if mime not in UPLOAD_EXAMPLE_MIMES:
-        return ("Tipo de arquivo não suportado. Use JPG, PNG, MP4, 3GPP, PDF, "
-                "DOC(X) ou XLS(X).")
+    permitidos = _allowed(spec, "upload_mimes")
+    if permitidos and mime not in permitidos:
+        return ("Tipo de arquivo não suportado neste canal. Aceitos: "
+                + ", ".join(sorted(permitidos)) + ".")
     if size <= 0:
         return "Arquivo vazio."
-    if size > UPLOAD_EXAMPLE_MAX_BYTES:
-        return "Arquivo maior que 16 MB."
+    teto = _cap(spec, "upload_max_bytes")
+    if teto and size > teto:
+        return f"Arquivo maior que {teto // (1024 * 1024)} MB."
     return None
 
 

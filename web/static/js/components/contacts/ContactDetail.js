@@ -7,7 +7,7 @@ import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon } from './MessageContextMenu.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
-import { TemplatePicker } from './TemplatePicker.js';
+import { TemplatePickerHost } from './TemplatePickerHost.js';
 import { Slot } from '../../plugins/Slot.js';
 // Selo do canal — MESMO componente da linha da barra lateral.
 import { ChannelChip } from './ChannelChip.js';
@@ -631,7 +631,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       `}
 
       ${showTemplatePicker ? html`
-        <${TemplatePicker}
+        <${TemplatePickerHost}
           conversationId=${conversationId}
           channelId=${channelId}
           phone=${phone}

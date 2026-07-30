@@ -1,55 +1,50 @@
 import { h } from 'preact';
 import { useState, useEffect, useMemo, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import {
-  getConversationTemplates,
-  sendConversationTemplate,
-  createConversationTemplate,
-  deleteConversationTemplate,
-  getChannelTemplates,
-  sendChannelTemplate,
-  createChannelTemplate,
-  deleteChannelTemplate,
-  uploadConversationTemplateExample,
-  uploadChannelTemplateExample,
-} from '../../services/api.js';
-import { formatPhoneDisplay } from '../../utils/phone.js';
+import { formatPhoneDisplay } from './phone.js';
+import { applyView, contarPorAba } from './templateFilter.js';
 
 const html = htm.bind(h);
 
-// ⚠️ ARQUIVO CONGELADO — FALLBACK TEMPORÁRIO (plano 92 · C1 → G1) ⚠️
+// ── Modal "Enviar template" — a tela É DO PROVIDER (plano 92 · C1) ───────────
 //
-// O dono desta tela agora é o PLUGIN:
-//     assets/plugin_examples/whatsapp_cloud/static/TemplatePicker.js
-// Esta cópia só continua aqui para não abrir uma janela sem envio de template
-// entre "core novo no ar" e "zip do plugin instalado". Ela é resolvida pelo
-// TemplatePickerHost apenas quando NENHUM plugin reivindica `template.picker`,
-// e some na fase G1.
+// Este arquivo era do core (`web/static/js/components/contacts/TemplatePicker.js`)
+// e mudou de dono: a FORMA de um template — categorias UTILITY/MARKETING, os
+// `{{n}}`, os 4 tipos de botão, o handle de upload, o ciclo de aprovação — é
+// vocabulário da Graph API da Meta, não do WhatsBot. O core mantém apenas um
+// ponto de extensão exclusivo (`template.picker`, plugins/registry.js) e um host
+// que o resolve; quem reivindica é o `extends.js` deste plugin.
 //
-// NÃO CORRIJA BUGS AQUI. As duas cópias já divergiram de propósito (a do plugin
-// tem favoritos, arquivar e busca por conteúdo — ~207 linhas a mais) e nada
-// detecta a divergência automaticamente: zero testes tocam este arquivo. Uma
-// correção feita aqui fica verde na suíte inteira e **não chega a nenhum
-// operador com o plugin ativo**, que é a instalação normal. O repo já tem o
-// precedente: duas famílias divergentes do formatador de telefone, consolidadas
-// no plano 23·R1 depois de uma delas errar o número BR de 12 dígitos.
+// CONTRATO DE PROPS (fixado pelo host do core — não mudar sem mudar o host):
+//   {conversationId, channelId, phone, onClose, onSent}
+// mais `svc`, injetado pelo wrapper do `extends.js`. `svc` é a allowlist curada
+// `api.services`: o plugin NUNCA importa `services/api.js` do core (o caminho
+// relativo resolveria para dentro de /plugins/... e daria 404). Os dois uploads
+// TÊM de sair por `svc` — `api.http` é JSON-only e transformaria o FormData em
+// "{}", com o FastAPI devolvendo 422.
 //
-// Exceção única: consertar quebra DO PRÓPRIO FALLBACK (ele deixar de renderizar
-// com o plugin desativado).
+// DOIS MODOS, ambos obrigatórios:
+//   • conversa existente (`conversationId`) — rotas conv-scoped;
+//   • canal + telefone (`channelId` + `phone`, `channelMode`) — "Novo
+//     atendimento", quando ainda não há conversa.
 //
-// ── Template picker (Cloud API, Frente C) ────────────────────────────────────
-// Lists the channel's templates (any status) with a category + status badge and,
-// on selecting an APPROVED one, builds a dynamic form from the template
-// definition: a text input per body {{n}}, a media URL (or text) for the header,
-// and inputs for dynamic URL buttons. Shows a live preview, then POSTs the
-// assembled `components`.
+// O que a tela faz: lista os templates do canal (qualquer status, com selo), e
+// ao escolher um APROVADO monta um formulário a partir da definição — um campo
+// por `{{n}}` do corpo, URL de mídia (ou texto) para o cabeçalho, e um campo por
+// botão de URL dinâmico. Mostra prévia ao vivo e envia os `components` montados.
 //
-// Management (gated server-side, flags in the list response):
-//  - `can_create` → a "Novo template" button (header) opens a create form that
-//    POSTs a simple definition; the provider assembles the Graph components.
-//  - `can_delete` → a trash action per row deletes the template (all languages).
-// Dark-mode-safe: wa-* / .wa-field + the green/amber/red -100/-700 tints covered
-// by the html.dark fallback in custom.css.
+// Gestão (autorizada NO SERVIDOR; os flags só decidem o que aparece):
+//  - `can_create` → botão "Novo template" abre o formulário de criação;
+//  - `can_delete` → lixeira por linha apaga o template (todos os idiomas).
+//
+// Modo escuro: usa as classes semânticas `wa-*` / `.wa-field` do core, que são
+// globais da SPA e valem igual numa tela de plugin; os tints crus (green/amber/
+// red -100/-700) são cobertos pelo fallback `html.dark` de `custom.css`. NÃO
+// introduza cor fora dessa lista (hex inline, `bg-*-300`) — fica ilegível.
+//
+// IDs de DOM são prefixados com `wac-` de propósito: enquanto o fallback do core
+// existir, os dois modais podem coexistir no documento, e `datalist`/`radio`
+// casam por id/name GLOBAIS — sem o prefixo, mexer num desmarcaria o outro.
 
 const MEDIA_FORMATS = ['image', 'video', 'document'];
 const LANG_SUGGESTIONS = ['pt_BR', 'en_US', 'en', 'es_ES', 'es'];
@@ -173,7 +168,7 @@ function statusBadge(status) {
 // `conversationId` → atendimento existente (modo padrão). Quando ausente e `channelId`
 // + `phone` são passados, opera em modo CHANNEL (plano 21): iniciar atendimento novo
 // pela "Novo atendimento" usa as rotas channel-scoped (ainda não há atendimento).
-export function TemplatePicker({ conversationId, channelId, phone, onClose, onSent }) {
+export function TemplatePicker({ conversationId, channelId, phone, onClose, onSent, svc, http }) {
   const channelMode = conversationId == null && !!channelId;
   const [loading, setLoading] = useState(true);
   const [supported, setSupported] = useState(true);
@@ -201,11 +196,27 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
   const [deletingName, setDeletingName] = useState(null);
   const [deleteError, setDeleteError] = useState('');
 
+  // ── Preferências (plano 92 · E1/E2) ───────────────────────────────────────
+  // Favorito é PESSOAL, arquivado é GLOBAL. Vêm de uma rota do próprio plugin
+  // (`/api/plugins/whatsapp_cloud/template-prefs`), separada da lista: a lista
+  // tem cache de 5 min no provider e é igual para todo mundo, a marcação não.
+  const [favorites, setFavorites] = useState(() => new Set());
+  const [archived, setArchived] = useState(() => new Set());
+  const [canArchive, setCanArchive] = useState(false);
+  const [canFavorite, setCanFavorite] = useState(false);
+  const [tab, setTab] = useState('todas');
+  const [prefBusy, setPrefBusy] = useState(null);   // nome em trânsito
+  const [prefError, setPrefError] = useState('');
+
+  // O canal em modo conversa só é conhecido DEPOIS da lista (vem no payload como
+  // `channel`); em modo canal já chega por prop.
+  const prefsChannelId = channelId || (channelInfo && channelInfo.id) || '';
+
   const loadTemplates = useCallback(() => {
     setLoading(true);
     const fetchTemplates = channelMode
-      ? getChannelTemplates(channelId)
-      : getConversationTemplates(conversationId);
+      ? svc.getChannelTemplates(channelId)
+      : svc.getConversationTemplates(conversationId);
     return fetchTemplates.then(res => {
       if (res && res.ok && res.data) {
         setSupported(!!res.data.supported);
@@ -225,8 +236,8 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
     let alive = true;
     setLoading(true);
     const fetchTemplates = channelMode
-      ? getChannelTemplates(channelId)
-      : getConversationTemplates(conversationId);
+      ? svc.getChannelTemplates(channelId)
+      : svc.getConversationTemplates(conversationId);
     fetchTemplates.then(res => {
       if (!alive) return;
       if (res && res.ok && res.data) {
@@ -242,6 +253,69 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
     }).catch(() => { if (alive) { setError('Falha ao carregar templates.'); setLoading(false); } });
     return () => { alive = false; };
   }, [conversationId, channelId, channelMode]);
+
+  // Preferências: buscadas assim que o canal é conhecido. Falha aqui NÃO derruba
+  // a lista — degrada para "sem estrela, sem arquivar", que é a tela de antes.
+  useEffect(() => {
+    if (!prefsChannelId || !http) return undefined;
+    let alive = true;
+    http.get(`/template-prefs?channel_id=${encodeURIComponent(prefsChannelId)}`)
+      .then(res => {
+        if (!alive || !res || !res.ok || !res.data) return;
+        setFavorites(new Set(res.data.favorites || []));
+        setArchived(new Set(res.data.archived || []));
+        setCanArchive(!!res.data.can_archive);
+        setCanFavorite(!!res.data.can_favorite);
+      })
+      .catch(() => { /* silencioso: a lista continua utilizável */ });
+    return () => { alive = false; };
+  }, [prefsChannelId, http]);
+
+  // Otimista com rollback: marcar estrela tem de responder na hora. O servidor é
+  // a autoridade — se recusar, o estado volta e o erro aparece.
+  async function toggleFavorite(name) {
+    if (!canFavorite || !prefsChannelId || !http) return;
+    const on = !favorites.has(name);
+    setPrefError('');
+    setFavorites(prev => {
+      const next = new Set(prev);
+      if (on) next.add(name); else next.delete(name);
+      return next;
+    });
+    const res = await http.post('/template-prefs/favorite',
+      { channel_id: prefsChannelId, template_name: name, favorite: on });
+    if (!res || !res.ok) {
+      setFavorites(prev => {
+        const next = new Set(prev);
+        if (on) next.delete(name); else next.add(name);
+        return next;
+      });
+      setPrefError((res && res.error) || 'Falha ao salvar o favorito.');
+    }
+  }
+
+  async function toggleArchived(name) {
+    if (!canArchive || !prefsChannelId || !http) return;
+    const on = !archived.has(name);
+    setPrefError('');
+    setPrefBusy(name);
+    setArchived(prev => {
+      const next = new Set(prev);
+      if (on) next.add(name); else next.delete(name);
+      return next;
+    });
+    const res = await http.post('/template-prefs/archive',
+      { channel_id: prefsChannelId, template_name: name, archived: on });
+    setPrefBusy(null);
+    if (!res || !res.ok) {
+      setArchived(prev => {
+        const next = new Set(prev);
+        if (on) next.delete(name); else next.add(name);
+        return next;
+      });
+      setPrefError((res && res.error) || 'Falha ao arquivar. Você tem permissão?');
+    }
+  }
 
   function selectTemplate(tpl) {
     setSelected(tpl);
@@ -324,8 +398,8 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
       preview_text: preview,
     };
     const res = channelMode
-      ? await sendChannelTemplate(channelId, { phone, ...payload })
-      : await sendConversationTemplate(conversationId, payload);
+      ? await svc.sendChannelTemplate(channelId, { phone, ...payload })
+      : await svc.sendConversationTemplate(conversationId, payload);
     setSending(false);
     if (res && res.ok) {
       if (onSent) onSent(res.data);
@@ -340,8 +414,8 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
     setDeletingName(name);
     setDeleteError('');
     const res = channelMode
-      ? await deleteChannelTemplate(channelId, name)
-      : await deleteConversationTemplate(conversationId, name);
+      ? await svc.deleteChannelTemplate(channelId, name)
+      : await svc.deleteConversationTemplate(conversationId, name);
     setDeletingName(null);
     if (res && res.ok) {
       await loadTemplates();
@@ -350,11 +424,15 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
     }
   }
 
-  const filtered = templates.filter(t => {
-    if (!search.trim()) return true;
-    const q = search.trim().toLowerCase();
-    return (t.name || '').toLowerCase().includes(q) || (t.category || '').toLowerCase().includes(q);
-  });
+  // Arquivado sai → aba → busca (nome + categoria + CONTEÚDO) → favoritos no
+  // topo. A ordem mora em `templateFilter.js`, que é puro e testado.
+  const view = { query: search, tab, favorites, archived };
+  const filtered = useMemo(
+    () => applyView(templates, view),
+    [templates, search, tab, favorites, archived]);
+  const contagem = useMemo(
+    () => contarPorAba(templates, view),
+    [templates, search, favorites, archived]);
 
   const title = creating ? 'Novo template' : (selected ? selected.name : 'Enviar template');
 
@@ -396,6 +474,7 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
           <!-- Create form -->
           ${!loading && supported && creating ? html`
             <${CreateTemplateForm}
+              svc=${svc}
               conversationId=${conversationId}
               channelId=${channelId}
               channelMode=${channelMode}
@@ -410,13 +489,39 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
               type="text"
               value=${search}
               onInput=${(e) => setSearch(e.target.value)}
-              placeholder="Buscar por nome ou categoria…"
+              placeholder="Buscar por nome, categoria ou conteúdo…"
               class="wa-field w-full text-[14px] rounded-[8px] px-3 py-2 border border-wa-border outline-none mb-3"
             />
+            <!-- Abas: só aparecem quando há o que separar (instalação sem login
+                 não tem favoritos, e sem nada arquivado a aba seria uma lista
+                 vazia permanente). -->
+            ${(canFavorite || archived.size > 0) ? html`
+              <div class="flex items-center gap-1.5 mb-3">
+                ${[['todas', 'Todas'], ['favoritas', 'Favoritas'], ['arquivadas', 'Arquivadas']]
+                  .filter(([k]) => (k !== 'favoritas' || canFavorite)
+                                && (k !== 'arquivadas' || archived.size > 0 || canArchive))
+                  .map(([k, rotulo]) => html`
+                    <button key=${k} type="button" onClick=${() => setTab(k)}
+                      class=${`px-2.5 py-1 rounded-full text-[12px] font-medium transition-colors ${
+                        tab === k
+                          ? 'bg-wa-teal text-white'
+                          : 'bg-wa-hover text-wa-secondary hover:text-wa-text'}`}>
+                      ${rotulo}${contagem[k] ? html` <span class="opacity-70">${contagem[k]}</span>` : null}
+                    </button>
+                  `)}
+              </div>
+            ` : null}
             ${deleteError ? html`<div class="text-red-500 text-[13px] mb-2">${deleteError}</div>` : null}
+            ${prefError ? html`<div class="text-red-500 text-[13px] mb-2">${prefError}</div>` : null}
             ${filtered.length === 0 ? html`
               <div class="text-wa-secondary text-[14px] py-6 text-center">
-                ${templates.length === 0 ? 'Nenhum template encontrado. Verifique o WABA ID na configuração do canal.' : 'Nenhum template corresponde à busca.'}
+                ${templates.length === 0
+                  ? 'Nenhum template encontrado. Verifique o WABA ID na configuração do canal.'
+                  : (tab === 'favoritas'
+                      ? 'Você ainda não marcou nenhum favorito. Use a ☆ na lista.'
+                      : (tab === 'arquivadas'
+                          ? 'Nenhum template arquivado.'
+                          : 'Nenhum template corresponde à busca.'))}
               </div>
             ` : html`
               <div class="flex flex-col gap-2">
@@ -426,6 +531,15 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
                   return html`
                   <div key=${(t.name || '') + '|' + langCode(t)}
                     class="flex items-stretch gap-2 bg-wa-bg border border-wa-border rounded-[8px] overflow-hidden hover:border-wa-iconActive transition-colors">
+                    ${canFavorite ? html`
+                      <button type="button" onClick=${() => toggleFavorite(t.name)}
+                        class=${`shrink-0 self-stretch px-2 transition-colors ${
+                          t._favorito ? 'text-amber-500' : 'text-wa-secondary hover:text-amber-500'}`}
+                        title=${t._favorito ? 'Remover dos favoritos' : 'Marcar como favorito'}
+                        aria-pressed=${t._favorito ? 'true' : 'false'}>
+                        <${StarIcon} filled=${t._favorito} />
+                      </button>
+                    ` : null}
                     <button onClick=${() => selectTemplate(t)}
                       class="flex-1 text-left px-3 py-2.5 min-w-0">
                       <div class="flex items-center gap-2">
@@ -435,10 +549,30 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
                       <div class="text-wa-secondary text-[12px] mt-0.5">
                         ${(t.category || '—')} · ${langCode(t)}${approved ? '' : ' · não enviável'}
                       </div>
+                      <!-- Casou no conteúdo: sem mostrar ONDE, a linha parece um
+                           falso positivo (o termo não está no nome nem na categoria). -->
+                      ${t._trecho ? html`
+                        <div class="text-wa-secondary text-[11px] mt-1 italic truncate">
+                          ${t._campo}: ${t._trecho}
+                        </div>
+                      ` : null}
                     </button>
-                    ${canDelete ? html`
+                    ${(canArchive || canDelete) ? html`
                       <div class="flex items-center pr-2 shrink-0">
-                        ${confirmDelete === t.name ? html`
+                        ${canArchive && confirmDelete !== t.name ? html`
+                          <button type="button" onClick=${() => toggleArchived(t.name)}
+                            disabled=${prefBusy === t.name}
+                            class="text-wa-secondary hover:text-wa-teal p-1.5 rounded-[6px] hover:bg-wa-hover transition-colors disabled:opacity-50"
+                            title=${t._arquivado
+                              ? 'Desarquivar (volta para a lista de todos)'
+                              : 'Arquivar: some da lista para TODOS os atendentes. Não apaga na Meta.'}>
+                            ${prefBusy === t.name ? '…' : html`<${ArchiveIcon} restore=${t._arquivado} />`}
+                          </button>
+                        ` : null}
+                        <!-- Excluir tem gate PRÓPRIO (template.delete, do core):
+                             quem só pode arquivar não pode ver a lixeira. Arquivar é
+                             reversível e local; apagar é irreversível e vai à Meta. -->
+                        ${!canDelete ? null : (confirmDelete === t.name ? html`
                           <div class="flex items-center gap-1">
                             <button onClick=${() => performDelete(t.name)}
                               class="text-[12px] px-2 py-1 rounded-[6px] text-white bg-red-500 hover:opacity-90">Apagar</button>
@@ -452,7 +586,7 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
                             title="Apagar template">
                             ${deletingName === t.name ? '…' : html`<${TrashIcon} />`}
                           </button>
-                        `}
+                        `)}
                       </div>
                     ` : null}
                   </div>
@@ -562,7 +696,7 @@ function ChannelBadge({ channel }) {
 // example values per {{n}} + media header handle + buttons) and POSTs it; the
 // provider assembles the Graph components. Plano 73 added the media header
 // (uploaded as an example → Meta handle) and the four button types.
-function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, onCreated }) {
+function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, onCreated, svc }) {
   const [name, setName] = useState('');
   const [category, setCategory] = useState('UTILITY');
   const [language, setLanguage] = useState('pt_BR');
@@ -596,8 +730,8 @@ function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, 
     setMediaName(file.name || '');
     setUploading(true);
     const res = channelMode
-      ? await uploadChannelTemplateExample(channelId, file)
-      : await uploadConversationTemplateExample(conversationId, file);
+      ? await svc.uploadChannelTemplateExample(channelId, file)
+      : await svc.uploadConversationTemplateExample(conversationId, file);
     setUploading(false);
     if (res && res.ok && res.data && res.data.handle) {
       setMediaHandle(res.data.handle);
@@ -642,8 +776,8 @@ function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, 
     if (buttons.length) payload.buttons = buttons.map(buildButtonPayload);
 
     const res = channelMode
-      ? await createChannelTemplate(channelId, payload)
-      : await createConversationTemplate(conversationId, payload);
+      ? await svc.createChannelTemplate(channelId, payload)
+      : await svc.createConversationTemplate(conversationId, payload);
     setSaving(false);
     if (res && res.ok) {
       setOkMsg('Template enviado para aprovação da Meta.');
@@ -679,9 +813,9 @@ function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, 
         </div>
         <div class="flex-1">
           <label class="text-wa-secondary text-[12px] font-medium block mb-1">Idioma</label>
-          <input type="text" value=${language} list="tpl-langs"
+          <input type="text" value=${language} list="wac-tpl-langs"
             onInput=${(e) => setLanguage(e.target.value)} class=${fieldCls} />
-          <datalist id="tpl-langs">
+          <datalist id="wac-tpl-langs">
             ${LANG_SUGGESTIONS.map(l => html`<option key=${l} value=${l}></option>`)}
           </datalist>
         </div>
@@ -692,7 +826,7 @@ function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, 
         <div class="flex flex-wrap gap-3 mb-2">
           ${HEADER_KIND_OPTIONS.map(opt => html`
             <label key=${opt.value} class="flex items-center gap-1.5 text-[13px] text-wa-text cursor-pointer">
-              <input type="radio" name="tpl-header-kind" value=${opt.value}
+              <input type="radio" name="wac-tpl-header-kind" value=${opt.value}
                 checked=${headerKind === opt.value}
                 onChange=${() => { setHeaderKind(opt.value); setUploadError(''); }} />
               ${opt.label}
@@ -829,6 +963,33 @@ function CreateTemplateForm({ conversationId, channelId, channelMode, onCancel, 
         </button>
       </div>
     </div>
+  `;
+}
+
+// Estrela: contorno quando não é favorito, preenchida quando é. `currentColor`
+// deixa o âmbar vir da classe do botão — legível nos dois temas sobre wa-bg.
+function StarIcon({ filled }) {
+  return html`
+    <svg width="16" height="16" viewBox="0 0 24 24" fill=${filled ? 'currentColor' : 'none'}
+      stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+    </svg>
+  `;
+}
+
+// Caixa de arquivo — DELIBERADAMENTE diferente da lixeira: as duas ações moram
+// lado a lado e têm risco oposto (arquivar é reversível e local; apagar é
+// irreversível e vai à Meta). Com `restore`, a seta aponta para cima.
+function ArchiveIcon({ restore }) {
+  return html`
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="3" width="20" height="5" rx="1"></rect>
+      <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"></path>
+      ${restore
+        ? html`<path d="M12 18v-6"></path><path d="M9 15l3-3 3 3"></path>`
+        : html`<path d="M12 12v6"></path><path d="M9 15l3 3 3-3"></path>`}
+    </svg>
   `;
 }
 

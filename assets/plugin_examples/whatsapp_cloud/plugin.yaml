@@ -1,6 +1,6 @@
 id: whatsapp_cloud
 name: WhatsApp Cloud API
-version: 1.7.0
+version: 1.8.0
 whatsbot_api_version: ">=1.0,<2.0"
 frontend_extends: /plugins/whatsapp_cloud/static/extends.js
 frontend_api_version: "1.0"
@@ -15,6 +15,9 @@ entry:
   channels: channels
   routes: routes
   settings: settings
+# Sem esta linha o migrator sai cedo e as tabelas nunca são criadas — o valor é
+# o NOME DA PASTA de migrations dentro do plugin, não um booleano.
+migrations: migrations
 screens:
   - id: whatsapp-cloud-config
     title: WhatsApp Cloud API
@@ -25,4 +28,14 @@ screens:
 permissions:
   - channel.provider
   - net.outbound
+# Permissões de USUÁRIO (RBAC), distintas das capabilities acima. O grupo casa
+# com o rótulo que o core já usa para template.create/template.delete, então as
+# três aparecem juntas no seletor de permissões.
+# NASCE SEM DONO por decisão de produto (plano 92 · D3): nenhuma migração concede
+# automaticamente — o administrador distribui em Usuários → Cargos.
+rbac:
+  group: "Templates (WhatsApp Cloud)"
+  permissions:
+    - key: template_archive
+      label: "Arquivar templates que não se usa mais"
 dependencies: []

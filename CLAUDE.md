@@ -527,6 +527,20 @@ Referências (na Loja de Plugins — repo *community*, ver "Plugins de exemplo")
 
 `PluginScreen` faz `import(screen.component)` dinâmico e passa `apiBase = "/api/plugins/<id>"` como prop. Importmap em `web/index.html` cobre `preact`, `preact/hooks`, `htm` — plugin usa os mesmos sem bundle. Screen custom pode importar utilitários do core por URL absoluta (ex: `import { playNotificationSound } from '/static/js/utils/notifications.js'`).
 
+### Override de componente (plano 92 · B1)
+
+Terceira semântica do registry, ao lado de **slots** (aditivos) e **route override** (exclusivo): `overrideComponent(name, C)` ([registry.js](web/static/js/plugins/registry.js)) deixa um plugin **substituir uma peça de UI que não é rota**. Contrato igual ao `overrideRoute` — **primeiro que registra ganha**, reivindicação posterior é logada e ignorada (nunca silenciosa). Use quando a tela inteira pertence ao domínio do plugin; um slot resolve quando é só acrescentar.
+
+O core renderiza um **Host** que resolve o override e cai no próprio componente enquanto existir fallback — nenhum arquivo do core sabe qual plugin reivindicou o quê. O Host **congela o componente na montagem** (só a transição "nada → algo" é aceita): re-resolver a cada `bump()` do registry trocaria o tipo do vnode com o modal aberto e descartaria o formulário do operador, porque `loadPluginExtensions` limpa o registry de forma síncrona a cada toggle de plugin.
+
+| Nome | Host | Dono hoje | ctx |
+|---|---|---|---|
+| `template.picker` | [TemplatePickerHost.js](web/static/js/components/contacts/TemplatePickerHost.js) | `whatsapp_cloud` | `{conversationId, channelId, phone, onClose, onSent}` |
+
+**O modal "Enviar template" é do plugin.** O formato de um template é ditado pela API do provedor, então quem o desenha é o plugin de canal — `assets/plugin_examples/whatsapp_cloud/static/TemplatePicker.js`, com favoritos por usuário, arquivar global (permissão `plugin.whatsapp_cloud.template_archive`, que **nasce sem dono**) e busca por conteúdo. A cópia do core ([TemplatePicker.js](web/static/js/components/contacts/TemplatePicker.js)) está **congelada** como fallback de transição e some na release seguinte — as duas já divergiram de propósito, **não corrija bug nela**. Quem chama o picker deve gatear com `templatePickerAvailable()` (sem plugin e sem fallback, o botão não aparece e o aviso de 24h degrada para texto).
+
+O vocabulário da Meta que o core carregava (categorias, formatos de cabeçalho, tipos/limites de botão, MIMEs de upload) virou `TemplateSpec` em [channels/base.py](channels/base.py), declarado pelo provider em `ChannelCapabilities.template_spec` e apenas **avaliado** pelo core ([template_service.py](app/services/template_service.py) `spec_for`) — mesmo padrão de `MediaLimits`/`VideoLimits`.
+
 ### Convenções obrigatórias
 
 - **`id`**: snake_case, regex `^[a-z][a-z0-9_]{0,31}$`. Vira o prefixo de tabela e o nome do pacote Python.

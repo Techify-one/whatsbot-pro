@@ -167,6 +167,7 @@ export function buildPluginApi(pluginId) {
     addFilter: (name, fn, priority = 100) => registry.addFilter(name, fn, priority, pluginId),
     addSlot: (name, component, priority = 100) => registry.addSlot(name, component, priority, pluginId),
     overrideRoute: (tabId, component, opts = {}) => registry.overrideRoute(tabId, component, opts, pluginId),
+    overrideComponent: (name, component) => registry.overrideComponent(name, component, pluginId),
     on: (name, fn) => registry.on(name, fn, pluginId),
     emit: (name, data) => registry.emit(name, data),
     applyFilter: registry.applyFilter,
