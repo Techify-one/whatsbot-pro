@@ -499,8 +499,8 @@ def _attach_effective_assignee(d: dict) -> dict:
     """Atendente EFETIVO = definitivo (``assignee_user_id``) ?? provisório.
 
     Derivado aqui, na borda, para que nenhum consumidor (lista, card do Kanban, detalhe,
-    tabela de atendimentos) re-implemente a regra. ``assignee_is_provisional`` é o que
-    liga o marcador visual "provisório" — e o filtro "Vínculo do atendente"."""
+    tabela de atendimentos) re-implemente a regra. ``assignee_is_provisional`` diz apenas
+    de ONDE veio o atendente efetivo — a UI exibe os dois casos IGUAIS, sem marcador."""
     definitivo = d.get("assignee_user_id")
     prov = d.get("provisional_assignee_user_id")
     if definitivo is not None:
@@ -807,6 +807,20 @@ def ensure_protocolo_for_contact(contact_id: int, phone: str = "", name: str = "
         # Só a nota PRIVADA (com o ID pesquisável). NÃO há card de sistema na abertura:
         # a nota já anuncia o protocolo e o card era redundante no fio.
         _write_open_note(at, conversation_id)
+    if created and at:
+        # plano 94: ABERTURA no barramento. Aqui — e não nos 6 chamadores — porque
+        # este é o único ponto que sabe se o protocolo foi REALMENTE criado (quem
+        # perde a corrida do índice parcial cai no ``except IntegrityError`` e
+        # re-seleciona). Emitir nos chamadores duplicaria ou perderia eventos.
+        _emit_bus("opened",
+                  contact_id=contact_id, protocolo_id=at.get("id"),
+                  contact_phone=phone or at.get("contact_phone") or "",
+                  contact_name=name or at.get("contact_name") or "",
+                  conversation_id=conversation_id,
+                  opened_at=at.get("opened_at"),
+                  opened_by_kind=op.get("kind") or "",
+                  opened_by_user_id=op.get("user_id"),
+                  opened_by_name=op.get("name") or "")
     return at
 
 
@@ -1099,7 +1113,20 @@ def close_protocolo(atid: int, assignee_user_id: int | None = None,
                  "WHERE id = :id"),
             {"ts": ts, "auid": clo_uid, "aname": clo_name or "", "id": atid},
         )
-    _broadcast_changed(at["contact_id"], atid)
+    # plano 94: FINALIZAÇÃO no barramento. Montado das variáveis locais já
+    # escritas (``ts``, ``clo_*``) e dos valores efetivos dos rótulos — um
+    # re-read aqui pegaria o estado depois do UPDATE e custaria uma consulta.
+    _broadcast_changed(
+        at["contact_id"], atid, kind="closed",
+        contact_phone=at.get("contact_phone") or "",
+        contact_name=at.get("contact_name") or "",
+        opened_at=at.get("opened_at"), closed_at=ts,
+        assignee_user_id=(clo_uid if clo_uid is not None else at.get("assignee_user_id")),
+        assignee_name=(clo_name or at.get("assignee_name") or ""),
+        opened_by_kind=at.get("opened_by_kind") or "",
+        opened_by_name=at.get("opened_by_name") or "",
+        conversation_id=_latest_conversation_of_protocolo(atid),
+        fields=_effective_values("protocolo", at))
     # Card de sistema "Protocolo finalizado" ancorado na atendimento MAIS RECENTE do
     # protocolo (via conversation_id) — não no caminho contact-scoped, que em multicanal
     # cairia na thread errada. Autor = operador que finalizou, quando houver.
@@ -1526,12 +1553,13 @@ def _conversation_ids_of_protocolo(atid: int) -> list[int]:
 # O rótulo "Atendente" só vira DEFINITIVO (``assignee_user_id``) quando alguém salva o
 # formulário de Resolver/Finalizar (ou arrasta o card no Kanban). Enquanto isso, quem de
 # fato está cuidando do atendimento é o dono da CONVERSA no core — e o quadro mostrava
-# "Não atribuído". As colunas ``provisional_*`` (migration 019) espelham esse dono, o
-# agrupamento/filtro passam a usar o EFETIVO = COALESCE(definitivo, provisório) e o filtro
-# "Vínculo do atendente" isola os abertos que ainda não foram salvos com ninguém.
+# "Não atribuído". As colunas ``provisional_*`` (migration 019) espelham esse dono e o
+# agrupamento/filtro passam a usar o EFETIVO = COALESCE(definitivo, provisório).
 #
-# O provisório é SÓ leitura/filtro: nunca entra em ``_effective_values``/``_missing_required``
-# (o campo obrigatório continua exigindo preenchimento consciente) e nunca semeia o form.
+# O provisório é INVISÍVEL na interface (1.24.1): a tela mostra o atendente efetivo sem
+# distinguir a origem. É SÓ leitura/filtro: nunca entra em ``_effective_values``/
+# ``_missing_required`` (o campo obrigatório continua exigindo preenchimento consciente)
+# e nunca semeia o formulário.
 
 def _user_display_name(uid) -> str:
     """Nome do usuário do core p/ snapshot (name → email → '')."""
@@ -1804,7 +1832,7 @@ def _list_clause(sql: str, params: dict):
 def list_protocolos(*, status=None, assignee_user_id=None,
                       contact_id: int | None = None, q: str | None = None,
                       opened_from: float | None = None, opened_to: float | None = None,
-                      attr_filters: dict | None = None, nota=None, vinculo=None,
+                      attr_filters: dict | None = None, nota=None,
                       include_archived: bool = False,
                       limit: int = 200, offset: int = 0) -> dict:
     """Página de protocolos como envelope ``{items, total, has_more}`` (plano 50).
@@ -1819,26 +1847,16 @@ def list_protocolos(*, status=None, assignee_user_id=None,
     off = clamp_offset(offset)
     where, params = _build_list_where(
         status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
-        opened_from=opened_from, opened_to=opened_to, nota=nota, vinculo=vinculo,
+        opened_from=opened_from, opened_to=opened_to, nota=nota,
         include_archived=include_archived)
     base = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
             + " ORDER BY (status = 'aberto') DESC, opened_at DESC")
     return _list_page(base, where, params, af_src=attr_filters, lim=lim, off=off)
 
 
-# Filtro "Vínculo do atendente" — allowlist fechada (o SQL é interpolado, nunca bindado).
-# Combina com ``status=aberto`` para o recorte pedido: "abertos ainda não salvos com
-# ninguém, mas com a conversa atribuída".
-_VINCULO_SQL = {
-    "definitivo": "assignee_user_id IS NOT NULL",
-    "provisorio": "(assignee_user_id IS NULL AND provisional_assignee_user_id IS NOT NULL)",
-    "sem": "(assignee_user_id IS NULL AND provisional_assignee_user_id IS NULL)",
-}
-
-
 def _build_list_where(*, status=None, assignee_user_id=None, contact_id=None,
                       q: str | None = None, opened_from=None, opened_to=None,
-                      nota=None, vinculo=None,
+                      nota=None,
                       include_archived: bool = False) -> tuple[list[str], dict]:
     """WHERE + params da listagem de protocolos.
 
@@ -1888,13 +1906,6 @@ def _build_list_where(*, status=None, assignee_user_id=None, contact_id=None,
         # pelo índice de expressão da migration 019.
         where.append("COALESCE(assignee_user_id, provisional_assignee_user_id) IN :auids")
         params["auids"] = auids
-    # Vínculo do atendente (multi-seleção → OR). Fica no SQL, e não no avaliador Python de
-    # `attr_filters`: é predicado puro de coluna, e em Python ligaria o caminho de scan-cap
-    # (total/has_more virariam limite-inferior) e precisaria ser replicado no índice.
-    vincs = [v for v in (vinculo if isinstance(vinculo, list) else [vinculo])
-             if v in _VINCULO_SQL]
-    if vincs:
-        where.append("(" + " OR ".join(_VINCULO_SQL[v] for v in dict.fromkeys(vincs)) + ")")
     if contact_id is not None:
         where.append("contact_id = :cid")
         params["cid"] = contact_id
@@ -1991,7 +2002,7 @@ def scan_protocolos(filters: dict, cap: int):
         status=f.get("status"), assignee_user_id=f.get("assignee_user_id"),
         contact_id=f.get("contact_id"), q=f.get("q"),
         opened_from=f.get("opened_from"), opened_to=f.get("opened_to"),
-        nota=f.get("nota"), vinculo=f.get("vinculo"),
+        nota=f.get("nota"),
         include_archived=bool(f.get("include_archived")))
     sql = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
            + " ORDER BY (status = 'aberto') DESC, opened_at DESC LIMIT :scan")
@@ -2954,7 +2965,11 @@ def _finalize_protocolo_if_no_open_cycle(protocolo_id: int, ts: float) -> None:
                  "closed_at = :ts, updated_at = :ts WHERE id = :id AND status = 'aberto'"),
             {"ts": ts, "id": protocolo_id})
         contact_id = proto["contact_id"]
-    _broadcast_changed(contact_id, protocolo_id)
+    # plano 94: limpeza de órfão TAMBÉM é um fechamento. Sem emitir aqui, o CDP
+    # mostraria o protocolo aberto para sempre (foi exatamente o bug do plano de
+    # protocolo órfão ao deletar conversa, agora do lado de fora).
+    _broadcast_changed(contact_id, protocolo_id, kind="closed",
+                       closed_at=ts, reason="orphan_cleanup")
 
 
 def on_startup(ctx, payload: dict) -> None:
@@ -3930,7 +3945,11 @@ def record_avaliacao(id_protocol: str, nota, sugestao: str = "",
         # Perdeu a corrida: outro POST respondeu entre o SELECT e o UPDATE.
         return None, "Esta avaliação já foi respondida."
     # Atualiza o Kanban/painel ao vivo (a nota passa a aparecer no protocolo).
-    _broadcast_changed(row["contact_id"], row["protocolo_id"])
+    # plano 94: e publica a AVALIAÇÃO no barramento. Aqui, depois da guarda de
+    # ``rowcount == 0``, o ponto dispara exatamente uma vez por avaliação (o
+    # perdedor da corrida já saiu acima) — não mover.
+    _broadcast_changed(row["contact_id"], row["protocolo_id"], kind="rated",
+                       id_protocol=idp, nota=n, sugestao=sug, answered_at=ts)
     return {"protocolo": idp, "nota": n, "sugestao": sug}, None
 
 
@@ -4569,7 +4588,19 @@ def notify_on_ignored(ctx, value):
 
 # ── Util ──────────────────────────────────────────────────────────────────────
 
-def _broadcast_changed(contact_id: int | None, protocolo_id: int | None) -> None:
+def _broadcast_changed(contact_id: int | None, protocolo_id: int | None,
+                       kind: str | None = None, **extra) -> None:
+    """Invalida o Kanban, avisa o painel (WS) e — quando ``kind`` é passado —
+    publica o acontecimento no BARRAMENTO de plugins.
+
+    O ``kind`` é opcional de propósito: os ~15 call sites que só querem "algo
+    mudou, recarregue" continuam chamando com 2 argumentos e nada muda para eles.
+    Só os momentos que são FATO DE NEGÓCIO (abriu, finalizou, avaliou) passam
+    ``kind`` e viram evento no bus — assinável por qualquer plugin, sem que este
+    plugin conheça nenhum deles.
+
+    O WS continua byte-idêntico: é contrato do frontend e não pode se mexer.
+    """
     # Invalida o índice do Kanban ANTES de avisar o frontend: o refetch disparado pelo
     # WS já enxerga a geração nova (vale para todas as réplicas — a geração vive no
     # `config`). Defensivo: falhar aqui nunca pode impedir o broadcast.
@@ -4580,3 +4611,24 @@ def _broadcast_changed(contact_id: int | None, protocolo_id: int | None) -> None
         logger.debug("protocolos: falha ao invalidar o índice do kanban", exc_info=True)
     broadcast("plugin_protocolos_changed",
               {"contact_id": contact_id, "protocolo_id": protocolo_id})
+
+    if kind:
+        _emit_bus(kind, contact_id=contact_id, protocolo_id=protocolo_id, **extra)
+
+
+def _emit_bus(kind: str, **payload) -> None:
+    """Publica ``protocolos.<kind>`` no barramento de plugins.
+
+    Separado de :func:`_broadcast_changed` porque nem todo fato de negócio tem
+    (ou pode ganhar) um broadcast de WS: a ABERTURA do protocolo acontece dentro
+    de ``ensure_protocolo_for_contact``, que hoje não avisa o painel — e colocar
+    um WS ali mudaria o comportamento do frontend (refetch a cada mensagem que
+    abre protocolo). O bus é aditivo; o WS não.
+
+    Falha no bus NUNCA pode derrubar a operação que chamou.
+    """
+    try:
+        from plugins.events import emit_with_filter_sync
+        emit_with_filter_sync(f"protocolos.{kind}", {**payload, "ts": time.time()})
+    except Exception:
+        logger.debug("protocolos: emit protocolos.%s falhou", kind, exc_info=True)

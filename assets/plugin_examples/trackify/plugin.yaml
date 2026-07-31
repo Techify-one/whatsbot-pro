@@ -1,0 +1,49 @@
+id: trackify
+name: Trackify (Jornada do cliente)
+version: 1.0.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Mostra a JORNADA do contato no Trackify (o CDP do Nexus) sem sair do atendimento:
+  um botão no cabeçalho da conversa abre um modal com quem é o cliente, quanto já
+  gastou, o que comprou, o que falhou, o que cancelou e quando é a próxima cobrança
+  da assinatura. Lê o CDP direto no banco do Nexus por uma 2ª conexão READ-ONLY
+  (nada é replicado no WhatsBot e nada é gravado no Trackify por essa via). O
+  casamento do contato é feito por telefone, com as variantes brasileiras (com e sem
+  o 9º dígito, com e sem "+") e, quando o atendente preencheu, também por e-mail ou
+  CPF — cadastro não encontrado é um estado normal e explícito, com busca manual
+  dentro do próprio modal. Sem o DSN configurado o plugin fica em no-op: a tela diz
+  "não configurado" e nada mais acontece. Zero mudança no core.
+short_description: >-
+  Jornada do contato no Trackify (CDP) num modal do cabeçalho da conversa: gasto
+  total, compras, falhas, cancelamentos e próxima cobrança. Leitura pura.
+author: WhatsBot
+entry:
+  routes: routes        # REST: /journey, /journey/events, /health, /outbox
+  settings: settings    # DSN do Nexus, URL do Trackify, cache, espelho
+  events: events        # conversa/protocolo/contato → fila de saída
+  filters: filters      # só OBSERVA quem fechou (devolve o valor intacto)
+  lifecycle: lifecycle  # tarefa supervisionada "outbox" (entrega ao CDP)
+migrations: migrations
+# A interface de USO é o botão dentro da conversa (slot conversation.header.actions),
+# registrado 1x no boot pelo extends.js. Não há página no menu.
+frontend_extends: /plugins/trackify/static/extends.js
+# Tela de CONFIGURAÇÃO (config:true → aparece no modal "Configurar" do card, no
+# lugar do form declarativo). Existe porque a chave de ingestão precisa ser
+# mascarada (o GET /settings devolve valores em claro) e porque a fila de envio
+# é diagnóstico de operação, não campo de formulário.
+screens:
+  - id: trackify-config
+    title: Trackify
+    path: /trackify
+    config: true
+    component: /plugins/trackify/static/config.js
+    requires: manage
+frontend_api_version: "1.0"
+permissions:
+  - db.write        # fila de saída própria (plugin_trackify_*)
+rbac:
+  group: Trackify
+  permissions:
+    - { key: view,   label: "Ver a jornada do cliente no Trackify" }
+    - { key: manage, label: "Ver e reprocessar a fila de envio ao Trackify" }
+dependencies: []

@@ -1,6 +1,6 @@
 id: protocolos
 name: Protocolos
-version: 1.24.0
+version: 1.24.1
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Camada de protocolos sobre os atendimentos (estilo Chatwoot personalizado). MANTÉM o
@@ -41,12 +41,14 @@ description: >-
   A 1.24.0 traz o ATENDENTE PROVISÓRIO (migração 019): atribuir a CONVERSA a um atendente
   carimba temporariamente o protocolo e o atendimento (ciclo) abertos com ele. O Kanban e o
   filtro "Atendente" passam a usar o atendente EFETIVO (o definitivo salvo no formulário e,
-  na falta dele, o provisório), com um marcador "provisório" no card, na lista e no detalhe.
-  O filtro novo "Vínculo do atendente" (Definitivo / Provisório / Sem atendente) isola, junto
-  com o status Aberto, exatamente os protocolos que alguém já está atendendo mas que ainda
-  não foram salvos com atendente nenhum. Desatribuir a conversa (ou a IA assumir) limpa o
+  na falta dele, o provisório). Desatribuir a conversa (ou a IA assumir) limpa o
   provisório; fechar a conversa não. O provisório é só leitura: o rótulo obrigatório
   "Atendente" continua exigindo preenchimento consciente ao resolver/finalizar.
+  A 1.24.1 torna esse vínculo INVISÍVEL na interface: some o marcador "provisório" do card,
+  da lista, do detalhe e da tabela de atendimentos, o aviso de auto-preenchimento do
+  formulário e o filtro "Vínculo do atendente". O mecanismo continua idêntico — atribuir a
+  conversa segue carimbando, e o agrupamento e o filtro "Atendente" seguem achando quem só
+  tem o vínculo provisório.
   Permissões: ver, editar/resolver/configurar, criar visualizações e gerenciar visualizações
   de equipe. Desative e a tela volta ao padrão — os dados ficam nas tabelas do plugin e no
   custom_attributes do core.

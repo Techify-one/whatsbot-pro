@@ -43,16 +43,6 @@ function nearBottom(sc) {
   return el.scrollTop + el.clientHeight >= el.scrollHeight - NEAR_BOTTOM_PX;
 }
 
-// Marcador do atendente PROVISÓRIO: a conversa está atribuída a alguém, mas o rótulo
-// "Atendente" do protocolo/ciclo ainda NÃO foi salvo no formulário de Resolver/Finalizar.
-// Tinta amber com opacidade (mesmo precedente da nota de avaliação no card) — legível nos
-// dois temas sem depender de cor crua não coberta pelo custom.css.
-const ProvisionalChip = ({ title = 'Atendente da CONVERSA. Ainda não salvo no protocolo.' }) => html`
-  <span title=${title}
-    class="px-1.5 py-0.5 rounded-full text-[10px] leading-none bg-amber-500/15 text-amber-600 whitespace-nowrap">
-    provisório
-  </span>`;
-
 const MODE_KEY = 'whatsbot_protocolos_mode';    // 'lista' | 'kanban'
 const KGROUP_KEY = 'whatsbot_protocolos_kgroup'; // legado: 'status' | 'atendente' (migrado p/ VIEW_KEY)
 const VIEW_KEY = 'whatsbot_protocolos_view';     // id (numérico) da aba ativa; sentinelas legadas '__status'/'__atendente' caem na 1ª aba
@@ -515,9 +505,6 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   });
   const [assigneeFilter, setAssigneeFilter] = useState([]);  // filtro por atendente — LISTA (multi) de ids (string)
   const [notaFilter, setNotaFilter] = useState([]);   // filtro por nota de avaliação (1..5)
-  // Vínculo do atendente — LISTA (multi) de 'definitivo' | 'provisorio' | 'sem'.
-  // 'provisorio' = a conversa está atribuída mas o rótulo Atendente ainda não foi salvo.
-  const [vinculoFilter, setVinculoFilter] = useState([]);
   const [attrFilters, setAttrFilters] = useState({});          // filtros por atributo de atendimento (da aba)
   const [sortBy, setSortBy] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
@@ -654,10 +641,9 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     // `groupParams` — as rotas /grouped/* precisam do mesmo recorte, senão as contagens
     // por coluna do Kanban ignorariam o filtro que a lista aplica.
     if (notaFilter.length) params.set('nota', JSON.stringify(notaFilter));
-    if (vinculoFilter.length) params.set('vinculo', JSON.stringify(vinculoFilter));
     if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
     return params;
-  }, [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters]);
+  }, [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters]);
 
   // Bump manual → re-busca da 1ª página (botão Atualizar, WS, pós-ação no detalhe).
   const [reloadTick, setReloadTick] = useState(0);
@@ -682,8 +668,8 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
 
   // resetKey: qualquer mudança de filtro / permissão / modo / reload volta à 1ª página.
   const resetKey = useMemo(
-    () => JSON.stringify([status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters, canView, mode, reloadTick]),
-    [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters, canView, mode, reloadTick]);
+    () => JSON.stringify([status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, mode, reloadTick]),
+    [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, mode, reloadTick]);
 
   const { items: rows, loading, loadingMore, hasMore, loadMore } =
     useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey, keyOf: (r) => r.id });
@@ -725,12 +711,12 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
 
   // Muda ⇒ recarrega colunas e reinicia a paginação de TODAS as colunas.
   const groupResetKey = useMemo(() => JSON.stringify([
-    status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters, canView, reloadTick,
+    status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, reloadTick,
     (activeView || {}).group_by, (activeView || {}).group_attr_key,
     (activeView || {}).group_field_scope, (activeView || {}).group_date_mode,
     (activeView || {}).group_date_grain, (activeView || {}).group_date_from,
     (activeView || {}).group_date_to,
-  ]), [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters, canView, reloadTick, activeView]);
+  ]), [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, reloadTick, activeView]);
 
   useEffect(() => {
     if (!canView || mode !== 'kanban') return undefined;
@@ -788,7 +774,6 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     setQ(availFilter('q') && f.q != null ? f.q : '');
     setAssigneeFilter(availFilter('atendente') ? asFilterList(f.assignee_user_id).map(String) : []);
     setNotaFilter(availFilter('nota') && f.nota != null ? asFilterList(f.nota).map(String) : []);
-    setVinculoFilter(availFilter('vinculo') && f.vinculo != null ? asFilterList(f.vinculo).map(String) : []);
     setAttrFilters(f.attrs && typeof f.attrs === 'object'
       ? Object.fromEntries(Object.entries(f.attrs).filter(([k]) => availFilter(k))) : {});
     const df = (availFilter('periodo') && f.date && typeof f.date === 'object') ? f.date : null;
@@ -859,10 +844,9 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   // filtros" — assim uma aba com filtro pré-determinado que zera o resultado nunca é um
   // mistério: o usuário vê os controles e limpa para ver todos.
   const hasViewFilters = !!(status.length || (q && q.trim()) || notaFilter.length || assigneeFilter.length
-    || vinculoFilter.length
     || Object.keys(attrFilters).length || dateTo || (datePreset && datePreset !== null));
   const clearFilters = () => {
-    setStatus([]); setQ(''); setNotaFilter([]); setAssigneeFilter([]); setVinculoFilter([]); setAttrFilters({});
+    setStatus([]); setQ(''); setNotaFilter([]); setAssigneeFilter([]); setAttrFilters({});
     setDatePreset(null); setDateFrom(ymd(new Date())); setDateTo('');
   };
 
@@ -875,7 +859,6 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     if (availFilter('q') && q.trim()) f.q = q.trim();
     if (availFilter('atendente') && assigneeFilter.length) f.assignee_user_id = assigneeFilter;
     if (availFilter('nota') && notaFilter.length) f.nota = notaFilter;
-    if (availFilter('vinculo') && vinculoFilter.length) f.vinculo = vinculoFilter;
     if (availFilter('periodo')) {
       if (datePreset && datePreset !== 'tudo') f.date = { preset: datePreset, from: '', to: '' };
       else if (datePreset === 'tudo') f.date = { preset: 'tudo', from: '', to: '' };
@@ -1216,10 +1199,7 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
       render: (r) => {
         const e = effectiveAssignee(r);
         if (!e.name && e.id == null) return '—';
-        const nome = e.name || `Usuário #${e.id}`;
-        return e.provisional
-          ? html`<span class="inline-flex items-center gap-1">${nome}<${ProvisionalChip} /></span>`
-          : nome;
+        return e.name || `Usuário #${e.id}`;
       } },
     { key: 'status', label: 'Status', nowrap: true,
       get: (r) => r.status || '', render: (r) => (r.status === 'aberto' ? 'ABERTO' : 'FECHADO') },
@@ -1389,15 +1369,6 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
         <${OptionListSelect} options=${[5, 4, 3, 2, 1].map((n) => ({ value: String(n), label: `${'★'.repeat(n)} ${n}` }))}
           multiple=${true} value=${asFilterList(notaFilter).map(String)}
           onChange=${(v) => setNotaFilter(v)} placeholder="Avaliação" float=${true} />
-      </div>` } : null,
-    availFilter('vinculo') ? { key: 'vinculo', el: html`
-      <div key="vinculo" class="w-[190px]">
-        <${OptionListSelect}
-          options=${[{ value: 'definitivo', label: 'Definitivo' },
-                     { value: 'provisorio', label: 'Provisório' },
-                     { value: 'sem', label: 'Sem atendente' }]}
-          multiple=${true} value=${asFilterList(vinculoFilter).map(String)}
-          onChange=${(v) => setVinculoFilter(v)} placeholder="Vínculo do atendente" float=${true} />
       </div>` } : null,
     availFilter('periodo') ? { key: 'periodo', el: html`
       <div key="periodo" class="flex items-center gap-2">
@@ -1573,13 +1544,12 @@ function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = t
       ${row.closed_at ? html`<div class="text-[12px] text-wa-secondary">Fim: ${fmtTs(row.closed_at)}</div>` : null}
       <div class="flex items-center justify-between gap-2 mt-1">
         ${(() => {
-          // Atendente EFETIVO: com só o provisório o card já mostra o dono da conversa,
-          // marcado como não-salvo (em vez do antigo "Não atribuído").
+          // Atendente EFETIVO: com só o provisório o card já mostra o dono da conversa
+          // (em vez do antigo "Não atribuído"), sem distinguir de um atendente salvo.
           const e = effectiveAssignee(row);
           const nome = e.name || (e.id != null ? `Usuário #${e.id}` : '');
           return html`<span class="flex items-center gap-1 min-w-0">
             <span class="text-[12px] ${nome ? 'text-wa-text' : 'text-wa-secondary'} truncate">${nome || 'Não atribuído'}</span>
-            ${e.provisional ? html`<${ProvisionalChip} />` : null}
           </span>`;
         })()}
         <div class="flex items-center gap-1 shrink-0">
@@ -1608,7 +1578,6 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
   // de fonte também p/ a visão read-only.
   const hasSavedAssignee = at.assignee_user_id != null && String(at.assignee_user_id).trim() !== '';
   const shouldSeedCurrentAssignee = !readOnly && !hasSavedAssignee && defaultAssignee != null;
-  const showAssigneeSeedNotice = protoDefs.some((d) => d.type === 'atendente') && shouldSeedCurrentAssignee;
   // Atendente: mantém o assignee salvo quando existir; só usa o usuário conectado como
   // sugestão inicial quando o protocolo ainda não tem atendente gravado (ver proto_fields.js).
   const [vals, setVals] = useState(() => seedProtocolValues(protoDefs, at, { defaultAssignee, readOnly }));
@@ -1689,7 +1658,11 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
   };
 
   // Visão read-only (protocolo fechado): só os campos com valor (checkbox sempre exibe).
-  const readOnlyInfo = protoDefs.filter((d) => d.type === 'checkbox' || isFilledProto(d, vals[d.key]));
+  // O rótulo Atendente é a exceção: exibe o atendente EFETIVO (na falta do salvo, o dono
+  // da conversa), que não vive em `vals` — senão sumiria da tela sem o assignee gravado.
+  const readOnlyInfo = protoDefs.filter((d) => (d.type === 'atendente'
+    ? effectiveAssignee(at).id != null
+    : (d.type === 'checkbox' || isFilledProto(d, vals[d.key]))));
 
   return html`
     <div class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4">
@@ -1719,17 +1692,11 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
             <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px] mb-2">
               <div><span class="text-wa-secondary">Aberto por:</span> <span class="text-wa-text">${at.opened_by_name || '—'}</span></div>
               <div><span class="text-wa-secondary">Fechado por:</span> <span class="text-wa-text">${fechado ? (at.assignee_name || '—') : '—'}</span></div>
-              ${at.assignee_is_provisional ? html`
-                <div class="flex items-center gap-1">
-                  <span class="text-wa-secondary">Atendente:</span>
-                  <span class="text-wa-text">${at.provisional_assignee_name || `Usuário #${at.provisional_assignee_user_id}`}</span>
-                  <${ProvisionalChip} />
-                </div>` : null}
             </div>
             ${readOnlyInfo.length ? html`
               <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px]">
                 ${readOnlyInfo.map((d) => html`<div key=${d.key}>
-                  <span class="text-wa-secondary">${d.label}:</span> <span class="text-wa-text">${d.type === 'atendente' ? (at.assignee_name || '—') : fmtCell(vals[d.key], d)}</span>
+                  <span class="text-wa-secondary">${d.label}:</span> <span class="text-wa-text">${d.type === 'atendente' ? (effectiveAssignee(at).name || '—') : fmtCell(vals[d.key], d)}</span>
                 </div>`)}
               </div>` : html`<div class="text-[12px] text-wa-secondary">Sem dados preenchidos.</div>`}
           </div>`
@@ -1739,17 +1706,7 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
             <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px] mb-3">
               <div><span class="text-wa-secondary">Aberto por:</span> <span class="text-wa-text">${at.opened_by_name || '—'}</span></div>
               <div><span class="text-wa-secondary">Fechado por:</span> <span class="text-wa-text">${fechado ? (at.assignee_name || '—') : '—'}</span></div>
-              ${at.assignee_is_provisional ? html`
-                <div class="flex items-center gap-1">
-                  <span class="text-wa-secondary">Atendente:</span>
-                  <span class="text-wa-text">${at.provisional_assignee_name || `Usuário #${at.provisional_assignee_user_id}`}</span>
-                  <${ProvisionalChip} />
-                </div>` : null}
             </div>
-            ${showAssigneeSeedNotice ? html`
-              <div class="mb-3 px-3 py-2.5 rounded-md bg-wa-teal/10 border border-wa-teal/40 text-wa-teal text-[13px]">
-                Este protocolo ainda não tinha atendente — preenchemos com o seu usuário. Troque se necessário.
-              </div>` : null}
             <div class="space-y-3">
               ${protoDefs.map((d) => {
                 // O rótulo "atendente" precisa de um fallbackUser para o AttendantSelect
@@ -1835,7 +1792,7 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
   // (cattr:). "Outros" (defensivo) captura escopos de campo desconhecidos p/ nada sumir do checklist.
   // Chaves nativas do checklist (lista fixa — a barra ao vivo renderiza widgets próprios p/ elas).
   const NATIVE_ITEMS = [
-    ['status', 'Status'], ['atendente', 'Atendente'], ['vinculo', 'Vínculo do atendente'],
+    ['status', 'Status'], ['atendente', 'Atendente'],
     ['q', 'Buscar'], ['periodo', 'Período'], ['canal', 'Canal'], ['nota', 'Avaliação'],
   ];
   // Derivado da fonte única filterCategories() → pares [key,label] que o `cbox` espera

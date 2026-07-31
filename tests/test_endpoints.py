@@ -2700,20 +2700,6 @@ _lf3 = _alogic.list_protocolos(attr_filters={"cattr:qualquer": "x"}, limit=50)
 check("list_protocolos(cattr filter) -> envelope {items,total,has_more}",
       isinstance(_lf3, dict) and isinstance(_lf3.get("items"), list)
       and "total" in _lf3 and "has_more" in _lf3)
-# 7-vinculo) Filtro "Vínculo do atendente" (1.24.0) — SQL puro no WHERE compartilhado
-# (lista + índice do Kanban), allowlist fechada e multi-seleção = OR.
-_vw_p, _ = _alogic._build_list_where(vinculo=["provisorio"])
-_vw_d, _ = _alogic._build_list_where(vinculo=["definitivo"])
-_vw_s, _ = _alogic._build_list_where(vinculo=["sem"])
-_vw_or, _ = _alogic._build_list_where(vinculo=["provisorio", "sem"])
-_vw_x, _ = _alogic._build_list_where(vinculo=["lixo"])
-_vw_none, _ = _alogic._build_list_where()
-check("vinculo -> cláusula por valor, OR na multi-seleção, valor inválido ignorado",
-      any("provisional_assignee_user_id IS NOT NULL" in c for c in _vw_p)
-      and any(c == "(assignee_user_id IS NOT NULL)" for c in _vw_d)
-      and any("provisional_assignee_user_id IS NULL" in c for c in _vw_s)
-      and any(" OR " in c and "provisional_assignee_user_id" in c for c in _vw_or)
-      and _vw_x == _vw_none)
 # O filtro nativo "Atendente" passa a casar o EFETIVO (COALESCE) — é o que faz o protocolo
 # só-provisório aparecer ao filtrar pelo atendente que está com a conversa.
 _aw, _ap = _alogic._build_list_where(assignee_user_id=[7])
@@ -2818,11 +2804,11 @@ check("paginação: limit/offset negativos saneados (>=1 item, offset→0)",
 # nenhuma tela precisa baixar a coleção inteira para montar as colunas/contagens.
 _kanban = _il.import_module(f"{_APKG}.kanban_index")
 _grp = _il.import_module(f"{_APKG}.grouping")
-# A chave do cache do índice precisa enxergar o `vinculo` (1.24.0), senão trocar o filtro
+# A chave do cache do índice precisa enxergar o recorte dos filtros, senão trocar o filtro
 # serviria as colunas do filtro anterior.
-check("cache do índice -> chave sensível ao vinculo",
+check("cache do índice -> chave sensível aos filtros",
       len({_kanban._cache_key({"group_by": "status"}, f, 1, "America/Sao_Paulo")
-           for f in ({"vinculo": ["provisorio"]}, {"vinculo": ["sem"]}, {})}) == 3)
+           for f in ({"nota": ["5"]}, {"nota": ["1"]}, {})}) == 3)
 _kanban.invalidate()
 _gf = {"q": "ZPGNTEST"}          # isola o conjunto criado em 7d
 

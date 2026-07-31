@@ -1,8 +1,11 @@
 """Atendente PROVISÓRIO do plugin ``protocolos`` (1.24.0, migração 019).
 
 "Atribuir a CONVERSA a um atendente carimba temporariamente o protocolo e o ciclo abertos
-com ele" — para o supervisor achar os protocolos ainda ABERTOS que ninguém salvou com um
-atendente, mas que já estão de fato sendo atendidos.
+com ele" — para o Kanban e o filtro "Atendente" acharem os protocolos ainda ABERTOS que
+ninguém salvou com um atendente, mas que já estão de fato sendo atendidos.
+
+O vínculo é INVISÍVEL na interface desde a 1.24.1 (sem marcador "provisório" e sem o
+filtro "Vínculo do atendente"); o mecanismo abaixo continua idêntico.
 
 Cobre a política inteira:
 
@@ -14,8 +17,7 @@ Cobre a política inteira:
   sem emitir atribuição, e o último atendente fica registrado);
 * NÃO VAZAR — o provisório não entra em ``_effective_values``/``_missing_required`` nem
   semeia o formulário: o rótulo obrigatório "Atendente" continua bloqueando;
-* LER — atendente EFETIVO no agrupamento do Kanban e no filtro nativo, mais o filtro novo
-  "Vínculo do atendente" (definitivo | provisorio | sem);
+* LER — atendente EFETIVO no agrupamento do Kanban e no filtro nativo "Atendente";
 * CUSTO — o carimbo é idempotente e não invalida o índice do Kanban à toa.
 
 Aponta para a cópia INSTALADA em ``storages/plugins/protocolos`` (monkeypatch
@@ -361,45 +363,6 @@ def test_filtro_nativo_atendente_acha_o_provisorio(logic):
     assert any(p["id"] == at["id"] for p in env["items"])
     # Ficou no SQL: total do envelope = contagem real (não caiu no scan-cap).
     assert env["total"] == len(env["items"]) or env["has_more"]
-
-
-def test_filtro_vinculo(logic):
-    u = _user("Ana")
-    conv_prov = _conversation(assignee_user_id=u["id"])
-    at_prov, _ = _protocolo_com_ciclo(logic, conv_prov)
-    logic.on_conversation_assigned(None, _assigned_payload(conv_prov))
-
-    conv_def = _conversation()
-    at_def, _ = _protocolo_com_ciclo(logic, conv_def)
-    logic.assign_protocolo(at_def["id"], u["id"], "Ana")
-
-    conv_sem = _conversation()
-    at_sem, _ = _protocolo_com_ciclo(logic, conv_sem)
-
-    def ids(**kw):
-        return {p["id"] for p in logic.list_protocolos(limit=200, **kw)["items"]}
-
-    prov = ids(vinculo=["provisorio"])
-    assert at_prov["id"] in prov and at_def["id"] not in prov and at_sem["id"] not in prov
-
-    definitivo = ids(vinculo=["definitivo"])
-    assert at_def["id"] in definitivo and at_prov["id"] not in definitivo
-
-    sem = ids(vinculo=["sem"])
-    assert at_sem["id"] in sem and at_prov["id"] not in sem
-
-    ou = ids(vinculo=["provisorio", "sem"])          # multi-seleção = OR
-    assert {at_prov["id"], at_sem["id"]} <= ou and at_def["id"] not in ou
-
-    assert ids(vinculo=["lixo"]) >= {at_prov["id"], at_def["id"], at_sem["id"]}  # ignora
-
-
-def test_vinculo_entra_na_chave_do_cache_do_indice(kanban_index):
-    view = {"group_by": "status"}
-    a = kanban_index._cache_key(view, {"vinculo": ["provisorio"]}, 1, "America/Sao_Paulo")
-    b = kanban_index._cache_key(view, {"vinculo": ["sem"]}, 1, "America/Sao_Paulo")
-    c = kanban_index._cache_key(view, {}, 1, "America/Sao_Paulo")
-    assert len({a, b, c}) == 3
 
 
 # ── Custo ─────────────────────────────────────────────────────────────────────

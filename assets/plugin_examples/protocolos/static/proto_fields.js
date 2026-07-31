@@ -27,8 +27,10 @@ export const isMultiDef = (d) => (d && (d.type === 'checkboxes'
 // agrupamento do Kanban do frontend precisa da mesma regra do backend, e o
 // `protocolos_tab.js` arrasta preact/htm.
 //
-// `provisional: true` é o que liga o marcador visual "provisório" na UI. String vazia
-// conta como ausente (o backend devolve inteiro ou null, mas o form devolve string).
+// `provisional: true` diz de ONDE veio o atendente (só do dono da conversa). A UI NÃO
+// distingue os dois casos — o flag existe para espelhar o backend e para as regras de
+// arraste do Kanban. String vazia conta como ausente (o backend devolve inteiro ou null,
+// mas o form devolve string).
 export function effectiveAssignee(row) {
   const r = row || {};
   const def = r.assignee_user_id;

@@ -84,18 +84,11 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [],
     if (col.key === '__inicio') return fmtTs(c[startField]);
     if (col.key === '__fim') return fmtTs(c[endField]);
     // Atendente EFETIVO do ciclo: o definitivo (salvo ao resolver) e, na falta dele, o
-    // PROVISÓRIO (o dono da conversa). O marcador só aparece no ciclo ainda ABERTO —
-    // ciclo encerrado sem definitivo é histórico, não pendência.
+    // provisório (o dono da conversa) — exibidos igual, sem distinção na tela.
     if (col.key === '__atendente') {
       const e = effectiveAssignee(c);
       const nome = e.name || (e.id != null ? `Usuário #${e.id}` : '');
-      if (!nome) return '—';
-      return (e.provisional && !c[endField])
-        ? html`<span class="inline-flex items-center gap-1">${nome}
-            <span title="Atendente da CONVERSA. Ainda não salvo no atendimento."
-              class="px-1.5 py-0.5 rounded-full text-[10px] leading-none bg-amber-500/15 text-amber-600 whitespace-nowrap">provisório</span>
-          </span>`
-        : nome;
+      return nome || '—';
     }
     // "Aberto por" = quem abriu o ciclo (opened_by_name: Contato/IA/atendente).
     if (col.key === '__aberto') return c.opened_by_name || '—';
