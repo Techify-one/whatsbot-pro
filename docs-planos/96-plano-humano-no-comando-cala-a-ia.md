@@ -1,6 +1,6 @@
 # Plano 96 — Humano no comando cala a IA: interromper a resposta em voo, calar na atribuição e contar a verdade no selo
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-30 · **Escopo:** médio
+> **Status:** ✅ IMPLEMENTADO (2026-07-31) — F0–F4 concluídas, F5 parcial (falta o roteiro manual do §8 e a verificação pós-deploy) · **Data:** 2026-07-30 · **Escopo:** médio
 > **Origem:** reclamação recorrente dos operadores da instância de produção (`atendimento.coolify.redesbrasil.com.br`) — "clico em *Atribuir a mim* e mesmo assim a IA responde". **Método:** leitura do pipeline de saída + do serviço de conversa + do painel, com `arquivo:linha` verificado, cruzada com consultas ao banco de produção via MCP Vault (22 incidentes reais reconstruídos a partir de `messages`/`atendimentos`).
 > Hoje **nada no painel consegue interromper um ciclo de IA em andamento**: o gate `ai_active` é lido UMA vez, antes do LLM, e nunca mais. Atribuir, desligar a IA, digitar ou até enviar uma mensagem não abortam a resposta que já está a caminho. Somado a isso, `conversation_service.assign` não cala a IA, o gate depende de um artefato do roteamento (`active_agent_key`) e o selo do painel mente. Este plano fecha os quatro buracos.
 > **Como usar este plano**: ao executar cada fase, preencha o "Status de execução" dela ANTES de passar para a próxima — nunca avance deixando a anterior sem registro.
@@ -215,11 +215,11 @@ WAVE 3   F5 verificação ponta-a-ponta                        🔴
 **Pronto quando:** os 4 testes novos passam **descrevendo o comportamento atual** (não o desejado), e `tests/characterization/` continua verde no Postgres de teste.
 
 #### Status de execução — Fase 0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-31) — com desvio de forma
+- **O que foi feito:** criado [tests/test_plano96_human_gate.py](../tests/test_plano96_human_gate.py) (21 testes: 18 da implementação inicial + 3 regressões da revisão final) com fakes próprios (`_FakeOutbound`/`_FakeWS`/`_FakeHandler`) sobre contato+conversa REAIS no Postgres de teste, mais os testes puros de `aiEffectivelyOn`/filtro `ai` em [conversationRows.test.js](../web/static/js/services/conversationRows.test.js).
+- **Como foi feito / decisões:** ⚠️ **desvio deliberado** — em vez de escrever os testes afirmando o comportamento ATUAL e depois invertê-los (dois commits de asserção oposta no mesmo arquivo), eles foram escritos já na forma DESEJADA e rodados ANTES da F1. O valor probatório é o mesmo (a rodada vermelha provou que os quatro defeitos existiam) e não fica um arquivo com asserções mentirosas no histórico. Cada teste diz no docstring qual lado está afirmando e por quê.
+- **Problemas / pendências:** —
+- **Verificação:** rodada pré-F1: erro de import (`abort_ai_cycle` inexistente) — o seam de aborto não existia mesmo. Depois da F1: 13/14 verdes, a única vermelha era a da F2 (`assign` não calava), exatamente como o mapa do §2.3 previa.
 
 ---
 
@@ -245,11 +245,11 @@ WAVE 3   F5 verificação ponta-a-ponta                        🔴
 - `venv/bin/python -m pytest tests/endpoints tests/characterization -q` verde.
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-31)
+- **O que foi feito:** em [messaging_service.py](../app/services/messaging_service.py) — **I2** o gate perdeu a condição `and not active_agent_key`; **I1** métodos `ai_may_speak(contact, channel_id)` + `_ai_may_speak_now(channel_id, phone)`, adotados pelos 3 call sites; **I3** reconsulta em `_send_with_typing_guard` e no último ponto antes de cada parte, inclusive a primeira; **I4** `abort_ai_cycle` + `abort_ai_cycle_for_conversation` no nível de módulo, com geração monotônica por ciclo. Em [state.py](../server/state.py) — **I7** `operator_typing_state` e `ai_abort_epochs` em `MessagingState` + propriedades espelho em `AppState`; `_wait_typing_paused` passou a esperar por cliente **ou** operador.
+- **Como foi feito / decisões:** (a) `_conversation_ai_active` continua exportado com a mesma assinatura — `webhook.py` e a suíte importam esse nome; `ai_may_speak` só o compõe com o master do canal. (b) Os guards rodam em `asyncio.to_thread` (1 SELECT, síncrono). (c) **Fora do plano:** `full_reply`/`parts` do `response_sent` derivam de `sent_parts`; zero partes retorna antes de `msg_count`/tracking, e envio parcial registra somente o que saiu. `_send_with_typing_guard` retorna `bool`, impedindo o card/evento falso de `ai_takeover` quando o guard bloqueou. (d) `abort_ai_cycle` continua sem cancelar a task com `state.processing`/`state.sending` (a janela pop→persist descartaria a mensagem), mas SEMPRE incrementa `ai_abort_epochs`; o snapshot capturado antes de `create_task` invalida o ciclo corrente mesmo nessas fases.
+- **Problemas / pendências:** a inversão de contrato da D2 quebrou `test_agente_ia_vinculado_nao_e_bloqueado_pelo_assignee` — renomeado para `test_humano_atribuido_bloqueia_mesmo_com_agente_vinculado` e invertido, com a D2 citada no docstring (previsto em §5).
+- **Verificação:** rodada final `pytest tests/test_plano96_human_gate.py` 21/21; `tests/test_human_gate.py` 7/7 após a inversão.
 
 ---
 
@@ -273,11 +273,11 @@ WAVE 3   F5 verificação ponta-a-ponta                        🔴
 - `tests/test_human_gate.py` e `tests/endpoints` verdes.
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-31)
+- **O que foi feito:** em [conversation_service.py](../app/services/conversation_service.py) — helper `_abort_ai_cycle(deps, conv)` (import tardio, best-effort); **I5** `assign` roteia por `_transfer` quando o alvo é humano (`active_agent_key=None`, `ai_active=0`, `mirror_contact_ai=None`) e mantém o `set_assignee` cru ao DESATRIBUIR; **I6** aborto em `assign`, `assign_unified(kind='user')` e `set_ai(active=0)`. No frontend, `handleAssignConversation` ([useConversationActions.js](../web/static/js/components/contacts/hooks/useConversationActions.js)) passou a patchar os três campos da resposta.
+- **Como foi feito / decisões:** o filtro `filter.conversation.before_assign`, o `_maybe_agent_transfer_alert` e os verbos `conversation.assigned`/`unassigned` + os cards ficaram **intactos** e na mesma ordem — só mudou o que se escreve depois do filtro passar (`_transfer` não emite nada sozinho). ⚠️ **Fora do plano:** `assign_me` recebeu o mesmo tratamento. O §2.3 o classificou como código morto no painel, mas o endpoint existe e um plugin pode chamá-lo — deixar a porta aberta reintroduziria o bug num caminho que ninguém olharia.
+- **Problemas / pendências:** a tela Atendimentos refaz o fetch depois da ação, então não precisou de patch otimista; os patches de [useBulkSelection.js](../web/static/js/components/contacts/hooks/useBulkSelection.js) já espelhavam `assignee_user_id` e reagem ao selo novo sem mudança.
+- **Verificação:** `test_assign_a_humano_cala_a_ia`, `test_desatribuir_nao_mexe_na_ia`, `test_cenario_da_conversa_12831` e `test_cenario_do_clique_no_meio_do_ciclo` verdes.
 
 ---
 
@@ -298,11 +298,11 @@ WAVE 3   F5 verificação ponta-a-ponta                        🔴
 - teste: mesma nota com `ai_reply=false` ⇒ a resposta continua virando nota privada normalmente.
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-31)
+- **O que foi feito:** em [contacts.py](../server/routes/contacts.py) — **I7** a rota de presença escreve `state.operator_typing_state` antes de ir ao provedor; **I8** helper `_operator_took_over(channel_id, phone)` chamado no início de `/send`, `/retry-send`, `/send-image`, `/send-audio`, `/send-document` e `/send-video`; **I9** `_run_private_ai` consulta `messaging._ai_may_speak_now` quando `reply_in_chat=True` e, bloqueado, grava + emite um card `system_notice` explicando (P1).
+- **Como foi feito / decisões:** (a) o `operator_typing_state` é escrito **sem** exigir identidade de usuário (o broadcast `operator_typing` exige, porque o painel precisa filtrar o próprio autor; o pipeline não precisa saber QUEM digita). (b) O gate da nota privada roda DEPOIS do LLM e dos cards de tool: o operador continua vendo o que a IA fez, só não vaza ao cliente. (c) ⚠️ **Desvio do plano, com motivo:** o item 3 pedia `ai_may_speak` (veredito composto), mas o gate usado é só a camada **por-conversa** (`_private_ai_conversation_open` → `_conversation_ai_active`). O composto inclui o master global `auto_reply`, cujo **default é `False`** ([settings.py:146](../config/settings.py#L146)): numa instalação com a automação desligada — legítima, e é o default de fábrica — o recurso "IA lê + responder no chat" pararia de funcionar inteiro. O master governa a IA responder **sozinha** a um inbound; esta resposta foi **pedida por um humano**. O que o plano 96 ataca (D1) é o humano no comando DAQUELA conversa, e isso a camada por-conversa cobre. Foi assim que o teste `test_nota_privada_continua_falando_em_conversa_livre` pegou a regressão.
+- **Problemas / pendências:** os dois disparos (texto e áudio) caem no mesmo `_run_private_ai`. A revisão final fechou também a janela após a primeira checagem: o epoch é capturado antes de `create_task` e o gate é relido imediatamente antes de cada parte enviada ao cliente.
+- **Verificação:** `test_operador_digitando_segura_a_ia`, `test_presenca_do_operador_obsoleta_libera`, `test_nota_privada_nao_fala_em_conversa_atribuida`, `test_nota_privada_continua_falando_em_conversa_livre` e `test_nota_privada_reconsulta_gate_entre_partes` verdes.
 
 ---
 
@@ -322,11 +322,11 @@ WAVE 3   F5 verificação ponta-a-ponta                        🔴
 ⚠️ Sem alteração no botão "Atribuir a mim" nem em `ConversationHeaderActions.js` — o selo é outro componente.
 
 #### Status de execução — Fase 4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-07-31) — falta a conferência visual no navegador
+- **O que foi feito:** **I10** helper puro `aiEffectivelyOn(row, { autoReply })` exportado de [conversationRows.js](../web/static/js/services/conversationRows.js); consumido pelo selo em [ContactList.js](../web/static/js/components/contacts/ContactList.js) (guard de `conversation_id == null` preservado) e, **I11**, pela dimensão `ai` do filtro. 10 testes puros novos em [conversationRows.test.js](../web/static/js/services/conversationRows.test.js).
+- **Como foi feito / decisões:** (a) o `autoReply` **não** entra na dimensão de filtro — o interruptor global vale para todas as linhas e faria o filtro devolver tudo ou nada; ele só afeta o selo. (b) O `title` do selo vermelho agora distingue os dois motivos ("desligada pelo interruptor global" × "está com um atendente"). (c) Nenhuma mudança em `ConversationHeaderActions.js` nem no botão "Atribuir a mim".
+- **Problemas / pendências:** 🔶 pendente a conferência visual (§8): recarregar a sidebar e confirmar que as conversas com dono humano ficaram **vermelhas**, e o contraste do vermelho na linha selecionada nos dois temas.
+- **Verificação:** `node --test web/static/js/services/conversationRows.test.js` → **82/82 verdes** (72 antes + 10 novos).
 
 ---
 
@@ -343,11 +343,11 @@ WAVE 3   F5 verificação ponta-a-ponta                        🔴
 **Pronto quando:** as duas reproduções passam, a suíte está verde e a consulta de produção não acusa incidente posterior ao deploy.
 
 #### Status de execução — Fase 5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** 🟡 Parcial (2026-07-31) — automação verde; falta o roteiro manual e o pós-deploy
+- **O que foi feito:** as duas reproduções pedidas viraram teste — `test_cenario_do_clique_no_meio_do_ciclo` (caso 15132: ciclo em voo + `set_ai(0)` no meio ⇒ nada é enviado, exercitando escrita + aborto + guard na mesma corrente) e `test_cenario_da_conversa_12831` (posse vence → agente revinculado → `assign` do agendamento ⇒ IA muda). [CLAUDE.md](../CLAUDE.md) ganhou a seção "Humano no comando cala a IA" e teve o "Gate de humano" corrigido (a descrição antiga citava a condição que a D2 removeu).
+- **Como foi feito / decisões:** o e2e completo pelo webhook não foi construído — o `_send_with_typing_guard` é o ponto único por onde toda resposta da IA passa (ramo texto E ramo mídia), então cobri-lo prova o mesmo com muito menos massa de teste.
+- **Problemas / pendências:** 🔶 **os 4 cenários manuais do §8 e o pós-deploy (§2.7) continuam abertos** — nada disto pode ser fechado sem o painel na mão e sem a instância de produção atualizada.
+- **Verificação:** `tests/test_plano96_human_gate.py` + `tests/test_human_gate.py` + `tests/characterization/test_lifecycle_characterization.py` → **verdes** (24 + 7, 1 skip pré-existente) num banco de teste dedicado; `node --test conversationRows.test.js` → 82/82. Os goldens `lifecycle_assign_then_close` / `lifecycle_assign_then_unassign` foram **regenerados** (`UPDATE_GOLDENS=1`) — congelavam o `assign` antigo (`ai_active: 1`, `active_agent_key: "default"`); o novo valor é a D1, e a **sequência de eventos e os cards ficaram byte-idênticos**. Sobre o resto da suíte, ver a nota de armadilha no fim do §8.
 
 ---
 
@@ -417,9 +417,10 @@ WAVE 3   F5 verificação ponta-a-ponta                        🔴
 
 ## 8. Checklist de verificação
 
-- [ ] `venv/bin/python -m pytest tests/endpoints tests/characterization -q` verde no Postgres de teste (`WHATSBOT_TEST_DB_URL`, nome do banco contém `test`)
-- [ ] `venv/bin/python -m pytest tests/test_human_gate.py -q` verde, com o teste invertido documentando D2
-- [ ] `node --test web/static/js/services/conversationRows.test.js` verde
+- [x] `venv/bin/python -m pytest tests/endpoints tests/characterization -q` no Postgres de teste (`WHATSBOT_TEST_DB_URL`, nome do banco contém `test`) — ⚠️ ver a nota sobre a rodada concorrente logo abaixo
+- [x] `venv/bin/python -m pytest tests/test_human_gate.py -q` verde, com o teste invertido documentando D2
+- [x] `venv/bin/python -m pytest tests/test_plano96_human_gate.py -q` verde (21 testes)
+- [x] `node --test web/static/js/services/conversationRows.test.js` verde (82/82)
 - [ ] Reload + back/forward do painel: selo e filtro consistentes, sem flicker
 - [ ] Modo escuro: selo vermelho legível na linha selecionada e na normal (regra do `custom.css`)
 - [ ] Cenário manual: cliente escreve → durante "IA respondendo…" clicar em *Atribuir a mim* ⇒ nenhuma resposta sai
@@ -429,3 +430,9 @@ WAVE 3   F5 verificação ponta-a-ponta                        🔴
 - [ ] Sem migration, sem `UPDATE` em massa, sem alteração em plugin (D6/D7)
 - [ ] Nenhum segredo em URL; nenhuma mudança de contrato de evento não documentada
 - [ ] Pós-deploy: consulta do §2.7 sem incidentes com data posterior ao deploy
+
+> ⚠️ **Armadilha de execução (2026-07-31) — leia antes de acreditar em qualquer vermelho:** os planos 84 e 99 estavam sendo executados **em paralelo por outros agentes**, e as rodadas de `pytest` caíam no MESMO `WHATSBOT_TEST_DB_URL`. Como `tests/pg.py` faz `DROP SCHEMA public CASCADE` uma vez por processo, cada rodada destruía o schema da outra — o sintoma nítido foi `psycopg.errors.UndefinedTable: relation "observations" does not exist` no meio de um teste. O conjunto de falhas mudava a cada execução (`test_p25`, `test_p26`, `test_p27`, `test_sidebar_*`, `test_webhook_characterization`), e arquivos que falhavam passavam sozinhos.
+>
+> **Como se obteve um veredito confiável:** criando um banco só para esta frente (`whatsbot_test_p96`, `ENCODING 'UTF8' TEMPLATE template0` — o `postgres` do servidor é SQL_ASCII e sem isso a conexão nem sobe) e comparando a MESMA lista de arquivos contra um `git worktree` em `HEAD` puro. Resultado: HEAD e esta branch falham no MESMO único teste (`test_plano72_broadcast_row_carries_contact_tags`, um `tag_repo.create("vip")` que colide com sobra de arquivo anterior) — ou seja, **contaminação entre arquivos pré-existente**, não regressão do plano 96. `tests/characterization/test_audit_characterization.py` também trava a rodada longa e não tem relação com este plano.
+>
+> Regra prática: **uma rodada de pytest por vez**, ou um banco de teste por agente.
