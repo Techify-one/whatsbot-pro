@@ -117,16 +117,59 @@ def _panel_deep_link(sid: int) -> str:
     return f"{base}/melhorias?detail={sid}" if base else f"/melhorias?detail={sid}"
 
 
-def _conversation_deep_link(conversation_id, message_db_id) -> str | None:
-    """URL absoluta da conversa ancorada na mensagem marcada (``?message=<id>``).
-    Mesmo formato do permalink de mensagem do core."""
-    if conversation_id is None:
-        return None
+def _row_exists(kind: str, getter, row_id, cache: dict | None) -> bool:
+    """``getter(id) is not None``, memoizado por chamada de listagem (uma lista de
+    100 sugestões costuma apontar para pouquíssimos ids distintos). A chave leva
+    o ``kind`` junto — id de atendimento e id de contato colidem no mesmo número.
+
+    Fail-OPEN: erro de leitura ⇒ trata como existente e o link é oferecido como
+    antes — um link possivelmente quebrado é menos grave que sumir com o link
+    por causa de uma falha transitória de banco."""
+    if row_id is None:
+        return False
+    try:
+        key = (kind, int(row_id))
+    except (TypeError, ValueError):
+        return False
+    if cache is not None and key in cache:
+        return cache[key]
+    try:
+        alive = getter(key[1]) is not None
+    except Exception:  # noqa: BLE001
+        logger.debug("melhorias: checagem de existência de %s falhou", key)
+        alive = True
+    if cache is not None:
+        cache[key] = alive
+    return alive
+
+
+def _conversation_deep_link(conversation_id, message_db_id, *,
+                            contact_id=None, cache: dict | None = None
+                            ) -> tuple[str | None, str | None]:
+    """``(url, kind)`` do link "Abrir conversa" da sugestão.
+
+    A conversa marcada pode ter sido APAGADA depois do pedido (o histórico do
+    plugin sobrevive à limpeza do core — não há FK cross-table). Um link para
+    um atendimento inexistente leva o operador à tela principal SEM nada
+    selecionado: o hub não acha a linha e não tem o que abrir. Então:
+
+    - conversa viva  ⇒ ``/conversations/<id>?message=<msg>`` (``kind='conversation'``);
+    - conversa apagada + contato vivo ⇒ ``/contacts/<contact_id>``, que o core
+      resolve para o atendimento ATUAL daquele contato (``kind='contact'``) —
+      sem a âncora ``?message``, que morreu junto;
+    - nada vivo ⇒ ``(None, None)``: o painel diz que a conversa foi excluída em
+      vez de oferecer um link que não vai a lugar nenhum.
+    """
     base = _base_url()
-    path = f"/conversations/{conversation_id}"
-    if message_db_id is not None:
-        path += f"?message={message_db_id}"
-    return f"{base}{path}" if base else path
+    if _row_exists("conv", conversation_repo.get, conversation_id, cache):
+        path = f"/conversations/{conversation_id}"
+        if message_db_id is not None:
+            path += f"?message={message_db_id}"
+        return (f"{base}{path}" if base else path), "conversation"
+    if _row_exists("contact", contact_repo.get, contact_id, cache):
+        path = f"/contacts/{contact_id}"
+        return (f"{base}{path}" if base else path), "contact"
+    return None, None
 
 
 def _channel_for_conversation(conversation_id) -> str:
@@ -141,12 +184,20 @@ def _channel_for_conversation(conversation_id) -> str:
     return "default"
 
 
-def _suggestion_dict(row) -> dict:
-    """Row → dict do painel/API, com deep-links computados."""
+def _suggestion_dict(row, *, cache: dict | None = None) -> dict:
+    """Row → dict do painel/API, com deep-links computados.
+
+    ``conversation_link_kind`` diz ao painel o que o link é de verdade:
+    ``'conversation'`` (o atendimento marcado), ``'contact'`` (o atendimento
+    ATUAL do contato — o marcado foi apagado) ou ``None`` (não há para onde ir).
+    """
     d = dict(row)
     d["panel_url"] = _panel_deep_link(d["id"])
-    d["conversation_url"] = _conversation_deep_link(
-        d.get("conversation_id"), d.get("message_db_id"))
+    url, kind = _conversation_deep_link(
+        d.get("conversation_id"), d.get("message_db_id"),
+        contact_id=d.get("contact_id"), cache=cache)
+    d["conversation_url"] = url
+    d["conversation_link_kind"] = kind
     return d
 
 
@@ -529,4 +580,7 @@ def list_suggestions(*, status=None, requester_user_id=None, approver_user_id=No
         stmt = stmt.bindparams(*binds)
     with make_plugin_db() as conn:
         rows = conn.execute(stmt, {**params, "limit": lim, "offset": off}).mappings().all()
-    return [_suggestion_dict(r) for r in rows]
+    # Cache compartilhado: a listagem inteira costuma apontar para um punhado de
+    # atendimentos/contatos distintos — uma checagem por id, não por linha.
+    cache: dict = {}
+    return [_suggestion_dict(r, cache=cache) for r in rows]

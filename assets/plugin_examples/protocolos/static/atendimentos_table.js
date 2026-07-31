@@ -11,6 +11,7 @@
 import { h } from 'preact';
 import { useState, useMemo } from 'preact/hooks';
 import htm from 'htm';
+import { effectiveAssignee } from '/plugins/protocolos/static/proto_fields.js';
 
 const html = htm.bind(h);
 
@@ -82,7 +83,20 @@ export function AtendimentosTable({ atendimentos = [], fieldDefs = [],
   function cell(c, col) {
     if (col.key === '__inicio') return fmtTs(c[startField]);
     if (col.key === '__fim') return fmtTs(c[endField]);
-    if (col.key === '__atendente') return c.assignee_name || '—';
+    // Atendente EFETIVO do ciclo: o definitivo (salvo ao resolver) e, na falta dele, o
+    // PROVISÓRIO (o dono da conversa). O marcador só aparece no ciclo ainda ABERTO —
+    // ciclo encerrado sem definitivo é histórico, não pendência.
+    if (col.key === '__atendente') {
+      const e = effectiveAssignee(c);
+      const nome = e.name || (e.id != null ? `Usuário #${e.id}` : '');
+      if (!nome) return '—';
+      return (e.provisional && !c[endField])
+        ? html`<span class="inline-flex items-center gap-1">${nome}
+            <span title="Atendente da CONVERSA. Ainda não salvo no atendimento."
+              class="px-1.5 py-0.5 rounded-full text-[10px] leading-none bg-amber-500/15 text-amber-600 whitespace-nowrap">provisório</span>
+          </span>`
+        : nome;
+    }
     // "Aberto por" = quem abriu o ciclo (opened_by_name: Contato/IA/atendente).
     if (col.key === '__aberto') return c.opened_by_name || '—';
     // "Fechado por" = o atendente salvo, só quando o ciclo já foi encerrado (ended_at).

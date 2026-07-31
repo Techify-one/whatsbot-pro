@@ -89,7 +89,7 @@ export function ReloginModal({ apiJson, apiBase, onClose, onSuccess }) {
           </div>` : ''}
         ${phase === 'success' ? html`
           <div class="text-[13px] text-wa-teal font-medium py-3">
-            ✓ Sessão renovada. Abra uma nova conversa para usar o token fresco.
+            ✓ Sessão renovada. A conversa aberta volta a valer — feche e continue de onde parou.
           </div>
           <div class="flex justify-end">
             <button onClick=${onClose}

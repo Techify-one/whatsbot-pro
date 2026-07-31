@@ -35,6 +35,12 @@ function currentUser() {
   try { return JSON.parse(localStorage.getItem('whatsbot_user') || 'null'); }
   catch (_) { return null; }
 }
+// Nome do usuário conectado — usado como fallback de EXIBIÇÃO do rótulo "atendente"
+// semeado (para o AttendantSelect renderizar o operador mesmo fora da lista atribuível).
+function currentUserName() {
+  const u = currentUser();
+  return u ? (u.name || u.email || null) : null;
+}
 
 // Encadeamento "fechar conversa e protocolo juntos" (botão c do popup de vínculo) —
 // replica o forceResolveAndClose da aba Protocolos, sem depender do componente: resolve
@@ -49,6 +55,7 @@ async function resolveAndCloseAll(api, apiBase, conversationId, protocoloId) {
     if (defs.length) {
       const picked = await api.ui.openModal((close) => html`
         <${ResolveForm} defs=${defs} initialValues=${{}} defaultAssignee=${currentUserId()}
+          defaultAssigneeName=${currentUserName()}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!picked) return { ok: false, error: 'Cancelado.' };
       fields = picked.fields || {};
@@ -163,7 +170,7 @@ export default function register(api) {
   // Via api.http do core: checa status HTTP e toasta "Permissão negada." em 403.
   const getJson = (url) => api.http.get(url);
 
-  // 1) Popup ao resolver atendimento — pré-preenchido. Roda em TODOS os 5 sites de
+  // 1) Popup ao resolver atendimento — sempre em branco. Roda em TODOS os 5 sites de
   //    "Resolver" porque o core os afunila por resolveConversation. Mostra APENAS os
   //    rótulos do protocolo (escopo atendimento) — os atributos personalizados de
   //    CONVERSA do core não fazem mais parte do plugin (ficam só no core).
@@ -190,29 +197,22 @@ export default function register(api) {
       defs = ((d && d.ok && d.data && d.data.defs) || []).filter((x) => !x.readonly);
     } catch (_) { /* sem defs → segue sem essa seção */ }
 
-    // Valores atuais p/ pré-preencher os rótulos do plugin (chegam espelhados em
-    // conversations.custom_attributes) + o seed do atendente logo abaixo.
-    const initialValues = { ...((atend && atend.custom_attributes) || {}) };
-
-    // Semear o rótulo "Atendente (nativo)" com o assignee ATUAL da conversa. Alguns call
-    // sites passam só { id } → busca no core quando o objeto não traz assignee_user_id.
-    // (Sem seed, resolver poderia LIMPAR a atribuição existente — o backend só reatribui
-    //  quando o valor muda, então seed correto = re-asserção idempotente.)
-    const atendenteDef = defs.find((d) => d.type === 'atendente');
-    if (atendenteDef) {
-      let cur = atend && atend.assignee_user_id;
-      if (cur === undefined) {
-        try { const c = await getConversation(atend.id); const cv = (c && c.ok && c.data) ? c.data.conversation : null; cur = cv ? cv.assignee_user_id : null; }
-        catch (_) { cur = null; }
-      }
-      initialValues[atendenteDef.key] = (cur == null ? '' : cur);
-    }
+    // O formulário nasce SEMPRE VAZIO. Semear com conversations.custom_attributes (o
+    // espelho que mirror_atendimento_to_core escreve a cada resolução) fazia cada
+    // atendimento herdar os valores do anterior: o espelho é acumulativo, nunca é limpo,
+    // e a linha de conversa é REUTILIZADA quando o cliente volta a falar — inclusive
+    // entre operadores diferentes. O que já foi resolvido vive no protocolo (extras por
+    // ciclo) e na aba "Informações do atendimento", não no formulário do próximo.
+    // O rótulo "Atendente (nativo)" fica de fora de propósito: sem valor inicial, o
+    // ResolveForm cai no `defaultAssignee` abaixo = quem clicou em Resolver.
+    const initialValues = {};
 
     let result = { fields: {} };
     if (defs.length) {
       const r = await api.ui.openModal((close) => html`
         <${ResolveForm} defs=${defs} initialValues=${initialValues}
           defaultAssignee=${currentUserId()}
+          defaultAssigneeName=${currentUserName()}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!r) return null;                       // cancelado → aborta o fechar
       result = r;

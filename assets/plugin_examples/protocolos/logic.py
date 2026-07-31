@@ -27,6 +27,7 @@ Conceito:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -61,6 +62,9 @@ _BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.campos_extras_backfilled"
 _CA_BACKFILL_FLAG = f"plugin.{PLUGIN_ID}.custom_attrs_backfilled"
 # Liga/desliga o espelho dos campos de resolução no core (conversations.custom_attributes).
 _MIRROR_FLAG = f"plugin.{PLUGIN_ID}.mirror_custom_attributes"
+# Registro das chaves que ESTE plugin espelhou como atributo de conversa no core. É o
+# critério de posse do reconcile: só aposentamos definição que nós criamos.
+_MIRROR_KEYS_FLAG = f"plugin.{PLUGIN_ID}.mirrored_attr_keys"
 # One-time: obs deixou de ser rótulo FIXO (coluna própria) e virou rótulo EXTRA comum.
 _OBS_MIGRATE_FLAG = f"plugin.{PLUGIN_ID}.obs_to_extra_migrated"
 
@@ -491,13 +495,32 @@ def _visible_extras(scope: str, owner_ids: list[int]) -> dict[int, dict]:
 
 # ── Mapeamento de linhas ──────────────────────────────────────────────────────
 
+def _attach_effective_assignee(d: dict) -> dict:
+    """Atendente EFETIVO = definitivo (``assignee_user_id``) ?? provisório.
+
+    Derivado aqui, na borda, para que nenhum consumidor (lista, card do Kanban, detalhe,
+    tabela de atendimentos) re-implemente a regra. ``assignee_is_provisional`` é o que
+    liga o marcador visual "provisório" — e o filtro "Vínculo do atendente"."""
+    definitivo = d.get("assignee_user_id")
+    prov = d.get("provisional_assignee_user_id")
+    if definitivo is not None:
+        d["effective_assignee_user_id"] = definitivo
+        d["effective_assignee_name"] = d.get("assignee_name") or ""
+        d["assignee_is_provisional"] = False
+    else:
+        d["effective_assignee_user_id"] = prov
+        d["effective_assignee_name"] = d.get("provisional_assignee_name") or ""
+        d["assignee_is_provisional"] = prov is not None
+    return d
+
+
 def _proto_dict(row, extras: dict | None = None) -> dict:
     d = dict(row)
     d["obs"] = d.get("obs") or ""
     if extras is None:
         extras = _visible_extras("protocolo", [d["id"]]).get(d["id"], {})
     d["fields"] = extras  # só extras (do protocolo) com def atual (key → value)
-    return d
+    return _attach_effective_assignee(d)
 
 
 def _atendimento_dict(row, extras: dict | None = None) -> dict:
@@ -506,7 +529,7 @@ def _atendimento_dict(row, extras: dict | None = None) -> dict:
     if extras is None:
         extras = _visible_extras("atendimento", [d["id"]]).get(d["id"], {})
     d["fields"] = extras  # só extras (da atendimento) com def atual (key → value)
-    return d
+    return _attach_effective_assignee(d)
 
 
 # ── Espelho no core (conversations.custom_attributes) ─────────────────────────
@@ -538,18 +561,91 @@ def _mirror_value(d: dict, value):
     return "" if value is None else str(value)
 
 
+def _owned_mirror_keys(system_keys: set[str]) -> set[str]:
+    """Chaves que ESTE plugin espelhou no core — o "de quem é" do reconcile.
+
+    Sem esse registro a única heurística de posse seria "todo atributo de conversa com
+    ``is_system=1``", e um outro plugin que espelhasse atributos de conversa teria as
+    definições dele apagadas por nós. O registro é aditivo: cresce a cada sync e nunca
+    encolhe (uma chave aposentada continua nossa, senão o órfão voltaria a ser intocável).
+
+    Na PRIMEIRA execução o registro não existe e adotamos as linhas ``is_system=1`` já
+    presentes — é o que traz os espelhos criados antes deste reconcile (hoje os únicos
+    ``is_system=1`` de conversa do produto) para dentro da gestão.
+    """
+    raw = config_repo.get(_MIRROR_KEYS_FLAG, None)
+    if raw is None:
+        adopted = set(system_keys)
+        config_repo.set(_MIRROR_KEYS_FLAG, sorted(adopted))
+        return adopted
+    return {str(k) for k in (raw or []) if str(k)}
+
+
 def sync_core_atendimento_defs() -> None:
-    """Registra (idempotente) as defs EDITÁVEIS da atendimento como atributos de atendimento
-    no core, p/ os valores espelhados aparecerem/serem editáveis no painel de info.
-    ``ensure_system_definition`` é no-op se a def já existe (respeita edição/remoção do
-    usuário) — best-effort, nunca quebra o fluxo de resolução."""
+    """Reconcilia (idempotente) as defs EDITÁVEIS da atendimento com os atributos de
+    conversa do core, p/ os valores espelhados aparecerem/serem editáveis no painel de
+    info. Roda no boot, ao SALVAR os rótulos e a cada espelho de resolução.
+
+    Três direções (antes só existia a primeira, e por isso rótulo apagado virava opção
+    fantasma no seletor da aba Avaliação — que lista os atributos do core sem filtro):
+
+    * **Rótulo novo** → cria a definição (``ensure_system_definition``).
+    * **Rótulo renomeado/reordenado** → atualiza ``display_name``/``position``. Sem isso
+      o nome fica congelado no dia da criação.
+    * **Rótulo apagado** → soft-delete da definição, contanto que a chave seja NOSSA
+      (ver ``_owned_mirror_keys``). Soft delete: a linha e os valores já gravados em
+      ``conversations.custom_attributes`` permanecem no banco, só somem das telas.
+
+    Um rótulo que VOLTA depois de apagado é restaurado (``restore_definition``) — a
+    criação seria no-op, já que a linha soft-deletada ocupa a chave.
+
+    Limite conhecido: o ``type`` do core é imutável no update, então trocar o tipo de um
+    rótulo já espelhado não re-tipa a definição (o valor continua sendo gravado; só a
+    renderização no painel do core segue o tipo antigo). Best-effort de ponta a ponta —
+    nunca quebra o fluxo de resolução.
+    """
     try:
+        desired: dict[str, tuple[str, str, int]] = {}  # key → (label, tipo core, posição)
         for i, d in enumerate(get_field_defs("atendimento")):
             if d.get("readonly") or d.get("type") == "atendente":
                 continue  # "atendente" já É a coluna nativa; não vira atributo do core
-            custom_attribute_repo.ensure_system_definition(
-                attribute_key=d["key"], display_name=d.get("label") or d["key"],
-                type=_core_attr_type(d.get("type")), applies_to="conversation", position=i)
+            desired[d["key"]] = (d.get("label") or d["key"],
+                                 _core_attr_type(d.get("type")), i)
+
+        rows = custom_attribute_repo.list_definitions(
+            applies_to="conversation", include_deleted=True)
+        mirrored = {r["attribute_key"]: r for r in rows if r.get("is_system")}
+        owned = _owned_mirror_keys(set(mirrored))
+        # Chave tomada por um atributo do USUÁRIO (is_system=0, ativo ou apagado): a
+        # criação seria no-op silenciosa. Não sequestramos a definição dele.
+        taken = {r["attribute_key"] for r in rows if not r.get("is_system")}
+
+        for key, (label, ctype, pos) in desired.items():
+            row = mirrored.get(key)
+            if row is None:
+                if key in taken:
+                    logger.debug("protocolos: rótulo '%s' colide com atributo de conversa "
+                                 "do usuário — espelho não registrado", key)
+                    continue
+                custom_attribute_repo.ensure_system_definition(
+                    attribute_key=key, display_name=label, type=ctype,
+                    applies_to="conversation", position=pos)
+                continue
+            if row.get("deleted_at") is not None:
+                custom_attribute_repo.restore_definition(row["id"])
+            if row.get("display_name") != label or row.get("position") != pos:
+                custom_attribute_repo.update_definition(
+                    row["id"], display_name=label, position=pos)
+
+        # Aposenta o que é nosso e não é mais rótulo. Linha de outro dono fica intacta.
+        for key, row in mirrored.items():
+            if key in desired or key not in owned or row.get("deleted_at") is not None:
+                continue
+            custom_attribute_repo.delete_definition(row["id"])
+
+        grown = owned | set(desired)
+        if grown != owned:
+            config_repo.set(_MIRROR_KEYS_FLAG, sorted(grown))
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos: sync_core_atendimento_defs falhou: %s", e)
 
@@ -1033,6 +1129,17 @@ def reopen_protocolo(atid: int) -> tuple[dict | None, str | None]:
             )
     except IntegrityError:
         return None, "Já existe um protocolo aberto para este contato."
+    # Reabrir o protocolo é o atendente RETOMANDO o atendimento: cancela a devolução
+    # automática à IA que estivesse pendente nas conversas deste protocolo.
+    clear_ai_holds_of_protocolo(atid)
+    # Um protocolo FECHADO nunca é carimbado com o provisório (o histórico congela), então
+    # ao reabrir ele nasce sem — ressincroniza pela conversa mais recente. Também cobre o
+    # relink/merge, que reabrem o protocolo anterior depois de mover os ciclos.
+    _cv = _latest_conversation_of_protocolo(atid)
+    if _cv is not None:
+        _conv = conversation_repo.get(_cv) or {}
+        stamp_provisional_assignee(_cv, _conv.get("assignee_user_id"),
+                                   broadcast_changed=False)
     _broadcast_changed(at["contact_id"], atid)
     return get_protocolo(atid), None
 
@@ -1415,6 +1522,114 @@ def _conversation_ids_of_protocolo(atid: int) -> list[int]:
     return [int(r[0]) for r in rows]
 
 
+# ── Atendente PROVISÓRIO (espelho do atendente da CONVERSA) ───────────────────
+# O rótulo "Atendente" só vira DEFINITIVO (``assignee_user_id``) quando alguém salva o
+# formulário de Resolver/Finalizar (ou arrasta o card no Kanban). Enquanto isso, quem de
+# fato está cuidando do atendimento é o dono da CONVERSA no core — e o quadro mostrava
+# "Não atribuído". As colunas ``provisional_*`` (migration 019) espelham esse dono, o
+# agrupamento/filtro passam a usar o EFETIVO = COALESCE(definitivo, provisório) e o filtro
+# "Vínculo do atendente" isola os abertos que ainda não foram salvos com ninguém.
+#
+# O provisório é SÓ leitura/filtro: nunca entra em ``_effective_values``/``_missing_required``
+# (o campo obrigatório continua exigindo preenchimento consciente) e nunca semeia o form.
+
+def _user_display_name(uid) -> str:
+    """Nome do usuário do core p/ snapshot (name → email → '')."""
+    if uid is None:
+        return ""
+    try:
+        u = user_repo.get(int(uid)) or {}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: nome do usuário %s não resolvido: %s", uid, e)
+        return ""
+    return str(u.get("name") or u.get("email") or "")
+
+
+def _write_provisional(sql_tail: str, params: dict, uid, name: str, ts: float) -> bool:
+    """UPDATE do provisório em uma das duas tabelas. Devolve se ALGUMA linha mudou.
+
+    O ``IS DISTINCT FROM`` no WHERE é o que torna a sincronização idempotente e barata:
+    no caminho quente (uma mensagem qualquer) nada muda ⇒ nenhuma linha é escrita e o
+    índice do Kanban não é invalidado."""
+    try:
+        with make_plugin_db() as conn:
+            res = conn.execute(text(sql_tail), {**params, "puid": uid,
+                                                "pname": name or "", "ts": ts})
+        return bool(res.rowcount)
+    except Exception as e:  # noqa: BLE001 — sincronizar provisório nunca quebra o caller
+        logger.debug("protocolos: gravar atendente provisório falhou: %s", e)
+        return False
+
+
+def _write_provisional_protocolo(atid: int, uid, name: str, ts: float) -> bool:
+    """Protocolo ABERTO — um fechado nunca é re-carimbado (o histórico congela)."""
+    return _write_provisional(
+        "UPDATE plugin_protocolos_protocolos SET provisional_assignee_user_id = :puid, "
+        "provisional_assignee_name = :pname, provisional_set_at = :ts WHERE id = :id "
+        "AND status = 'aberto' AND provisional_assignee_user_id IS DISTINCT FROM :puid",
+        {"id": int(atid)}, uid, name, ts)
+
+
+def _write_provisional_cycles(conversation_id: int, uid, name: str, ts: float) -> bool:
+    """Ciclo(s) ABERTO(s) desta conversa (``ended_at IS NULL``)."""
+    return _write_provisional(
+        "UPDATE plugin_protocolos_atendimentos SET provisional_assignee_user_id = :puid, "
+        "provisional_assignee_name = :pname, provisional_set_at = :ts "
+        "WHERE conversation_id = :cv AND ended_at IS NULL "
+        "AND provisional_assignee_user_id IS DISTINCT FROM :puid",
+        {"cv": int(conversation_id)}, uid, name, ts)
+
+
+def stamp_provisional_assignee(conversation_id: int, assignee_user_id,
+                               *, broadcast_changed: bool = True) -> bool:
+    """Espelha nas entidades do plugin o atendente NATIVO da conversa (o "provisório").
+
+    Toca o protocolo ABERTO dono da conversa + o(s) ciclo(s) ABERTO(s) dela.
+    ``assignee_user_id=None`` LIMPA (conversa desatribuída / assumida pela IA).
+    Devolve se algo de fato mudou. Nunca levanta.
+
+    O broadcast só sai quando alguma linha mudou: bumpar a geração do índice a cada
+    mensagem derrubaria o cache do Kanban de todas as réplicas sem motivo."""
+    try:
+        cid = int(conversation_id)
+    except (TypeError, ValueError):
+        return False
+    uid = None
+    if assignee_user_id is not None and str(assignee_user_id).strip() != "":
+        try:
+            uid = int(assignee_user_id)
+        except (TypeError, ValueError):
+            return False
+    name = _user_display_name(uid)
+    ts = now()
+    atid = _protocolo_id_of_conversation(cid)
+    changed = _write_provisional_cycles(cid, uid, name, ts)
+    if atid is not None:
+        changed = _write_provisional_protocolo(atid, uid, name, ts) or changed
+    if changed and broadcast_changed:
+        at = get_protocolo(atid) if atid is not None else None
+        _broadcast_changed((at or {}).get("contact_id"), atid)
+    return changed
+
+
+def _sync_provisional_from_conv(conv: dict, proto: dict | None, cycle: dict | None) -> None:
+    """Sincroniza o provisório comparando EM MEMÓRIA — sem query extra no caminho quente.
+
+    Existe porque nem toda atribuição emite evento: o "atendente padrão do canal" é
+    carimbado direto no repo do core (``conversation_repo.resolve_for_contact_ex``), no
+    NASCIMENTO e na REABERTURA da conversa. Como ``on_inbound``/``on_outbound`` já têm a
+    conversa e as entidades em mãos, basta comparar e só então escrever."""
+    try:
+        conv = conv or {}
+        want = conv.get("assignee_user_id")
+        stale = [e for e in (proto, cycle) if e is not None
+                 and e.get("provisional_assignee_user_id") != want]
+        if stale:
+            stamp_provisional_assignee(conv.get("id"), want)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: sincronizar provisório falhou: %s", e)
+
+
 def _propagate_assignee_to_conversations(atend_ids: list[int],
                                          assignee_user_id: int | None) -> None:
     """Espelha o atendente do protocolo nas ATENDIMENTOS do core (``assignee_user_id``)
@@ -1426,6 +1641,11 @@ def _propagate_assignee_to_conversations(atend_ids: list[int],
             atend = conversation_repo.set_assignee(cid, assignee_user_id)
             if not atend:
                 continue
+            # O core NÃO emite evento de atribuição aqui (``set_assignee`` é um UPDATE
+            # puro), então o provisório precisa ser sincronizado na mão — senão um card
+            # arrastado para "Não atribuído" voltaria para a coluna do provisório antigo.
+            # Sem broadcast: os dois call sites já chamam ``_broadcast_changed``.
+            stamp_provisional_assignee(cid, assignee_user_id, broadcast_changed=False)
             broadcast("conversation_assigned", {
                 "conversation_id": atend.get("id"),
                 "display_id": atend.get("display_id"),
@@ -1584,7 +1804,7 @@ def _list_clause(sql: str, params: dict):
 def list_protocolos(*, status=None, assignee_user_id=None,
                       contact_id: int | None = None, q: str | None = None,
                       opened_from: float | None = None, opened_to: float | None = None,
-                      attr_filters: dict | None = None, nota=None,
+                      attr_filters: dict | None = None, nota=None, vinculo=None,
                       include_archived: bool = False,
                       limit: int = 200, offset: int = 0) -> dict:
     """Página de protocolos como envelope ``{items, total, has_more}`` (plano 50).
@@ -1599,16 +1819,27 @@ def list_protocolos(*, status=None, assignee_user_id=None,
     off = clamp_offset(offset)
     where, params = _build_list_where(
         status=status, assignee_user_id=assignee_user_id, contact_id=contact_id, q=q,
-        opened_from=opened_from, opened_to=opened_to, nota=nota,
+        opened_from=opened_from, opened_to=opened_to, nota=nota, vinculo=vinculo,
         include_archived=include_archived)
     base = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
             + " ORDER BY (status = 'aberto') DESC, opened_at DESC")
     return _list_page(base, where, params, af_src=attr_filters, lim=lim, off=off)
 
 
+# Filtro "Vínculo do atendente" — allowlist fechada (o SQL é interpolado, nunca bindado).
+# Combina com ``status=aberto`` para o recorte pedido: "abertos ainda não salvos com
+# ninguém, mas com a conversa atribuída".
+_VINCULO_SQL = {
+    "definitivo": "assignee_user_id IS NOT NULL",
+    "provisorio": "(assignee_user_id IS NULL AND provisional_assignee_user_id IS NOT NULL)",
+    "sem": "(assignee_user_id IS NULL AND provisional_assignee_user_id IS NULL)",
+}
+
+
 def _build_list_where(*, status=None, assignee_user_id=None, contact_id=None,
                       q: str | None = None, opened_from=None, opened_to=None,
-                      nota=None, include_archived: bool = False) -> tuple[list[str], dict]:
+                      nota=None, vinculo=None,
+                      include_archived: bool = False) -> tuple[list[str], dict]:
     """WHERE + params da listagem de protocolos.
 
     Extraído de ``list_protocolos`` para ser COMPARTILHADO com o índice de agrupamento
@@ -1652,8 +1883,18 @@ def _build_list_where(*, status=None, assignee_user_id=None, contact_id=None,
         except (TypeError, ValueError):
             pass
     if auids:
-        where.append("assignee_user_id IN :auids")
+        # Atendente EFETIVO: o filtro nativo acha também os protocolos que só têm o
+        # atendente PROVISÓRIO (conversa atribuída, formulário ainda não salvo). Coberto
+        # pelo índice de expressão da migration 019.
+        where.append("COALESCE(assignee_user_id, provisional_assignee_user_id) IN :auids")
         params["auids"] = auids
+    # Vínculo do atendente (multi-seleção → OR). Fica no SQL, e não no avaliador Python de
+    # `attr_filters`: é predicado puro de coluna, e em Python ligaria o caminho de scan-cap
+    # (total/has_more virariam limite-inferior) e precisaria ser replicado no índice.
+    vincs = [v for v in (vinculo if isinstance(vinculo, list) else [vinculo])
+             if v in _VINCULO_SQL]
+    if vincs:
+        where.append("(" + " OR ".join(_VINCULO_SQL[v] for v in dict.fromkeys(vincs)) + ")")
     if contact_id is not None:
         where.append("contact_id = :cid")
         params["cid"] = contact_id
@@ -1750,7 +1991,8 @@ def scan_protocolos(filters: dict, cap: int):
         status=f.get("status"), assignee_user_id=f.get("assignee_user_id"),
         contact_id=f.get("contact_id"), q=f.get("q"),
         opened_from=f.get("opened_from"), opened_to=f.get("opened_to"),
-        nota=f.get("nota"), include_archived=bool(f.get("include_archived")))
+        nota=f.get("nota"), vinculo=f.get("vinculo"),
+        include_archived=bool(f.get("include_archived")))
     sql = ("SELECT * FROM plugin_protocolos_protocolos WHERE " + " AND ".join(where)
            + " ORDER BY (status = 'aberto') DESC, opened_at DESC LIMIT :scan")
     with make_plugin_db() as conn:
@@ -2607,14 +2849,20 @@ def on_inbound(ctx, payload: dict) -> None:
         at = ensure_protocolo_for_contact(
             contact["id"], phone=contact.get("phone", ""), name=_contact_name(contact),
             conversation_id=atend["id"], announce_open=True, opener=opener)
-        ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
+        cyc = ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
+        _sync_provisional_from_conv(atend, at, cyc)
     except Exception as e:  # noqa: BLE001 — um handler que falha nunca quebra o pipeline
         logger.debug("protocolos.on_inbound falhou: %s", e)
 
 
 def on_outbound(ctx, payload: dict) -> None:
     """``message.sent`` (operador/IA) → garante protocolo + ciclo de bootstrap,
-    mas NUNCA abre um ciclo novo logo após uma resolução (evita ciclo fantasma)."""
+    mas NUNCA abre um ciclo novo logo após uma resolução (evita ciclo fantasma).
+
+    Também encerra a posse temporária quando quem enviou foi um ATENDENTE: ele respondeu
+    dentro da janela, então fica com a conversa (a IA não reassume no vencimento). Isso
+    roda ANTES do gate ``auto_link``/``ignorar abertura`` — posse não depende deles."""
+    cancel_ai_hold_on_human_send(payload)
     try:
         if _skip_open_matches((payload or {}).get("text") or "", "sent"):
             return  # regra "ignorar abertura": mensagem enviada casou a regex
@@ -2635,9 +2883,13 @@ def on_outbound(ctx, payload: dict) -> None:
         # Conversa FECHADA (ex.: a mensagem de avaliação do fechar, enviada com
         # reopen=False) → só bootstrap: nunca abre ciclo logo após uma resolução.
         if (atend.get("status") or "") != "closed":
-            ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
+            cyc = ensure_open_cycle(atend["id"], contact["id"], at["id"], opener=opener)
         else:
+            # Conversa fechada: o ciclo (se existir) já foi resolvido, então só o
+            # protocolo entra na sincronização do provisório.
             ensure_cycle_exists(atend["id"], contact["id"], at["id"], opener=opener)
+            cyc = None
+        _sync_provisional_from_conv(atend, at, cyc)
     except Exception as e:  # noqa: BLE001
         logger.debug("protocolos.on_outbound falhou: %s", e)
 
@@ -2649,11 +2901,15 @@ def on_conversation_deleted(ctx, payload: dict) -> None:
     Sem isto, deletar a conversa no core deixava o protocolo pendurado em ``aberto`` no
     Kanban para sempre (o ciclo ficava com ``ended_at`` NULL apontando para uma conversa
     que não existe mais). Fechamento QUIET: não envia avaliação nem valida obrigatórios —
-    não há como continuar um atendimento cuja conversa sumiu."""
+    não há como continuar um atendimento cuja conversa sumiu.
+
+    Também apaga um hold de posse temporária pendente — sem isso a varredura tentaria
+    devolver à IA uma conversa que não existe mais, a cada passada."""
     try:
         conv_id = (payload or {}).get("conversation_id") or (payload or {}).get("id")
         if not conv_id:
             return
+        clear_ai_hold(int(conv_id))
         ts = now()
         affected: set[int] = set()
         with make_plugin_db() as conn:
@@ -2899,15 +3155,63 @@ def auto_assign_conversation_on_close_enabled() -> bool:
 
 def resolve_keep_assignee_enabled() -> bool:
     """Plano 67 — "resolver sem desatribuir o atendente" ligado? Default OFF: o core
-    limpa o ``assignee_user_id`` ao fechar, como sempre fez."""
+    limpa o ``assignee_user_id`` ao fechar, como sempre fez.
+
+    Com a DEVOLUÇÃO temporizada ligada (``ai_takeover_delay_minutes`` > 0 +
+    ``reactivate_ai_on_close``), este toggle deixa de ser o caminho normal: o atendente
+    é mantido de qualquer jeito durante a janela (ver :func:`clear_assignee_on_close`) e
+    a IA reassume no vencimento. Ele continua valendo como "manter para SEMPRE" quando a
+    devolução está desligada."""
     return bool(config_repo.get(_general_key("resolve_keep_assignee"), False))
+
+
+def ai_takeover_delay_minutes() -> int:
+    """Minutos que o atendente fica com a conversa depois de resolver, antes de a IA
+    reassumir. Default 30. ``0`` = sem janela (a IA volta na hora que o protocolo é
+    finalizado, comportamento legado). Valor inválido cai no default; negativo vira 0."""
+    try:
+        m = int(config_repo.get(_general_key("ai_takeover_delay_minutes"), 30))
+    except (TypeError, ValueError):
+        return 30
+    return max(0, min(m, 10080))  # teto de 7 dias — evita hold eterno por digitação
+
+
+def ai_takeover_enabled() -> bool:
+    """A posse temporária está ativa? Exige a devolução à IA LIGADA e uma janela > 0.
+    Desligada, nada é armado e o fluxo é exatamente o de antes."""
+    return get_reactivate_ai_on_close_setting() and ai_takeover_delay_minutes() > 0
 
 
 def clear_assignee_on_close(ctx, value):
     """``filter.conversation.clear_assignee_on_close`` (plano 67) — o core pergunta se
-    deve limpar o atendente humano ao FECHAR a conversa. Ligado ⇒ ``False`` (mantém o
-    atendente vinculado); desligado ⇒ devolve o ``value`` recebido (não interfere)."""
-    return False if resolve_keep_assignee_enabled() else value
+    deve limpar o atendente humano ao FECHAR a conversa.
+
+    Devolve ``False`` (mantém o atendente vinculado) em dois casos:
+
+    * ``resolve_keep_assignee`` ligado — o toggle legado, "manter para sempre";
+    * posse temporária ativa (:func:`ai_takeover_enabled`) E a conversa tem um atendente
+      humano — ele segura a conversa durante a janela e a IA reassume no vencimento
+      (a varredura do lifecycle). Sem atendente não há o que manter: cai no ``value``
+      recebido e o hold é armado no modo ``muted`` (IA calada por ``ai_active=0``).
+
+    Nunca levanta: sem ``ctx`` (chamada direta dos testes) ou com a conversa ilegível,
+    responde só pelo toggle legado."""
+    if resolve_keep_assignee_enabled():
+        return False
+    if not ai_takeover_enabled():
+        return value
+    conv_id = (getattr(ctx, "extras", None) or {}).get("conversation_id")
+    if not conv_id:
+        return value
+    try:
+        conv = conversation_repo.get(int(conv_id))
+    except Exception as e:  # noqa: BLE001 — filtro nunca trava o fechamento
+        logger.debug("protocolos: clear_assignee_on_close não leu a conversa %s: %s",
+                     conv_id, e)
+        return value
+    if conv and conv.get("assignee_user_id") is not None:
+        return False  # dono humano segura a conversa durante a janela
+    return value
 
 
 def relink_prompt_enabled() -> bool:
@@ -2983,6 +3287,8 @@ def get_general_config() -> dict:
     return {
         "auto_assign_conversation_on_close": auto_assign_conversation_on_close_enabled(),
         "resolve_keep_assignee": resolve_keep_assignee_enabled(),
+        "ai_takeover_delay_minutes": ai_takeover_delay_minutes(),
+        "reactivate_ai_on_close": get_reactivate_ai_on_close_setting(),
         "relink_prompt_enabled": relink_prompt_enabled(),
         "relink_window_minutes": relink_window_minutes(),
         "relink_attr": get_relink_attr_config(),
@@ -2997,6 +3303,19 @@ def set_general_config(cfg: dict) -> dict:
     if "resolve_keep_assignee" in cfg:
         config_repo.set(_general_key("resolve_keep_assignee"),
                         bool(cfg.get("resolve_keep_assignee")))
+    # Religar a IA ao finalizar (key das settings declarativas, mesma que o getter lê —
+    # não usa _general_key; só grava quando presente p/ não zerar o default em payload antigo).
+    if "reactivate_ai_on_close" in cfg:
+        config_repo.set(f"plugin.{PLUGIN_ID}.reactivate_ai_on_close",
+                        bool(cfg.get("reactivate_ai_on_close")))
+    # Janela da posse temporária (minutos). Só grava quando presente; inválido cai no
+    # default 30 e negativo vira 0 (= devolver na hora, comportamento legado).
+    if "ai_takeover_delay_minutes" in cfg:
+        try:
+            d = int(cfg.get("ai_takeover_delay_minutes"))
+        except (TypeError, ValueError):
+            d = 30
+        config_repo.set(_general_key("ai_takeover_delay_minutes"), max(0, min(d, 10080)))
     # Chaves do plano 49: só grava quando presentes (payloads antigos não zeram o default).
     if "relink_prompt_enabled" in cfg:
         config_repo.set(_general_key("relink_prompt_enabled"),
@@ -3067,11 +3386,50 @@ def _skip_open_matches(text_value: str, msg_direction: str) -> bool:
 _SKIP_ATTR_SCOPES = ("contact", "conversation", "protocolo")
 
 
+# Operadores de uma condição. Os 2 últimos não usam valor (o campo some na tela).
+_SKIP_OPS = ("eq", "neq", "contains", "not_contains", "filled", "empty")
+_SKIP_OPS_NO_VALUE = ("filled", "empty")
+# Como as condições da MESMA linha se combinam: qualquer uma (OU) ou todas (E).
+_SKIP_JOINS = ("any", "all")
+
+
+def _sanitize_skip_conditions(raw, legacy_value: str = "") -> list:
+    """Normaliza as condições ``[{op, value}]`` de UMA regra — só a FORMA.
+
+    Aceita o formato ANTIGO (a regra tinha um único ``value`` implicitamente "igual a")
+    via ``legacy_value`` — config gravada antes das condicionais continua valendo.
+
+    Condição com valor em branco é PRESERVADA (quem a ignora é a avaliação, ver
+    :func:`_condition_is_active`): o operador costuma escolher o operador antes de
+    digitar o valor, e descartar aqui apagaria a escolha dele ao salvar.
+    """
+    items = raw if isinstance(raw, list) else None
+    if items is None:
+        items = [{"op": "eq", "value": legacy_value}] if legacy_value else []
+    out = []
+    for c in items:
+        if not isinstance(c, dict):
+            continue
+        op = str(c.get("op") or "eq").strip().lower()
+        if op not in _SKIP_OPS:
+            continue
+        value = "" if op in _SKIP_OPS_NO_VALUE else str(c.get("value") or "").strip()
+        out.append({"op": op, "value": value})
+    return out
+
+
 def _sanitize_skip_attrs(raw) -> list:
-    """Normaliza a lista de regras {key, scope, value} da aba Avaliação.
+    """Normaliza as regras da aba Avaliação: ``{key, scope, join, conditions[]}``.
 
     Descarta itens inválidos (key vazia, escopo fora de :data:`_SKIP_ATTR_SCOPES`).
-    O valor é coagido para string (comparação feita em ``_attr_value_matches``).
+    Uma regra ainda em branco é MANTIDA (a linha continua na tela até o operador
+    removê-la) — quem a ignora é a avaliação.
+
+    Compatibilidade: a chave legada ``value`` (uma regra = uma igualdade) é lida quando
+    não há ``conditions``, e é REGRAVADA quando a regra é uma única condição "igual a"
+    — assim uma versão anterior do plugin ainda entende a config. Com qualquer outro
+    operador a chave é omitida de propósito: uma versão antiga leria ``value`` vazio e
+    trataria a regra como inerte (não pula o envio), que é o lado seguro do erro.
     """
     out = []
     for r in (raw or []):
@@ -3081,7 +3439,14 @@ def _sanitize_skip_attrs(raw) -> list:
         scope = r.get("scope")
         if not key or scope not in _SKIP_ATTR_SCOPES:
             continue
-        out.append({"key": key, "scope": scope, "value": str(r.get("value") or "")})
+        conds = _sanitize_skip_conditions(r.get("conditions"), str(r.get("value") or ""))
+        join = str(r.get("join") or "any").strip().lower()
+        rule = {"key": key, "scope": scope,
+                "join": join if join in _SKIP_JOINS else "any",
+                "conditions": conds}
+        if len(conds) == 1 and conds[0]["op"] == "eq":
+            rule["value"] = conds[0]["value"]  # espelho legado (ver docstring)
+        out.append(rule)
     return out
 
 
@@ -3221,24 +3586,91 @@ def _attr_value_matches(stored, wanted) -> bool:
     return False
 
 
+def _stored_parts(stored) -> list:
+    """Valor armazenado → lista de pedaços normalizados (minúsculo, sem espaços).
+
+    Cobre os 3 formatos que chegam aqui: lista nativa (checkboxes/atributo de lista),
+    string multi espelhada (``", ".join`` do mirror de campos do plugin) e string
+    simples. Um valor com vírgula vira vários pedaços — é assim que "igual a" já
+    casava um item dentro de uma seleção múltipla."""
+    if isinstance(stored, list):
+        raw = [str(x) for x in stored]
+    else:
+        s = str(stored if stored is not None else "")
+        raw = s.split(",") if "," in s else [s]
+    return [p.strip().lower() for p in raw if p.strip()]
+
+
+def _condition_is_active(cond: dict) -> bool:
+    """Condição que de fato filtra. Operador que exige valor e está sem valor é
+    ignorado (regra antiga: "valor vazio nunca casa") — vale tanto para o modo OU
+    quanto para o E, onde senão um campo em branco travaria a linha inteira."""
+    op = (cond or {}).get("op") or "eq"
+    return op in _SKIP_OPS_NO_VALUE or bool(str((cond or {}).get("value") or "").strip())
+
+
+def _condition_matches(stored, cond: dict) -> bool:
+    """Uma condição ``{op, value}`` contra o valor armazenado do atributo."""
+    op = (cond or {}).get("op") or "eq"
+    parts = _stored_parts(stored)
+    if op == "filled":
+        return bool(parts)
+    if op == "empty":
+        return not parts
+    want = str((cond or {}).get("value") or "").strip().lower()
+    if op == "eq":
+        return any(p == want for p in parts)
+    if op == "neq":
+        # "diferente de" NÃO exige o atributo preenchido: um contato sem o atributo
+        # é, de fato, diferente do valor. Espelha o comportamento de um filtro comum.
+        return not any(p == want for p in parts)
+    if op == "contains":
+        return any(want in p for p in parts)
+    if op == "not_contains":
+        return not any(want in p for p in parts)
+    return False
+
+
+def _rule_matches(stored, rule: dict) -> bool:
+    """Regra de uma LINHA: várias condições sobre o MESMO atributo, combinadas por
+    ``join`` (``any`` = OU, ``all`` = E). Sem condição efetiva → não casa (inerte)."""
+    conds = [c for c in ((rule or {}).get("conditions") or []) if _condition_is_active(c)]
+    if not conds:
+        # Regra legada (só ``value``) que não passou pelo saneamento novo.
+        legacy = str((rule or {}).get("value") or "").strip()
+        return _condition_matches(stored, {"op": "eq", "value": legacy}) if legacy else False
+    if (rule or {}).get("join") == "all":
+        return all(_condition_matches(stored, c) for c in conds)
+    return any(_condition_matches(stored, c) for c in conds)
+
+
 def _should_skip_evaluation(at: dict, conv_id) -> bool:
     """Decide se as mensagens da aba Avaliação devem ser PULADAS para este contato.
 
-    Lê as regras {key, scope, value} da config e compara com os custom_attributes
-    do contato e/ou da conversa E com os rótulos da aba "Protocolo" (escopo
-    ``protocolo``, campos próprios do plugin). Qualquer regra que casar → pula
-    (retorna True). Best-effort: erro de leitura NÃO bloqueia o envio (False)."""
+    Lê as regras {key, scope, join, conditions[]} da config e compara com os
+    custom_attributes do contato e/ou da conversa E com os rótulos da aba "Protocolo"
+    (escopo ``protocolo``, campos próprios do plugin). Dentro de uma LINHA as condições
+    se combinam por ``join`` (OU/E); ENTRE linhas é sempre OU — qualquer regra que casar
+    → pula (retorna True). Best-effort: erro de leitura NÃO bloqueia o envio (False)."""
     try:
         rules = get_protocol_config().get("skip_attrs") or []
         if not rules:
             return False
         contact_vals, conv_vals, proto_vals = {}, {}, {}
+        # Escopos cujos valores dá para LER neste fechamento. Um escopo de fora (ex.:
+        # regra de conversa num fechamento sem conversation_id) é ignorado em vez de
+        # lido como vazio — senão um "está vazio" pularia o envio por falta de dado.
+        available = {"protocolo"}
         cid = (at or {}).get("contact_id")
         if cid and any(r.get("scope") == "contact" for r in rules):
             from db.tables import contacts as _contacts_tbl
             contact_vals = custom_attribute_repo.get_values(_contacts_tbl, cid) or {}
+        if cid:
+            available.add("contact")
         if conv_id and any(r.get("scope") == "conversation" for r in rules):
             conv_vals = custom_attribute_repo.get_values(_conversations_tbl, conv_id) or {}
+        if conv_id:
+            available.add("conversation")
         if any(r.get("scope") == "protocolo" for r in rules):
             # `at` já vem hidratado com `fields` (``_proto_dict``); re-hidrata só se
             # o chamador passou uma row crua.
@@ -3248,8 +3680,10 @@ def _should_skip_evaluation(at: dict, conv_id) -> bool:
         by_scope = {"contact": contact_vals, "conversation": conv_vals,
                     "protocolo": proto_vals}
         for r in rules:
+            if r.get("scope") not in available:
+                continue
             vals = by_scope.get(r.get("scope")) or {}
-            if _attr_value_matches(vals.get(r.get("key")), r.get("value")):
+            if _rule_matches(vals.get(r.get("key")), r):
                 return True
         return False
     except Exception as e:  # noqa: BLE001 — nunca travar o envio por erro de leitura
@@ -3507,15 +3941,35 @@ def get_reactivate_ai_on_close_setting() -> bool:
     return bool(config_repo.get(f"plugin.{PLUGIN_ID}.reactivate_ai_on_close", True))
 
 
-async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) -> None:
-    """Ao FINALIZAR o protocolo: religa a IA na conversa mais recente se o interruptor
-    GLOBAL (``auto_reply``) E a IA do CANAL (``ai_enabled``) estiverem ligados. Mantém a
-    tag ``transferido_atendente`` (é só rótulo visual desde o plano 37, não trava mais
-    a IA). Best-effort — nunca levanta (não pode quebrar a resposta do fechar).
+def _ai_master_gate(conv_id: int) -> bool:
+    """Interruptor GLOBAL (``auto_reply``) + IA do CANAL (``ai_enabled``) da conversa.
 
-    Reusa ``conversation_service.set_ai`` (limpa o assignee humano, revincula o agente
-    de IA padrão do inbox e grava ``ai_active=1``) porque só gravar ``ai_active=1`` não
-    passa o gate de humano quando um atendente assumiu a conversa."""
+    MESMA regra do webhook ``_channel_ai_enabled`` (que é closure e não é importável),
+    replicada aqui: global primeiro, depois canal. ``False`` também quando o runtime não
+    está cabeado (sem ``deps``) — nesses casos não há como religar a IA mesmo."""
+    from plugins.context import get_deps
+    deps = get_deps()
+    if not deps:
+        return False
+    if not deps.settings.get("auto_reply", True):
+        return False
+    from channels import ai_settings
+    return bool(ai_settings.value(_channel_for_conversation(conv_id), "ai_enabled", True))
+
+
+async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) -> None:
+    """Ao FINALIZAR o protocolo: devolve a conversa à IA se o interruptor GLOBAL
+    (``auto_reply``) E a IA do CANAL (``ai_enabled``) estiverem ligados. Mantém a tag
+    ``transferido_atendente`` (é só rótulo visual desde o plano 37, não trava mais a IA).
+    Best-effort — nunca levanta (não pode quebrar a resposta do fechar).
+
+    Com a POSSE TEMPORÁRIA ativa (janela > 0) a devolução não é imediata: garante que há
+    um hold armado para a conversa (cobre finalizar sem ter resolvido agora) e sai — quem
+    devolve é a varredura de vencimento. Sem janela (``0``), comportamento legado: devolve
+    na hora.
+
+    Devolve via :func:`handoff_to_ai` — a IA volta SEM agente vinculado (quem escolhe é
+    o roteamento no próximo turno)."""
     try:
         # Protocolo órfão (conversa excluída): sem alvo válido — não religa.
         if _is_orphan_protocolo(at):
@@ -3523,20 +3977,16 @@ async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) 
         conv_id = _latest_conversation_of_protocolo((at or {}).get("id"))
         if not conv_id:
             return
-        channel_id = _channel_for_conversation(conv_id)
-        from plugins.context import get_deps
-        deps = get_deps()
-        if not deps:
-            return
-        # Gate global + canal — MESMA regra do webhook ``_channel_ai_enabled`` (que é
-        # closure e não é importável), replicada aqui: global primeiro, depois canal.
-        if not deps.settings.get("auto_reply", True):
-            return
-        from channels import ai_settings
-        if not ai_settings.value(channel_id, "ai_enabled", True):
+        if not _ai_master_gate(conv_id):
             return
         conv = conversation_repo.get(conv_id)
         if not conv:
+            return
+        if ai_takeover_enabled():
+            # Janela ativa: quem devolve é o vencimento. Arma se ainda não há hold (o
+            # caminho normal já armou no resolver; isto cobre finalizar isolado).
+            if get_ai_hold(conv_id) is None:
+                arm_ai_hold(conv, protocolo_id=(at or {}).get("id"), reason="finalizar")
             return
         # Guard anti-ruído: só age se a IA está de fato desligada nesta conversa
         # (ai_active=0 OU humano no comando sem agente de IA) — evita card "ai_on"
@@ -3545,14 +3995,456 @@ async def reactivate_ai_after_close(at: dict, *, actor_name: str | None = None) 
                        and not conv.get("active_agent_key"))
         if conv.get("ai_active") and not human_owned:
             return
-        from app.services import conversation_service
-        # Ação AUTOMÁTICA (efeito de fechar o protocolo, não um toggle manual do
-        # atendente): actor_name=None ⇒ o card lê "🤖 SISTEMA reativou a IA.", nunca
-        # o nome de quem fechou. (O ``actor_name`` recebido fica só para logs futuros.)
-        await conversation_service.set_ai(
-            deps, conv, 1, actor_name=None, clear_transfer_tag=False)
+        await handoff_to_ai(conv)
     except Exception as e:  # noqa: BLE001
         logger.warning("protocolos: reactivate_ai_after_close falhou: %s", e)
+
+
+# ── Devolver a conversa à IA (sem carimbar agente) ───────────────────────────
+# NÃO usa ``conversation_service.set_ai``: aquele religa a IA JÁ VINCULANDO o agente
+# padrão do inbox (``default_agent_key_for_inbox``), e a conversa reabre carimbada com
+# ele. Aqui a devolução é deliberadamente "crua": humano fora, ``ai_active=1`` e
+# ``active_agent_key`` NULO — quem decide o agente é o turno seguinte (o roteador/a
+# triagem por palavra-chave), quando a mensagem do cliente chegar.
+#
+# Como não passamos pelo serviço, reproduzimos aqui os efeitos VISÍVEIS dele: os dois
+# broadcasts que o painel escuta + o card "🤖 SISTEMA reativou a IA.". A tag
+# ``transferido_atendente`` é PRESERVADA (é só rótulo visual desde o plano 37) — mesmo
+# comportamento do ``clear_transfer_tag=False`` que o fechar-protocolo sempre usou.
+#
+# Os broadcasts são WS PURO (``plugins.context.broadcast``), não o bus ``emit`` — mesmo
+# padrão que o espelho do modo ``muted``. Emitir ``conversation.ai_toggled`` daqui
+# realimentaria :func:`on_conversation_ai_toggled` (o plugin reagindo à própria ação) e
+# faria a devolução reentrar no bus dentro do event loop da varredura.
+
+def _conv_ws_payload(conv: dict) -> dict:
+    """Espelha o payload que ``conversation_service._broadcast`` manda ao painel."""
+    return {
+        "conversation_id": conv.get("id"),
+        "display_id": conv.get("display_id"),
+        "contact_id": conv.get("contact_id"),
+        "status": conv.get("status"),
+        "assignee_user_id": conv.get("assignee_user_id"),
+        "active_agent_key": conv.get("active_agent_key"),
+        "ai_active": conv.get("ai_active"),
+        "is_archived": conv.get("is_archived"),
+        "inbox_id": conv.get("inbox_id"),
+        "ts": now(),
+    }
+
+
+async def handoff_to_ai(conv: dict) -> bool:
+    """Tira o humano e devolve a conversa à IA **sem vincular agente**.
+
+    Uma escrita atômica (``assign_agent``): ``assignee_user_id=None``,
+    ``active_agent_key=None``, ``ai_active=1``. Best-effort; ``True`` quando gravou."""
+    conv_id = int(conv["id"])
+    try:
+        updated = await asyncio.to_thread(
+            conversation_repo.assign_agent, conv_id,
+            assignee_user_id=None, active_agent_key=None, ai_active=1)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("protocolos: falha ao devolver a conversa %s à IA: %s", conv_id, e)
+        return False
+    if not updated:
+        return False
+    payload = _conv_ws_payload(updated)
+    for event in ("conversation_assigned", "conversation_ai_toggled"):
+        try:
+            broadcast(event, payload)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("protocolos: broadcast %s falhou conv=%s: %s", event, conv_id, e)
+    # Card no fio da conversa. actor=None ⇒ "🤖 SISTEMA reativou a IA." (ação automática).
+    # Vai num to_thread: grava mensagem + broadcast, e estamos no event loop da varredura.
+    await asyncio.to_thread(
+        _emit_proto_notice, "ai_on", conversation_id=conv_id,
+        contact_id=updated.get("contact_id"),
+        phone=_phone_of_contact(updated.get("contact_id")), actor=None)
+    return True
+
+
+def _phone_of_contact(contact_id) -> str | None:
+    """Telefone do contato (o ``get`` da conversa não traz) — chave do broadcast do card."""
+    if contact_id is None:
+        return None
+    try:
+        contact = contact_repo.get(int(contact_id))
+        return (contact or {}).get("phone")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ── Posse temporária do atendente pós-fechamento ─────────────────────────────
+# "Quem resolveu fica com a conversa por N minutos, depois a IA reassume."
+#
+# O mecanismo é POSSE, não mordaça: o core já cala a IA quando a conversa tem dono
+# humano sem agente vinculado (``messaging_service._conversation_ai_active``), e o
+# fechar SEMPRE limpa o ``active_agent_key``. Então manter o atendente (via
+# ``clear_assignee_on_close``) já é o silêncio — de graça, por conversa e com o selo
+# honesto. Só falta devolver a conversa à IA quando o prazo vence: é o que a varredura
+# do lifecycle faz, lendo ``plugin_protocolos_ai_holds``.
+#
+# Conversa fechada SEM atendente (a própria IA/automação fechou) não tem dono a segurar:
+# aí o hold entra no modo ``muted`` e a conversa recebe ``ai_active=0`` durante a janela
+# (IA calada + selo "IA OFF"), voltando a 1 no vencimento.
+#
+# Qualquer ação HUMANA dentro da janela APAGA o hold: o atendente respondeu, reabriu pelo
+# painel ou religou a IA na mão — em todos os casos o automático sai de cena.
+
+_HOLDS_TABLE = "plugin_protocolos_ai_holds"
+
+
+def get_ai_hold(conversation_id: int) -> dict | None:
+    """Hold pendente da conversa (ou ``None``). Best-effort: erro ⇒ ``None``."""
+    try:
+        with make_plugin_db() as conn:
+            row = conn.execute(
+                text(f"SELECT conversation_id, hold_until, mode, owner_user_id, "
+                     f"protocolo_id, reason, set_at FROM {_HOLDS_TABLE} "
+                     f"WHERE conversation_id = :cv"),
+                {"cv": int(conversation_id)}).mappings().first()
+        return dict(row) if row else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: get_ai_hold falhou conv=%s: %s", conversation_id, e)
+        return None
+
+
+def _write_ai_hold(conversation_id: int, *, hold_until: float, mode: str,
+                   owner_user_id: int | None, protocolo_id: int | None,
+                   reason: str) -> None:
+    """Upsert do hold (uma linha por conversa). Best-effort — uma falha aqui só
+    significa que a IA volta no prazo antigo (fail-open, nunca quebra o fechamento)."""
+    ts = now()
+    try:
+        with make_plugin_db() as conn:
+            conn.execute(
+                text(f"INSERT INTO {_HOLDS_TABLE} (conversation_id, hold_until, mode, "
+                     f"owner_user_id, protocolo_id, reason, set_at) "
+                     f"VALUES (:cv, :until, :mode, :owner, :proto, :reason, :ts) "
+                     f"ON CONFLICT (conversation_id) DO UPDATE SET "
+                     f"hold_until = EXCLUDED.hold_until, mode = EXCLUDED.mode, "
+                     f"owner_user_id = EXCLUDED.owner_user_id, "
+                     f"protocolo_id = COALESCE(EXCLUDED.protocolo_id, {_HOLDS_TABLE}.protocolo_id), "
+                     f"reason = EXCLUDED.reason, set_at = EXCLUDED.set_at"),
+                {"cv": int(conversation_id), "until": float(hold_until), "mode": mode,
+                 "owner": owner_user_id, "proto": protocolo_id,
+                 "reason": reason or "", "ts": ts})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("protocolos: não consegui armar a posse temporária conv=%s: %s",
+                       conversation_id, e)
+
+
+def clear_ai_hold(conversation_id: int) -> bool:
+    """Apaga o hold da conversa. ``True`` quando havia um (para o caller decidir se
+    precisa religar a IA no modo ``muted``)."""
+    try:
+        with make_plugin_db() as conn:
+            res = conn.execute(
+                text(f"DELETE FROM {_HOLDS_TABLE} WHERE conversation_id = :cv"),
+                {"cv": int(conversation_id)})
+        return bool(res.rowcount)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: clear_ai_hold falhou conv=%s: %s", conversation_id, e)
+        return False
+
+
+def clear_ai_holds_of_protocolo(protocolo_id: int) -> None:
+    """Apaga os holds das conversas de um protocolo (reabrir/religar protocolo = o
+    atendente está retomando o atendimento). Religa a IA das que estavam ``muted``."""
+    try:
+        with make_plugin_db() as conn:
+            rows = conn.execute(
+                text(f"SELECT conversation_id, mode FROM {_HOLDS_TABLE} "
+                     f"WHERE protocolo_id = :pid"),
+                {"pid": int(protocolo_id)}).mappings().all()
+            if not rows:
+                return
+            conn.execute(text(f"DELETE FROM {_HOLDS_TABLE} WHERE protocolo_id = :pid"),
+                         {"pid": int(protocolo_id)})
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: clear_ai_holds_of_protocolo falhou pid=%s: %s",
+                     protocolo_id, e)
+        return
+    for r in rows:
+        if r["mode"] == "muted":
+            _set_conversation_ai_active(int(r["conversation_id"]), 1)
+
+
+def list_expired_ai_holds(now_ts: float, limit: int = 200) -> list[dict]:
+    """Holds cujo prazo VENCEU (``hold_until <= now``), mais antigos primeiro.
+    Alimenta a varredura do lifecycle. Best-effort: erro ⇒ lista vazia."""
+    try:
+        with make_plugin_db() as conn:
+            rows = conn.execute(
+                text(f"SELECT conversation_id, hold_until, mode, owner_user_id, "
+                     f"protocolo_id FROM {_HOLDS_TABLE} WHERE hold_until <= :now "
+                     f"ORDER BY hold_until LIMIT :lim"),
+                {"now": float(now_ts), "lim": int(limit)}).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: list_expired_ai_holds falhou: %s", e)
+        return []
+
+
+def _set_conversation_ai_active(conversation_id: int, ai_active: int) -> None:
+    """Liga/desliga a IA da conversa no CORE + broadcast do selo (modo ``muted``).
+
+    Usa a primitiva low-level ``conversation_repo.set_ai_active`` de propósito: sem mexer
+    no assignee, sem card de sistema e — importante — o broadcast abaixo é WS puro (não o
+    bus ``emit``), então não realimenta :func:`on_conversation_ai_toggled`."""
+    try:
+        conv = conversation_repo.set_ai_active(int(conversation_id), int(ai_active))
+        if not conv:
+            return
+        broadcast("conversation_ai_toggled", {
+            "conversation_id": conv["id"], "contact_id": conv.get("contact_id"),
+            "ai_active": int(ai_active), "ts": now()})
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: set_ai_active(%s) falhou conv=%s: %s",
+                     ai_active, conversation_id, e)
+
+
+def arm_ai_hold(conv: dict, *, protocolo_id: int | None = None,
+                reason: str = "resolver") -> dict | None:
+    """Arma a posse temporária para uma conversa recém-fechada.
+
+    Com atendente (o filtro ``clear_assignee_on_close`` já o preservou) ⇒ modo ``owner``:
+    nada é escrito na conversa, o core já cala a IA sozinho. Sem atendente ⇒ modo
+    ``muted``: grava ``ai_active=0`` (IA calada + selo "IA OFF" durante a janela).
+
+    Devolve o hold gravado (ou ``None`` quando a feature está desligada)."""
+    if not conv or not ai_takeover_enabled():
+        return None
+    conv_id = int(conv["id"])
+    owner = conv.get("assignee_user_id")
+    mode = "owner" if owner is not None else "muted"
+    until = now() + ai_takeover_delay_minutes() * 60.0
+    if protocolo_id is None:
+        protocolo_id = _protocolo_id_of_conversation(conv_id)
+    _write_ai_hold(conv_id, hold_until=until, mode=mode,
+                   owner_user_id=int(owner) if owner is not None else None,
+                   protocolo_id=protocolo_id, reason=reason)
+    if mode == "muted" and conv.get("ai_active"):
+        _set_conversation_ai_active(conv_id, 0)
+    logger.info("protocolos: posse temporária armada conv=%s modo=%s até %.0f",
+                conv_id, mode, until)
+    return get_ai_hold(conv_id)
+
+
+def _protocolo_id_of_conversation(conversation_id: int) -> int | None:
+    """Protocolo do ciclo mais recente da conversa (para limpar o hold ao reabrir o
+    protocolo). ``None`` quando a conversa não está vinculada."""
+    try:
+        with make_plugin_db() as conn:
+            row = conn.execute(
+                text("SELECT protocolo_id FROM plugin_protocolos_atendimentos "
+                     "WHERE conversation_id = :cv ORDER BY id DESC LIMIT 1"),
+                {"cv": int(conversation_id)}).mappings().first()
+        return int(row["protocolo_id"]) if row and row["protocolo_id"] is not None else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos: _protocolo_id_of_conversation falhou: %s", e)
+        return None
+
+
+def cancel_ai_hold(conversation_id: int, *, restore_ai: bool = True,
+                   why: str = "") -> bool:
+    """Encerra a posse temporária ANTES do vencimento porque um humano agiu.
+
+    A conversa NÃO é devolvida à IA: quem agiu fica com ela. A exceção é o modo
+    ``muted`` (fechada sem dono) — lá não há atendente a preservar, então religar a IA
+    (``restore_ai``) mantém o comportamento de sempre. ``True`` quando havia hold."""
+    hold = get_ai_hold(conversation_id)
+    if hold is None:
+        return False
+    clear_ai_hold(conversation_id)
+    if restore_ai and hold.get("mode") == "muted":
+        _set_conversation_ai_active(int(conversation_id), 1)
+    logger.info("protocolos: posse temporária encerrada conv=%s (%s)",
+                conversation_id, why or "humano agiu")
+    return True
+
+
+def on_conversation_status(ctx, payload: dict) -> None:
+    """``conversation.status_changed`` → arma a posse ao FECHAR, cancela ao reabrir.
+
+    O payload do core já traz ``assignee_user_id``/``ai_active``, então armar não relê a
+    conversa. Só a reabertura MANUAL (painel) passa por aqui — a automática (cliente
+    escreveu) não emite este evento, e é justamente o que queremos: o prazo continua
+    correndo com o atendente segurando a conversa reaberta."""
+    try:
+        payload = payload or {}
+        conv_id = payload.get("conversation_id") or payload.get("id")
+        if not conv_id:
+            return
+        status = payload.get("status")
+        if status == "closed":
+            if not ai_takeover_enabled():
+                return
+            arm_ai_hold({"id": conv_id,
+                         "assignee_user_id": payload.get("assignee_user_id"),
+                         "ai_active": payload.get("ai_active")},
+                        reason="resolver")
+        elif status == "open":
+            cancel_ai_hold(int(conv_id), why="reaberta no painel")
+    except Exception as e:  # noqa: BLE001 — handler nunca quebra o pipeline
+        logger.debug("protocolos.on_conversation_status falhou: %s", e)
+
+
+def on_conversation_ai_toggled(ctx, payload: dict) -> None:
+    """``conversation.ai_toggled`` → o operador devolveu a IA na mão durante a janela.
+
+    Só reage a religar (``ai_active`` verdadeiro): a IA já está no comando, o hold não
+    tem mais o que fazer. Desligar a IA não mexe na janela. Não há realimentação: o
+    espelho do modo ``muted`` usa broadcast WS puro, não o bus."""
+    try:
+        payload = payload or {}
+        if not payload.get("ai_active"):
+            return
+        conv_id = payload.get("conversation_id") or payload.get("id")
+        if conv_id:
+            # restore_ai=False: a IA já foi religada por quem emitiu o evento.
+            cancel_ai_hold(int(conv_id), restore_ai=False, why="IA religada no painel")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_ai_toggled falhou: %s", e)
+
+
+def on_conversation_assigned(ctx, payload: dict) -> None:
+    """``conversation.assigned`` E ``conversation.unassigned`` — DOIS efeitos independentes,
+    cada um no seu ``try`` (um não pode calar o outro):
+
+    1. posse temporária (hold da IA) — comportamento 1.22.0, inalterado;
+    2. atendente PROVISÓRIO — espelha ``assignee_user_id`` no protocolo + ciclo aberto.
+
+    Os dois nomes de evento carregam o MESMO payload (``conversation_service._broadcast``)
+    e o único discriminante é o valor de ``assignee_user_id``: ``None`` (desatribuir,
+    ``assign_unified(kind="none")`` ou a IA assumindo) LIMPA o provisório."""
+    payload = payload or {}
+    conv_id = payload.get("conversation_id") or payload.get("id")
+    if not conv_id:
+        return
+    try:
+        _ai_hold_on_assigned(payload)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_assigned (hold) falhou: %s", e)
+    try:
+        stamp_provisional_assignee(int(conv_id), payload.get("assignee_user_id"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_assigned (provisório) falhou: %s", e)
+
+
+def on_conversation_transferred_to_human(ctx, payload: dict) -> None:
+    """``conversation.transferred_to_human`` — o único caminho de atribuição que grava
+    direto no repo do core (``agent/tools/transfer_to_human.py``) sem emitir evento de
+    atribuição. O payload não carrega ``assignee_user_id``, então relemos a conversa: o
+    default da tool é DESATRIBUIR, mas o filtro ``filter.conversation.assignment`` pode
+    redirecionar a um humano."""
+    try:
+        payload = payload or {}
+        conv_id = payload.get("conversation_id") or payload.get("id")
+        if not conv_id:
+            return
+        conv = conversation_repo.get(int(conv_id)) or {}
+        stamp_provisional_assignee(int(conv_id), conv.get("assignee_user_id"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_transferred_to_human falhou: %s", e)
+
+
+def _ai_hold_on_assigned(payload: dict) -> None:
+    """Alguém mexeu na posse durante a janela do hold.
+
+    Passou para um AGENTE de IA (``active_agent_key``) ⇒ o hold perdeu a razão de ser.
+    Passou para outro humano ⇒ atualiza o dono e mantém o prazo (a conversa continua
+    com gente, só que outra)."""
+    try:
+        payload = payload or {}
+        conv_id = payload.get("conversation_id") or payload.get("id")
+        if not conv_id:
+            return
+        hold = get_ai_hold(int(conv_id))
+        if hold is None:
+            return
+        if payload.get("active_agent_key"):
+            cancel_ai_hold(int(conv_id), restore_ai=False, why="IA assumiu a conversa")
+            return
+        owner = payload.get("assignee_user_id")
+        if owner is not None and owner != hold.get("owner_user_id"):
+            _write_ai_hold(int(conv_id), hold_until=float(hold["hold_until"]),
+                           mode="owner", owner_user_id=int(owner),
+                           protocolo_id=hold.get("protocolo_id"),
+                           reason=hold.get("reason") or "")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.on_conversation_assigned falhou: %s", e)
+
+
+# ``message.sent`` de HUMANO (o envio da IA usa source="ai" e não pode se auto-liberar).
+_HUMAN_SEND_SOURCES = frozenset({"operator", "template"})
+
+
+def cancel_ai_hold_on_human_send(payload: dict) -> None:
+    """Chamado de ``on_outbound``: o ATENDENTE respondeu dentro da janela ⇒ ele fica
+    com a conversa e a devolução automática é cancelada.
+
+    O payload de ``message.sent`` não traz ``conversation_id``, então resolvemos pelo
+    telefone (aberta primeiro; o envio do operador já reabriu a conversa nesse ponto).
+    Não passa pelo ``_resolve_target`` de propósito: aquele é gated por ``auto_link``,
+    que não tem nada a ver com posse.
+
+    LIMITAÇÃO CONHECIDA (herdada do payload): a resolução é CHANNEL-BLIND. Num install
+    multicanal com o MESMO número em dois canais, responder num canal pode encerrar a
+    janela do outro. Corrigir exigiria o core mandar ``channel_id``/``conversation_id``
+    no evento. O erro é a favor do humano (a IA deixa de reassumir), não contra."""
+    try:
+        payload = payload or {}
+        if str(payload.get("source") or "") not in _HUMAN_SEND_SOURCES:
+            return
+        phone = payload.get("phone")
+        if not phone:
+            return
+        contact = contact_repo.get_by_phone(phone)
+        if not contact:
+            return
+        conv = (conversation_repo.get_open_for_contact(contact["id"])
+                or conversation_repo.get_latest_for_contact(contact["id"]))
+        if conv:
+            cancel_ai_hold(int(conv["id"]), why="atendente respondeu")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("protocolos.cancel_ai_hold_on_human_send falhou: %s", e)
+
+
+async def expire_ai_holds_once() -> int:
+    """Uma passada da varredura: devolve à IA as conversas cujo prazo venceu.
+
+    Usa :func:`handoff_to_ai` (tira o humano, ``ai_active=1``, SEM carimbar agente — quem
+    escolhe é o roteamento no próximo turno) e emite o card "🤖 SISTEMA reativou a IA.".
+    Gates global/canal desligados ⇒ a linha é apagada sem religar (a IA está desligada de
+    propósito). Devolve quantas foram devolvidas. Nunca levanta."""
+    rows = await asyncio.to_thread(list_expired_ai_holds, now())
+    if not rows:
+        return 0
+    from plugins.context import get_deps
+    if not get_deps():
+        # Runtime não cabeado (boot degradado): sem ``deps`` o gate global nem dá para
+        # avaliar, e apagar a linha perderia a intenção. Deixa para a próxima passada.
+        logger.debug("protocolos: varredura sem deps — %d hold(s) adiado(s)", len(rows))
+        return 0
+    released = 0
+    for row in rows:
+        conv_id = int(row["conversation_id"])
+        try:
+            conv = await asyncio.to_thread(conversation_repo.get, conv_id)
+            if not conv:
+                await asyncio.to_thread(clear_ai_hold, conv_id)
+                continue
+            if not await asyncio.to_thread(_ai_master_gate, conv_id):
+                await asyncio.to_thread(clear_ai_hold, conv_id)
+                continue
+            await handoff_to_ai(conv)
+            await asyncio.to_thread(clear_ai_hold, conv_id)
+            released += 1
+        except Exception as e:  # noqa: BLE001 — uma conversa ruim não para a varredura
+            logger.warning("protocolos: falha ao devolver a conversa %s à IA: %s",
+                           conv_id, e)
+    return released
 
 
 # ── Enforcement no backend (filter.conversation.before_status) ────────────────

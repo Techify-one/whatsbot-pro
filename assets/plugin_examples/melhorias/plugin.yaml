@@ -1,6 +1,6 @@
 id: melhorias
 name: Sugestões de melhoria
-version: 1.4.0
+version: 1.7.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Fluxo de aprovação + chat agêntico para melhorar as respostas da IA. O botão-direito
@@ -16,6 +16,18 @@ description: >-
   multi-instância) fica numa seção da aba "Configurações de IA" (preenchida via slot);
   dormente até configurar URL+secret. Desative o plugin e tudo some (opção do menu,
   painel, seção de IA e endpoints); os dados ficam nas tabelas do plugin.
+  A 1.5.0 acrescenta o estado GLOBAL da sessão do executor: o painel mostra uma faixa
+  quando a sessão do Claude expira, o botão "Testar" passa a informar as DUAS coisas
+  (o segredo bate E a sessão está viva — sondando o "GET /health" do executor quando ele
+  implementa) e o relogin limpa a faixa ao vivo em todos os painéis abertos.
+  A 1.6.0 tipa a falha do executor (migração 004): o "kind" vem etiquetado e é PERSISTIDO
+  em vez de adivinhado pelo texto da mensagem — limite de uso deixa de ser confundido com
+  sessão expirada e a hidratação do chat lê o tipo. Linhas antigas (NULL) continuam
+  válidas e caem na heurística anterior.
+  A 1.7.0 endurece essa heurística: sobre CONTEÚDO da IA ela exige marcador literal do SDK
+  (um "401" citado dentro de uma análise não derruba mais a sessão global), enquanto sobre
+  um frame que já É erro segue frouxa. O gateway decide "executor tipado" pela PRESENÇA da
+  chave "kind", nunca pelo valor.
 short_description: >-
   Fluxo de aprovação + chat agêntico de melhoria (executor Claude Code externo) para respostas da IA.
 author: WhatsBot

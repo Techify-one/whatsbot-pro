@@ -1,6 +1,6 @@
 id: protocolos
 name: Protocolos
-version: 1.20.0
+version: 1.24.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Camada de protocolos sobre os atendimentos (estilo Chatwoot personalizado). MANTÉM o
@@ -17,6 +17,36 @@ description: >-
   cria/remove campos de vários tipos — texto, área, número, data, seleção, rádio, checkbox,
   múltipla escolha e atendente nativo — com validação por regex. Ao finalizar exige resolver
   o último atendimento, grava o agente que resolveu e registra uma nota privada de abertura.
+  A 1.21.0 registra quem ABRIU cada protocolo/ciclo (Contato, Atendente ou IA) e mostra
+  "Aberto por"/"Fechado por" no card e no detalhe (migração 017).
+  A 1.22.0 traz a POSSE TEMPORÁRIA depois de resolver (migração 018): o atendente que
+  resolveu continua com a conversa por N minutos (default 30) — a IA fica calada e, se o
+  cliente voltar nesse intervalo, a conversa reabre com ele mesmo. Vencido o prazo, a
+  conversa é devolvida à IA automaticamente. Se ele responder dentro da janela, fica com
+  a conversa; se a conversa foi fechada sem atendente, a IA só fica muda até o prazo
+  vencer. Substitui a janela equivalente do plugin Vendas IA.
+  A 1.22.1 corrige a corrida em que abrir o protocolo por link/F5 ("Resolver e ir ao
+  protocolo", ?detail=<id>) montava o detalhe antes das definições de campo chegarem: o
+  formulário nascia vazio, os valores salvos sumiam e o obrigatório Atendente travava o
+  "Finalizar protocolo".
+  A 1.22.2 tira o card de sistema "Protocolo aberto" do fio: a abertura passa a ser
+  anunciada só pela nota PRIVADA com o ID pesquisável (o card era redundante). Finalizar
+  e re-vincular seguem com card.
+  A 1.23.0 faz o popup de resolver NASCER SEMPRE EM BRANCO: semear com o espelho em
+  conversations.custom_attributes fazia cada atendimento herdar os valores do anterior —
+  inclusive entre operadores diferentes, porque a linha de conversa é REUTILIZADA quando o
+  cliente volta a falar. O que já foi resolvido continua no protocolo (extras por ciclo) e
+  na aba "Informações do atendimento". O rótulo "Atendente" segue semeado com quem clicou
+  em Resolver, e a semeadura virou módulo puro testado (proto_fields.js).
+  A 1.24.0 traz o ATENDENTE PROVISÓRIO (migração 019): atribuir a CONVERSA a um atendente
+  carimba temporariamente o protocolo e o atendimento (ciclo) abertos com ele. O Kanban e o
+  filtro "Atendente" passam a usar o atendente EFETIVO (o definitivo salvo no formulário e,
+  na falta dele, o provisório), com um marcador "provisório" no card, na lista e no detalhe.
+  O filtro novo "Vínculo do atendente" (Definitivo / Provisório / Sem atendente) isola, junto
+  com o status Aberto, exatamente os protocolos que alguém já está atendendo mas que ainda
+  não foram salvos com atendente nenhum. Desatribuir a conversa (ou a IA assumir) limpa o
+  provisório; fechar a conversa não. O provisório é só leitura: o rótulo obrigatório
+  "Atendente" continua exigindo preenchimento consciente ao resolver/finalizar.
   Permissões: ver, editar/resolver/configurar, criar visualizações e gerenciar visualizações
   de equipe. Desative e a tela volta ao padrão — os dados ficam nas tabelas do plugin e no
   custom_attributes do core.
@@ -26,6 +56,7 @@ entry:
   events: events      # message.saved / message.sent → auto-vínculo atendimento↔protocolo
   filters: filters    # filter.conversation.before_status → enforcement do popup
   settings: settings  # toggles (enforce_backend, auto_link, mirror_custom_attributes)
+  lifecycle: lifecycle  # varredura: devolve à IA as conversas cuja posse temporária venceu
 migrations: migrations
 # Override de rota + slot + popup beforeResolve vivem no extends.js (registrado 1x no boot).
 frontend_extends: /plugins/protocolos/static/extends.js

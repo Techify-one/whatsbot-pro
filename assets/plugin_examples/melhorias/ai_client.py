@@ -213,6 +213,29 @@ async def auth_check(user_id=None) -> dict:
                 "ok": resp.status_code == 200}
 
 
+async def health(user_id=None) -> dict:
+    """``GET /health`` do executor — best-effort (plano 60 · 2.8).
+
+    O executor REAL provavelmente não implementa a rota (é a camada 3); por isso
+    a resposta é honesta sobre o que NÃO sabe: ``supported=False`` quando a rota
+    não existe, e o painel mostra "desconhecido" em vez de inventar um veredito.
+    Vai assinado por precaução (a rota não exige HMAC — headers extras são inertes).
+    """
+    headers = signed_headers("GET", "/health", "", user_id)
+    async with httpx.AsyncClient(timeout=timeout_seconds()) as client:
+        resp = await client.get(server_url() + "/health", headers=headers)
+    if resp.status_code == 404:
+        return {"supported": False, "status_code": 404}
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    claude = data.get("claude") if isinstance(data, dict) else None
+    return {"supported": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "claude": claude if isinstance(claude, dict) else None}
+
+
 async def open_stream(conversation_id: str, *, user_id) -> AsyncIterator[bytes]:
     """SSE do executor (hop executor→gateway, D5). Iterador de bytes crus;
     o consumidor (chat_logic) parseia frames e re-emite no /ws do operador."""

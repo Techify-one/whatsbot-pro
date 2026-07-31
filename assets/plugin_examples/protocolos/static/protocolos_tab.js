@@ -10,7 +10,9 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { AtendimentosTable } from '/plugins/protocolos/static/atendimentos_table.js';
-import { ResolveForm, LabeledField, isMultiDef } from '/plugins/protocolos/static/resolve_form.js';
+import { ResolveForm, LabeledField } from '/plugins/protocolos/static/resolve_form.js';
+// Semeadura dos campos do protocolo — módulo PURO (testes em proto_fields.test.js).
+import { seedProtocolValues, mergeSeed, isMultiDef, effectiveAssignee } from '/plugins/protocolos/static/proto_fields.js';
 import { OptionListSelect } from '/static/js/components/OptionListSelect.js';
 import { useInfiniteScroll } from '/static/js/hooks/useInfiniteScroll.js';
 
@@ -40,6 +42,16 @@ function nearBottom(sc) {
   const el = sc || document.scrollingElement || document.documentElement;
   return el.scrollTop + el.clientHeight >= el.scrollHeight - NEAR_BOTTOM_PX;
 }
+
+// Marcador do atendente PROVISÓRIO: a conversa está atribuída a alguém, mas o rótulo
+// "Atendente" do protocolo/ciclo ainda NÃO foi salvo no formulário de Resolver/Finalizar.
+// Tinta amber com opacidade (mesmo precedente da nota de avaliação no card) — legível nos
+// dois temas sem depender de cor crua não coberta pelo custom.css.
+const ProvisionalChip = ({ title = 'Atendente da CONVERSA. Ainda não salvo no protocolo.' }) => html`
+  <span title=${title}
+    class="px-1.5 py-0.5 rounded-full text-[10px] leading-none bg-amber-500/15 text-amber-600 whitespace-nowrap">
+    provisório
+  </span>`;
 
 const MODE_KEY = 'whatsbot_protocolos_mode';    // 'lista' | 'kanban'
 const KGROUP_KEY = 'whatsbot_protocolos_kgroup'; // legado: 'status' | 'atendente' (migrado p/ VIEW_KEY)
@@ -249,7 +261,12 @@ function buildGrouping(view, { users, groupFields, rows, apiPost }) {
     return {
       columns: [{ id: '__none__', label: 'Não atribuído' },
                 ...users.map((u) => ({ id: `u:${u.id}`, label: u.name || `Usuário #${u.id}` }))],
-      columnIdOf: (r) => (r.assignee_user_id != null ? `u:${r.assignee_user_id}` : '__none__'),
+      // Atendente EFETIVO (definitivo ?? provisório) — mesmos ids do backend
+      // (`grouping._grouping_atendente`), então o `column_order` salvo continua valendo.
+      columnIdOf: (r) => {
+        const e = effectiveAssignee(r);
+        return e.id != null ? `u:${e.id}` : '__none__';
+      },
       confirmText: (r, col) => (col === '__none__'
         ? `Remover a atribuição do protocolo de ${cliente(r)}?`
         : `Atribuir o protocolo de ${cliente(r)} a ${nameOf(col)}?`),
@@ -498,6 +515,9 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   });
   const [assigneeFilter, setAssigneeFilter] = useState([]);  // filtro por atendente — LISTA (multi) de ids (string)
   const [notaFilter, setNotaFilter] = useState([]);   // filtro por nota de avaliação (1..5)
+  // Vínculo do atendente — LISTA (multi) de 'definitivo' | 'provisorio' | 'sem'.
+  // 'provisorio' = a conversa está atribuída mas o rótulo Atendente ainda não foi salvo.
+  const [vinculoFilter, setVinculoFilter] = useState([]);
   const [attrFilters, setAttrFilters] = useState({});          // filtros por atributo de atendimento (da aba)
   const [sortBy, setSortBy] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
@@ -578,6 +598,12 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   const getJson = useCallback((url) => api.http.get(url), [api]);
   const apiPost = useCallback((path, body) => api.http.post(path, body), [api]);
 
+  // Promise do carregamento de metadados em voo. O `openDetail` a aguarda antes de
+  // montar o modal — sem ela o detalhe podia abrir com `cols = []` e o form nascia
+  // vazio (inclusive o obrigatório "Atendente"). Nenhuma requisição extra: é a MESMA
+  // promise já disparada no mount. Ver plano 88 · B0.
+  const metaPromiseRef = useRef(null);
+
   // Metadados da aba (field-defs, atributos de contato, canais) — NÃO dependem dos
   // filtros; carregam uma vez (e a cada troca de apiBase), separados da lista paginada.
   const loadMeta = useCallback(async () => {
@@ -603,7 +629,9 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     setChannels(((ch && ch.ok && ch.data) || []).map((c) => ({ value: c.id, label: c.name || c.id })));
   }, [apiBase, getJson]);
   // Sem permissão de VER → não dispara os GETs (evita uma rajada de 403 no load).
-  useEffect(() => { if (canView) loadMeta(); }, [loadMeta, canView]);
+  // Guarda a promise p/ o openDetail poder esperá-la (`null` quando não dispara → o
+  // `await null` do openDetail resolve na hora, sem ramo especial).
+  useEffect(() => { if (canView) metaPromiseRef.current = loadMeta(); }, [loadMeta, canView]);
 
   // Popover ⚙ fecha ao clicar fora (mesmo padrão do OptionListSelect).
   useEffect(() => {
@@ -626,9 +654,10 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     // `groupParams` — as rotas /grouped/* precisam do mesmo recorte, senão as contagens
     // por coluna do Kanban ignorariam o filtro que a lista aplica.
     if (notaFilter.length) params.set('nota', JSON.stringify(notaFilter));
+    if (vinculoFilter.length) params.set('vinculo', JSON.stringify(vinculoFilter));
     if (attrFilters && Object.keys(attrFilters).length) params.set('attr_filters', JSON.stringify(attrFilters));
     return params;
-  }, [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters]);
+  }, [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters]);
 
   // Bump manual → re-busca da 1ª página (botão Atualizar, WS, pós-ação no detalhe).
   const [reloadTick, setReloadTick] = useState(0);
@@ -653,8 +682,8 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
 
   // resetKey: qualquer mudança de filtro / permissão / modo / reload volta à 1ª página.
   const resetKey = useMemo(
-    () => JSON.stringify([status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, mode, reloadTick]),
-    [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, mode, reloadTick]);
+    () => JSON.stringify([status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters, canView, mode, reloadTick]),
+    [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters, canView, mode, reloadTick]);
 
   const { items: rows, loading, loadingMore, hasMore, loadMore } =
     useInfiniteScroll({ fetchPage, pageSize: PAGE_SIZE, resetKey, keyOf: (r) => r.id });
@@ -696,12 +725,12 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
 
   // Muda ⇒ recarrega colunas e reinicia a paginação de TODAS as colunas.
   const groupResetKey = useMemo(() => JSON.stringify([
-    status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, reloadTick,
+    status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters, canView, reloadTick,
     (activeView || {}).group_by, (activeView || {}).group_attr_key,
     (activeView || {}).group_field_scope, (activeView || {}).group_date_mode,
     (activeView || {}).group_date_grain, (activeView || {}).group_date_from,
     (activeView || {}).group_date_to,
-  ]), [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, attrFilters, canView, reloadTick, activeView]);
+  ]), [status, q, dateFrom, dateTo, assigneeFilter, notaFilter, vinculoFilter, attrFilters, canView, reloadTick, activeView]);
 
   useEffect(() => {
     if (!canView || mode !== 'kanban') return undefined;
@@ -759,6 +788,7 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     setQ(availFilter('q') && f.q != null ? f.q : '');
     setAssigneeFilter(availFilter('atendente') ? asFilterList(f.assignee_user_id).map(String) : []);
     setNotaFilter(availFilter('nota') && f.nota != null ? asFilterList(f.nota).map(String) : []);
+    setVinculoFilter(availFilter('vinculo') && f.vinculo != null ? asFilterList(f.vinculo).map(String) : []);
     setAttrFilters(f.attrs && typeof f.attrs === 'object'
       ? Object.fromEntries(Object.entries(f.attrs).filter(([k]) => availFilter(k))) : {});
     const df = (availFilter('periodo') && f.date && typeof f.date === 'object') ? f.date : null;
@@ -829,9 +859,10 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   // filtros" — assim uma aba com filtro pré-determinado que zera o resultado nunca é um
   // mistério: o usuário vê os controles e limpa para ver todos.
   const hasViewFilters = !!(status.length || (q && q.trim()) || notaFilter.length || assigneeFilter.length
+    || vinculoFilter.length
     || Object.keys(attrFilters).length || dateTo || (datePreset && datePreset !== null));
   const clearFilters = () => {
-    setStatus([]); setQ(''); setNotaFilter([]); setAssigneeFilter([]); setAttrFilters({});
+    setStatus([]); setQ(''); setNotaFilter([]); setAssigneeFilter([]); setVinculoFilter([]); setAttrFilters({});
     setDatePreset(null); setDateFrom(ymd(new Date())); setDateTo('');
   };
 
@@ -844,6 +875,7 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     if (availFilter('q') && q.trim()) f.q = q.trim();
     if (availFilter('atendente') && assigneeFilter.length) f.assignee_user_id = assigneeFilter;
     if (availFilter('nota') && notaFilter.length) f.nota = notaFilter;
+    if (availFilter('vinculo') && vinculoFilter.length) f.vinculo = vinculoFilter;
     if (availFilter('periodo')) {
       if (datePreset && datePreset !== 'tudo') f.date = { preset: datePreset, from: '', to: '' };
       else if (datePreset === 'tudo') f.date = { preset: 'tudo', from: '', to: '' };
@@ -942,6 +974,13 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   const detailIdRef = useRef(null);
 
   const openDetail = useCallback(async (atid, warn = false) => {
+    // Espera as definições de campo antes de montar o modal — o form é semeado no mount
+    // e, sem elas, nasceria vazio (deep-link `?detail=`, F5, "Resolver e ir ao
+    // protocolo"). É a mesma forma do popup de resolver, que nunca falha (extends.js).
+    // try/catch OBRIGATÓRIO: loadMeta não trata erro, e uma rejeição abortaria a
+    // abertura do detalhe — pior que o bug. Falhou? Abre assim mesmo; o efeito de seed
+    // do DetailModal recupera quando (e se) as defs chegarem.
+    try { await metaPromiseRef.current; } catch (_) { /* segue sem os metadados */ }
     const r = await getJson(`${apiBase}/protocolos/${atid}`);
     if (r && r.ok) {
       setDetailWarning(warn ? 'Preencha os campos obrigatórios para finalizar este protocolo.' : '');
@@ -1065,8 +1104,9 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     let fields = {};
     if (atendResolveDefs.length) {
       const picked = await api.ui.openModal((close) => html`
-        <${ResolveForm} defs=${atendResolveDefs} atend=${{ id: openCycle.conversation_id }}
+        <${ResolveForm} defs=${atendResolveDefs}
           defaultAssignee=${currentUser && currentUser.id}
+          defaultAssigneeName=${currentUser && (currentUser.name || currentUser.email)}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!picked) return false; // cancelou → não finaliza
       fields = picked.fields || {}; // onOk devolve { fields, custom_attributes, goTo }
@@ -1124,7 +1164,14 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
   async function applyDrop(row, colId) {
     if (!canEdit) return;                            // sem permissão de editar → não muta
     if (!row || !grouping.onDrop) return;            // modo só-leitura (data) não muta
-    if (grouping.columnIdOf(row) === colId) return;  // já está na coluna
+    // "Já está na coluna" → nada a fazer. EXCEÇÃO no modo atendente: um card que está
+    // ali só pelo atendente PROVISÓRIO ainda não tem atribuição salva, e arrastá-lo para
+    // a coluna do MESMO atendente é justamente o gesto de confirmar o provisório como
+    // definitivo — não pode ser tratado como no-op.
+    const sameColumn = grouping.columnIdOf(row) === colId;
+    const provisionalOnly = ((activeView && activeView.group_by) === 'atendente'
+      && row.assignee_user_id == null && row.provisional_assignee_user_id != null);
+    if (sameColumn && !provisionalOnly) return;
     setActionMsg(null);
     // Confirmação OBRIGATÓRIA: descreve EXATAMENTE o que será feito antes de QUALQUER
     // alteração. Só prossegue ao confirmar.
@@ -1165,7 +1212,15 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
     { key: 'closed_at', label: 'Data fechamento', nowrap: true,
       get: (r) => r.closed_at || 0, render: (r) => fmtTs(r.closed_at) },
     { key: 'atendente', label: 'Atendente', nowrap: true,
-      get: (r) => (r.assignee_name || '').toLowerCase(), render: (r) => r.assignee_name || '—' },
+      get: (r) => (effectiveAssignee(r).name || '').toLowerCase(),
+      render: (r) => {
+        const e = effectiveAssignee(r);
+        if (!e.name && e.id == null) return '—';
+        const nome = e.name || `Usuário #${e.id}`;
+        return e.provisional
+          ? html`<span class="inline-flex items-center gap-1">${nome}<${ProvisionalChip} /></span>`
+          : nome;
+      } },
     { key: 'status', label: 'Status', nowrap: true,
       get: (r) => r.status || '', render: (r) => (r.status === 'aberto' ? 'ABERTO' : 'FECHADO') },
   ], []);
@@ -1335,6 +1390,15 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
           multiple=${true} value=${asFilterList(notaFilter).map(String)}
           onChange=${(v) => setNotaFilter(v)} placeholder="Avaliação" float=${true} />
       </div>` } : null,
+    availFilter('vinculo') ? { key: 'vinculo', el: html`
+      <div key="vinculo" class="w-[190px]">
+        <${OptionListSelect}
+          options=${[{ value: 'definitivo', label: 'Definitivo' },
+                     { value: 'provisorio', label: 'Provisório' },
+                     { value: 'sem', label: 'Sem atendente' }]}
+          multiple=${true} value=${asFilterList(vinculoFilter).map(String)}
+          onChange=${(v) => setVinculoFilter(v)} placeholder="Vínculo do atendente" float=${true} />
+      </div>` } : null,
     availFilter('periodo') ? { key: 'periodo', el: html`
       <div key="periodo" class="flex items-center gap-2">
         <span class="text-[12px] text-wa-secondary whitespace-nowrap">Período</span>
@@ -1478,9 +1542,11 @@ function ProtocolosList({ api, mode, setMode, setTab }) {
             ? html`<div class="text-[12px] text-wa-secondary p-2 text-center">Role para carregar mais (${rows.length}/${totalCount})</div>`
             : null)}
 
-      ${detail ? html`<${DetailModal} data=${detail} fieldDefs=${atendDefs}
+      ${detail ? html`<${DetailModal} key=${detail.protocolo && detail.protocolo.id}
+        data=${detail} fieldDefs=${atendDefs}
         protoDefs=${cols} warning=${detailWarning} api=${api} canEdit=${canEdit}
         defaultAssignee=${currentUser && currentUser.id}
+        defaultAssigneeName=${currentUser && (currentUser.name || currentUser.email)}
         onClose=${closeDetail}
         onChanged=${reload} onFinalize=${finalizeProtocolo} />` : null}
     </div>`;
@@ -1506,7 +1572,16 @@ function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = t
       <div class="text-[12px] text-wa-secondary mt-1">Início: ${fmtTs(row.opened_at)}</div>
       ${row.closed_at ? html`<div class="text-[12px] text-wa-secondary">Fim: ${fmtTs(row.closed_at)}</div>` : null}
       <div class="flex items-center justify-between gap-2 mt-1">
-        <span class="text-[12px] ${row.assignee_name ? 'text-wa-text' : 'text-wa-secondary'} truncate">${row.assignee_name || 'Não atribuído'}</span>
+        ${(() => {
+          // Atendente EFETIVO: com só o provisório o card já mostra o dono da conversa,
+          // marcado como não-salvo (em vez do antigo "Não atribuído").
+          const e = effectiveAssignee(row);
+          const nome = e.name || (e.id != null ? `Usuário #${e.id}` : '');
+          return html`<span class="flex items-center gap-1 min-w-0">
+            <span class="text-[12px] ${nome ? 'text-wa-text' : 'text-wa-secondary'} truncate">${nome || 'Não atribuído'}</span>
+            ${e.provisional ? html`<${ProvisionalChip} />` : null}
+          </span>`;
+        })()}
         <div class="flex items-center gap-1 shrink-0">
           ${row.avaliacao ? html`<span class="px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/15 text-amber-600" title="Avaliação do cliente">★ ${row.avaliacao.nota}</span>` : null}
           <span class="px-1.5 py-0.5 rounded-full text-[10px] ${row.status === 'aberto' ? 'bg-wa-teal/15 text-wa-teal' : 'bg-wa-hover text-wa-secondary'}">${row.status === 'aberto' ? 'Aberto' : 'Fechado'}</span>
@@ -1521,7 +1596,7 @@ function KanbanCard({ row, draggedRef, dragRef, onClearDrop, onOpen, canDrag = t
 // protocolo já está FECHADO, os valores aparecem read-only (sem ações). A tabela de
 // atendimentos (histórico, read-only) fica abaixo.
 function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
-                      defaultAssignee = null, api, canEdit = true, onClose, onChanged, onFinalize }) {
+                      defaultAssignee = null, defaultAssigneeName = null, api, canEdit = true, onClose, onChanged, onFinalize }) {
   const at = data.protocolo || {};
   const atendimentos = data.atendimentos || [];
   const fechado = at.status === 'fechado';                  // status REAL (rótulo do topo)
@@ -1534,21 +1609,20 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
   const hasSavedAssignee = at.assignee_user_id != null && String(at.assignee_user_id).trim() !== '';
   const shouldSeedCurrentAssignee = !readOnly && !hasSavedAssignee && defaultAssignee != null;
   const showAssigneeSeedNotice = protoDefs.some((d) => d.type === 'atendente') && shouldSeedCurrentAssignee;
-  const [vals, setVals] = useState(() => {
-    const init = {};
-    for (const d of protoDefs) {
-      // Atendente: mantém o assignee salvo quando existir. Só usa o usuário conectado
-      // como sugestão inicial quando o protocolo ainda não tem atendente gravado.
-      let cur = d.type === 'atendente'
-        ? (hasSavedAssignee ? at.assignee_user_id : (!readOnly ? defaultAssignee : at.assignee_user_id))
-        : (at.fields || {})[d.key];
-      if (d.type === 'checkbox') init[d.key] = (cur === true || cur === 'true');
-      else if (isMultiDef(d)) init[d.key] = Array.isArray(cur)
-        ? cur : (cur ? String(cur).split(',').map((s) => s.trim()).filter(Boolean) : []);
-      else init[d.key] = (cur == null ? '' : String(cur));
-    }
-    return init;
-  });
+  // Atendente: mantém o assignee salvo quando existir; só usa o usuário conectado como
+  // sugestão inicial quando o protocolo ainda não tem atendente gravado (ver proto_fields.js).
+  const [vals, setVals] = useState(() => seedProtocolValues(protoDefs, at, { defaultAssignee, readOnly }));
+
+  // Rede de segurança da corrida (plano 88 · C0): se `protoDefs` chegar DEPOIS do mount
+  // (o await do openDetail caiu no catch, config de campos editada noutra aba, um call
+  // site novo que não passe pelo openDetail), completa o estado. `mergeSeed` só preenche
+  // chave AUSENTE — não apaga o que o operador digitou nem ressuscita campo limpo de
+  // propósito, e devolve a mesma referência quando não há nada a somar (sem re-render).
+  useEffect(() => {
+    setVals((v) => mergeSeed(v, seedProtocolValues(protoDefs, at, { defaultAssignee, readOnly })));
+    // `data` (e não `at`) na dependência: `at` é derivado dela e ganharia identidade
+    // nova a cada render no caso degenerado `data.protocolo == null`.
+  }, [protoDefs, data, defaultAssignee, readOnly]);
   const [saving, setSaving] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [msg, setMsg] = useState(null);          // {text, error}
@@ -1645,6 +1719,12 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
             <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px] mb-2">
               <div><span class="text-wa-secondary">Aberto por:</span> <span class="text-wa-text">${at.opened_by_name || '—'}</span></div>
               <div><span class="text-wa-secondary">Fechado por:</span> <span class="text-wa-text">${fechado ? (at.assignee_name || '—') : '—'}</span></div>
+              ${at.assignee_is_provisional ? html`
+                <div class="flex items-center gap-1">
+                  <span class="text-wa-secondary">Atendente:</span>
+                  <span class="text-wa-text">${at.provisional_assignee_name || `Usuário #${at.provisional_assignee_user_id}`}</span>
+                  <${ProvisionalChip} />
+                </div>` : null}
             </div>
             ${readOnlyInfo.length ? html`
               <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px]">
@@ -1659,15 +1739,29 @@ function DetailModal({ data, fieldDefs = [], protoDefs = [], warning = '',
             <div class="flex flex-wrap gap-x-5 gap-y-1 text-[12px] mb-3">
               <div><span class="text-wa-secondary">Aberto por:</span> <span class="text-wa-text">${at.opened_by_name || '—'}</span></div>
               <div><span class="text-wa-secondary">Fechado por:</span> <span class="text-wa-text">${fechado ? (at.assignee_name || '—') : '—'}</span></div>
+              ${at.assignee_is_provisional ? html`
+                <div class="flex items-center gap-1">
+                  <span class="text-wa-secondary">Atendente:</span>
+                  <span class="text-wa-text">${at.provisional_assignee_name || `Usuário #${at.provisional_assignee_user_id}`}</span>
+                  <${ProvisionalChip} />
+                </div>` : null}
             </div>
             ${showAssigneeSeedNotice ? html`
               <div class="mb-3 px-3 py-2.5 rounded-md bg-wa-teal/10 border border-wa-teal/40 text-wa-teal text-[13px]">
-                Esse protocolo ainda não possui nenhum atendente salvo. Gostaria de salvar seu usuário como atendente?
+                Este protocolo ainda não tinha atendente — preenchemos com o seu usuário. Troque se necessário.
               </div>` : null}
             <div class="space-y-3">
               ${protoDefs.map((d) => {
-                const def = (d.type === 'atendente' && hasSavedAssignee)
-                  ? { ...d, fallbackUser: { id: at.assignee_user_id, name: at.assignee_name } }
+                // O rótulo "atendente" precisa de um fallbackUser para o AttendantSelect
+                // conseguir EXIBIR um id que não esteja na lista de atendentes atribuíveis
+                // (ex.: usuário logado sem conversation.read, ou fora da lista). Sem ele o
+                // select cai no placeholder "Não atribuído" mesmo com o valor semeado.
+                // Cobre os dois casos: assignee JÁ salvo e o seed do usuário logado.
+                const fallbackUser = hasSavedAssignee
+                  ? { id: at.assignee_user_id, name: at.assignee_name }
+                  : (shouldSeedCurrentAssignee ? { id: defaultAssignee, name: defaultAssigneeName } : null);
+                const def = (d.type === 'atendente' && fallbackUser)
+                  ? { ...d, fallbackUser }
                   : d;
                 return html`<${LabeledField} key=${d.key} def=${def}
                   value=${vals[d.key]}
@@ -1741,8 +1835,8 @@ function ViewGroupingConfig({ view, filterFields, contactAttrDefs, apiBase, auth
   // (cattr:). "Outros" (defensivo) captura escopos de campo desconhecidos p/ nada sumir do checklist.
   // Chaves nativas do checklist (lista fixa — a barra ao vivo renderiza widgets próprios p/ elas).
   const NATIVE_ITEMS = [
-    ['status', 'Status'], ['atendente', 'Atendente'], ['q', 'Buscar'], ['periodo', 'Período'],
-    ['canal', 'Canal'], ['nota', 'Avaliação'],
+    ['status', 'Status'], ['atendente', 'Atendente'], ['vinculo', 'Vínculo do atendente'],
+    ['q', 'Buscar'], ['periodo', 'Período'], ['canal', 'Canal'], ['nota', 'Avaliação'],
   ];
   // Derivado da fonte única filterCategories() → pares [key,label] que o `cbox` espera
   // (`pf:${scope}:${key}` p/ campos, `cattr:${key}` p/ contato). Comportamento inalterado.
