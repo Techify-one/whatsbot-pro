@@ -985,7 +985,15 @@ def update_protocolo_fields(atid: int, values: dict, assignee_user_id: int | Non
                 uname = str(u.get("name") or u.get("email") or "")
             assign_protocolo(atid, uid, assignee_name=uname,
                              propagate_to_conversations=propagate_assignee)
-    _broadcast_changed(at["contact_id"], atid)
+    # Os rótulos preenchidos FORA do fechamento também são fato de negócio: quem
+    # consome o barramento (ex.: espelho para o CDP) precisava esperar o
+    # protocolo fechar para ver o que o atendente escreveu — num protocolo que
+    # fica dias aberto, o dado chegava dias atrasado. O snapshot completo
+    # continua saindo no ``closed``; aqui vai o que acabou de ser gravado.
+    _broadcast_changed(at["contact_id"], atid, kind="fields_updated",
+                       contact_phone=at.get("contact_phone") or "",
+                       conversation_id=_latest_conversation_of_protocolo(atid),
+                       fields=_effective_values("protocolo", get_protocolo(atid) or at))
     return get_protocolo(atid), None
 
 
@@ -2623,10 +2631,15 @@ def set_protocolo_field(atid: int, scope: str, key: str, value) -> tuple[dict | 
             if not row:
                 return None, "Este protocolo ainda não tem atendimento vinculado."
             upsert_extra(conn, "atendimento", int(row["id"]), d, val)
-    _broadcast_changed(at.get("contact_id"), atid)
     out = [get_protocolo(atid)]
     _attach_latest_atendimento(out)
     _attach_contact_attrs(out)
+    # Mesmo motivo do ``update_protocolo_fields``: o drag no Kanban grava um
+    # rótulo, e isso é fato de negócio para quem assina o barramento.
+    _broadcast_changed(at.get("contact_id"), atid, kind="fields_updated",
+                       contact_phone=at.get("contact_phone") or "",
+                       conversation_id=_latest_conversation_of_protocolo(atid),
+                       fields=_effective_values("protocolo", out[0] or at))
     return out[0], None
 
 

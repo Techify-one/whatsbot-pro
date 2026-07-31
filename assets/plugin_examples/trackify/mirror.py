@@ -39,6 +39,18 @@ KIND_PROTO_RATED = "protocolo_rated"
 KIND_CONTACT_UPDATED = "contact_updated"
 KIND_CONTACT_TAGGED = "contact_tagged"
 KIND_CONTACT_UNTAGGED = "contact_untagged"
+KIND_PROTO_FIELDS = "protocolo_fields_updated"
+
+# Campos do cadastro do WhatsBot que viajam como DADO do evento. O e-mail também
+# viaja como IDENTIFICADOR (bloco `identity`), mas aqui ele aparece de novo para
+# a timeline mostrar "o que foi preenchido", que é a pergunta do atendente.
+_CADASTRO_FIELDS = {
+    "name": "cadastro_nome",
+    "email": "cadastro_email",
+    "profession": "cadastro_profissao",
+    "company": "cadastro_empresa",
+    "address": "cadastro_endereco",
+}
 
 # Título humano do evento na timeline do CDP. Sem isto o adapter do Trackify cai
 # no ``event_type`` e toda linha lê "protocolo_closed".
@@ -52,6 +64,7 @@ TITLES = {
     KIND_CONTACT_UPDATED: "Cadastro atualizado no atendimento",
     KIND_CONTACT_TAGGED: "Etiqueta aplicada",
     KIND_CONTACT_UNTAGGED: "Etiqueta removida",
+    KIND_PROTO_FIELDS: "Dados preenchidos no protocolo",
 }
 
 # Kinds descartáveis quando a fila passa do teto — o de menor valor no CDP.
@@ -317,12 +330,41 @@ def on_protocolo_rated(ctx, payload: dict) -> None:
                   "sugestao": payload.get("sugestao")})
 
 
+def _cadastro_data(contact: dict, origem: str) -> dict:
+    """O que o evento de cadastro LEVA. Antes daqui ia vazio (só um
+    ``{"conversation_id": None}``, que o filtro do ``enqueue`` descartava), então
+    a timeline do CDP dizia "Cadastro atualizado" sem dizer o quê — inútil para
+    quem abre a ficha. Manda os campos preenchidos + a lista do que existe.
+
+    Só valores NÃO vazios: o Trackify guarda o que chega, e mandar string vazia
+    criaria linha de campo sem informação nenhuma.
+    """
+    data: dict = {"origem": origem}
+    preenchidos = []
+    for col, slug in _CADASTRO_FIELDS.items():
+        val = (contact.get(col) or "")
+        val = val.strip() if isinstance(val, str) else val
+        if val:
+            data[slug] = str(val)
+            preenchidos.append(slug.replace("cadastro_", ""))
+    # Atributos personalizados do contato (é onde mora CPF e afins quando existem).
+    attrs = contact.get("custom_attributes")
+    if isinstance(attrs, dict):
+        for k, v in attrs.items():
+            if isinstance(v, (str, int, float)) and str(v).strip():
+                data[f"attr_{k}"] = str(v)
+                preenchidos.append(k)
+    if preenchidos:
+        data["alterados"] = ", ".join(preenchidos)
+    return data
+
+
 def on_contact_updated(ctx, payload: dict) -> None:
     """O atendente preencheu e-mail/nome/etc no painel.
 
     ⚠️ E-mail é IDENTIFICADOR no Trackify (prioridade 10, e 99,5% dos contatos do
     CDP têm um): um valor errado gruda o evento no contato errado. Por isso o
-    e-mail só viaja quando tem forma de e-mail.
+    e-mail só viaja como identidade quando tem forma de e-mail.
     """
     if not _enabled():
         return
@@ -337,7 +379,69 @@ def on_contact_updated(ctx, payload: dict) -> None:
     enqueue(KIND_CONTACT_UPDATED, contact=c,
             external_id=make_external_id(f"contact.{c.get('id')}.u{bucket}"),
             occurred_at=ts,
-            data={"conversation_id": None})
+            data=_cadastro_data(c, "painel"))
+
+
+# Tools do agente que gravam no CADASTRO do contato. A tool chama
+# ``ctx.contact.update_info()`` DIRETO no repo e o core só emite
+# ``contact.updated`` na rota do painel (server/routes/contacts.py) — então, sem
+# este gancho, tudo que a IA descobre sobre o cliente (e-mail, profissão,
+# empresa) nunca chegava ao CDP. Assinamos ``tool.after`` em vez de pedir um
+# emit novo ao core: é o padrão documentado para reagir a uma tool específica.
+CONTACT_WRITING_TOOLS = {"save_contact_info"}
+
+
+def on_tool_after(ctx, payload: dict) -> None:
+    """Espelha o cadastro quando a IA acabou de gravar algo nele."""
+    if not _enabled():
+        return
+    if (payload.get("tool_name") or "") not in CONTACT_WRITING_TOOLS:
+        return
+    if payload.get("error"):
+        return
+    c = _contact_by_phone(payload.get("phone") or "")
+    if not c:
+        return
+    ts = payload.get("ts") or time.time()
+    # MESMA janela e MESMO formato de external_id do caminho do painel: se o
+    # atendente e a IA mexerem no mesmo minuto, colapsa numa linha só em vez de
+    # duplicar o fato no CDP.
+    bucket = int(float(ts) // 60)
+    enqueue(KIND_CONTACT_UPDATED, contact=c,
+            external_id=make_external_id(f"contact.{c.get('id')}.u{bucket}"),
+            occurred_at=ts,
+            data=_cadastro_data(c, "ia"))
+
+
+def on_protocolo_fields(ctx, payload: dict) -> None:
+    """Rótulos gravados no protocolo FORA do fechamento.
+
+    Sem isto, o que o atendente (ou a IA) preenche só chegava ao CDP quando o
+    protocolo fosse finalizado — num protocolo que fica dias aberto, o dado
+    chegava dias atrasado. O fechamento continua mandando o snapshot completo;
+    aqui vai o incremento.
+    """
+    if not _enabled():
+        return
+    c = (_contact_by_id(payload.get("contact_id"))
+         or _contact_by_phone(payload.get("contact_phone") or ""))
+    pid = payload.get("protocolo_id")
+    ts = payload.get("ts") or time.time()
+    data = {"protocolo_id": pid, "conversation_id": payload.get("conversation_id")}
+    for k, v in (payload.get("fields") or {}).items():
+        if isinstance(v, (str, int, float)) and str(v).strip():
+            data[f"campo_{k}"] = str(v)
+        elif isinstance(v, list) and v:
+            data[f"campo_{k}"] = ", ".join(str(x) for x in v)
+    # Sem nenhum rótulo preenchido não há fato a registrar.
+    if len(data) <= 2:
+        return
+    # Endereçado pelo CONTEÚDO: salvar duas vezes os mesmos valores (o formulário
+    # reenvia tudo a cada save) colapsa em zero eventos novos no CDP.
+    stamp = _tags_hash([f"{k}={v}" for k, v in sorted(data.items())])
+    enqueue(KIND_PROTO_FIELDS, contact=c or {},
+            external_id=make_external_id(f"proto.{pid}.f{stamp}"),
+            occurred_at=ts, data=data)
 
 
 def _tags_hash(tags) -> str:

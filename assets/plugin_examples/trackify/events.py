@@ -24,8 +24,17 @@ EVENT_HANDLERS = {
     "protocolos.opened": mirror.on_protocolo_opened,
     "protocolos.closed": mirror.on_protocolo_closed,
     "protocolos.rated": mirror.on_protocolo_rated,
+    # Rótulos gravados no protocolo FORA do fechamento (o fechamento manda o
+    # snapshot completo; este manda o incremento, para o CDP não esperar dias
+    # por um protocolo que fica aberto).
+    "protocolos.fields_updated": mirror.on_protocolo_fields,
     # Contato
     "contact.updated": mirror.on_contact_updated,
     "contact.tagged": mirror.on_contact_tagged,
     "contact.untagged": mirror.on_contact_untagged,
+    # A IA gravando no cadastro. O core NÃO emite ``contact.updated`` nesse
+    # caminho — a tool ``save_contact_info`` escreve direto no repo e só a rota
+    # do painel emite. Sem este gancho, tudo que a IA descobre sobre o cliente
+    # (e-mail, profissão, empresa) nunca chegava ao CDP.
+    "tool.after": mirror.on_tool_after,
 }

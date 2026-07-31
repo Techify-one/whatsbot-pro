@@ -8,8 +8,16 @@
 //   2. o diagnóstico — conexão, schema e a FILA de envio — é operação, não config:
 //      é aqui que se descobre por que um evento não chegou no CDP.
 //
-// As demais opções (DSN, URL, ritmo, modo seco) seguem no formulário declarativo,
-// na aba "Configurações" abaixo.
+// ⚠️ CORREÇÃO: o comentário anterior dizia que "as demais opções seguem no
+// formulário declarativo, na aba Configurações abaixo". ESSA ABA NÃO EXISTE.
+// O core escolhe UM dos dois (PluginsManager.js): screen `config:true` OU
+// `PluginSettingsForm` — nunca os dois. Enquanto esta tela não tinha os campos,
+// as 11 settings de `settings.py` ficavam sem interface nenhuma.
+//
+// ⚠️ O `PUT /api/plugins/trackify/settings` é DESTRUTIVO por construção: o core
+// faz `Settings(**body)` e grava `model_dump()` inteiro, então todo campo ausente
+// volta ao DEFAULT. Um PUT parcial apagaria o `nexus_dsn` e derrubaria a leitura.
+// Por isso todo save daqui reenvia o objeto COMPLETO (`{...values, ...alterados}`).
 import { h } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
@@ -19,6 +27,31 @@ const html = htm.bind(h);
 
 const API = '/api/plugins/trackify';
 const MASK = '***';
+
+// Limites declarados em settings.py (Field ge/le). Espelhados aqui para o campo
+// já nascer válido — o PUT devolve 400 no valor fora da faixa.
+const NUM_LIMITS = {
+  cache_ttl_seconds: [0, 3600],
+  timeline_page_size: [5, 100],
+  statement_timeout_ms: [500, 30000],
+  rate_per_min: [1, 60],
+  max_age_days: [1, 90],
+};
+
+function clampNum(key, raw) {
+  const [lo, hi] = NUM_LIMITS[key];
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return lo;
+  return Math.min(Math.max(Math.round(n), lo), hi);
+}
+
+// Slug do canal, derivado da URL de ingestão — o texto de ajuda da chave era fixo
+// em "whatsbot" e mentia em qualquer instalação com outro slug.
+function channelSlug(url) {
+  const parts = String(url || '').split('?')[0].replace(/\/+$/, '').split('/');
+  const last = parts[parts.length - 1];
+  return last && last !== 'ingestion' ? last : '';
+}
 
 async function req(method, path, body) {
   const init = { method, headers: authHeaders() };
@@ -79,7 +112,201 @@ function Health({ data, onRefresh, busy }) {
     </section>`;
 }
 
-function KeyField({ state, onSave, busy }) {
+function Toggle({ checked, onChange, label, hint, disabled }) {
+  return html`
+    <label class=${`flex items-start gap-2.5 ${disabled ? 'opacity-50' : 'cursor-pointer'}`}>
+      <input type="checkbox" class="mt-0.5 accent-current text-wa-teal"
+        checked=${!!checked} disabled=${disabled}
+        onChange=${(e) => onChange(e.target.checked)} />
+      <span>
+        <span class="text-[13px] text-wa-text">${label}</span>
+        ${hint ? html`<span class="block text-[11px] text-wa-secondary">${hint}</span>` : null}
+      </span>
+    </label>`;
+}
+
+function Field({ label, hint, children }) {
+  return html`
+    <div>
+      <label class="block text-xs font-medium text-wa-text mb-1">${label}</label>
+      ${children}
+      ${hint ? html`<p class="text-[11px] text-wa-secondary mt-1">${hint}</p>` : null}
+    </div>`;
+}
+
+/** Espelho de eventos (escrita). É a seção que estava faltando: sem ela não havia
+ *  jeito de ligar/desligar o espelho nem o modo seco pela interface. */
+function MirrorSettings({ values, onSave, busy }) {
+  const [v, setV] = useState(null);
+  const [msg, setMsg] = useState('');
+  useEffect(() => { setV(values ? { ...values } : null); }, [values]);
+  if (!v) return null;
+
+  const set = (k) => (val) => { setV({ ...v, [k]: val }); setMsg(''); };
+  const live = v.mirror_enabled && !v.mirror_dry_run;
+
+  async function save(e) {
+    e.preventDefault();
+    setMsg('');
+    // Objeto COMPLETO: o PUT do core reseta todo campo ausente (ver topo).
+    const r = await onSave({
+      ...values,
+      mirror_enabled: !!v.mirror_enabled,
+      mirror_dry_run: !!v.mirror_dry_run,
+      ingestion_url: String(v.ingestion_url || '').trim(),
+      mirror_contact_types: String(v.mirror_contact_types || 'whatsapp').trim(),
+      rate_per_min: clampNum('rate_per_min', v.rate_per_min),
+      max_age_days: clampNum('max_age_days', v.max_age_days),
+    });
+    setMsg(r && r.ok ? 'Salvo.' : `Não foi possível salvar${r && r.error ? `: ${r.error}` : '.'}`);
+  }
+
+  return html`
+    <section class="border border-wa-border rounded-xl p-4 bg-wa-panel">
+      <h3 class="text-sm font-semibold text-wa-text mb-3">Espelho de eventos (envio ao Trackify)</h3>
+      <form onSubmit=${save} class="space-y-3">
+        <${Toggle} checked=${v.mirror_enabled} onChange=${set('mirror_enabled')}
+          label="Espelhar acontecimentos no Trackify"
+          hint="Conversas, protocolos e contatos viram eventos no CDP. Exige o canal e os mapeamentos criados lá." />
+        <${Toggle} checked=${v.mirror_dry_run} onChange=${set('mirror_dry_run')}
+          disabled=${!v.mirror_enabled}
+          label="Modo seco (não envia de verdade)"
+          hint="Enfileira e monta o envelope, mas não posta. Confira a fila antes de tocar no CDP." />
+
+        ${live ? html`
+          <p class="text-[12px] rounded-md px-3 py-2 bg-amber-500/15 text-amber-600 dark:text-amber-400">
+            Envio real ligado. Vale para <strong>toda</strong> conversa elegível — não dá para
+            limitar a um contato. Número que ainda não existe no Trackify vira cadastro novo lá,
+            e contato no CDP só sai por exclusão suave.
+          </p>` : null}
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="sm:col-span-2">
+            <${Field} label="URL de ingestão"
+              hint="Ex.: https://SEU-NEXUS/trackify/api/v1/ingestion/<canal>">
+              <input type="text" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+                placeholder="https://…/api/v1/ingestion/whatsbot"
+                value=${v.ingestion_url || ''} onInput=${(e) => set('ingestion_url')(e.target.value)} />
+            <//>
+          </div>
+          <${Field} label="Envios por minuto" hint="Teto do Trackify: 60/min por IP. Nunca rode no teto.">
+            <input type="number" min="1" max="60" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+              value=${v.rate_per_min} onInput=${(e) => set('rate_per_min')(e.target.value)} />
+          <//>
+          <${Field} label="Idade máxima na fila (dias)" hint="Evento não entregue nesse prazo é descartado com contador.">
+            <input type="number" min="1" max="90" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+              value=${v.max_age_days} onInput=${(e) => set('max_age_days')(e.target.value)} />
+          <//>
+          <div class="sm:col-span-2">
+            <${Field} label="Tipos de contato a espelhar"
+              hint="Separados por vírgula. Grupos nunca são espelhados.">
+              <input type="text" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+                value=${v.mirror_contact_types || ''}
+                onInput=${(e) => set('mirror_contact_types')(e.target.value)} />
+            <//>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button type="submit" disabled=${busy}
+            class="px-3 py-1.5 rounded-md text-[12px] bg-wa-teal/15 text-wa-teal hover:bg-wa-teal/25 disabled:opacity-50 transition-colors">
+            Salvar espelho
+          </button>
+          ${msg ? html`<span class="text-[12px] text-wa-secondary">${msg}</span>` : null}
+        </div>
+      </form>
+    </section>`;
+}
+
+/** Leitura do CDP. O DSN é segredo: o GET do core devolve em claro, então ele fica
+ *  no estado (para o reenvio completo) mas nunca é RENDERIZADO — só substituível. */
+function ReadSettings({ values, onSave, busy }) {
+  const [v, setV] = useState(null);
+  const [newDsn, setNewDsn] = useState(null);   // null = manter o atual
+  const [msg, setMsg] = useState('');
+  useEffect(() => { setV(values ? { ...values } : null); setNewDsn(null); }, [values]);
+  if (!v) return null;
+
+  const set = (k) => (val) => { setV({ ...v, [k]: val }); setMsg(''); };
+
+  async function save(e) {
+    e.preventDefault();
+    setMsg('');
+    const r = await onSave({
+      ...values,
+      nexus_dsn: newDsn === null ? values.nexus_dsn : newDsn.trim(),
+      nexus_base_url: String(v.nexus_base_url || '').trim(),
+      cache_ttl_seconds: clampNum('cache_ttl_seconds', v.cache_ttl_seconds),
+      timeline_page_size: clampNum('timeline_page_size', v.timeline_page_size),
+      statement_timeout_ms: clampNum('statement_timeout_ms', v.statement_timeout_ms),
+    });
+    setMsg(r && r.ok ? 'Salvo.' : `Não foi possível salvar${r && r.error ? `: ${r.error}` : '.'}`);
+  }
+
+  return html`
+    <section class="border border-wa-border rounded-xl p-4 bg-wa-panel">
+      <h3 class="text-sm font-semibold text-wa-text mb-3">Leitura do Trackify (jornada do contato)</h3>
+      <form onSubmit=${save} class="space-y-3">
+        <${Field} label="DSN do Nexus (somente leitura)"
+          hint="Conexão com o banco onde vivem as tabelas do Trackify. Nunca é exibido nem registrado em log.">
+          ${newDsn === null
+            ? html`
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-[13px] text-wa-secondary">
+                  ${values.nexus_dsn ? '•••••••• (configurado)' : 'não configurado'}
+                </span>
+                <button type="button" onClick=${() => setNewDsn('')}
+                  class="px-2 py-1 rounded-md text-[11px] bg-wa-hover text-wa-text hover:bg-wa-border transition-colors">
+                  ${values.nexus_dsn ? 'Substituir' : 'Definir'}
+                </button>
+              </div>`
+            : html`
+              <div class="flex flex-wrap items-center gap-2">
+                <input type="password" autocomplete="new-password"
+                  class="wa-field px-2.5 py-1.5 text-sm rounded-md flex-1 min-w-[240px]"
+                  placeholder="postgresql+psycopg://usuario:senha@host:5432/banco"
+                  value=${newDsn} onInput=${(e) => setNewDsn(e.target.value)} />
+                <button type="button" onClick=${() => setNewDsn(null)}
+                  class="px-2 py-1 rounded-md text-[11px] bg-wa-hover text-wa-text hover:bg-wa-border transition-colors">
+                  Cancelar
+                </button>
+              </div>`}
+        <//>
+
+        <${Field} label="URL do Trackify (botão “Abrir no Trackify”)"
+          hint="Base pública do módulo, sem barra no fim. Vazio esconde o botão.">
+          <input type="text" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+            placeholder="https://SEU-NEXUS/trackify"
+            value=${v.nexus_base_url || ''} onInput=${(e) => set('nexus_base_url')(e.target.value)} />
+        <//>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <${Field} label="Cache da jornada (s)" hint="0 desliga.">
+            <input type="number" min="0" max="3600" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+              value=${v.cache_ttl_seconds} onInput=${(e) => set('cache_ttl_seconds')(e.target.value)} />
+          <//>
+          <${Field} label="Eventos por página">
+            <input type="number" min="5" max="100" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+              value=${v.timeline_page_size} onInput=${(e) => set('timeline_page_size')(e.target.value)} />
+          <//>
+          <${Field} label="Tempo máx. da consulta (ms)">
+            <input type="number" min="500" max="30000" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+              value=${v.statement_timeout_ms} onInput=${(e) => set('statement_timeout_ms')(e.target.value)} />
+          <//>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button type="submit" disabled=${busy}
+            class="px-3 py-1.5 rounded-md text-[12px] bg-wa-teal/15 text-wa-teal hover:bg-wa-teal/25 disabled:opacity-50 transition-colors">
+            Salvar leitura
+          </button>
+          ${msg ? html`<span class="text-[12px] text-wa-secondary">${msg}</span>` : null}
+        </div>
+      </form>
+    </section>`;
+}
+
+function KeyField({ state, slug, onSave, busy }) {
   const [value, setValue] = useState('');
   const [msg, setMsg] = useState('');
   useEffect(() => { setValue(state && state.set ? MASK : ''); }, [state && state.set]);
@@ -98,8 +325,9 @@ function KeyField({ state, onSave, busy }) {
       <h3 class="text-sm font-semibold text-wa-text mb-1">Chave de ingestão</h3>
       <p class="text-[12px] text-wa-secondary mb-3">
         A mesma chave que está em <strong>config.auth.apiKey</strong> do canal
-        <code>whatsbot</code> no Trackify. Enviada no cabeçalho
-        <code>X-Trackify-Key</code>. Deixe o <code>***</code> intacto para não alterá-la.
+        ${slug ? html`<code>${slug}</code>` : 'de ingestão'} no Trackify. Enviada no
+        cabeçalho <code>X-Trackify-Key</code>. Deixe o <code>***</code> intacto para
+        não alterá-la.
       </p>
       <form onSubmit=${save} class="flex flex-wrap items-center gap-2">
         <input type="text" class="wa-field px-2.5 py-1.5 text-sm rounded-md flex-1 min-w-[240px]"
@@ -188,6 +416,7 @@ export default function TrackifyConfig() {
   const [health, setHealth] = useState(null);
   const [keyState, setKeyState] = useState(null);
   const [queue, setQueue] = useState(null);
+  const [settings, setSettings] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const loadHealth = useCallback(async () => {
@@ -211,7 +440,28 @@ export default function TrackifyConfig() {
     } finally { setBusy(false); }
   }, []);
 
-  useEffect(() => { loadHealth(); loadKey(); loadQueue(); }, [loadHealth, loadKey, loadQueue]);
+  // Rota do CORE (`/api/plugins/<id>/settings`), não do router do plugin — cai no
+  // mesmo prefixo mas o plugin não declara `/settings`, então resolve no core.
+  const loadSettings = useCallback(async () => {
+    const r = await req('GET', '/settings');
+    if (r && r.ok && r.data) setSettings(r.data.values || null);
+  }, []);
+
+  useEffect(() => {
+    loadHealth(); loadKey(); loadQueue(); loadSettings();
+  }, [loadHealth, loadKey, loadQueue, loadSettings]);
+
+  const saveSettings = useCallback(async (full) => {
+    setBusy(true);
+    try {
+      const r = await req('PUT', '/settings', full);
+      if (r && r.ok) {
+        await loadSettings();
+        await loadHealth();   // o farol "Espelho de eventos" mora no cartão de cima
+      }
+      return r;
+    } finally { setBusy(false); }
+  }, [loadSettings, loadHealth]);
 
   const saveKey = useCallback(async (value) => {
     setBusy(true);
@@ -233,7 +483,10 @@ export default function TrackifyConfig() {
   return html`
     <div class="space-y-4">
       <${Health} data=${health} onRefresh=${loadHealth} busy=${busy} />
-      <${KeyField} state=${keyState} onSave=${saveKey} busy=${busy} />
+      <${MirrorSettings} values=${settings} onSave=${saveSettings} busy=${busy} />
+      <${KeyField} state=${keyState} slug=${channelSlug(settings && settings.ingestion_url)}
+        onSave=${saveKey} busy=${busy} />
+      <${ReadSettings} values=${settings} onSave=${saveSettings} busy=${busy} />
       <${Queue} data=${queue} onRefresh=${loadQueue} onRequeue=${requeue} busy=${busy} />
     </div>`;
 }
