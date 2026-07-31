@@ -1818,7 +1818,9 @@ check("GET /channels/default -> mask keeps last 4", _creds.get("access_token", "
 # CRUD (plano 02 Fase 2)
 r = client.post("/api/channels", json={
     "id": "cloud_teste", "provider": "whatsapp_cloud", "display_name": "Cloud Teste",
-    "credentials": {"access_token": "EAAtokenSecreto123", "phone_number_id": "55123",
+    "credentials": {"access_token": "EAAtokenSecreto123",
+                    "app_secret": "appSecretCloudTeste",
+                    "phone_number_id": "55123",
                     "verify_token": "vtok_abc"}})
 check("POST /channels (cloud) -> 200", r.status_code == 200)
 check("POST /channels -> token mascarado na volta",
@@ -1831,7 +1833,11 @@ r = client.post("/api/channels", json={"id": "cloud_teste", "provider": "whatsap
 check("POST /channels id duplicado -> 409", r.status_code == 409)
 # Auto-geração do id quando o body não envia "id" (usuário só escolhe display_name)
 import re as _re_chan
-r = client.post("/api/channels", json={"provider": "whatsapp_cloud", "display_name": "Auto Cloud"})
+r = client.post("/api/channels", json={
+    "provider": "whatsapp_cloud", "display_name": "Auto Cloud",
+    "credentials": {"access_token": "tokAuto", "app_secret": "secAuto",
+                    "phone_number_id": "PN_AUTO_CLOUD",
+                    "verify_token": "vtAuto"}})
 check("POST /channels sem id -> 200", r.status_code == 200)
 check("POST /channels sem id -> id auto <provider>_<hex>",
       bool(_re_chan.match(r"^whatsapp_cloud_[0-9a-f]{8}$", (r.json()["data"] or {}).get("id", ""))))
@@ -1977,7 +1983,9 @@ check("DELETE purge -> credenciais removidas", _ccrepo.get("cloud_teste", "acces
 
 # ── Sync de nome canal→inbox + listagem sem órfãs (plano inboxes/canais §4.1/§4.6) ──
 r = client.post("/api/channels", json={
-    "id": "sync_ch", "provider": "whatsapp_cloud", "display_name": "Nome Antigo"})
+    "id": "sync_ch", "provider": "whatsapp_cloud", "display_name": "Nome Antigo",
+    "credentials": {"access_token": "tokSync", "app_secret": "secSync",
+                    "phone_number_id": "PN_SYNC", "verify_token": "vtSync"}})
 check("POST /channels (sync_ch) -> 200", r.status_code == 200)
 _inbx = client.get("/api/inboxes").json()["data"]
 _inbx = _inbx if isinstance(_inbx, list) else _inbx.get("inboxes", [])
@@ -6875,28 +6883,40 @@ check("descriptor telegram registrado -> aparece com bot_token required",
 check("descriptor whatsapp_cloud -> creds + templates + webhook_url pós-criação",
       "whatsapp_cloud" in _by33
       and {f["key"] for f in _by33["whatsapp_cloud"]["credential_fields"]}
-          >= {"access_token", "phone_number_id", "verify_token"}
+          >= {"access_token", "app_secret", "phone_number_id", "verify_token"}
+      and any(f["key"] == "app_secret" and f.get("required")
+              for f in _by33["whatsapp_cloud"]["credential_fields"])
       and _by33["whatsapp_cloud"]["capabilities"]["templates"] is True
       and _by33["whatsapp_cloud"]["post_create"]["kind"] == "webhook_url")
-check("required_credentials reflete o descriptor (cloud)",
+check("required_credentials reflete saúde operacional, não migração de create",
       set(_pr33["required_credentials"].get("whatsapp_cloud", []))
-      >= {"access_token", "phone_number_id", "verify_token"})
+      == {"access_token", "phone_number_id", "verify_token"})
+
+r = client.post("/api/channels", json={
+    "id": "p32_cloud_sem_secret", "provider": "whatsapp_cloud",
+    "display_name": "Cloud inseguro",
+    "credentials": {"access_token": "tokX", "phone_number_id": "PN_NO_SECRET",
+                    "verify_token": "vtX"}})
+check("cloud novo sem app_secret -> 400", r.status_code == 400)
 
 # whatsapp_cloud: two channels with the same phone_number_id -> 409
-_p32_cloud = {"access_token": "tokA", "phone_number_id": "PN_DEDUP_1", "verify_token": "vtA"}
+_p32_cloud = {"access_token": "tokA", "app_secret": "secA",
+              "phone_number_id": "PN_DEDUP_1", "verify_token": "vtA"}
 r = client.post("/api/channels", json={
     "id": "p32_cloud_a", "provider": "whatsapp_cloud", "display_name": "Cloud A",
     "credentials": _p32_cloud})
 check("dedup: 1º cloud (phone_number_id novo) -> 200", r.status_code == 200)
 r = client.post("/api/channels", json={
     "id": "p32_cloud_b", "provider": "whatsapp_cloud", "display_name": "Cloud B",
-    "credentials": {"access_token": "tokB", "phone_number_id": "PN_DEDUP_1", "verify_token": "vtB"}})
+    "credentials": {"access_token": "tokB", "app_secret": "secB",
+                    "phone_number_id": "PN_DEDUP_1", "verify_token": "vtB"}})
 check("dedup: 2º cloud mesmo phone_number_id -> 409", r.status_code == 409)
 
 # Different phone_number_id -> OK
 r = client.post("/api/channels", json={
     "id": "p32_cloud_c", "provider": "whatsapp_cloud", "display_name": "Cloud C",
-    "credentials": {"access_token": "tokC", "phone_number_id": "PN_DEDUP_2", "verify_token": "vtC"}})
+    "credentials": {"access_token": "tokC", "app_secret": "secC",
+                    "phone_number_id": "PN_DEDUP_2", "verify_token": "vtC"}})
 check("dedup: cloud phone_number_id diferente -> 200", r.status_code == 200)
 
 # telegram: same bot_id (parsed from {bot_id}:{hash}) -> 409
@@ -6912,7 +6932,8 @@ check("dedup: 2º telegram mesmo bot_id -> 409", r.status_code == 409)
 # Same numeric value across DIFFERENT providers/kinds is NOT a duplicate.
 r = client.post("/api/channels", json={
     "id": "p32_cloud_num", "provider": "whatsapp_cloud", "display_name": "Cloud Num",
-    "credentials": {"access_token": "tokN", "phone_number_id": "700700", "verify_token": "vtN"}})
+    "credentials": {"access_token": "tokN", "app_secret": "secN",
+                    "phone_number_id": "700700", "verify_token": "vtN"}})
 check("dedup: mesmo valor em provider/kind diferente -> 200 (não é duplicata)",
       r.status_code == 200)
 
@@ -7076,7 +7097,8 @@ def _p76_creds(channel_id):
 
 r = client.post("/api/channels", json={
     "id": "p76_cloud", "provider": "whatsapp_cloud", "display_name": "Cloud P76",
-    "credentials": {"access_token": "EAAsegredoLongo1234", "phone_number_id": "PN_P76",
+    "credentials": {"access_token": "EAAsegredoLongo1234",
+                    "app_secret": "appsecret_cloud_p76", "phone_number_id": "PN_P76",
                     "waba_id": "WABA_P76", "verify_token": "vtok_p76"}})
 check("P76: cria canal cloud -> 200", r.status_code == 200)
 _c76 = _p76_creds("p76_cloud")
@@ -7084,6 +7106,9 @@ check("P76: phone_number_id (type=text) em claro", _c76.get("phone_number_id") =
 check("P76: waba_id (type=text) em claro", _c76.get("waba_id") == "WABA_P76")
 check("P76: access_token (type=secret) mascarado",
       _c76.get("access_token", "").startswith("••••") and "segredo" not in _c76.get("access_token", ""))
+check("P76: app_secret (type=secret) mascarado",
+      _c76.get("app_secret", "").startswith("••••")
+      and "appsecret" not in _c76.get("app_secret", ""))
 check("P76: verify_token (token_suggest) mascarado",
       _c76.get("verify_token", "").startswith("••••"))
 

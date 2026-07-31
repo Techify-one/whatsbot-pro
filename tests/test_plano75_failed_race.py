@@ -205,6 +205,33 @@ def test_failure_arriving_before_the_row_is_recovered(build_app, pending, fast_r
     assert len(_error_cards(pending)) == 1
 
 
+def test_writer_insert_between_first_update_and_exists_is_recovered(
+        build_app, pending, fast_retry, monkeypatch):
+    """A row aparece no microssegundo mark→exists: o segundo UPDATE deve ganhá-la."""
+    fast_retry(interval=0.3)
+    built = build_app(["whatsapp_cloud"])
+    real_exists = message_repo.exists_by_msg_id
+    inserted = False
+
+    def _insert_then_check(msg_id):
+        nonlocal inserted
+        if not inserted:
+            inserted = True
+            _write_outgoing_row(pending)
+        return real_exists(msg_id)
+
+    monkeypatch.setattr(message_repo, "exists_by_msg_id", _insert_then_check)
+    r = _post(built, pending, _meta_errors(
+        131026, "Undeliverable", "writer race"))
+    assert r.status_code == 200, r.text
+
+    # Sem esperar o retry: o segundo mark dentro do próprio request encontrou a
+    # row recém-inserida, pintou a bolha e gravou um único card.
+    assert inserted is True
+    assert _status_of(pending) == "failed"
+    assert len(_error_cards(pending)) == 1
+
+
 def test_row_that_never_appears_is_dropped_quietly(build_app, pending, fast_retry):
     """msg_id de outra instalação / mensagem apagada: o webhook responde 200, a
     retentativa se esgota, sobra um WARNING — nenhum card, nenhuma exceção."""

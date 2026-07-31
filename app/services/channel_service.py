@@ -179,8 +179,10 @@ def required_credentials(deps, provider: str) -> list[str]:
 
     Probes a throwaway instance (pure constructor) to read
     ``ChannelCapabilities.required_credentials``. Best-effort → ``[]`` on any
-    failure, so a probe issue never spuriously blocks creation. Never branches on
-    provider name (the knowledge lives in each provider).
+    failure, so a probe issue never spuriously marks a live channel as unhealthy.
+    New-channel validation is intentionally handled by
+    :func:`creation_required_credentials`. Never branches on provider name (the
+    knowledge lives in each provider).
     """
     registry = getattr(deps, "channel_registry", None)
     if registry is None:
@@ -194,6 +196,28 @@ def required_credentials(deps, provider: str) -> list[str]:
         caps = getattr(inst, "capabilities", None)
         return list(getattr(caps, "required_credentials", ()) or ())
     except Exception:
+        return []
+
+
+def creation_required_credentials(deps, provider: str) -> list[str]:
+    """Credential keys mandatory when creating a NEW channel.
+
+    Creation policy already lives in the provider descriptor's
+    ``credential_fields[].required`` flag.  It is intentionally distinct from
+    :func:`required_credentials`, which describes ongoing operational health for
+    existing rows and feeds the panel's zombie-channel warning.  Usually the two
+    sets coincide; a provider can use a stricter creation policy during a legacy
+    migration without falsely marking old, compatible rows as disconnected.
+    """
+    try:
+        desc = provider_descriptor(deps, provider)
+        return [
+            str(field.get("key"))
+            for field in desc.get("credential_fields") or []
+            if field.get("key") and field.get("required")
+        ]
+    except Exception:
+        # Keep the historical best-effort behavior for a broken provider probe.
         return []
 
 
@@ -445,8 +469,12 @@ def provider_descriptor(deps, provider: str) -> dict:
 
 
 async def providers(deps) -> dict:
-    """Available providers as full descriptors (plano 33) + a flat required-
-    credentials map (kept for the create-form gate + back-compat).
+    """Available providers as full descriptors (plano 33) + operational creds.
+
+    ``credential_fields[].required`` drives NEW-channel form/create validation.
+    The flat ``required_credentials`` map is intentionally the ongoing health
+    contract consumed by ``ChannelCard``; keeping those meanings separate lets a
+    provider tighten new creation without labelling compatible legacy rows dead.
 
     Offer = every provider currently REGISTERED in the live registry (its backing
     plugin is enabled). ``ALLOWED_PROVIDERS`` is no longer the source of the offer
@@ -456,7 +484,7 @@ async def providers(deps) -> dict:
     names = sorted(registry.providers()) if registry is not None else []
     descriptors = [provider_descriptor(deps, p) for p in names]
     required = {
-        d["provider"]: [f["key"] for f in d["credential_fields"] if f.get("required")]
+        d["provider"]: required_credentials(deps, d["provider"])
         for d in descriptors
     }
     return {"providers": descriptors, "required_credentials": required}

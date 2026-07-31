@@ -215,6 +215,7 @@ def test_failed_status_emits_message_failed_on_the_bus(build_app, outgoing, bus_
     assert payload["phone"] == outgoing["phone"]
     assert payload["channel_id"] == outgoing["channel_id"]
     assert payload["is_new"] is True
+    assert payload["is_redelivery"] is False
 
 
 def test_message_failed_is_not_emitted_for_healthy_statuses(build_app, outgoing,
@@ -242,9 +243,29 @@ def test_redelivery_keeps_the_event_but_flags_is_new_false(build_app, outgoing,
     emitted = _for_msg(bus_capture.emitted("message.failed"), outgoing["msg_id"])
     assert len(emitted) == 2, emitted
     assert [p["is_new"] for p in emitted] == [True, False]
+    assert [p["is_redelivery"] for p in emitted] == [False, True]
     # A 2ª passada não acha a row (já 'failed') ⇒ sem conversa no payload.
     assert emitted[0]["conversation_id"] == outgoing["conversation"]["id"]
     assert emitted[1]["conversation_id"] is None
+
+
+def test_unmatched_failure_snapshot_is_not_called_redelivery(
+        build_app, outgoing, bus_capture):
+    """Status antes do writer: is_new=False, mas é a PRIMEIRA falha, não retry."""
+    built = build_app(["whatsapp_cloud"])
+    unknown_mid = f"wamid.p75race.{uuid.uuid4().hex[:16]}"
+
+    r = built.client.post(
+        f"/api/webhook/whatsapp_cloud/{outgoing['channel_id']}",
+        json=_status_payload(unknown_mid, outgoing["phone"], "failed",
+                             _meta_errors()))
+    assert r.status_code == 200, r.text
+    bus_capture.drain()
+
+    emitted = _for_msg(bus_capture.emitted("message.failed"), unknown_mid)
+    assert len(emitted) == 1, emitted
+    assert emitted[0]["is_new"] is False
+    assert emitted[0]["is_redelivery"] is False
 
 
 def test_message_failed_survives_an_errors_array_that_meta_omitted(build_app,
@@ -265,6 +286,26 @@ def test_message_failed_survives_an_errors_array_that_meta_omitted(build_app,
     assert payload["error_code"] is None
     assert payload["error_title"] == ""
     assert payload["error_details"] == ""
+
+
+def test_failed_status_without_message_id_is_still_accepted(
+        build_app, outgoing, bus_capture):
+    """Payload malformado da Meta não pode acessar snapshot não inicializado."""
+    built = build_app(["whatsapp_cloud"])
+    payload = _status_payload(outgoing["msg_id"], outgoing["phone"], "failed",
+                              _meta_errors())
+    del payload["entry"][0]["changes"][0]["value"]["statuses"][0]["id"]
+
+    r = built.client.post(
+        f"/api/webhook/whatsapp_cloud/{outgoing['channel_id']}", json=payload)
+    assert r.status_code == 200, r.text
+    bus_capture.drain()
+
+    emitted = bus_capture.emitted("message.failed")
+    assert len(emitted) == 1, emitted
+    assert emitted[0]["msg_id"] == ""
+    assert emitted[0]["is_new"] is False
+    assert emitted[0]["is_redelivery"] is False
 
 
 # ── receipt.changed SAIU do `if delivered/read` ─────────────────────────────

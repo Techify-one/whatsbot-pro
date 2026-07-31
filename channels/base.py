@@ -578,6 +578,25 @@ class Channel(ABC):
         """
         return True
 
+    def verify_inbound_signature_result(self, raw_body: bytes,
+                                        headers) -> tuple[bool, bool]:
+        """Return ``(accepted, authenticated)`` for one atomic verification.
+
+        ``verify_inbound_signature`` may deliberately accept unsigned traffic for
+        transports without signatures and for legacy channels missing a newly
+        introduced secret. Filters with external side effects need to distinguish
+        that compatibility path from a cryptographically authenticated body.
+
+        The two facts belong to ONE verdict: reading a mutable credential again
+        after verification creates a TOCTOU window where a secret added between
+        the reads could label an unsigned payload as authenticated. The default
+        delegates the accept/reject decision to the legacy hook and conservatively
+        reports ``authenticated=False``. Providers that expose authenticated
+        provenance override this method, snapshot their secret once and derive
+        both booleans from that same snapshot.
+        """
+        return bool(self.verify_inbound_signature(raw_body, headers)), False
+
     @abstractmethod
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
         """Translate a provider-specific raw payload into InboundEvents."""

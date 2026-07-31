@@ -95,6 +95,10 @@ def _sign(body: bytes, secret: str = APP_SECRET) -> str:
 def test_base_channel_never_verifies_by_default():
     """O default do contrato é 'não verifica' — GOWA/telegram inalterados."""
     assert Channel.verify_inbound_signature(object(), b"qualquer coisa", {}) is True
+    probe = _types.SimpleNamespace(
+        verify_inbound_signature=lambda raw_body, headers: True)
+    assert Channel.verify_inbound_signature_result(
+        probe, b"qualquer coisa", {}) == (True, False)
 
 
 def test_signature_valid_and_invalid():

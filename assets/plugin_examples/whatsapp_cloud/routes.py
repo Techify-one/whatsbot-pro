@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Body, Request
 
 from db.repositories import channel_credential_repo, config_repo
 from plugins.context import core_permission, make_plugin_db, plugin_permission
@@ -62,6 +64,21 @@ def _audit(action: str, channel_id: str, **kw) -> None:
         _core_audit(PLUGIN_ID, action, resource_type="channel",
                     resource_id=channel_id, **kw)
     except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
+
+def _audit_plugin(action: str, **kw) -> None:
+    """Auditoria de config GLOBAL do plugin (não é por canal → ``plugin:<id>``).
+
+    O alerta da conta Meta é uma configuração da instalação inteira (token do bot,
+    grupo de destino, o que alertar), então cai no recurso do plugin — ao contrário
+    das ações de webhook/template, que são sobre UM canal.
+    """
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, **kw)
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -491,3 +508,202 @@ async def set_template_archived(body: dict, request: Request):
 # create, DELETE), backed by ``OutboundRouter`` → ``WhatsAppCloudChannel`` Graph
 # calls. The old plugin ``GET /templates`` stub was removed to avoid confusion —
 # it always returned ``[]`` and nothing consumed it.
+
+
+# ── Alertas da conta Meta via Telegram (plano 84) ────────────────────────────
+# A configuração inteira do alerta mora AQUI, na aba "Configurar" deste plugin
+# (regra do CLAUDE.md: opção de plugin nunca vira aba no painel de Configurações
+# do core). Espelha o contrato já em produção no plugin ``gowa``: o token é
+# secreto, então o GET devolve só ``bot_token_set`` e o PUT só grava quando vem
+# um valor real — recarregar a tela nunca vaza o segredo e salvar sem digitar
+# não apaga o token guardado.
+
+_ALERT_MASK = "••••••••"
+_DEFAULT_TZ = "America/Sao_Paulo"
+
+# Lista completa de fusos IANA (zoneinfo — offline, autoritativa), cacheada por
+# processo; o rótulo traz o offset atual para o usuário se localizar.
+_TZ_CACHE: list[dict] | None = None
+
+
+def _alert_cfg(key: str, default=None):
+    return config_repo.get(f"plugin.{PLUGIN_ID}.{key}", default)
+
+
+def _valid_tz(name: str) -> bool:
+    if not name:
+        return False
+    try:
+        ZoneInfo(name)
+        return True
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return False
+
+
+def _all_timezones() -> list[dict]:
+    global _TZ_CACHE
+    if _TZ_CACHE is not None:
+        return _TZ_CACHE
+    now = datetime.now()
+    items: list[tuple[int, str, dict]] = []
+    for name in available_timezones():
+        try:
+            off = now.astimezone(ZoneInfo(name)).utcoffset()
+        except Exception:  # noqa: BLE001
+            continue
+        mins = int(off.total_seconds() // 60) if off else 0
+        sign = "+" if mins >= 0 else "-"
+        hh, mm = divmod(abs(mins), 60)
+        items.append((mins, name, {
+            "value": name, "label": f"(UTC{sign}{hh:02d}:{mm:02d}) {name.replace('_', ' ')}"}))
+    items.sort(key=lambda t: (t[0], t[1]))
+    _TZ_CACHE = [it[2] for it in items]
+    return _TZ_CACHE
+
+
+def _alert_groups_view() -> list[dict]:
+    """Catálogo de grupos de alerta + o estado efetivo de cada um.
+
+    A fonte do catálogo é ``alerts.ALERT_GROUPS`` (um lugar só): a tela renderiza
+    o que o motor conhece, então acrescentar um grupo novo não exige mexer no JS.
+    """
+    from . import alerts
+    saved = alerts._parse_groups(_alert_cfg("alert_groups", None))
+    return [{"key": key, "label": meta["label"],
+             "enabled": alerts.group_enabled(saved, key),
+             "default": bool(meta["default"])}
+            for key, meta in alerts.ALERT_GROUPS.items()]
+
+
+@router.get("/alert-settings", dependencies=[core_permission("channel.manage")])
+async def get_alert_settings(tz: str = ""):
+    """Configuração atual do alerta (token MASCARADO) + catálogo de grupos.
+
+    O fuso do navegador (query ``tz``) é persistido para o alerta exibir a hora
+    certa sem o usuário precisar escolher (o servidor roda em UTC)."""
+    detected_tz = tz.strip() if _valid_tz(tz.strip()) else ""
+
+    def _load():
+        from . import alerts
+        if detected_tz:
+            config_repo.set(f"plugin.{PLUGIN_ID}.alert_timezone_auto", detected_tz)
+        token = (_alert_cfg("alert_bot_token", "") or "").strip()
+        cfg = alerts.alert_config()
+        tz_manual = str(_alert_cfg("alert_timezone", "") or "")
+        tz_auto = (str(_alert_cfg("alert_timezone_auto", "") or "")
+                   or detected_tz or _DEFAULT_TZ)
+        return {
+            "enabled": cfg["enabled"],
+            "bot_token_set": bool(token),
+            # Últimos 4 dígitos: confere QUAL bot está salvo sem revelar o token.
+            "bot_token_hint": (token[-4:] if len(token) > 4 else ""),
+            "chat_id": cfg["chat_id"],
+            "interval_min": cfg["interval_min"],
+            "quality_poll_min": cfg["quality_poll_min"],
+            "timezone": tz_manual,
+            "timezone_auto": tz_auto,
+            "timezone_effective": tz_manual or tz_auto,
+            "timezones": _all_timezones(),
+            "groups": _alert_groups_view(),
+        }
+    return {"ok": True, "data": await asyncio.to_thread(_load)}
+
+
+def _alert_audit_view() -> dict:
+    """Config do alerta SEM o token em claro — só se ele está definido."""
+    return {
+        "enabled": bool(_alert_cfg("alert_enabled", False)),
+        "chat_id": str(_alert_cfg("alert_chat_id", "") or ""),
+        "interval_min": _alert_cfg("alert_interval_min", None),
+        "quality_poll_min": _alert_cfg("alert_quality_poll_min", None),
+        "timezone": str(_alert_cfg("alert_timezone", "") or ""),
+        "grupos": _alert_cfg("alert_groups", None),
+        "bot_token_definido": bool(_alert_cfg("alert_bot_token", "")),
+    }
+
+
+@router.put("/alert-settings", dependencies=[core_permission("channel.manage")])
+async def put_alert_settings(payload: dict = Body(...)):
+    """Salva a configuração do alerta. Campo ausente não é tocado."""
+    before = await asyncio.to_thread(_alert_audit_view)
+
+    def _save():
+        from . import alerts
+        prefix = f"plugin.{PLUGIN_ID}."
+        updates: dict = {}
+        if "enabled" in payload:
+            updates[prefix + "alert_enabled"] = bool(payload["enabled"])
+        if "chat_id" in payload:
+            updates[prefix + "alert_chat_id"] = str(payload["chat_id"] or "").strip()
+        if "interval_min" in payload:
+            try:
+                updates[prefix + "alert_interval_min"] = max(1, int(payload["interval_min"]))
+            except (TypeError, ValueError):
+                pass
+        if "quality_poll_min" in payload:
+            try:
+                updates[prefix + "alert_quality_poll_min"] = max(
+                    alerts.MIN_QUALITY_POLL_MIN, int(payload["quality_poll_min"]))
+            except (TypeError, ValueError):
+                pass
+        if "timezone" in payload:
+            tz = str(payload["timezone"] or "").strip()
+            updates[prefix + "alert_timezone"] = tz if _valid_tz(tz) else _DEFAULT_TZ
+        if isinstance(payload.get("groups"), dict):
+            # Só chaves conhecidas: um POST torto não polui a config nem esconde
+            # um grupo de alerta que o motor conhece.
+            merged = alerts._parse_groups(_alert_cfg("alert_groups", None))
+            merged.update({k: bool(v) for k, v in payload["groups"].items()
+                           if k in alerts.ALERT_GROUPS})
+            updates[prefix + "alert_groups"] = merged
+        # Token só é gravado quando vem um valor real (não vazio, não a máscara).
+        token = payload.get("bot_token")
+        if token is not None:
+            token = str(token).strip()
+            if token and token != _ALERT_MASK:
+                updates[prefix + "alert_bot_token"] = token
+        if updates:
+            config_repo.set_many(updates)
+    await asyncio.to_thread(_save)
+    _audit_plugin("alerta.config", before=before,
+                  after=await asyncio.to_thread(_alert_audit_view))
+    return {"ok": True}
+
+
+@router.post("/alert-test", dependencies=[core_permission("channel.manage")])
+async def alert_test(payload: dict = Body(default={})):
+    """Manda uma mensagem de teste ao Telegram com o token/chat_id salvos (ou os
+    enviados no corpo, ainda não salvos) para o operador validar a configuração."""
+    def _resolve():
+        token = str(payload.get("bot_token") or "").strip()
+        if not token or token == _ALERT_MASK:
+            token = (_alert_cfg("alert_bot_token", "") or "").strip()
+        chat_id = (str(payload.get("chat_id") or "").strip()
+                   or str(_alert_cfg("alert_chat_id", "") or "").strip())
+        return token, chat_id
+    token, chat_id = await asyncio.to_thread(_resolve)
+    if not token or not chat_id:
+        return {"ok": False, "error": "Informe o token do bot e o chat_id."}
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    body = {"chat_id": chat_id,
+            "text": "✅ WhatsBot: alertas da conta Meta configurados com sucesso."}
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            resp = await client.post(url, json=body)
+            data = resp.json()
+            # Grupo promovido a supergrupo: persiste o novo id e reenvia uma vez.
+            new_id = ((data.get("parameters") or {}).get("migrate_to_chat_id")
+                      if not data.get("ok") else None)
+            if new_id:
+                new_id = str(new_id)
+                await asyncio.to_thread(
+                    config_repo.set, f"plugin.{PLUGIN_ID}.alert_chat_id", new_id)
+                resp = await client.post(url, json={**body, "chat_id": new_id})
+                data = resp.json()
+    except Exception:  # noqa: BLE001
+        # O texto de uma exceção httpx pode carregar a URL ``/bot{token}/``.
+        # Nunca reflita esse detalhe na resposta da API.
+        return {"ok": False, "error": "Falha ao contatar o Telegram."}
+    if not data.get("ok"):
+        return {"ok": False, "error": data.get("description") or "Erro do Telegram."}
+    return {"ok": True}

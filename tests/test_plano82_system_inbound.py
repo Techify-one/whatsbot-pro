@@ -33,10 +33,9 @@ import pytest
 
 from db.repositories import (channel_credential_repo, channel_repo,
                              contact_inbox_repo, contact_repo, conversation_repo,
-                             message_repo)
+                             inbox_repo, message_repo)
 from tests.characterization.golden import EventRecorder
 
-INBOX_ID = 1  # semeado pela migration 0013
 PHONE_NUMBER_ID = "PNID_P82_SYS"
 NEW_WA_ID = "12195555358"
 SYS_TYPE = "user_changed_number"
@@ -44,13 +43,14 @@ SYS_TYPE = "user_changed_number"
 
 # ── Setup de canal / conversa ────────────────────────────────────────────────
 
-def _make_cloud_channel() -> str:
+def _make_cloud_channel(*, phone_number_id: str = PHONE_NUMBER_ID,
+                        waba_id: str = "WABA_P82_SYS") -> str:
     channel_id = f"p82sys_{uuid.uuid4().hex[:8]}"
     channel_repo.create(id=channel_id, provider="whatsapp_cloud",
                         display_name=channel_id, enabled=1)
     for key, value in {"access_token": "TOKEN_SECRET",
-                       "phone_number_id": PHONE_NUMBER_ID,
-                       "waba_id": "WABA_P82_SYS",
+                       "phone_number_id": phone_number_id,
+                       "waba_id": waba_id,
                        "verify_token": "VERIFY_SECRET"}.items():
         channel_credential_repo.set(channel_id, key, value)
     return channel_id
@@ -64,13 +64,19 @@ def _seed_contact(phone: str) -> dict:
     return contact_repo.get_or_create(phone)
 
 
-def _seed_conversation(contact_id: int, *, status: str = "open") -> dict:
+def _seed_conversation(contact_id: int, channel_id: str, *,
+                       status: str = "open",
+                       opened_at: float | None = None) -> dict:
+    inbox = inbox_repo.get_or_create_for_channel(channel_id)
+    assert inbox is not None
     jid = f"{_new_phone()}@s.whatsapp.net"
     ci = contact_inbox_repo.get_or_create(
-        inbox_id=INBOX_ID, contact_id=contact_id, source_id=jid, source_jid=jid)
+        inbox_id=inbox["id"], contact_id=contact_id,
+        source_id=jid, source_jid=jid)
     return conversation_repo.create(
-        inbox_id=INBOX_ID, contact_id=contact_id, contact_inbox_id=ci["id"],
-        status=status)
+        inbox_id=inbox["id"], contact_id=contact_id,
+        contact_inbox_id=ci["id"],
+        status=status, opened_at=opened_at)
 
 
 # ── Envelope literal (§11.1) ─────────────────────────────────────────────────
@@ -112,7 +118,7 @@ def test_open_conversation_gets_card_no_ai_no_automation(build_app):
     channel_id = _make_cloud_channel()
     phone = _new_phone()
     contact = _seed_contact(phone)
-    conv = _seed_conversation(contact["id"], status="open")
+    conv = _seed_conversation(contact["id"], channel_id, status="open")
     built = build_app(["whatsapp_cloud"])
 
     with EventRecorder() as rec:
@@ -155,7 +161,7 @@ def test_closed_conversation_gets_card_but_stays_closed(build_app):
     channel_id = _make_cloud_channel()
     phone = _new_phone()
     contact = _seed_contact(phone)
-    conv = _seed_conversation(contact["id"], status="closed")
+    conv = _seed_conversation(contact["id"], channel_id, status="closed")
     built = build_app(["whatsapp_cloud"])
 
     with EventRecorder() as rec:
@@ -166,6 +172,28 @@ def test_closed_conversation_gets_card_but_stays_closed(build_app):
     # A garantia de P2: a conversa fechada CONTINUA fechada (sem set_status).
     assert conversation_repo.get(conv["id"])["status"] == "closed"
     assert _for_phone(rec.by_name("message.saved"), phone) == []
+
+
+def test_system_card_is_scoped_to_the_event_channel_inbox(build_app):
+    """Mesmo contato em dois canais: o card nunca pode cair no thread mais novo."""
+    target_channel = _make_cloud_channel()
+    other_channel = _make_cloud_channel(
+        phone_number_id=f"PNID_P82_OTHER_{uuid.uuid4().hex[:8]}",
+        waba_id=f"WABA_P82_OTHER_{uuid.uuid4().hex[:8]}")
+    phone = _new_phone()
+    contact = _seed_contact(phone)
+    target_conv = _seed_conversation(
+        contact["id"], target_channel, status="open", opened_at=100.0)
+    newer_other_conv = _seed_conversation(
+        contact["id"], other_channel, status="open", opened_at=200.0)
+    assert conversation_repo.get_latest_for_contact(contact["id"])["id"] \
+        == newer_other_conv["id"], "pré-condição: resolver global escolheria errado"
+    built = build_app(["whatsapp_cloud"])
+
+    assert _post(built, target_channel, _system_envelope(phone)).status_code == 200
+
+    assert len(_cards(target_conv["id"])) == 1
+    assert _cards(newer_other_conv["id"]) == []
 
 
 # ── P2 (c1): contato SEM conversa → nada gravado, conversa não criada ────────
@@ -215,7 +243,7 @@ def test_meta_redelivery_does_not_duplicate(build_app):
     channel_id = _make_cloud_channel()
     phone = _new_phone()
     contact = _seed_contact(phone)
-    conv = _seed_conversation(contact["id"], status="open")
+    conv = _seed_conversation(contact["id"], channel_id, status="open")
     built = build_app(["whatsapp_cloud"])
     msg_id = f"wamid.p82dedup.{uuid.uuid4().hex[:16]}"
 

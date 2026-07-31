@@ -13,7 +13,8 @@ Credentials model (P24 — provider never touches the channels tables by SQL):
     passed to ``__init__`` is used instead.
 
 Keys read: ``access_token``, ``phone_number_id`` and the optional
-``graph_api_version`` (default ``v21.0`` — also exposed as a plugin setting).
+``app_secret``/``graph_api_version`` (default ``v21.0`` — also exposed as a
+plugin setting).
 
 HTTP uses ``httpx`` to match the rest of the core (gowa/client.py, balance
 monitor, etc.) — no extra dependency.
@@ -21,6 +22,8 @@ monitor, etc.) — no extra dependency.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import mimetypes
 import os
@@ -342,11 +345,14 @@ class WhatsAppCloudChannel(Channel):
                 edit_message=False,
                 inbound_route="path",
                 session_window_hours=24,  # free text only within 24h of last inbound
-                # No QR / connect step: a channel missing these can never connect,
-                # send or receive (status() pings phone_number_id+access_token; the
-                # core webhook handshake needs verify_token). The core rejects
-                # creating one without them — see channels.base.required_credentials.
-                required_credentials=("access_token", "phone_number_id", "verify_token"),
+                # Operational health only: these three are needed to connect/send
+                # and perform the webhook handshake. ``app_secret`` is deliberately
+                # NOT here because legacy rows without it remain operational in the
+                # compatibility window (messages are accepted fail-open). The
+                # descriptor below still marks it required for NEW channel creation
+                # and account alerts stay blocked until the legacy row is migrated.
+                required_credentials=("access_token", "phone_number_id",
+                                      "verify_token"),
                 # Limites de vídeo da Meta — o core valida/recomprime a partir daqui
                 # (plano 65). ``**`` para não passar a chave em core antigo.
                 **({"media_limits": _MEDIA_LIMITS} if _MEDIA_LIMITS else {}),
@@ -356,6 +362,7 @@ class WhatsAppCloudChannel(Channel):
         self.registry = registry
         # In-memory fallback for tests / registry-less usage.
         self._credentials = dict(credentials or {})
+        self._warned_missing_app_secret = False
         # Short cache for list_templates (avoid hitting the Graph API on every
         # picker open): (fetched_at, [templates]).
         self._templates_cache: Optional[tuple] = None
@@ -374,6 +381,13 @@ class WhatsAppCloudChannel(Channel):
             "credential_fields": [
                 {"key": "access_token", "label": "Access Token", "type": "secret",
                  "required": True, "placeholder": "EAAB..."},
+                {"key": "app_secret", "label": "App Secret (Meta)",
+                 "type": "secret", "required": True,
+                 "placeholder": "segredo do app na Meta",
+                 "help": "Obrigatório em canais novos: valida "
+                         "X-Hub-Signature-256. Canais legados sem ele continuam "
+                         "recebendo mensagens por compatibilidade, mas avisos de "
+                         "template/conta são descartados até a migração."},
                 {"key": "phone_number_id", "label": "Phone Number ID",
                  "type": "text", "required": True,
                  "placeholder": "ID do número (Meta)"},
@@ -446,6 +460,23 @@ class WhatsAppCloudChannel(Channel):
     def _access_token(self) -> str:
         return self._cred("access_token")
 
+    @property
+    def _app_secret(self) -> str:
+        return self._cred("app_secret")
+
+    def _inbound_app_secret(self) -> str:
+        """Read App Secret without turning storage failures into "not configured".
+
+        ``_cred`` is intentionally best-effort for outbound/status operations and
+        falls back after registry errors. Authentication cannot do that: a transient
+        DB failure must reject the webhook, while only an explicit missing value may
+        use the legacy fail-open path.
+        """
+        if self.registry is not None:
+            value = self.registry.get_credential(self.channel_id, "app_secret")
+            return str(value or "").strip()
+        return str(self._credentials.get("app_secret") or "").strip()
+
     def _base_url(self) -> str:
         return f"{GRAPH_BASE}/{self._graph_version}"
 
@@ -458,6 +489,50 @@ class WhatsAppCloudChannel(Channel):
     # ── Lifecycle ────────────────────────────────────────────────────
     # Cloud API is stateless / push-based; nothing to start or stop. The
     # base class no-op start()/stop() are inherited.
+
+    # ── Inbound signature ────────────────────────────────────────────
+    def verify_inbound_signature_result(self, raw_body: bytes,
+                                        headers) -> tuple[bool, bool]:
+        """Atomically validate Meta's signature and report authentication.
+
+        Missing ``app_secret`` intentionally preserves the pre-1.10.2 inbox
+        behaviour (accept + warn), so updating the plugin cannot silently stop all
+        conversations. Account events are stricter in ``filters.py`` and will not
+        alert until the secret is configured and this HMAC succeeds. The secret is
+        snapshotted exactly once: acceptance and authentication can never disagree
+        because a credential changed between two reads.
+        """
+        secret = self._inbound_app_secret()
+        if not secret:
+            if not self._warned_missing_app_secret:
+                logger.warning(
+                    "[whatsapp_cloud] canal %s sem app_secret — mensagens aceitas "
+                    "por compatibilidade; alertas de conta desativados até configurar",
+                    self.channel_id,
+                )
+                self._warned_missing_app_secret = True
+            return True, False
+        self._warned_missing_app_secret = False
+        try:
+            header = ""
+            if headers is not None:
+                header = (headers.get("X-Hub-Signature-256")
+                          or headers.get("x-hub-signature-256") or "")
+        except Exception:  # noqa: BLE001
+            header = ""
+        if not header.startswith("sha256="):
+            return False, False
+        expected = hmac.new(secret.encode("utf-8"), raw_body or b"",
+                            hashlib.sha256).hexdigest()
+        authenticated = hmac.compare_digest(
+            expected, header.split("=", 1)[1].strip())
+        return authenticated, authenticated
+
+    def verify_inbound_signature(self, raw_body: bytes, headers) -> bool:
+        """Compatibility wrapper for callers using the original boolean hook."""
+        accepted, _authenticated = self.verify_inbound_signature_result(
+            raw_body, headers)
+        return accepted
 
     def status(self) -> dict:
         """Ping the phone-number node to confirm token + id are valid."""
@@ -1101,6 +1176,21 @@ class WhatsAppCloudChannel(Channel):
                 value = (change or {}).get("value") or {}
                 metadata = value.get("metadata") or {}
                 phone_number_id = metadata.get("phone_number_id", "")
+
+                # ── avisos da CONTA (plano 84) ────────────────────────
+                # ``change["field"]`` separa "mensagem" (``messages``) de "aviso
+                # sobre a conta" (``message_template_status_update``,
+                # ``account_update``, ``phone_number_quality_update``, …). Estes
+                # NÃO viram ``InboundEvent``: não são mensagem de ninguém (sem
+                # chat, sem contato, sem conversa) e o core não teria ramo de
+                # dispatch para eles. Quem os captura é o observador
+                # ``filters.observe`` deste plugin, no webhook cru autenticado
+                # (plano 84). Aqui só se sai fora do caminho: um change
+                # de conta não tem ``messages`` nem ``statuses``, então os dois
+                # laços abaixo rodariam vazios.
+                field = (change or {}).get("field") or ""
+                if field and field != "messages":
+                    continue
 
                 # Map waba phone-number-id → our channel id when it matches; we
                 # keep this channel's own id otherwise (the core routes by the

@@ -319,11 +319,12 @@ def register_routes(app, deps):
         if provider not in creatable:
             return _err(
                 f"provider deve ser um de: {', '.join(sorted(creatable))}.", 400)
-        # Anti zombie-channel (capability-driven): a credential-only provider with no
-        # connect step (Cloud/Telegram) is useless without its required credentials —
-        # reject the create up front. GOWA's required set is empty (QR flow).
+        # Creation policy comes from descriptor ``credential_fields[].required``.
+        # It normally includes every operational capability requirement, but may be
+        # stricter during a legacy migration (for example a new signing secret that
+        # old rows may temporarily omit without becoming zombie channels).
         submitted_creds = body.get("credentials") or {}
-        missing_creds = [k for k in svc.required_credentials(deps, provider)
+        missing_creds = [k for k in svc.creation_required_credentials(deps, provider)
                          if not str(submitted_creds.get(k) or "").strip()]
         if missing_creds:
             return _err(
