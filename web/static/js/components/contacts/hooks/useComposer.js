@@ -211,13 +211,13 @@ export function useComposer({
     // Collapse the composer's **bold** authoring markup to WhatsApp's *bold*
     // wire format so the recipient (and the stored/rendered copy) sees clean bold.
     const text = toWhatsAppMarkup(input.trim());
-    if (!text) return;
+    if (!text) return false;
 
     // 24h window closed (WhatsApp Cloud): free text can't be sent — steer the
     // operator to an approved template instead of letting Meta reject it.
     if (sessionClosed && mode !== 'private') {
       openTemplatePicker();
-      return;
+      return false;
     }
 
     // Stop typing presence
@@ -233,6 +233,7 @@ export function useComposer({
     const msgTs = Date.now() / 1000;
 
     if (mode === 'private') {
+      let sent = false;
       setContactData(prev => prev ? {
         ...prev,
         messages: [...(prev.messages || []), {
@@ -253,6 +254,7 @@ export function useComposer({
           mentionInbox: mm.mention_inbox,
         });
         if (res.ok && res.data) {
+          sent = true;
           // Plano 53 — mesmo padrão serverCopyArrived do envio normal (abaixo),
           // com identidade `_id`: se a cópia do broadcast WS já chegou (relógio
           // do cliente defasado fura a janela de dedup de 30s e ela é apendada
@@ -283,7 +285,7 @@ export function useComposer({
       }
       if (resetMentions) resetMentions();
       inputRef.current?.focus();
-      return;
+      return sent;
     }
 
     // Quoted reply (only meaningful when the target has a GOWA msg_id).
@@ -302,9 +304,11 @@ export function useComposer({
             _localId: localId, _status: 'sending', reply_to_msg_id: replyTo || undefined }],
     } : prev);
 
+    let sent = false;
     try {
       const res = await api.sendText(phone, text, replyTo, conversationId, channelId);
       if (res.ok) {
+        sent = true;
         const msgId = res.data?.msg_id || null;
         if (sandbox) {
           updateMsgByLocalId(localId, () => ({ _status: null }));
@@ -339,6 +343,7 @@ export function useComposer({
       updateMsgByLocalId(localId, () => ({ _status: 'failed' }));
     }
     inputRef.current?.focus();
+    return sent;
   }
 
   async function handleRetry(localId, text) {
@@ -347,6 +352,7 @@ export function useComposer({
       const res = await retrySend(phone, text, conversationId, channelId);
       if (res.ok) {
         updateMsgByLocalId(localId, () => ({ _status: null, status: 'operator' }));
+        return true;
       } else {
         updateMsgByLocalId(localId, () => ({ _status: 'failed', status: 'failed' }));
       }
@@ -354,6 +360,7 @@ export function useComposer({
       console.error('Retry error:', err);
       updateMsgByLocalId(localId, () => ({ _status: 'failed', status: 'failed' }));
     }
+    return false;
   }
 
   // Stop typing presence imperatively (used when sending media before the form).

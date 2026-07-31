@@ -23,6 +23,10 @@ export function MessageBubble({
   isGroup, sandbox, displayName, fmt,
   findQuoted, quotedInfo, focusMessage, openMsgMenu, myReaction, handleRetry,
   showAgentName = true,
+  // plano 99 F0e·4: o container sabe pedir ao servidor a janela ANCORADA numa
+  // mensagem, então a citação cujo alvo caiu fora da página carregada deixou de
+  // ser um beco sem saída e volta a ser clicável.
+  canJumpOutsideWindow = false,
   // plano 51 (04 F1): batch selection mode. Presentational only — the container
   // owns the Set; here we just render the checkbox/realce and route the click.
   selectionMode = false, selected = false, onToggleSelect = null,
@@ -84,10 +88,13 @@ export function MessageBubble({
           const q = quotedInfo(qmsg);
           const accent = q ? q.senderColor : '#8696a0';
           // Plano 75 F10: a citação hidratada pelo servidor mostra o CONTEÚDO mesmo
-          // com o alvo fora da página — mas não dá para rolar até uma linha ausente
-          // do DOM, então o clique fica desligado (_hydrated). Sem citação nenhuma
-          // (alvo apagado / nunca recebido) segue o texto de indisponível.
-          const canJump = !!(qmsg && qmsg._id != null && !qmsg._hydrated);
+          // com o alvo fora da página carregada. Sem citação nenhuma (alvo apagado /
+          // nunca recebido) segue o texto de indisponível.
+          // Plano 99 F0e·4: o alvo `_hydrated` (fora da janela) VOLTA a ser clicável
+          // quando o container sabe pedir a janela ancorada nele — antes o clique
+          // ficava desligado porque não dava para rolar até uma linha ausente do DOM.
+          const canJump = !!(qmsg && qmsg._id != null
+                             && (!qmsg._hydrated || canJumpOutsideWindow));
           return html`
             <div
               onClick=${canJump ? ((e) => { e.stopPropagation(); focusMessage(qmsg._id, { smooth: true }); }) : null}

@@ -1,8 +1,8 @@
 {
   "assign": {
     "conversation": {
-      "active_agent_key": "default",
-      "ai_active": 1,
+      "active_agent_key": null,
+      "ai_active": 0,
       "assignee_user_id": "<USER>",
       "status": "open"
     },
@@ -31,7 +31,7 @@
   "close": {
     "conversation": {
       "active_agent_key": null,
-      "ai_active": 1,
+      "ai_active": 0,
       "assignee_user_id": null,
       "status": "closed"
     },

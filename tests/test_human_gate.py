@@ -65,12 +65,19 @@ def test_humano_atribuido_bloqueia_mesmo_com_flag_dessincronizado(gate_contact):
     assert _conversation_ai_active(contact) is False
 
 
-def test_agente_ia_vinculado_nao_e_bloqueado_pelo_assignee(gate_contact):
-    """Com um agente de IA vinculado, o assignee não silencia a IA."""
+def test_humano_atribuido_bloqueia_mesmo_com_agente_vinculado(gate_contact):
+    """Plano 96 · D2 — INVERSÃO DELIBERADA DE CONTRATO.
+
+    Até o plano 96 este teste afirmava o oposto (um agente de IA vinculado
+    neutralizava o assignee). Era cara ou coroa em produção: nenhum inbox define
+    ``default_agent_key``, então o único escritor de ``active_agent_key`` é a tool
+    ``transferir_agente`` — a conversa ficava muda se e somente se a IA não
+    tivesse roteado no turno anterior. Agora dono humano ⇒ IA muda, ponto.
+    """
     contact, conv = gate_contact
     conversation_repo.assign_agent(
         conv["id"], assignee_user_id=42, active_agent_key="default", ai_active=1)
-    assert _conversation_ai_active(contact) is True
+    assert _conversation_ai_active(contact) is False
 
 
 def test_tag_transferido_atendente_nao_bloqueia_sozinha(gate_contact):

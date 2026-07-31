@@ -183,7 +183,15 @@ export function useConversationActions({
   const handleAssignConversation = useCallback(async (convId, userId) => {
     const res = await assignConversation(convId, userId);
     if (res && res.ok && res.data && res.data.conversation) {
-      patchCtxConv({ assignee_user_id: res.data.conversation.assignee_user_id });
+      // plano 96: atribuir a um humano agora cala a IA no servidor — o menu precisa
+      // dos TRÊS campos (como o assign-agent unificado já fazia), senão continuaria
+      // mostrando a IA ligada numa conversa que acabou de ficar muda.
+      const c = res.data.conversation;
+      patchCtxConv({
+        assignee_user_id: c.assignee_user_id,
+        active_agent_key: c.active_agent_key,
+        ai_active: c.ai_active,
+      });
     } else {
       setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir conversa.' }));
     }

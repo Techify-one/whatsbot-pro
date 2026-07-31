@@ -51,12 +51,14 @@ import { notify } from '../../../services/notify.js';
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  * @param {(localId:string, updater:(m:any)=>any)=>void} opts.updateMsgByLocalId
  * @param {()=>void} opts.openTemplatePicker
+ * @param {()=>Promise<any>|any} [opts.onSent] - chamado após ao menos um ACK bem-sucedido.
  * @param {Object|null} opts.mediaLimits - limites por tipo declarados pelo canal.
  */
 export function useMediaUpload({
   api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
   mode = 'reply', aiReadPrivate = false, aiReplyInChat = true,
-  setContactData, updateMsgByLocalId, openTemplatePicker, mediaLimits = null,
+  setContactData, updateMsgByLocalId, openTemplatePicker, onSent = null,
+  mediaLimits = null,
 }) {
   const [sending, setSending] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
@@ -449,13 +451,13 @@ export function useMediaUpload({
   // segue para o próximo. A exceção é a janela de 24h fechada, que vale para a
   // conversa inteira: aí para e abre o seletor de template.
   async function confirmQueue() {
-    if (!pendingQueue.length || sending) return;
+    if (!pendingQueue.length || sending) return false;
     const isPrivate = mode === 'private';
     // 24h window closed (WhatsApp Cloud): media also requires a template.
     if (sessionClosed && !isPrivate) {
       cancelPendingMedia();
       openTemplatePicker();
-      return;
+      return false;
     }
     const queue = pendingQueue;
     const caption = mediaCaption.trim();
@@ -492,6 +494,11 @@ export function useMediaUpload({
     setSending(false);
     setSentCount(0);
     setSendTotal(0);
+    const successes = done - failures;
+    if (successes > 0 && onSent) {
+      try { await onSent(); } catch (_) { /* envio confirmou; recarga é best-effort */ }
+    }
+    return successes > 0;
   }
 
   // Nome antigo mantido (o Composer e os testes o conhecem): confirmar a

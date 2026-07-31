@@ -17,7 +17,8 @@
 // from the selection refs and consumed by the list/WS optimistic patches.
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { getContact, getConversationMessages } from '../../../services/api.js';
-import { applyThreadResponse, prependOlder } from '../../../services/threadData.js';
+import { applyThreadResponse, prependOlder, appendNewer, isAnchored,
+         pageCursorId } from '../../../services/threadData.js';
 import { shapeConvData } from '../../../services/conversationRows.js';
 import { resolveDeepLink } from '../../../services/deepLinkResolve.js';
 import { emit as emitClientEvent } from '../../../plugins/registry.js';
@@ -75,6 +76,11 @@ export function useConversationSelection({
   // conversa depois de uma falha era um no-op (nada re-tentava).
   const [retryNonce, setRetryNonce] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);  // plano 50 F4: scroll-up
+  const [loadingNewer, setLoadingNewer] = useState(false);  // plano 99 F0d: scroll-down
+  // plano 99 F0e — o salto pediu uma janela ancorada e ela ainda está em voo.
+  // O painel mostra isso; sem indicação o operador clica de novo achando que
+  // o clique se perdeu (era exatamente a sensação do bug antigo).
+  const [jumping, setJumping] = useState(false);
   // Which side drawer is open: 'contact' (foto/nome) | 'conversation' (botão ℹ️) |
   // null. Single state so opening one closes the other (no overlapping drawers).
   const [openPanel, setOpenPanel] = useState(null);
@@ -85,6 +91,7 @@ export function useConversationSelection({
   // durante toda a carga sem nenhuma indicação visual). Guarda a chave de `threadKeyOf`
   // e o carregamento é ligado sempre que a thread pedida ≠ a thread carregada.
   const loadedThreadKeyRef = useRef(null);
+  const loadedRetryNonceRef = useRef(null);
   // plano 85 A1 — token de sequência do carregamento do DETALHE, espelhando o
   // `fetchSeqRef` que a LISTA ganhou no plano 62 F3. Só a carga mais recente pode
   // gravar `contactData`: uma resposta que chega depois de a seleção ter mudado
@@ -102,6 +109,17 @@ export function useConversationSelection({
   const lastResolvedConvId = useRef(null);
   const contactDataRef = useRef(null);         // plano 50 F4: cursor sem stale-closure
   const loadingOlderRef = useRef(false);        // guarda contra loadOlder concorrente
+  const loadingNewerRef = useRef(false);        // idem para loadNewer (plano 99)
+  const jumpTokenRef = useRef(0);               // qual salto pode desligar `jumping`
+  // Fonte síncrona de verdade compartilhada com o hook de WS: fica ligada desde o
+  // INÍCIO de um salto, antes de a resposta ancorada existir em `contactData`.
+  // Assim nenhum upsert/reconnect ocorrido no meio do GET marca lido ou recarrega
+  // silenciosamente a ponta recente por cima do alvo.
+  const anchoredWindowRef = useRef(false);
+  // A resolução de deep-link e o loader são efeitos do MESMO commit inicial. O
+  // primeiro agenda a seleção; o segundo ainda enxerga `selected=null`. Este bit
+  // impede o segundo de desligar a intenção ancorada nessa única passagem.
+  const pendingAnchoredOpenRef = useRef(false);
 
   // Keep refs in sync — avoids stale closures
   useEffect(() => { contactDataRef.current = contactData; }, [contactData]);
@@ -122,6 +140,8 @@ export function useConversationSelection({
   const retryDetail = useCallback(() => setRetryNonce(n => n + 1), []);
 
   const selectContact = useCallback((rowOrPhone, msgId = null) => {
+    pendingAnchoredOpenRef.current = false;
+    anchoredWindowRef.current = msgId != null;
     setScrollToMsg(msgId != null ? msgId : null);
     if (rowOrPhone == null) {
       setSelected(null);
@@ -180,6 +200,8 @@ export function useConversationSelection({
       case 'wait':
         return;
       case 'deselect':
+        pendingAnchoredOpenRef.current = false;
+        anchoredWindowRef.current = false;
         setSelected(null);
         setSelectedConvId(null);
         lastResolvedId.current = null;
@@ -187,6 +209,8 @@ export function useConversationSelection({
         return;
       case 'select':
       case 'open_by_id': {
+        pendingAnchoredOpenRef.current = initialScrollMsgId != null;
+        anchoredWindowRef.current = initialScrollMsgId != null;
         if (decision.action === 'select') {
           const row = decision.row;
           setSelected(row.phone);
@@ -237,8 +261,10 @@ export function useConversationSelection({
   // per-contact endpoint for rows without a conversation.
   useEffect(() => {
     if (!selected && selectedConvId == null) {
+      if (!pendingAnchoredOpenRef.current) anchoredWindowRef.current = false;
       setContactData(null);
       loadedThreadKeyRef.current = null;
+      loadedRetryNonceRef.current = null;
       setLoadingDetail(false);
       return;
     }
@@ -252,16 +278,36 @@ export function useConversationSelection({
     // que já está em `contactData`. Um refetch da MESMA thread (ex.: o segundo passe do
     // deep-link, que só adota o telefone da resposta) roda em silêncio, sem piscar.
     const threadKey = threadKeyOf(selected, selectedConvId);
+    // Deep-link aberto só por conversation_id adota o telefone da própria
+    // resposta. Essa adoção muda `selected`, mas NÃO muda a thread nem representa
+    // retry: não faça um segundo GET idêntico. Um clique explícito na mesma linha
+    // incrementa `retryNonce`, portanto continua recarregando normalmente.
+    if (loadedThreadKeyRef.current === threadKey
+        && loadedRetryNonceRef.current === retryNonce
+        && contactDataRef.current && contactDataRef.current._threadKey === threadKey) {
+      setLoadingDetail(false);
+      return;
+    }
     if (loadedThreadKeyRef.current !== threadKey) setLoadingDetail(true);
     setDetailError(null);   // plano 85 A3 — cada tentativa começa limpa
+    // Um permalink/resultado global já abre a PRIMEIRA requisição em torno do alvo.
+    // O caminho antigo buscava a ponta recente (marcando lido e zerando badge) e só
+    // depois disparava outro GET com around_id. Além do flash, violava a visita ao
+    // passado: o primeiro GET já tinha consumido os não-lidos de hoje.
+    const anchorTarget = scrollToMsg != null ? scrollToMsg : null;
+    const openingAnchored = anchorTarget != null;
+    pendingAnchoredOpenRef.current = false;
+    anchoredWindowRef.current = openingAnchored;
     // Preserve any messages already buffered for this thread (arrived before selection)
-    // but reset the accumulator for new messages arriving during fetch
+    // but reset the accumulator for new messages arriving during fetch. Buffer de WS
+    // pertence à ponta recente e nunca pode ser colado no meio de uma janela ancorada.
     const bufKey = selected || (selectedConvId != null ? `conv:${selectedConvId}` : '');
-    const preFetchBuffer = pendingWsMessages.current[bufKey] || [];
+    const bufferedBeforeFetch = pendingWsMessages.current[bufKey] || [];
+    const preFetchBuffer = openingAnchored ? [] : bufferedBeforeFetch;
     pendingWsMessages.current[bufKey] = [];
     // Clear unread badges immediately on the OPEN row (only if page is visible)
-    const isPageVisible = pageVisibleRef.current;
-    if (isPageVisible) {
+    const shouldMarkRead = pageVisibleRef.current && !openingAnchored;
+    if (shouldMarkRead) {
       setContacts(prev => prev.map(c =>
         isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false } : c
       ));
@@ -277,10 +323,11 @@ export function useConversationSelection({
     const newConvChannel = newConvChannelRef.current;
     newConvChannelRef.current = null;
     const token = ++detailSeqRef.current;   // plano 85 A1
+    const requestOpts = openingAnchored ? { aroundId: anchorTarget } : {};
     const loader = convId != null
-      ? getConversationMessages(convId, isPageVisible).then(res =>
+      ? getConversationMessages(convId, shouldMarkRead, requestOpts).then(res =>
           res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
-      : getContact(selected, isPageVisible, newConvChannel);
+      : getContact(selected, shouldMarkRead, newConvChannel, requestOpts);
     loader.then(res => {
       if (token !== detailSeqRef.current) return;  // resposta obsoleta — descarta
       if (res.ok) {
@@ -293,11 +340,26 @@ export function useConversationSelection({
         // hidratação dos `failed` e o carimbo da thread (plano 85 A4) vivem em
         // services/threadData.js — a MESMA regra dos outros dois call sites.
         const duringFetch = pendingWsMessages.current[bufKey] || [];
-        const pending = [...preFetchBuffer, ...duringFetch];
+        const pending = openingAnchored ? [] : [...preFetchBuffer, ...duringFetch];
         pendingWsMessages.current[bufKey] = [];
-        setContactData(applyThreadResponse(data, pending, threadKey));
+        const applied = applyThreadResponse(data, pending, threadKey);
+        const bufferedWhileAnchored = openingAnchored
+          ? bufferedBeforeFetch.length + duringFetch.length : 0;
+        setContactData(prev => {
+          const carried = openingAnchored && prev && prev._threadKey === threadKey
+            ? Math.max(0, Number(prev._newWhileAnchored) || 0) : 0;
+          const newCount = carried + bufferedWhileAnchored;
+          const next = newCount > 0
+            ? { ...applied, has_more_newer: true, _newWhileAnchored: newCount }
+            : applied;
+          contactDataRef.current = next;
+          anchoredWindowRef.current = isAnchored(next);
+          return next;
+        });
         loadedThreadKeyRef.current = threadKey;
+        loadedRetryNonceRef.current = retryNonce;
       } else {
+        anchoredWindowRef.current = isAnchored(contactDataRef.current);
         // plano 85 A3 — 404/500/403 deixavam o painel mudo com a conversa anterior.
         // `handleErrorResponse` já normaliza a mensagem das duas formas de corpo.
         setDetailError(res.error || 'Não foi possível carregar esta conversa.');
@@ -308,6 +370,7 @@ export function useConversationSelection({
       // redeploy): sem este catch a promise ficava não-tratada e `setLoadingDetail(false)`
       // nunca rodava — a tela travava em "Carregando..." para sempre.
       if (token !== detailSeqRef.current) return;
+      anchoredWindowRef.current = isAnchored(contactDataRef.current);
       if (e && e.name === 'AbortError') { setLoadingDetail(false); return; }
       setDetailError('Não foi possível carregar esta conversa. Verifique sua conexão.');
       setLoadingDetail(false);
@@ -328,6 +391,9 @@ export function useConversationSelection({
     const sel = selectedRef.current;
     const convId = selectedConvIdRef.current;
     if (!sel && convId == null) return;
+    // Reconnect/upsert só pode substituir a ponta RECENTE. Numa visita ao passado,
+    // trocar a janela inteira faria o alvo sumir e ainda marcaria os não-lidos.
+    if (anchoredWindowRef.current || isAnchored(contactDataRef.current)) return;
     const bufKey = sel || (convId != null ? `conv:${convId}` : '');
     const preFetchBuffer = pendingWsMessages.current[bufKey] || [];
     pendingWsMessages.current[bufKey] = [];
@@ -349,20 +415,20 @@ export function useConversationSelection({
       const pending = [...preFetchBuffer, ...duringFetch];
       pendingWsMessages.current[bufKey] = [];
       setContactData(applyThreadResponse(data, pending, threadKeyOf(sel, convId)));
-    });
+    }).catch(() => { /* background best-effort; preserva a thread atual */ });
   }, []);
 
   // Plano 50 F4 — carregar mensagens ANTERIORES (scroll-up / keyset). Busca a página
-  // anterior (before_id = menor _id já carregado) SEM re-marcar como lida e a PREPENDA
+  // anterior (before_id = primeira mensagem persistida da lista cronológica) SEM
+  // re-marcar como lida e a PREPENDA
   // ao histórico (dedup por _id, como o merge de WS). Guardado por ref contra chamadas
   // concorrentes. O caller (ContactDetail) ancora o scroll para a viewport não saltar.
   const loadOlder = useCallback(() => {
     const data = contactDataRef.current;
     if (!data || !data.has_more || loadingOlderRef.current) return;
     const msgs = data.messages || [];
-    const ids = msgs.map(m => m._id).filter(v => v != null);
-    if (ids.length === 0) return;
-    const beforeId = Math.min(...ids);
+    const beforeId = pageCursorId(msgs, 'older');
+    if (beforeId == null) return;
     const sel = selectedRef.current;
     const convId = selectedConvIdRef.current;
     if (!sel && convId == null) return;
@@ -379,15 +445,133 @@ export function useConversationSelection({
           res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
       : getContact(sel, false, null, { beforeId });
     loader.then(res => {
-      loadingOlderRef.current = false;
-      setLoadingOlder(false);
       if (token !== detailSeqRef.current) return;  // trocou de conversa — descarta
       if (!res.ok) return;
       const older = res.data.messages || [];
       const newHasMore = !!res.data.has_more;
       setContactData(prev => prependOlder(prev, older, newHasMore));
+    }).catch(() => { /* deixa a thread intacta; o próximo scroll pode tentar de novo */ })
+      .finally(() => {
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
+      });
+  }, []);
+
+  // Plano 99 F0d — carregar mensagens SEGUINTES (scroll-down). Só existe porque a
+  // janela deixou de terminar sempre na última mensagem: ancorada no passado (por
+  // um salto, uma busca ou o "ir para data"), rolar para baixo precisa pedir as
+  // próximas em vez de simplesmente não ter mais nada. Espelho de `loadOlder`,
+  // inclusive na captura do token `detailSeqRef` (paginar não invalida uma carga
+  // de seleção em voo, mas trocar de conversa invalida esta página — senão a
+  // página seguinte da conversa A seria anexada à thread de B).
+  const loadNewer = useCallback(() => {
+    const data = contactDataRef.current;
+    if (!data || !data.has_more_newer || loadingNewerRef.current) return;
+    const afterId = pageCursorId(data.messages || [], 'newer');
+    if (afterId == null) return;
+    const sel = selectedRef.current;
+    const convId = selectedConvIdRef.current;
+    if (!sel && convId == null) return;
+    loadingNewerRef.current = true;
+    setLoadingNewer(true);
+    const token = detailSeqRef.current;
+    const newCountAtStart = Math.max(0, Number(data._newWhileAnchored) || 0);
+    const loader = convId != null
+      ? getConversationMessages(convId, false, { afterId }).then(res =>
+          res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
+      : getContact(sel, false, null, { afterId });
+    loader.then(res => {
+      if (token !== detailSeqRef.current) return;  // trocou de conversa — descarta
+      if (!res.ok) return;
+      setContactData(prev => {
+        const next = appendNewer(prev, res.data.messages || [],
+                                 !!res.data.has_more_newer, newCountAtStart);
+        anchoredWindowRef.current = isAnchored(next);
+        return next;
+      });
+    }).catch(() => { /* libera o lock no finally para permitir retry */ })
+      .finally(() => {
+        loadingNewerRef.current = false;
+        setLoadingNewer(false);
+      });
+  }, []);
+
+  // Plano 99 F0e — SUBSTITUI a janela carregada por outra, ancorada onde se pediu.
+  //
+  // É o mecanismo por trás dos quatro caminhos de salto: resultado da busca global
+  // da sidebar, clique numa citação antiga, deep-link `?message=<id>` e a busca /
+  // o calendário dentro da conversa. Antes deste plano nenhum deles funcionava
+  // fora da janela de 50 já carregada: `focusMessage` devolvia `false` e ninguém
+  // pedia nada — o salto morria em silêncio.
+  //
+  // `opts` é `{aroundId}` (mensagem), `{atTs}` (dia, epoch do NAVEGADOR) ou `{}`
+  // (voltar ao fim). Devolve uma Promise com `{ok, anchorId}` para o chamador
+  // dizer ao operador o que aconteceu — "essa mensagem não existe mais" é uma
+  // resposta, falha muda não é.
+  const loadWindow = useCallback((opts = {}) => {
+    const sel = selectedRef.current;
+    const convId = selectedConvIdRef.current;
+    if (!sel && convId == null) return Promise.resolve({ ok: false, anchorId: null });
+    const anchored = opts.aroundId != null || opts.atTs != null;
+    anchoredWindowRef.current = anchored;
+    // Voltar ao fim é a abertura normal da conversa: marca como lida e adota o
+    // buffer de WS. Uma janela ancorada é uma VISITA ao passado — não marca nada
+    // (P6) e descarta o buffer, que pertence ao FIM da conversa e criaria um
+    // buraco se fosse colado no meio do histórico.
+    const bufKey = sel || (convId != null ? `conv:${convId}` : '');
+    const pending = anchored ? [] : (pendingWsMessages.current[bufKey] || []);
+    pendingWsMessages.current[bufKey] = [];
+    const markRead = !anchored && pageVisibleRef.current;
+    // Incrementa (não captura): esta leitura troca a thread inteira, então
+    // invalida qualquer carga anterior em voo — e é invalidada por uma troca
+    // de conversa que aconteça no meio.
+    const token = ++detailSeqRef.current;
+    // `jumping` é um flag de UI, e quem o desliga tem de ser o salto MAIS RECENTE.
+    // Desligá-lo no `.then` de um salto obsoleto apagaria o do salto em voo (e o
+    // efeito de foco reavaliaria no meio); não desligá-lo de jeito nenhum quando
+    // a conversa troca no meio deixaria o flag preso em `true` para sempre — e
+    // todo salto na conversa seguinte ficaria eternamente "aguardando".
+    jumpTokenRef.current = token;
+    setJumping(true);
+    const settle = () => { if (jumpTokenRef.current === token) setJumping(false); };
+    const loader = convId != null
+      ? getConversationMessages(convId, markRead, opts).then(res =>
+          res.ok ? { ok: true, data: shapeConvData(res.data) } : res)
+      : getContact(sel, markRead, null, opts);
+    return loader.then(res => {
+      settle();
+      if (token !== detailSeqRef.current) return { ok: false, anchorId: null };
+      if (!res.ok) {
+        anchoredWindowRef.current = isAnchored(contactDataRef.current);
+        return { ok: false, anchorId: null };
+      }
+      const data = res.data;
+      setContactData(applyThreadResponse(data, pending, threadKeyOf(sel, convId)));
+      anchoredWindowRef.current = isAnchored(data);
+      const anchorId = data.anchor_id != null ? data.anchor_id : null;
+      // O foco é pedido AQUI (e não pelo chamador) para que os quatro caminhos
+      // de salto compartilhem exatamente o mesmo mecanismo.
+      if (anchorId != null) setScrollToMsg(anchorId);
+      // `anchorTs` deixa o chamador comparar o DIA em que aterrissou com o dia
+      // que pediu — é o que permite dizer "não havia nada em 3 de janeiro,
+      // fomos para 5 de janeiro" em vez de parecer que o clique foi ignorado.
+      const anchorMsg = anchorId == null ? null
+        : (data.messages || []).find(m => m._id === anchorId);
+      return { ok: true, anchorId, anchorTs: anchorMsg ? anchorMsg.ts : null };
+    }).catch(() => {
+      settle();
+      if (token === detailSeqRef.current) {
+        anchoredWindowRef.current = isAnchored(contactDataRef.current);
+      }
+      return { ok: false, anchorId: null, anchorTs: null };
     });
   }, []);
+
+  // Açúcar dos três usos concretos, para nenhuma tela precisar conhecer a forma
+  // dos parâmetros da janela.
+  const jumpToMessage = useCallback((msgId) => loadWindow({ aroundId: msgId }), [loadWindow]);
+  const jumpToDate = useCallback((ts) => loadWindow({ atTs: ts }), [loadWindow]);
+  const backToBottom = useCallback(() => loadWindow({}), [loadWindow]);
 
   return {
     selected, setSelected,
@@ -398,8 +582,12 @@ export function useConversationSelection({
     loadingDetail,
     detailError, retryDetail,      // plano 85 A3
     loadingOlder, loadOlder,
+    // plano 99 — janela ancorada + os quatro caminhos de salto
+    loadingNewer, loadNewer, jumping,
+    jumpToMessage, jumpToDate, backToBottom,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
+    anchoredWindowRef,
     openInfoAfterSelect, pendingWsMessages,
     isOpenRow, selectContact, reloadOpenThread,
   };
