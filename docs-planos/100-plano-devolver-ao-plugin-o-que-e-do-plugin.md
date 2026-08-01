@@ -1,13 +1,20 @@
 # Plano 100 — Devolver ao plugin o que é do plugin
 
-**Status:** EM EXECUÇÃO — F0 segura concluída; F1 já existia e foi confirmado; F2 GOWA
-bloqueado pelos gates. Escrito em 2026-07-31, atualizado em 2026-07-31.
+**Status:** EM EXECUÇÃO — F0 segura concluída; F1 confirmado; a bancada externa do
+plano 83 foi implantada; F2 GOWA continua bloqueado pelos gates de runtime. Escrito em
+2026-07-31, atualizado em 2026-08-01.
 
 > **Estado honesto desta tranche.** Foram removidos somente frontend morto, helpers órfãos e
 > o catálogo enganoso de um filtro sem produtor. O gate assíncrono de `/protocolos` foi
 > preservado por ser infraestrutura necessária de `overrideRoute`; nenhuma fonte de plugin
 > em `assets/plugin_examples/` foi removida. Em paralelo, o plano 83 recebeu fundações de
 > teste/empacotamento, mas publicação e extração GOWA continuam bloqueadas.
+
+> **Atualização de 2026-08-01:** a fonte de desenvolvimento, os testes e os ZIPs dos 18
+> plugins agora vivem juntos em `whatsbot-pro-plugins/plugins/<id>/{src,tests}`. O runner
+> externo substitui a dependência de testes instalados e nenhum teste entra no artefato de
+> produção. O GOWA publicado foi sincronizado com o bundled 1.3.1; isso **não** autoriza
+> remover o GOWA do core, pois os gates de runtime desta F2 permanecem.
 
 **Objetivo do usuário:** *"tudo que seja possível ir pro plugin vá somente pro plugin, com o
 mínimo possível de coisa no core"* — diretriz dada na execução do plano 84, e a base da
@@ -357,9 +364,10 @@ Hoje o **único** detector de "refactor do core quebrou o plugin" é a fonte do 
 repo e a suíte exercitá-la. Num repo **sem CI** (não existe `.github/`) e sem check de versão
 remoto, esse detector é tudo o que há.
 
-**Consequência para os dois planos:** o plano 83 remove o detector sem substituto. Ou a suíte
-passa a rodar contra os **zips publicados** (contract test), ou se define e versiona uma
-superfície pública (`plugins.context` + `channels.base`) e se bumpa a versão de verdade.
+**Atualização:** o plano 83 já entregou o primeiro substituto: cada plugin mantém os testes
+ao lado de `src/`, e `scripts/test_plugins.py` os executa contra um checkout explícito do
+core; `scripts/build_plugins.py --check --all` prova que os ZIPs correspondem à fonte e não
+contêm testes. Ainda falta CI e continua válido versionar a superfície Python pública.
 
 ### R2 — Duplicação entre plugins é o preço, e é aceito
 
@@ -404,8 +412,9 @@ continuam funcionando.
 GOWA e tarefas genéricas de background. Também faltam boot real sem GOWA e regressões
 cross-provider. As fundações de teste do plano 83 ajudam, mas não fecham esses gates.
 
-**Não remover/publicar GOWA ainda:** nenhuma fonte GOWA foi movida e a publicação permanece
-bloqueada pelos gates de distribuição, compatibilidade de imports e suíte do plano 83.
+**Não remover GOWA do core ainda:** o artefato externo 1.3.1 está sincronizado e pode ser
+usado para atualizar instalações, mas a implementação ainda reexporta componentes do core e
+o fresh install depende do bundled. Extração física continua bloqueada pelos gates acima.
 
 ### F3 — A revisão geral, plugin a plugin
 Com o checklist do §11.

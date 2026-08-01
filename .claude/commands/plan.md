@@ -83,7 +83,7 @@ Legenda de estado de execução (distinta dos 🟢/🔴 de paralelização e dos
 
 ## Passo 4 — Checklist de verificação
 
-Termine o plano com um **Checklist de verificação** (`- [ ]`) aplicável a cada mudança, conforme a tarefa: reload/back-forward, `tests/test_endpoints.py` verde, `node --test` nos módulos puros, **suíte verde no Postgres** (`WHATSBOT_TEST_DB_URL`), modo escuro legível (telas novas), migration round-trip, restart de plugin, sem segredo na URL.
+Termine o plano com um **Checklist de verificação** (`- [ ]`) aplicável a cada mudança, conforme a tarefa: reload/back-forward, `python -m pytest` nas camadas afetadas, `node --test` nos módulos puros, **suíte verde no Postgres** (`WHATSBOT_TEST_DB_URL`), runner do plugin quando aplicável, modo escuro legível (telas novas), migration round-trip, restart de plugin, sem segredo na URL.
 
 ## Regras finais
 

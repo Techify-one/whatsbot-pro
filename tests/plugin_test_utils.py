@@ -1,16 +1,18 @@
 """DB-free helpers for tests that consume plugin source trees.
 
-Plugin code lives in one of two places while plugins are being extracted from
-the core: the versioned workbench under ``assets/plugin_examples`` or the
-installed tree under ``storages/plugins``.  Tests should resolve those trees in
-that order and load modules as real packages so plugin-relative imports keep
-working.
+During the repository split, plugin code may live in the sibling plugins
+repository, in the legacy versioned workbench, or in an installed tree.  The
+optional ``WHATSBOT_PLUGIN_SOURCE_ROOT`` points at the plugins repository's
+``plugins/`` directory, whose entries use ``<id>/src``.  Test helpers resolve
+that external source first and load modules as real packages so relative
+imports keep working.
 """
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
@@ -24,15 +26,21 @@ PLUGIN_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 
 class PluginSourceNotFound(ValueError):
-    """Raised when a plugin is absent from both supported source trees."""
+    """Raised when a plugin is absent from every supported source tree."""
 
-    def __init__(self, plugin_id: str, candidates: tuple[Path, Path]) -> None:
+    def __init__(self, plugin_id: str, candidates: tuple[Path, ...]) -> None:
         self.plugin_id = plugin_id
         self.candidates = candidates
         super().__init__(
             f"plugin {plugin_id!r} not found; looked in "
-            f"{candidates[0]} and {candidates[1]}"
+            + ", ".join(str(candidate) for candidate in candidates)
         )
+
+
+def external_plugins_root() -> Path | None:
+    """Return the optional development-only external plugin source root."""
+    value = os.environ.get("WHATSBOT_PLUGIN_SOURCE_ROOT", "").strip()
+    return Path(value).expanduser() if value else None
 
 
 def plugin_source_candidates(
@@ -40,11 +48,20 @@ def plugin_source_candidates(
     *,
     examples_root: Path = PLUGIN_EXAMPLES_ROOT,
     installed_root: Path = INSTALLED_PLUGINS_ROOT,
-) -> tuple[Path, Path]:
-    """Return the two candidate directories in precedence order."""
+    external_root: Path | None = None,
+) -> tuple[Path, ...]:
+    """Return candidate directories in deterministic precedence order."""
     if not PLUGIN_ID_RE.fullmatch(plugin_id or ""):
         raise ValueError(f"invalid plugin id: {plugin_id!r}")
-    return Path(examples_root) / plugin_id, Path(installed_root) / plugin_id
+    root = external_plugins_root() if external_root is None else Path(external_root)
+    candidates: list[Path] = []
+    if root is not None:
+        candidates.append(root / plugin_id / "src")
+    candidates.extend((
+        Path(examples_root) / plugin_id,
+        Path(installed_root) / plugin_id,
+    ))
+    return tuple(candidates)
 
 
 def purge_loaded_plugin_modules(plugin_id: str) -> tuple[str, ...]:
@@ -85,12 +102,14 @@ def resolve_plugin_source(
     *,
     examples_root: Path = PLUGIN_EXAMPLES_ROOT,
     installed_root: Path = INSTALLED_PLUGINS_ROOT,
+    external_root: Path | None = None,
 ) -> Path:
-    """Find ``plugin_id`` in the workbench first, then the installed tree."""
+    """Find ``plugin_id`` in external, workbench, then installed sources."""
     candidates = plugin_source_candidates(
         plugin_id,
         examples_root=examples_root,
         installed_root=installed_root,
+        external_root=external_root,
     )
     for candidate in candidates:
         if candidate.is_dir():
@@ -127,6 +146,7 @@ def load_plugin_package(
     package_name: str,
     examples_root: Path = PLUGIN_EXAMPLES_ROOT,
     installed_root: Path = INSTALLED_PLUGINS_ROOT,
+    external_root: Path | None = None,
 ) -> ModuleType:
     """Resolve and import a plugin directory as ``package_name``.
 
@@ -140,6 +160,7 @@ def load_plugin_package(
         plugin_id,
         examples_root=examples_root,
         installed_root=installed_root,
+        external_root=external_root,
     )
     existing = sys.modules.get(package_name)
     if existing is not None:
@@ -190,6 +211,7 @@ def load_plugin_module(
     package_name: str,
     examples_root: Path = PLUGIN_EXAMPLES_ROOT,
     installed_root: Path = INSTALLED_PLUGINS_ROOT,
+    external_root: Path | None = None,
 ) -> ModuleType:
     """Resolve a plugin and import one submodule with relative imports enabled."""
     package = load_plugin_package(
@@ -197,6 +219,7 @@ def load_plugin_module(
         package_name=package_name,
         examples_root=examples_root,
         installed_root=installed_root,
+        external_root=external_root,
     )
     if not module_name or module_name == "__init__":
         return package

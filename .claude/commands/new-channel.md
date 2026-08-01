@@ -1,6 +1,6 @@
 # /new-channel — Criar um novo provider de canal (plugin) do WhatsBot
 
-Você (Claude) vai criar um **novo provider de canal** como plugin, **sem tocar em nenhum arquivo do core**. Tudo fica em `storages/plugins/<id>/`. Um provider é um plugin mais pesado que os do `/new-plugin`: ele traz uma subclasse de `Channel` (o contrato de canal), os ganchos de **identidade de conta** (dedup — plano 32), e o **descriptor** que faz a tela Canais renderizar o form dele dinamicamente (plano 33) — sem `if provider ==` no core.
+Você (Claude) vai criar um **novo provider de canal** como plugin, **sem tocar em nenhum arquivo do core**. Tudo fica no repositório irmão `../whatsbot-pro-plugins/plugins/<id>/`, com fonte em `src/`, testes em `tests/`, metadados e ZIP. Um provider é um plugin mais pesado que os do `/new-plugin`: ele traz uma subclasse de `Channel` (o contrato de canal), os ganchos de **identidade de conta** (dedup — plano 32), e o **descriptor** que faz a tela Canais renderizar o form dele dinamicamente (plano 33) — sem `if provider ==` no core.
 
 Argumento opcional do usuário (descrição do provider): `$ARGUMENTS`
 
@@ -33,25 +33,32 @@ Antes de gerar, **leia**:
 
 - [channels/base.py](channels/base.py) — o contrato `Channel` (métodos abstratos `status`/`send_text`/`send_media`/`parse_inbound`), `ChannelCapabilities`, `AccountIdentity`, e os docstrings de `identity_from_credentials`/`account_identity`/`reject_duplicate`/**`provider_descriptor`** (fonte da verdade da forma do descriptor)/**`contact_type`** (o tipo de contato que o canal marca).
 - [channels/events.py](channels/events.py) — `InboundEvent` (o que `parse_inbound` devolve).
-- [assets/plugin_examples/telegram/channels.py](assets/plugin_examples/telegram/channels.py) — melhor referência de provider credential-only por long-poll (`bot_id` derivado do token nos DOIS hooks de identidade; descriptor com `post_create.autoconfigure`).
-- [assets/plugin_examples/whatsapp_cloud/channels.py](assets/plugin_examples/whatsapp_cloud/channels.py) — referência de provider por webhook + templates (identidade no create via `phone_number_id`; descriptor com `post_create.webhook_url`; janela de 24h).
+- [telegram/src/channels.py](../../../whatsbot-pro-plugins/plugins/telegram/src/channels.py) — melhor referência de provider credential-only por long-poll (`bot_id` derivado do token nos DOIS hooks de identidade; descriptor com `post_create.autoconfigure`).
+- [whatsapp_cloud/src/channels.py](../../../whatsbot-pro-plugins/plugins/whatsapp_cloud/src/channels.py) — referência de provider por webhook + templates (identidade no create via `phone_number_id`; descriptor com `post_create.webhook_url`; janela de 24h).
 - [channels/providers/gowa_channel.py](channels/providers/gowa_channel.py) — referência de provider QR/linked-device (identidade só pós-conexão via `account_identity`; descriptor com `config_fields` `generated`/`multiselect` e `needs_qr`).
 - `CLAUDE.md` → seções **"Contrato de identidade de conta / dedup de canais (plano 32)"** e **"Provider de canal (plugin) — plano 33"**.
 
 ## Passo 3 — Gerar a estrutura
 
-Crie em `storages/plugins/<id>/`:
+Crie em `../whatsbot-pro-plugins/plugins/<id>/`:
 
 ```
-storages/plugins/<id>/
-├── plugin.yaml         ← manifest com entry.channels
-├── __init__.py         ← vazio
-├── channels.py         ← subclasse Channel + descriptor + identidade + CHANNEL_PROVIDERS
-├── lifecycle.py        ← SÓ se inbound_route == 'poll' (loop de long-poll)
-├── routes.py           ← SÓ se post_create.autoconfigure ou APIs próprias
-├── settings.py         ← opcional (ex: api_version)
-└── static/<id>.js      ← SÓ se form_component ou uma screen config:true
+../whatsbot-pro-plugins/plugins/<id>/
+├── src/
+│   ├── plugin.yaml         ← manifest com entry.channels
+│   ├── __init__.py
+│   ├── channels.py         ← subclasse Channel + descriptor + identidade + CHANNEL_PROVIDERS
+│   ├── lifecycle.py        ← SÓ se inbound_route == 'poll'
+│   ├── routes.py           ← SÓ se post_create.autoconfigure ou APIs próprias
+│   ├── settings.py         ← opcional
+│   └── static/<id>.js      ← SÓ se form_component ou screen config:true
+├── tests/python/test_<comportamento>.py
+├── <id>.json
+└── <id>.zip                    ← gerado; nunca editar à mão
 ```
+
+Adicione a entrada em `../whatsbot-pro-plugins/catalog.json`. Testes devem ter
+nomes comportamentais e ficar sempre fora de `src/`.
 
 ### plugin.yaml
 
@@ -239,9 +246,20 @@ async def set_webhook(body: dict):
 - Segredo nunca entra no `before`/`after`: registre `{"token_definido": True}`.
 - Guia completo: `docs/PLUGINS_AUDITAVEIS.md`.
 
-## Passo 4 — Instalar + verificar
+## Passo 4 — Testar, empacotar, instalar e verificar
 
-1. O plugin nasce `enabled=0`. Ative pela tela **Plugins** (ou `plugin_repo`), o que dispara restart.
+No repositório `whatsbot-pro-plugins`, rode primeiro:
+
+```bash
+python3 scripts/test_plugins.py <id>
+python3 scripts/build_plugins.py <id>
+python3 scripts/build_plugins.py --check <id>
+```
+
+Importe `plugins/<id>/<id>.zip` pela tela **Plugins**. O diretório `tests/` é
+somente de desenvolvimento: não entra no ZIP e não roda na instalação/atualização.
+
+1. O plugin importado nasce `enabled=0`. Ative pela tela **Plugins**, o que dispara restart.
 2. Confirme que registrou: `GET /api/channels/providers` deve trazer o descriptor do novo provider.
 3. Abra a tela **Canais → Adicionar canal**: o provider aparece no picker e o form renderiza os campos do descriptor. Crie um canal e confirme que o dedup (plano 32) barra a mesma conta 2×.
 3b. **RBAC**: com um usuário SEM `channel.manage`, cada rota de operador do plugin deve devolver **403** (e as `/public/`, se houver, continuar 200). Confira que a ação auditada aparece em `/audit` filtrando pelo **canal**.

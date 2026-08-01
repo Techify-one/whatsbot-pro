@@ -139,7 +139,7 @@ roda a cada poll do painel).
 Dois testes travam isso: `test_audit_ignores_message_traffic` dirige um webhook
 inbound + um envio do operador e exige `audit_log` **intacta**; e
 `test_audit_message_events_stay_out_of_allowlist` falha se alguém puser um desses
-eventos na allowlist ([tests/characterization/test_audit_characterization.py](../tests/characterization/test_audit_characterization.py)).
+eventos na allowlist ([tests/integration/characterization/test_audit_characterization.py](../tests/integration/characterization/test_audit_characterization.py)).
 
 Num plugin, a mesma regra: não audite o endpoint que recebe a mensagem do
 visitante (é o que o `website` faz com as rotas `/public/*`) nem o chat agêntico

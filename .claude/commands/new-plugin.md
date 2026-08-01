@@ -1,6 +1,6 @@
 # /new-plugin — Criar um novo plugin do WhatsBot
 
-Você (Claude) vai criar um novo plugin do WhatsBot **sem mexer em nenhum arquivo do core**. Tudo fica em `storages/plugins/<id>/`.
+Você (Claude) vai criar um novo plugin do WhatsBot **sem mexer em nenhum arquivo do core**. Tudo fica no repositório irmão `../whatsbot-pro-plugins/plugins/<id>/`: fonte instalável em `src/`, testes de desenvolvimento em `tests/`, metadados e ZIP no diretório do plugin.
 
 Argumento opcional do usuário (descrição do plugin): `$ARGUMENTS`
 
@@ -31,32 +31,42 @@ Antes de gerar qualquer arquivo, **leia** estes arquivos para seguir os padrões
 - [db/tables.py](../../db/tables.py) — `Table` objects do core (referência de tipos e nomes)
 - [server/routes/tags.py](../../server/routes/tags.py) — padrão de APIRouter + helpers `_ok`/`_err`
 - [web/static/js/components/Dashboard.js](../../web/static/js/components/Dashboard.js) — padrão de componente Preact + HTM
-- [assets/plugin_examples/protocolos/](../../assets/plugin_examples/protocolos/) — plugin completo de referência (routes/settings/events/filters/lifecycle/UI/migrations)
-- [assets/plugin_examples/melhorias/events.py](../../assets/plugin_examples/melhorias/events.py) — exemplo de `EVENT_HANDLERS`
-- [assets/plugin_examples/protocolos/filters.py](../../assets/plugin_examples/protocolos/filters.py) — filtros de lifecycle de conversa
-- [assets/plugin_examples/whatsapp_cloud/filters.py](../../assets/plugin_examples/whatsapp_cloud/filters.py) — observador defensivo de webhook bruto
+- [protocolos/src/](../../../whatsbot-pro-plugins/plugins/protocolos/src/) — plugin completo de referência (routes/settings/events/filters/lifecycle/UI/migrations)
+- [melhorias/src/events.py](../../../whatsbot-pro-plugins/plugins/melhorias/src/events.py) — exemplo de `EVENT_HANDLERS`
+- [protocolos/src/filters.py](../../../whatsbot-pro-plugins/plugins/protocolos/src/filters.py) — filtros de lifecycle de conversa
+- [whatsapp_cloud/src/filters.py](../../../whatsbot-pro-plugins/plugins/whatsapp_cloud/src/filters.py) — observador defensivo de webhook bruto
 - [plugins/events.py](../../plugins/events.py) — implementação do bus (assinaturas reais, prioridade, sync/async)
 - [docs/PLUGINS_AUDITAVEIS.md](../../docs/PLUGINS_AUDITAVEIS.md) — como registrar as ações do plugin na trilha de Auditoria (leia se o plugin tiver `routes.py`)
 
 ## Passo 3 — Gerar a estrutura
 
-Crie os arquivos em `storages/plugins/<id>/`. **Sempre** prefixe nomes de tabela com `plugin_<id>_` — o migrator valida e rejeita o contrário.
+Crie os arquivos em `../whatsbot-pro-plugins/plugins/<id>/`. **Sempre** prefixe nomes de tabela com `plugin_<id>_` — o migrator valida e rejeita o contrário.
 
 ```
-storages/plugins/<id>/
-├── plugin.yaml              ← manifest (campos abaixo)
-├── __init__.py              ← arquivo vazio
-├── tools.py                 ← se houver tools
-├── prompts.py               ← se houver fragments
-├── routes.py                ← se houver REST endpoints
-├── settings.py              ← se houver settings
-├── events.py                ← se houver event handlers
-├── filters.py               ← se houver filters
-├── migrations/
-│   └── 001_initial.sql
-└── static/
-    └── <id>.js
+../whatsbot-pro-plugins/plugins/<id>/
+├── src/                     ← único conteúdo que entra no ZIP
+│   ├── plugin.yaml          ← manifest (campos abaixo)
+│   ├── __init__.py
+│   ├── tools.py             ← se houver tools
+│   ├── prompts.py           ← se houver fragments
+│   ├── routes.py            ← se houver REST endpoints
+│   ├── settings.py          ← se houver settings
+│   ├── events.py            ← se houver event handlers
+│   ├── filters.py           ← se houver filters
+│   ├── migrations/
+│   │   └── 001_initial.sql
+│   └── static/
+│       └── <id>.js
+├── tests/
+│   └── python/test_<comportamento>.py
+├── <id>.json               ← metadados do catálogo
+└── <id>.zip                ← gerado; nunca editar à mão
 ```
+
+Adicione também a entrada correspondente em `../whatsbot-pro-plugins/catalog.json`.
+Testes devem ter nomes comportamentais; não use número de plano no nome do arquivo.
+Eles importam fixtures do core pelo `conftest.py` do repositório externo e **nunca**
+ficam dentro de `src/`.
 
 ### plugin.yaml
 
@@ -113,7 +123,8 @@ e/ou uma screen `config: true` (UI custom no mesmo modal "Configurar"). **Nunca*
 adicione opção de plugin ao painel de Configurações do core (`ConfigPanel.js`).
 Quando há uma screen `config: true`, o modal renderiza ela no lugar do form
 declarativo. Veja as screens `config: true` em
-`assets/plugin_examples/website/` e `assets/plugin_examples/protocolos/`.
+`../whatsbot-pro-plugins/plugins/website/src/` e
+`../whatsbot-pro-plugins/plugins/protocolos/src/`.
 
 ### tools.py (se houver tools)
 
@@ -442,15 +453,26 @@ export default function MyScreen({ apiBase, can }) {
 
 Para `POST`/`PUT` com JSON, passe `headers: { 'Content-Type': 'application/json' }` e `body: JSON.stringify(...)` — o `apiFetch` adiciona o `Authorization` em cima desses headers. Para uploads (`FormData`), **não** defina `Content-Type` — o navegador define com boundary correto.
 
-## Passo 4 — Instruções finais ao usuário
+## Passo 4 — Testar, empacotar e instruir o usuário
+
+No repositório `whatsbot-pro-plugins`, rode:
+
+```bash
+python3 scripts/test_plugins.py <id>
+python3 scripts/build_plugins.py <id>
+python3 scripts/build_plugins.py --check <id>
+```
+
+O build deve falhar se houver teste, cache, banco ou segredo em `src/`. Nunca copie
+`tests/` para o ZIP e nunca execute testes durante instalação/atualização.
 
 Ao terminar, mostre:
 
 1. Caminho da pasta criada.
 2. Lista de arquivos gerados.
-3. Próximo passo: "Acesse `/plugins` no app. Clique em **Ativar** no card do plugin. O servidor reinicia em ~3s; telas de funcionalidade (`config: false`) aparecem no menu da engrenagem."
+3. Próximo passo: "Acesse `/plugins`, importe `plugins/<id>/<id>.zip` e depois clique em **Ativar**. O servidor reinicia em ~3s; telas de funcionalidade (`config: false`) aparecem no menu da engrenagem."
 4. Para configurar: na tela `/plugins`, clique em **Configurar** no card do plugin (abre o form de settings e/ou a screen `config: true`).
-5. Para compartilhar: na tela `/plugins`, **Exportar** baixa um `.zip`.
+5. Para compartilhar: entregue somente `<id>.zip`; fonte e testes continuam no repositório de desenvolvimento.
 
 ## Regras importantes
 

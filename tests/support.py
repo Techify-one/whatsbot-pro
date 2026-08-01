@@ -366,7 +366,7 @@ def _copy_plugin(
         except PluginSourceNotFound as exc:
             raise ValueError(
                 f"build_test_app: unknown plugin {plugin_id!r} "
-                f"(not found in {exc.candidates[0]} or {exc.candidates[1]})"
+                f"(not found in {', '.join(str(path) for path in exc.candidates)})"
             ) from None
     dest = dest_parent / plugin_id
     shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -384,8 +384,9 @@ def build_test_app(
 
     Args:
         plugins: plugin ids to copy + enable (default ``("gowa",)``). Each must
-            exist under ``assets/plugin_examples/<id>/`` or, after extraction,
-            under ``storages/plugins/<id>/``.
+            exist in the external source root, under
+            ``assets/plugin_examples/<id>/``, or under
+            ``storages/plugins/<id>/``.
         plugin_sources: optional mapping from a requested plugin id to an explicit
             source directory. Useful for versioned fixtures; ids not present keep
             the normal examples-then-installed resolution. Existing callers do

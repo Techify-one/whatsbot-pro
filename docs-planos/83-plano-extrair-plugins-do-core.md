@@ -145,24 +145,35 @@ publicado está ausente de `assets/`**.
 > **Paridade de plugin se decide LENDO os hunks — contagem de linhas só-de-um-lado não
 > distingue "superado" de "perdido".**
 
-> 🔄 **`gowa` não se instala por zip.** O publicado (1.2.0) está duas versões atrás do
-> bundled (1.3.1). Como o `gowa` é o único plugin com upgrade automático no boot, um
-> operador que importe a cópia publicada **rebaixa** o plugin — e o próximo boot desfaz
-> sozinho. Vale uma regra explícita no catálogo.
+> ✅ **Atualização de 2026-08-01:** o GOWA publicado foi sincronizado com o bundled
+> 1.3.1, inclusive permissão `channel.manage` e auditoria da configuração de alertas.
+> O ZIP externo continua sendo um artefato de atualização; fresh install e upgrade
+> automático ainda usam a cópia bundled do core.
 
 **Ação / estado:**
-1. 🟡 Reconciliar plugin a plugin, comparando **conteúdo**. Os sete não-GOWA estão
-   reconciliados: dois já eram idênticos e cinco estão no PR externo #1. O `gowa` 1.3.1
-   continua deliberadamente fora enquanto o plano 100 F2 estiver bloqueado.
-2. ✅ Criar `scripts/build_plugin_zips.py` no lugar do snippet manual. O builder descobre
-   qualquer plugin válido ou aceita ids explícitos; a seleção do que publicar continua sendo
-   uma decisão de release.
+1. ✅ Reconciliar plugin a plugin, comparando **conteúdo**, inclusive o GOWA 1.3.1.
+2. ✅ Criar `scripts/build_plugins.py` no repositório externo. O builder usa
+   `plugins/<id>/src/` como fonte, gera ZIP determinístico e rejeita testes, caches,
+   bancos e segredos no artefato.
 3. 🟡 🔄 **Resolver a disponibilidade:** os cinco ZIPs já chegaram a uma branch remota
    revisável; falta mergear o PR #1. O core ainda não consome `catalog.json`, então instalação
    pela UI continua exigindo baixar o ZIP e usar **Importar (.zip)**.
 4. ⏳ Só então remover as pastas do core. **Nenhuma foi removida nesta tranche.**
 
-### P2 — "O plugin traz os próprios testes" só funciona pela metade
+### P2 — "O plugin traz os próprios testes" ✅ estrutura implantada
+
+> ✅ **Atualização de 2026-08-01 (substitui o diagnóstico histórico abaixo):** os 18
+> plugins do repositório Pro agora têm `src/` e `tests/`; os diretórios vazios são
+> preservados no Git. Foram externalizados 28 arquivos Python, 5 suítes JavaScript e
+> 2 ferramentas manuais. O core não descobre mais `storages/plugins/*/tests`: plugin
+> instalado/atualizado em produção nunca executa nem recebe esses testes. O comando
+> explícito é `python3 scripts/test_plugins.py <id>` no repositório externo; cada plugin
+> roda em subprocesso separado contra um checkout compatível do core.
+>
+> O core foi reorganizado em `tests/core/`, `tests/contracts/` e `tests/integration/`.
+> `WHATSBOT_PLUGIN_SOURCE_ROOT` permite que contratos transitórios usem o `src/` externo
+> primeiro. As medições abaixo permanecem apenas como registro do estado encontrado antes
+> dessa tranche; não descrevem mais a coleta atual.
 
 A **descoberta** funciona: `tests/conftest.py::_discover_plugin_test_dirs` varre `storages/plugins/<id>/tests/test_*.py`
 — mas só quando o pytest roda "pelado" (`args_source == TESTPATHS`).
@@ -414,9 +425,10 @@ teste `test_plano84_account_alerts.py` (41 funções/1.000 linhas). O motor fico
 o core recebeu somente o seam genérico de confiança (`provider`, `channel_id`,
 `signature_authenticated`) descrito no plano 100.
 
-Além dos call sites de nível de módulo, `tests/manual_cloud_api_test.py` tem um import direto
-de `assets.plugin_examples.whatsapp_cloud.channels` (o **único** assim no repo; some junto
-com a pasta).
+As ferramentas manuais que antes estavam em `tests/manual_cloud_api_test.py` e
+`tests/manual_inbound_message_inject.py` foram movidas para
+`plugins/whatsapp_cloud/tests/manual/` no repositório externo e ficaram fora da coleta
+automática.
 
 Fica no core, e **está certo que fique** (valores duplicados, não import do plugin):
 `LEGACY_CLOUD_VIDEO_LIMITS` em `channels/video_validate.py`, consumido por
@@ -485,12 +497,12 @@ Contraste com o `gowa`: `plugins/bootstrap.py:127-173` compara semver e substitu
 | Fase | Recomendação |
 |---|---|
 | 🔄 **Plano 100 antes de tudo** | F0 segura concluída e F1 confirmado; F2 GOWA ainda bloqueado pelos contratos/gates |
-| F0 | **Em andamento:** fundações entregues e cinco artefatos no PR externo #1; merge, P4, migração dos testes e suíte completa pendentes |
-| F1 `protocolos` | **Bloqueada por F0/P4:** ZIP 1.24.0 preparado, fonte/testes ainda no core |
-| F2 `melhorias` | **Bloqueada pela F0/P4**; é o próximo candidato de baixo risco quando o gate fechar e precisa de data-alvo |
-| F3 `website` | **Bloqueada pela F0/P4**; números reconfirmados, pronta como candidata depois do gate |
-| F4/F5 `telegram`/`whatsapp_cloud` | **Adiar** — bloqueadas por F0/P4 e pelo acoplamento de testes/providers |
-| 🔄 F6/F7 `facebook_messenger`/`instagram` | **Adiar remoção** — primeiros ZIPs no PR externo #1; testes e P2–P4 continuam no caminho |
+| F0 | **Estrutura implantada:** 18 plugins com `src/tests/json/zip`, builder e runner externos; ZIPs não contêm testes. Remoção dos espelhos do core ainda depende do legado. |
+| F1 `protocolos` | **Testes e fonte publicados externamente**; espelho no core mantido temporariamente porque `legacy_endpoints` ainda o carrega. |
+| F2 `melhorias` | **Testes e fonte publicados externamente**; os testes claros saíram da suíte do core. |
+| F3 `website` | **Testes e fonte publicados externamente**; os testes claros saíram da suíte do core. |
+| F4/F5 `telegram`/`whatsapp_cloud` | **Parcial:** fonte externa e testes Cloud migrados; contratos mistos e blocos legados ainda precisam ser fatiados antes de apagar os espelhos. |
+| 🔄 F6/F7 `facebook_messenger`/`instagram` | **Fonte e testes externos**; o contrato Meta Graph também saiu do core. Remoção dos espelhos segue o gate do legado. |
 
 ---
 
