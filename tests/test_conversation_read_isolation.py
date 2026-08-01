@@ -21,6 +21,23 @@ from db.repositories import (channel_repo, contact_repo, conversation_repo,
 from server.auth import hash_password_argon2
 
 
+_CREATED_USER_IDS: list[int] = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_isolation_users(_engine_ready):
+    """Remove module-owned identities from the process-global test database."""
+    yield
+    from db.repositories import session_repo
+
+    for user_id in reversed(_CREATED_USER_IDS):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), (
+            f"could not remove conversation-isolation user {user_id}"
+        )
+    _CREATED_USER_IDS.clear()
+
+
 def _mk_inbox(channel_id: str) -> int:
     if channel_repo.get(channel_id) is None:
         channel_repo.create(id=channel_id, provider="whatsapp_cloud",
@@ -48,6 +65,7 @@ def _scoped_user(email: str, inbox_id: int) -> int:
             email=email, name=email.split("@")[0],
             password_hash=hash_password_argon2("supersecret"),
             permission_keys=["conversation.read"], custom=True)["id"]
+        _CREATED_USER_IDS.append(user_id)
     inbox_member_repo.set_members(inbox_id, [user_id])
     return user_id
 
@@ -130,10 +148,12 @@ def _plain_user(email: str) -> int:
     existing = user_repo.get_by_email(email)
     if existing:
         return existing["id"]
-    return user_repo.create(
+    user_id = user_repo.create(
         email=email, name=email.split("@")[0],
         password_hash=hash_password_argon2("supersecret"),
         permission_keys=["conversation.read"], custom=True)["id"]
+    _CREATED_USER_IDS.append(user_id)
+    return user_id
 
 
 @pytest.fixture

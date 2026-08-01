@@ -25,6 +25,11 @@ import pytest
 # guarda um espelho que pode estar atrás. O ``build_app`` copia de ``assets`` por padrão
 # — aqui apontamos para ``storages/plugins`` para exercitar o código instalado (real).
 _STORAGES_PLUGINS = Path(__file__).resolve().parents[1] / "storages" / "plugins"
+pytestmark = pytest.mark.skipif(
+    not (_STORAGES_PLUGINS / "protocolos" / "plugin.yaml").is_file(),
+    reason="plugin protocolos não instalado em storages/plugins "
+           "(fonte intencional deste módulo)",
+)
 
 
 @pytest.fixture(autouse=True)

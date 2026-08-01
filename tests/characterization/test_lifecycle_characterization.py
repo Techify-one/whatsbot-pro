@@ -52,6 +52,25 @@ from tests.characterization.golden import (
 )
 
 
+_CREATED_USER_IDS: list[int] = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_lifecycle_users(_engine_ready):
+    """Do not leave the shared suite in authenticated-install mode."""
+    yield
+    global _OPERATOR_TOKEN
+    from db.repositories import session_repo, user_repo
+
+    for user_id in reversed(_CREATED_USER_IDS):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), (
+            f"could not remove lifecycle test user {user_id}"
+        )
+    _CREATED_USER_IDS.clear()
+    _OPERATOR_TOKEN = None
+
+
 # ── Shared helpers ───────────────────────────────────────────────────────────
 
 def _make_conversation(phone: str, *, status: str = "open"):
@@ -80,6 +99,7 @@ def _make_user(name: str, email: str) -> int:
     """Create an active user (idempotent-ish: a fresh email per test)."""
     from db.repositories import user_repo
     user = user_repo.create(email=email, name=name, password_hash="x")
+    _CREATED_USER_IDS.append(user["id"])
     return user["id"]
 
 
@@ -98,9 +118,13 @@ def _operator_client(built):
     from db.repositories import user_repo, session_repo
     from server.auth import generate_session_token
     if _OPERATOR_TOKEN is None:
-        op = (user_repo.get_by_email("lifecycle_operator@test.com")
-              or user_repo.create(email="lifecycle_operator@test.com", name="Operador",
-                                  password_hash="x", role_keys=["admin"]))
+        op = user_repo.get_by_email("lifecycle_operator@test.com")
+        if op is None:
+            op = user_repo.create(
+                email="lifecycle_operator@test.com", name="Operador",
+                password_hash="x", role_keys=["admin"],
+            )
+            _CREATED_USER_IDS.append(op["id"])
         _OPERATOR_TOKEN = generate_session_token()
         session_repo.create(_OPERATOR_TOKEN, op["id"], user_agent="test", ip="127.0.0.1")
     built.client.headers["Authorization"] = f"Bearer {_OPERATOR_TOKEN}"

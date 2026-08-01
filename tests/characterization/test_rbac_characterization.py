@@ -61,18 +61,28 @@ _DENIED_TEXT = _DENIED_BODY.decode("utf-8")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _make_custom_user(email: str, permission_keys: list[str]) -> int:
-    """Create an ACTIVE user with an explicit (custom) permission set + a known
-    password, so login works and the effective perms are exactly ``permission_keys``."""
-    from db.repositories import user_repo
+@pytest.fixture
+def make_custom_user():
+    """Create exact-permission users and remove their sessions/rows afterwards."""
+    from db.repositories import session_repo, user_repo
     from server.auth import hash_password_argon2
 
-    user = user_repo.create(
-        email=email, name=email.split("@")[0],
-        password_hash=hash_password_argon2("supersecret"),
-        permission_keys=permission_keys, custom=True,
-    )
-    return user["id"]
+    created_ids: list[int] = []
+
+    def _make(email: str, permission_keys: list[str]) -> int:
+        user = user_repo.create(
+            email=email, name=email.split("@")[0],
+            password_hash=hash_password_argon2("supersecret"),
+            permission_keys=permission_keys, custom=True,
+        )
+        created_ids.append(user["id"])
+        return user["id"]
+
+    yield _make
+
+    for user_id in reversed(created_ids):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), f"could not remove RBAC test user {user_id}"
 
 
 def _auth_headers(client, email: str) -> dict:
@@ -96,13 +106,13 @@ def _assert_denied_envelope(resp) -> None:
 
 
 # ── The exact (route, permission key) cells converted in B1 ───────────────────
-# One representative gated route per file × its key. Each is a PUT/POST whose
-# FIRST action in the body is the permission check (verified by recon), so the
-# 403 happens before any observable work — safe to also enforce via a dependency.
+# One representative gated route per file × its key. The gate is a dependency,
+# so the 403 happens before observable route work. Prefer read-only routes when
+# one directly exercises the same permission.
 _CASES = [
-    # ai_engine.py — chaves granulares de IA (substituíram o antigo agent.config.manage)
-    ("ai_engine", "agent.config.manage", "put",  "/api/ai/agents/some_agent",
-     {"display_name": "x", "prompt_key": "p"}),
+    # As chaves granulares substituíram agent.manage. agent.config.manage segue
+    # sendo leitura/edição; criar uma chave inexistente exige agent.create.
+    ("ai_engine", "agent.config.manage", "get", "/api/ai/agents", None),
     ("ai_engine", "agent.tools.manage", "post", "/api/ai/restart", {}),
     # admin.py — key "database.manage" (moved from settings.manage in plano 24)
     ("admin", "database.manage", "get",  "/api/admin/database", None),
@@ -130,13 +140,15 @@ def _slug(path: str) -> str:
 
 @pytest.mark.parametrize("file_id,key,method,path,body", _CASES,
                          ids=[f"{c[0]}:{c[3]}" for c in _CASES])
-def test_lacking_permission_returns_exact_403(build_app, file_id, key, method, path, body):
+def test_lacking_permission_returns_exact_403(
+    build_app, make_custom_user, file_id, key, method, path, body,
+):
     """A logged-in user WITHOUT the route's permission → the canonical 403 with the
     byte-identical ``permission_denied`` envelope (NOT FastAPI's ``{detail}``)."""
     built = build_app(["gowa"])
     email = f"rbac_lacks_{_slug(path)}@test.com"
     # Custom user holding ONLY contact.read → guaranteed to lack agent/settings/plugins.manage.
-    _make_custom_user(email, ["contact.read"])
+    make_custom_user(email, ["contact.read"])
     headers = _auth_headers(built.client, email)
 
     resp = _call(built.client, method, path, body, headers)
@@ -147,13 +159,15 @@ def test_lacking_permission_returns_exact_403(build_app, file_id, key, method, p
 
 @pytest.mark.parametrize("file_id,key,method,path,body", _CASES,
                          ids=[f"{c[0]}:{c[3]}" for c in _CASES])
-def test_having_permission_passes_gate(build_app, file_id, key, method, path, body):
+def test_having_permission_passes_gate(
+    build_app, make_custom_user, file_id, key, method, path, body,
+):
     """A logged-in user WITH the route's permission → the gate passes. We assert
     the response is NOT the 403 envelope (the route body ran); the route's own
     success/validation status is out of scope for the AUTH characterization."""
     built = build_app(["gowa"])
     email = f"rbac_has_{_slug(path)}@test.com"
-    _make_custom_user(email, [key])
+    make_custom_user(email, [key])
     headers = _auth_headers(built.client, email)
 
     resp = _call(built.client, method, path, body, headers)
@@ -177,7 +191,7 @@ def test_no_user_legacy_default_allow(build_app, file_id, key, method, path, bod
 
 # ── (d) the filter.authz.decision seam can downgrade allow→deny ───────────────
 
-def test_authz_seam_can_downgrade_allow_to_deny():
+def test_authz_seam_can_downgrade_allow_to_deny(make_custom_user):
     """The ABAC seam (``filter.authz.decision``) runs AFTER RBAC and can flip
     allow→deny. Characterized at the DECISION layer (``authz.acheck``) because
     that is where the seam is genuinely live (the async path the new
@@ -193,7 +207,7 @@ def test_authz_seam_can_downgrade_allow_to_deny():
     from plugins import events as bus
     from server import authz
 
-    uid = _make_custom_user("rbac_seam@test.com", ["agent.config.manage"])
+    uid = make_custom_user("rbac_seam@test.com", ["agent.config.manage"])
 
     # A fake Request whose state.user is our granted user (acheck reads
     # request.state.user via current_user()).

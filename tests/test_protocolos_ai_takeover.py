@@ -37,6 +37,11 @@ from db.repositories import (config_repo, contact_inbox_repo, contact_repo,
 
 _STORAGES_PLUGINS = Path(__file__).resolve().parents[1] / "storages" / "plugins"
 INBOX_ID = 1
+pytestmark = pytest.mark.skipif(
+    not (_STORAGES_PLUGINS / "protocolos" / "plugin.yaml").is_file(),
+    reason="plugin protocolos não instalado em storages/plugins "
+           "(fonte intencional deste módulo)",
+)
 
 
 @pytest.fixture(autouse=True)

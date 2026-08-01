@@ -1,9 +1,18 @@
 # Plano 83 — Extrair os plugins do repositório do core
 
-**Status:** PLANEJADO — nada executado. Escrito em 2026-07-25.
-**Revisado em 2026-07-31** (auditoria de 25 agentes): todos os números medidos foram
-re-medidos. **Nenhuma linha da matriz de paridade e nenhuma linha da matriz de testes
-sobreviveu intacta.** As correções estão marcadas com 🔄 e a data.
+**Status:** EM EXECUÇÃO — fundações da F0 entregues; nenhuma fonte de plugin removida.
+Escrito em 2026-07-25.
+**Revisado e iniciado em 2026-07-31** (auditoria de 25 agentes + tranche de fundações):
+todos os números medidos foram re-medidos. **Nenhuma linha da matriz de paridade e nenhuma
+linha da matriz de testes sobreviveu intacta.** As correções estão marcadas com 🔄 e a data.
+
+> **Estado honesto desta tranche (2026-07-31).** Foram adicionados o builder reproduzível de
+> ZIP, o resolver de fonte `assets/` → `storages/`, o loader DB-free para módulos de teste, o
+> provider sintético e a fixture de autenticação com teardown. Isso prepara a extração, mas
+> **não publica plugin, não torna os ZIPs disponíveis no servidor e não remove nenhuma pasta
+> de `assets/plugin_examples/`**. O boot real sem qualquer fonte de plugin foi provado pelo
+> loader/endpoint; os gates de publicação, superfície de import e suíte completa continuam
+> bloqueando F1–F7.
 
 **Objetivo do usuário:** o repositório `whatsbot-pro` (core) não deve mais carregar o
 código-fonte dos plugins em `assets/plugin_examples/`. Cada plugin vira um `.zip`
@@ -20,20 +29,18 @@ e o plugin traz **tudo** junto — inclusive os próprios testes. No core fica s
 
 ## 1. Veredito
 
-**É viável, e nenhum plugin tem acoplamento de RUNTIME que impeça.** O app sobe sem
-qualquer uma das pastas: `plugins/bootstrap.py` só auto-instala `gowa`
-(`BUNDLED_AUTO_INSTALL = ("gowa",)`, `bootstrap.py:37`).
+**A análise estática e o teste de boot indicam que é viável e que nenhum plugin tem
+acoplamento de RUNTIME intransponível.** `plugins/bootstrap.py` só auto-instala `gowa`
+(`BUNDLED_AUTO_INSTALL = ("gowa",)`, `bootstrap.py:37`). Nesta tranche,
+`test_app_boots_with_no_plugin_source_folders` subiu o app com `assets/plugin_examples/` e
+`storages/plugins/` vazios, confirmou registry de plugins vazio e bateu no endpoint real de
+providers. O único provider retornado foi o GOWA de compatibilidade do core (plano 100 F2
+ainda bloqueado). O gate empírico que faltava, portanto, foi fechado sem fingir que GOWA já
+foi extraído.
 
-> 🔄 **2026-07-31 — o veredito é verificado ESTATICAMENTE, não empiricamente.** Ninguém
-> subiu o app sem as pastas. As duas âncoras que o plano citava não apontam mais para o que
-> ele diz: `server/app.py:170-182` é o wiring de `channel_providers` (nenhum id de plugin) e
-> `plugins/context.py:248-258` é a validação do `PLUGIN_ACTION_RE`. Os 3 hits de
-> `assets/plugin_examples` fora de tests/assets/storages continuam sendo **comentários**.
-> **Ação:** o gate da F0 passa a incluir um boot real com as pastas ausentes — é a única
-> prova do veredito central deste plano.
-
-O que quebra é (a) a suíte de testes e (b) a distribuição. E há **quatro pré-requisitos**
-que precisam existir ANTES de apagar qualquer pasta — nenhum deles existe hoje.
+O que quebra é (a) a suíte de testes e (b) a distribuição. Há **quatro pré-requisitos**
+antes de apagar qualquer pasta. As fundações de P1–P3 começaram a existir nesta tranche,
+mas nenhum dos gates de remoção/publicação foi fechado por completo.
 
 🔄 **Baseline corrigido (2026-07-31).** No dia em que este plano foi escrito,
 `assets/plugin_examples/` já tinha **7 pastas** — o `facebook_messenger` **já existia** e
@@ -78,10 +85,12 @@ $ git ls-files assets/channel_plugins/
 assets/channel_plugins/README.md      ← só o README
 ```
 
-🔄 **2026-07-31: continua idêntico, só que agora são 5 zips (entraram `facebook_messenger` e
-`instagram`), somando 199 KB no disco e zero no git.** Não há script nem CI para gerá-los:
-`scripts/` tem 3 arquivos e nenhum é de build, não existe `Makefile` e **não existe
-`.github/`**. O `README.md` continua mandando rodar um heredoc à mão — hoje com 5 ids.
+🔄 **Estado após a tranche de 2026-07-31:** os ZIPs continuam gitignorados e fora do clone,
+mas agora existe `scripts/build_plugin_zips.py`, com build determinístico, validação de
+manifest, exclusão de caches/bancos locais e modos `--all`, `--list` e `--check`. O
+`assets/channel_plugins/README.md` passou a apontar para ele. Isso resolve **reprodução do
+artefato**, não sua disponibilidade: ainda não há CI, catálogo consumido pelo core nem
+publicação automática, e um clone continua sem os ZIPs.
 
 #### 🚨 P1 é bloqueador de DISPONIBILIDADE, não só de paridade (descoberto em 2026-07-31)
 
@@ -113,7 +122,7 @@ o P1 ainda é bloqueador de **existência**, não de paridade.
 |---|---|---|---|---|
 | `gowa` | **1.2.0** ⬅ atrás | 1.3.1 | 1.3.1 | 1.3.1 |
 | `telegram` | **1.3.0** ⬅ atrás | 1.3.1 | 1.3.1 | 1.3.1 |
-| `whatsapp_cloud` | 1.10.1 | 1.9.0 | 1.10.1 | 1.10.1 |
+| `whatsapp_cloud` | 1.10.2 | 1.10.2 | 1.10.2 | 1.10.2 |
 | `website` | **1.0.0** ⬅ atrás | 1.1.1 | 1.1.1 | 1.1.1 |
 | `melhorias` | 1.7.0 | 1.7.0 | 1.7.0 | 1.7.0 |
 | `protocolos` | **1.23.0** ⬅ atrás | 1.24.0 | 1.24.0 | 1.23.0 |
@@ -137,30 +146,29 @@ publicado está ausente de `assets/`**.
 > operador que importe a cópia publicada **rebaixa** o plugin — e o próximo boot desfaz
 > sozinho. Vale uma regra explícita no catálogo.
 
-**Ação:**
-1. Reconciliar plugin a plugin, comparando **conteúdo**. 🔄 Hoje **4 dos 6** estão atrás na
-   publicação (`gowa`, `telegram`, `website`, `protocolos`), mais 2 nunca publicados.
-2. Criar `scripts/build_plugin_zips.py` no lugar do snippet manual. 🔄 Decidir se `gowa`,
-   `melhorias` e `protocolos` entram (não têm zip local, mas **são** publicados).
-3. 🔄 **NOVO — resolver a disponibilidade:** o build script não basta, o zip precisa **chegar
+**Ação / estado:**
+1. ⏳ Reconciliar plugin a plugin, comparando **conteúdo**. 🔄 Hoje **4 dos 6** publicados
+   comparados estão atrás (`gowa`, `telegram`, `website`, `protocolos`),
+   mais 2 nunca publicados.
+2. ✅ Criar `scripts/build_plugin_zips.py` no lugar do snippet manual. O builder descobre
+   qualquer plugin válido ou aceita ids explícitos; a seleção do que publicar continua sendo
+   uma decisão de release.
+3. ⏳ 🔄 **Resolver a disponibilidade:** o build script não basta, o zip precisa **chegar
    ao servidor**. Três saídas: zip trackeado no git, uma rota "instalar bundled a partir de
    `assets/`", ou o catálogo remoto do §5.
-4. Só então remover as pastas do core.
+4. ⏳ Só então remover as pastas do core. **Nenhuma foi removida nesta tranche.**
 
 ### P2 — "O plugin traz os próprios testes" só funciona pela metade
 
-A **descoberta** funciona: `tests/conftest.py:162` varre `storages/plugins/<id>/tests/test_*.py`
+A **descoberta** funciona: `tests/conftest.py::_discover_plugin_test_dirs` varre `storages/plugins/<id>/tests/test_*.py`
 — mas só quando o pytest roda "pelado" (`args_source == TESTPATHS`).
 
-A **fixture que sobe o app não funciona**. `tests/support.py:73-80` (🔄 era 74-78):
-
-```python
-src = REAL_PLUGIN_EXAMPLES / plugin_id          # = assets/plugin_examples/<id>
-if not src.is_dir():
-    raise ValueError(f"build_test_app: unknown bundled plugin {plugin_id!r} ...")
-```
-
-Prova empírica reconfirmada em 2026-07-31: `melhorias: COPIADO OK` / `vendas_ia: FALHA`.
+**A falha da fixture foi corrigida nesta tranche.** `tests/support.py::_copy_plugin` agora
+resolve primeiro `assets/plugin_examples/<id>` e depois `storages/plugins/<id>`, com erro que
+cita os dois caminhos. `tests/plugin_test_utils.py` concentra a mesma resolução e carrega
+pacotes/submódulos por path com `__path__`/`sys.modules` corretos para imports relativos. O
+helper `loaded_plugin_module()` separa explicitamente esse carregamento unitário do módulo
+real em `whatsbot_plugins.<id>`, evitando o falso-verde descrito abaixo.
 
 🔄 **Correções de escala:**
 - O `vendas_ia` tem **67 testes** embutidos (3 arquivos), não 2 — e continua sendo o **único
@@ -170,38 +178,54 @@ Prova empírica reconfirmada em 2026-07-31: `melhorias: COPIADO OK` / `vendas_ia
   testes") tem hoje **1 caso de sucesso em 18 plugins**. Criar o `tests/` dentro de cada
   plugin extraído é item explícito de cada fase, não consequência automática da F0.1.
 - Os `monkeypatch` de `REAL_PLUGIN_EXAMPLES` são **10 arquivos**, não 6 (+67% em 6 dias):
-  `test_avaliacao_protocolo.py:32` (confirmado), `test_plano67_protocolos_toggle.py:29`,
-  `test_plano68_reopen_assign_on_due.py:26`, `test_protocolos_popup.py:31`,
-  `test_protocolos_relink_attr.py:31`, `test_utm_atendente.py:504-510`, e os quatro novos:
-  `test_protocolos_ai_takeover.py:44`, `test_protocolos_atendente_provisorio.py:46`,
-  `test_protocolos_mirror_sync.py:28`, `test_protocolos_skip_conditions.py:25`.
+  `test_avaliacao_protocolo`, `test_plano67_protocolos_toggle`,
+  `test_plano68_reopen_assign_on_due`, `test_protocolos_popup`,
+  `test_protocolos_relink_attr`, `test_utm_atendente`, `test_protocolos_ai_takeover`,
+  `test_protocolos_atendente_provisorio`, `test_protocolos_mirror_sync` e
+  `test_protocolos_skip_conditions`.
   **O número cresce a cada plano executado.**
 
 #### 🚨 P2 tem um lado inverso que ninguém mediu
 
 **112 testes do core dependem de conteúdo GITIGNORADO em `storages/plugins/`** —
-`utm_atendente` 56, `retorno_automatico` 37, `vendas_ia` 10, `agendamento_retorno` 9. E
-`tests/test_utm_atendente.py:56-59` faz `_load('utm')` em **nível de módulo, sem guard de
-existência**: num clone limpo isso é **erro de COLETA**, não skip. Só
-`test_retorno_automatico.py` e `test_vendas_ia_ad_store.py` degradam com segurança.
+`utm_atendente` 56, `retorno_automatico` 37, `vendas_ia` 10, `agendamento_retorno` 9. O bug
+de coleta foi fechado nesta tranche: `test_utm_atendente.py` agora faz skip de módulo antes
+de qualquer load quando a fonte instalada falta, e os módulos que intencionalmente exercitam
+`protocolos`/`agendamento_retorno` instalados têm guard explícito. Isso torna o clone limpo
+coletável; **não substitui mover esses testes para os plugins distribuídos** — ausente a
+fonte, a cobertura é declaradamente skipada.
+
+🔄 **Existir também não prova paridade.** Na validação desta tranche, a cópia instalada de
+`agendamento_retorno` (1.4.0) existe, então o guard libera o módulo, mas seu
+`build_message_text(description, contact_name)` já diverge do teste do core, que ainda chama
+uma terceira posição `scheduler`. Esse vermelho é a prova dinâmica do split que o plano quer
+eliminar: até o teste viajar junto do zip, o gate por existência evita erro de coleta, mas
+não pode prometer compatibilidade de conteúdo.
+
+O mesmo ocorreu com `protocolos`: o teste de atendente provisório exige 1.24/migration 019,
+enquanto a cópia instalada local é 1.23 e termina na migration 018. O guard agora verifica a
+capability concreta (arquivo 019), não só a existência da pasta, e declara skip em vez de
+executar contra bytes incompatíveis/schema residual.
 
 É **o mesmo bug de classe** do split `assets`↔`storages` que este plano usa como argumento
 central da F1 — do outro lado. O `_copy_plugin` bidirecional não resolve isso sozinho.
 
-**Ação (mudança no core, pequena):**
-1. `_copy_plugin` procura em `assets/plugin_examples/<id>` **e** `storages/plugins/<id>`,
+**Ação / estado:**
+1. ✅ `_copy_plugin` procura em `assets/plugin_examples/<id>` **e** `storages/plugins/<id>`,
    nessa ordem, com erro citando os dois caminhos.
-2. 🔄 **NOVO** — um helper único de "carregar módulo de plugin nos testes" (hoje
-   reimplementado à mão em cada arquivo), que também procure nos dois lugares. Sem isso,
+2. ✅ 🔄 Um helper único de "carregar módulo de plugin nos testes", que também procura nos
+   dois lugares e suporta imports relativos. Sem isso,
    extrair uma pasta quebra o arquivo de teste em **dois lugares independentes**: o
    `build_app` e o loader por caminho do próprio teste.
-3. 🔄 **NOVO** — guard de skip obrigatório em todo teste do core que aponte para
-   `storages/plugins/`.
-4. 🔄 **NOVO** — helper de autenticação de teste **com teardown obrigatório**. Rotas de
+3. ✅ 🔄 Guard de skip obrigatório nos testes que **intencionalmente** apontam para
+   `storages/plugins/`; consumidores que não precisam da cópia instalada passaram ao resolver
+   dual e continuam rodando contra `assets/` no checkout atual.
+4. ✅ 🔄 A fixture `authenticated_admin` autentica com admin isolado, restaura o header,
+   apaga a sessão e remove o usuário que criou no teardown. Rotas de
    plugin gateadas por `core_permission` quebram **por ordem de execução**, porque o plano 48
    fecha a API assim que existe ≥1 usuário e o banco de teste é compartilhado pelo processo.
-   O plano 84 topou nisso e resolveu com uma fixture que autentica como admin e **apaga o
-   usuário no teardown**.
+   A costura do fake provider, a prova da fixture `plugin_app` e a caracterização do sandbox
+   já a adotaram; novos testes autenticados devem usar a mesma fixture.
 
 > 🔄 **Armadilha de falso-verde (plano 84).** O teste precisa patchar o módulo carregado pelo
 > **loader** (`sys.modules['whatsbot_plugins.<id>.<mod>']`), que é um objeto **diferente** do
@@ -237,17 +261,20 @@ arquivos usam um plugin de canal como veículo"**. A conclusão **não muda** �
 volume subiu e a urgência também. `melhorias` triplicou em 6 dias (+39 funções em 4 commits),
 o que confirma que **este plano acumula juros**.
 
-**Ação:** um provider sintético residente em `tests/`.
+**Ação / estado:** ✅ `tests/fake_provider.py` fornece `FakeChannel` configurável para o
+contrato genérico e reexporta o `FakeGowaClient` sem fingir que o cliente HTTP é um
+`Channel`. Há cobertura DB-free para descriptor, identidade, capabilities, limites/janelas,
+lifecycle, outbound e `parse_inbound`. ⏳ Os ~90 testes do core ainda não foram migrados para
+ele; portanto os fakes locais não podem ser apagados ainda.
 
-> 🔄 **São 7 fakes de `Channel`, não 5 — e as 3 linhas citadas estavam todas erradas:**
-> `_FakeChannel` (`test_endpoints.py:4919`, era 4869), `_FakeWindowed` (`:5020`, era 4944),
-> `_FakeTplChannel` (`:6290`, era 6134), **`_P76GuardChannel` (`:7106` — omitido, e já
-> existia em 25/07)**, `_CloudStub` (`test_source_id_per_channel.py:26` ✅),
-> `_FakeChan` (`test_channel_identity_hooks.py:103` ✅) e **`_Meta`
-> (`test_meta_graph_core.py:76`)**.
+> 🔄 **São 7 fakes de `Channel`, não 5 — e as linhas citadas envelheceram:**
+> `_FakeChannel`, `_FakeWindowed`, `_FakeTplChannel` e `_P76GuardChannel` em
+> `test_endpoints.py`; `_CloudStub` em `test_source_id_per_channel.py`; `_FakeChan` em
+> `test_channel_identity_hooks.py`; e `_Meta` em `test_meta_graph_core.py`. Os símbolos,
+> localizáveis por `rg`, são a referência estável.
 >
-> 🔄 **E há um 8º dublê que a varredura por subclasse não pega:** `tests/fakes.py:34`
-> `FakeGowaClient` (220 linhas). Não é um `Channel` — é o cliente GOWA falso, e é o que
+> 🔄 **E há um 8º dublê que a varredura por subclasse não pega:**
+> `tests.fakes.FakeGowaClient`. Não é um `Channel` — é o cliente GOWA falso, e é o que
 > sustenta os testes que passam por `channels/registry.py:108` (`if provider == "gowa"`, que
 > só constrói o canal se `gowa_client` existir). **Um `fake_provider.py` que o ignore não
 > cobre o único provider que este plano mantém no core.**
@@ -258,11 +285,11 @@ o que confirma que **este plano acumula juros**.
 > plano chamou de "status" é o `receipt`, que desde o plano 75 carrega
 > `sent/delivered/read/failed/played`.
 >
-> 🔄 **A lista de carregamentos em nível de módulo estava incompleta e desatualizada.** Linhas
-> atuais em `test_endpoints.py`: `:683` ✅, `:690` ✅, `:5129-5130` (era ~5052), `:5339` (era
-> 5263), `:6595-6598` (era 6439), `:6863-6864` (eram 6681/6690), `:7091`. **Faltava o bloco
-> `protocolos` inteiro** (`:2549-2820`, que lê de `storages/`) e ~18 call sites em 11 outros
-> arquivos. **O raio de explosão de remover uma pasta é MAIOR do que o plano descrevia.**
+> 🔄 **A lista de carregamentos em nível de módulo estava incompleta e desatualizada.** A
+> busca pelos helpers de carregamento em `test_endpoints.py` inclui também o bloco inteiro de
+> `protocolos` (que lê de `storages/`) e há ~18 call sites em 11 outros arquivos. Localize-os
+> pelos símbolos do loader, não por números de linha. **O raio de explosão de remover uma
+> pasta é MAIOR do que o plano descrevia.**
 
 ### 🔄 P4 (NOVO) — A superfície de import não é versionada
 
@@ -271,7 +298,8 @@ Os plugins de `assets/` fazem **100+ imports de módulos internos do core** (45 
 `server.background`, `server.authz`, `ai_engine`, `app.services`, `gowa.manager`,
 `runtime.supervisor`, `db.tables`, `agent`) — **nenhum é API declarada**.
 
-E **todos os 22 plugins** declaram o mesmo `whatsbot_api_version: ">=1.0,<2.0"` contra
+E **os 22 manifests/cópias não ocultos medidos** (15 ids únicos; `assets` + `storages`
+incluem duplicatas) declaram o mesmo `whatsbot_api_version: ">=1.0,<2.0"` contra
 `WHATSBOT_API_VERSION = "1.0.0"` (`plugins/semver.py:26`), que **nunca foi bumpada** desde a
 criação do sistema de plugins. **O guard nunca rejeitou nada e, como está, nunca vai
 rejeitar.**
@@ -280,7 +308,12 @@ Hoje o **único** detector de "refactor do core quebrou o plugin" é a fonte do 
 no repo e a suíte exercitá-la. Este plano **remove esse detector sem substituto**, num repo
 **sem CI** (não existe `.github/`) e sem check de versão remoto.
 
-**Ação — uma das duas, obrigatória antes de F4/F5:**
+O frontend avançou parcialmente nesta tranche: `plugin_services_version` agora negocia
+surfaces 1.x/2.x de `api.services`; manifests legados caem no adapter 1.x e ranges inválidos
+ou incompatíveis falham fechados. Isso **não fecha P4**: os 100+ imports Python e o
+`WHATSBOT_API_VERSION` continuam no estado acima.
+
+**Ação — uma das duas, obrigatória antes de qualquer remoção F1–F7:**
 - a suíte passa a rodar contra os **zips publicados** (contract test); **ou**
 - define-se e versiona-se uma superfície pública (`plugins.context` + `channels.base`) e
   bumpa-se o `WHATSBOT_API_VERSION` de verdade.
@@ -304,22 +337,36 @@ cada.**
 
 ## 4. Fases
 
-### F0 — Pré-requisitos (bloqueia tudo)
-1. `tests/support.py::_copy_plugin` procura em `assets/` **e** `storages/plugins/` (P2).
-   Remover os 🔄 **10** `monkeypatch` que viram redundantes.
-2. `tests/fake_provider.py` — consolida os 🔄 **7 fakes + o `FakeGowaClient`** num provider
+### F0 — Pré-requisitos (EM ANDAMENTO; bloqueia toda remoção)
+1. ✅ `tests/support.py::_copy_plugin` procura em `assets/` **e** `storages/plugins/` (P2).
+   Os 🔄 **10** `monkeypatch` que escolhem deliberadamente a cópia **instalada** foram
+   preservados com guard; eles somem quando os respectivos testes forem para o plugin, não
+   por uma troca silenciosa da fonte sob teste.
+2. ✅ Fundação em `tests/fake_provider.py` para consolidar os 🔄 **7 fakes + o
+   `FakeGowaClient`** num provider
    sintético completo: `provider_descriptor()`, `contact_type()`, `source_id_for()`, hooks de
    identidade, `media_limits`, `session_window_hours`, `capabilities` parametrizáveis, e
    `parse_inbound` capaz de emitir 🔄 `kind ∈ {message, system, receipt, reaction, edited}`.
-3. `scripts/build_plugin_zips.py` — build reproduzível dos zips (P1).
-4. 🔄 **Resolver a disponibilidade do zip no servidor** (P1 · ação 3).
-5. Publicar os plugins no `whatsbot-pro-plugins` **antes** de remover (P1).
-6. 🔄 Helper único de load de módulo de plugin + guards de skip + fixture de auth com
-   teardown (P2 · ações 2-4).
-7. 🔄 Decidir a saída do P4 (contract test **ou** superfície versionada).
+   ⏳ A migração dos testes/fakes existentes continua pendente.
+3. ✅ `scripts/build_plugin_zips.py` — build reproduzível dos zips (P1).
+4. ⏳ 🔄 **Resolver a disponibilidade do zip no servidor** (P1 · ação 3).
+5. ⏳ Publicar os plugins no `whatsbot-pro-plugins` **antes** de remover (P1).
+6. ✅ 🔄 Helper único de load, fixture de auth com teardown, guards de skip e primeiras
+   adoções pelos testes existentes entregues (P2 · ações 2-4). A migração física dos testes
+   para cada zip continua pertencendo às fases F1–F7.
+7. ⏳ 🔄 Decidir a saída do P4 (contract test **ou** superfície versionada).
 
-**Gate:** suíte verde com o `_copy_plugin` novo, sem nenhuma pasta removida ainda —
-🔄 **mais um boot real do app com as pastas ausentes** (§1).
+**Gate ainda NÃO atingido por completo:** os testes unitários das fundações e o 🔄 **boot
+real do app com as duas pastas de fontes vazias** passaram. Falta fechar a suíte completa e,
+principalmente, P1/P4. Até lá, nenhuma fase autoriza publicar/remover uma fonte de plugin.
+
+**Validação desta tranche (31/07):** a costura/fundações passou em rodadas focadas, os 54
+testes nativos de endpoint passaram e o legado `tests/test_endpoints.py` executou **1.641
+checks, 0 falhas**. O `pytest tests/` agregado ainda não é um gate verde do baseline: além
+da divergência instalada acima, `test_audit_matrix_is_complete` acusa corretamente 9 eventos
+auditáveis adicionados em 27/07 sem suas células/goldens, e `test_alembic_hygiene` ainda
+proíbe merge revisions embora `0058_merge_p50_p57` já exista. Nenhum desses vermelhos foi
+silenciado para fabricar uma suíte verde.
 
 ### F1 — `protocolos`
 🔄 Não é mais "custo ~zero", mas continua a fase mais barata. Após F0.1 nem o `monkeypatch`
@@ -348,7 +395,7 @@ protocolo HMAC do gateway do plano 51) **fica órfão no core** quando `melhoria
 
 ### F3 — `website` ✅ números intactos
 `test_website_widget.py` tem 23 testes: 16 do plugin, 6 do core (`build_app(["gowa","website"])`
-nas linhas 257/269/277/290/298/311), 1 sem mudança. 🔄 **Reconfirmado linha a linha em
+em seis funções, localizáveis pelo símbolo), 1 sem mudança. 🔄 **Reconfirmado por função em
 2026-07-31 — a única fase cujos números sobreviveram.** Pode ir para execução sem re-medição.
 
 ### F4 — `telegram`
@@ -357,16 +404,19 @@ arquivo inteiro.
 
 ### F5 — `whatsapp_cloud` (o mais entrelaçado)
 🔄 Ficou **maior e mais autônomo ao mesmo tempo**: o plano 84 acrescentou 4 arquivos + 1
-migration (`alerts.py` 754 linhas, `filters.py` 104, `events.py` 20, `lifecycle.py` 51) e o
-teste `test_plano84_account_alerts.py` (22 funções) — **e não tocou no core**.
+migration (`alerts.py` 801 linhas, `filters.py` 162, `events.py` 22, `lifecycle.py` 51) e o
+teste `test_plano84_account_alerts.py` (41 funções/1.000 linhas). O motor ficou no plugin;
+o core recebeu somente o seam genérico de confiança (`provider`, `channel_id`,
+`signature_authenticated`) descrito no plano 100.
 
-Além dos call sites de nível de módulo, há `tests/manual_cloud_api_test.py:25` com
-`from assets.plugin_examples.whatsapp_cloud.channels import ...` (o **único** import assim no
-repo; some junto com a pasta).
+Além dos call sites de nível de módulo, `tests/manual_cloud_api_test.py` tem um import direto
+de `assets.plugin_examples.whatsapp_cloud.channels` (o **único** assim no repo; some junto
+com a pasta).
 
 Fica no core, e **está certo que fique** (valores duplicados, não import do plugin):
-`channels/video_validate.py:36` `LEGACY_CLOUD_VIDEO_LIMITS` + `video_transcode.py:30` —
-fallback retrocompat para canal `windowed` cujo plugin não declara `media_limits`.
+`LEGACY_CLOUD_VIDEO_LIMITS` em `channels/video_validate.py`, consumido por
+`video_transcode.py` — fallback retrocompat para canal `windowed` cujo plugin não declara
+`media_limits`.
 
 ### 🔄 F6 / F7 — `facebook_messenger` e `instagram` (NOVOS)
 Fora do plano original. São os **únicos dois plugins de `assets/` que não estão publicados em
@@ -416,10 +466,11 @@ Contraste com o `gowa`: `plugins/bootstrap.py:127-173` compara semver e substitu
 > boot desfaz sozinho**. **O catálogo só vira fonte de verdade DEPOIS que o canal sair do
 > core** — enquanto os dois coexistirem, o check tem de ignorar plugin bundled.
 
-> 🔄 **Contrapartida positiva (plano 84):** quanto mais zero-core o plugin, mais o zip vira
-> unidade de deploy autônoma — que é exatamente a premissa deste plano. A F8 original do 84
-> exigia "core antes do zip"; com a reimplementação sem core o item foi riscado. **Critério de
-> aceite por fase: "o plugin extraído instala e funciona num core da release anterior".**
+> 🔄 **Contrapartida positiva, com o plano 84 já corrigido:** quanto menor o seam no core,
+> mais autônomo o zip. Isso não elimina automaticamente a ordem de deploy: o alerta de webhook
+> da Meta exige a procedência/autenticação do core novo e degrada fechado no anterior. **O
+> critério por fase é: o plugin carrega no core anterior; dependências de seam novo degradam
+> explicitamente e têm ordem de deploy documentada.**
 
 ---
 
@@ -427,13 +478,13 @@ Contraste com o `gowa`: `plugins/bootstrap.py:127-173` compara semver e substitu
 
 | Fase | Recomendação |
 |---|---|
-| 🔄 **Plano 100 antes de tudo** | A bancada core→plugin é a pasta que este plano remove |
-| F0 | Fazer. Vale por si só (F0.1 elimina a classe de bug do split assets↔storages) |
-| F1 `protocolos` | Fazer junto com F0. 🔄 Ganhou 2 decisões (SPA hardcode, dono das migrations) |
-| F2 `melhorias` | Fazer, **com data-alvo** — 🔄 os testes triplicaram em 6 dias |
-| F3 `website` | Fazer depois de F0.2. ✅ Números reconfirmados, pronto para executar |
-| F4/F5 `telegram`/`whatsapp_cloud` | **Adiar** — 🔄 agora por **P4** (superfície de import não versionada), motivo mais forte que "atualização manual" |
-| 🔄 F6/F7 `facebook_messenger`/`instagram` | **Adiar** — nem publicados estão; P1 é bloqueador de existência |
+| 🔄 **Plano 100 antes de tudo** | F0 segura concluída e F1 confirmado; F2 GOWA ainda bloqueado pelos contratos/gates |
+| F0 | **Em andamento:** builder, resolver/loader dual, fake provider, auth e boot sem fontes entregues; publicação, P4, migração dos testes e suíte completa pendentes |
+| F1 `protocolos` | **Bloqueada por F0/P4:** nenhuma fonte foi removida nem publicada |
+| F2 `melhorias` | **Bloqueada pela F0/P4**; é o próximo candidato de baixo risco quando o gate fechar e precisa de data-alvo |
+| F3 `website` | **Bloqueada pela F0/P4**; números reconfirmados, pronta como candidata depois do gate |
+| F4/F5 `telegram`/`whatsapp_cloud` | **Adiar** — bloqueadas por F0/P4 e pelo acoplamento de testes/providers |
+| 🔄 F6/F7 `facebook_messenger`/`instagram` | **Adiar** — F0/P4 bloqueiam a remoção e P1 bloqueia a própria disponibilidade |
 
 ---
 
@@ -441,9 +492,8 @@ Contraste com o `gowa`: `plugins/bootstrap.py:127-173` compara semver e substitu
 
 - **`custom_sounds` foi absorvido na direção CONTRÁRIA** (plugin → core): `server/sound_catalog.py`
   (180 linhas), `server/routes/sound_prefs.py` (212), `db/repositories/custom_sound_repo.py`,
-  a tabela `custom_sounds` e permissões na migration `0062` — **enquanto o CLAUDE.md ainda o
-  descreve como plugin da Loja community**. Qualquer plano de fronteira core/plugin precisa
-  reconciliar essa contradição.
+  a tabela `custom_sounds` e permissões na migration `0062`. O `CLAUDE.md` já foi alinhado
+  para registrar essa absorção; ela continua sendo precedente importante da direção oposta.
 - **Migrations com provider hardcoded:** `0047_source_id_native.py` tem 3 cláusulas
   `c.provider <> 'gowa'` e `0050_contact_type.py` escreve `contact_type='telegram'` filtrando
   por `ch.provider='telegram'`. São **fósseis legítimos** (migration é histórico imutável) —

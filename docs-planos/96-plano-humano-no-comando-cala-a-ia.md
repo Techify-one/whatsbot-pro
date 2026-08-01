@@ -91,10 +91,18 @@ O ÚNICO `task.cancel()` do pipeline está em `schedule_orchestrator` ([:796-809
 |---|---|---|---|---|---|---|
 | Botão do cabeçalho | [ConversationHeaderActions.js:214](../web/static/js/components/contacts/ConversationHeaderActions.js#L214) | `set_ai(0)` [:523](../app/services/conversation_service.py#L523) | grava | `NULL` | `0` | ✅ |
 | Picker / menu de contexto / Kanban / lote | [AssigneePicker.js:50](../web/static/js/components/contacts/AssigneePicker.js#L50) | `assign_unified(kind='user')` [:470](../app/services/conversation_service.py#L470) | grava | `NULL` | `0` | ✅ |
-| **Tela Atendimentos** | [Attendances.js:281](../web/static/js/components/attendances/Attendances.js#L281) | **`assign`** [:402](../app/services/conversation_service.py#L402) | grava | intacto | intacto | ❌ |
+| **Tela Atendimentos nativa (histórico pré-plano 100; removida)** | drag-and-drop da tela antiga | **`assign`** [:402](../app/services/conversation_service.py#L402) | grava | intacto | intacto | ❌ no diagnóstico original |
 | **Plugin `agendamento_retorno`** | vencimento do retorno | **`assign`** [logic.py:350](../storages/plugins/agendamento_retorno/logic.py#L350) | grava | intacto | intacto | ❌ |
 
 `assign_me` ([:442](../app/services/conversation_service.py#L442)) tem o mesmo buraco, mas é **código morto no painel** (`assignMeConversation` está definido em [api.js:575](../web/static/js/services/api.js#L575) e não é chamado por ninguém).
+
+O fluxo vivo que substituiu a tela nativa está no plugin `protocolos`:
+[protocolos_tab.js](../assets/plugin_examples/protocolos/static/protocolos_tab.js) envia
+`POST /protocolos/{id}/assign`, recebido por
+[routes.py](../assets/plugin_examples/protocolos/routes.py) e propagado por
+[logic.py](../assets/plugin_examples/protocolos/logic.py) via `conversation_repo.set_assignee`.
+Esse update low-level ainda preserva `active_agent_key`/`ai_active`, mas, depois da F2 deste
+plano, a presença de dono humano já basta para o gate efetivo calar a IA.
 
 ### 2.4 ⚠️ Por que a condição (2) do gate é frágil
 

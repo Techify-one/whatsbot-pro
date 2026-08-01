@@ -39,6 +39,29 @@ from db.repositories import (contact_inbox_repo, contact_repo, conversation_repo
 
 _STORAGES_PLUGINS = Path(__file__).resolve().parents[1] / "storages" / "plugins"
 INBOX_ID = 1
+pytestmark = pytest.mark.skipif(
+    not all((
+        (_STORAGES_PLUGINS / "protocolos" / "plugin.yaml").is_file(),
+        (_STORAGES_PLUGINS / "protocolos" / "migrations"
+         / "019_atendente_provisorio.sql").is_file(),
+    )),
+    reason="plugin protocolos 1.24+/migração 019 não instalado em "
+           "storages/plugins (fonte intencional deste módulo)",
+)
+_CREATED_USER_IDS: list[int] = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_provisional_users(_engine_ready):
+    yield
+    from db.repositories import session_repo
+
+    for user_id in reversed(_CREATED_USER_IDS):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), (
+            f"could not remove provisional-assignee user {user_id}"
+        )
+    _CREATED_USER_IDS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +90,9 @@ def kanban_index(logic):
 def _user(name: str) -> dict:
     """Usuário REAL do core (o snapshot do nome sai daqui)."""
     email = f"prov-{uuid.uuid4().hex[:10]}@teste.local"
-    return user_repo.create(email=email, name=name, password_hash="x")
+    user = user_repo.create(email=email, name=name, password_hash="x")
+    _CREATED_USER_IDS.append(user["id"])
+    return user
 
 
 def _conversation(*, assignee_user_id=None, status="open") -> dict:

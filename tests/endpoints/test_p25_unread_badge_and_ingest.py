@@ -345,11 +345,12 @@ def test_plano72_broadcast_row_carries_contact_tags(build_app):
     assert row0.get("contact_tags") == [], f"untagged contact → []; got {row0.get('contact_tags')!r}"
 
     # Tag the CONTACT → the broadcast row must carry it (parity with list_filtered).
-    assert tag_repo.create("vip", "#f00")
-    tag_repo.set_contact_tags(contact["id"], ["vip"])
+    tag_name = "vip_p72_broadcast"
+    assert tag_repo.create(tag_name, "#f00")
+    tag_repo.set_contact_tags(contact["id"], [tag_name])
     row1 = conversation_repo.get_row_for_broadcast(conv_id)
     assert row1 is not None
-    assert row1.get("contact_tags") == ["vip"], (
+    assert row1.get("contact_tags") == [tag_name], (
         f"broadcast row must reflect the contact's tags (plano 72 F0); "
         f"got {row1.get('contact_tags')!r}")
     # Conversation labels stay a SEPARATE field (not fused with contact tags).

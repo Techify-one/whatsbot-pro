@@ -99,10 +99,8 @@ def test_sweep_none_identity_is_noop_on_identity():
 
 
 # ── Create/update guard (credential identity → 409 decision) ────────────────
-import importlib.util
-from pathlib import Path
-
 from app.services import channel_service as cs
+from tests.plugin_test_utils import load_plugin_module
 
 
 class _FakeRegistry:
@@ -119,12 +117,9 @@ class _FakeDeps:
 
 
 def _cloud_cls():
-    root = Path(__file__).resolve().parents[1]
-    spec = importlib.util.spec_from_file_location(
-        "wa_cloud_guard_test",
-        root / "storages" / "plugins" / "whatsapp_cloud" / "channels.py")
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
+    m = load_plugin_module(
+        "whatsapp_cloud", "channels", package_name="channel_dedup_cloud",
+    )
     return m.WhatsAppCloudChannel
 
 

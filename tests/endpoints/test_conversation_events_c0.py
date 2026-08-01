@@ -32,6 +32,21 @@ import pytest
 from plugins import events as bus
 
 
+_CREATED_USER_IDS: list[int] = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_c0_users(_engine_ready):
+    """Keep this module's users from closing the API for later modules."""
+    yield
+    from db.repositories import session_repo, user_repo
+
+    for user_id in reversed(_CREATED_USER_IDS):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), f"could not remove C0 test user {user_id}"
+    _CREATED_USER_IDS.clear()
+
+
 # ── Background loop + event capture ────────────────────────────────────────
 
 @pytest.fixture
@@ -108,10 +123,13 @@ def _auth_admin(client):
     (``conversation.assigned``, not ``assigned_me``). Returns the same client."""
     from db.repositories import user_repo, session_repo
     from server.auth import hash_password_argon2, generate_session_token
-    admin = (user_repo.get_by_email("c0_admin@test.com")
-             or user_repo.create(email="c0_admin@test.com", name="C0 Admin",
-                                 password_hash=hash_password_argon2("x"),
-                                 role_keys=["admin"]))
+    admin = user_repo.get_by_email("c0_admin@test.com")
+    if admin is None:
+        admin = user_repo.create(
+            email="c0_admin@test.com", name="C0 Admin",
+            password_hash=hash_password_argon2("x"), role_keys=["admin"],
+        )
+        _CREATED_USER_IDS.append(admin["id"])
     tok = generate_session_token()
     session_repo.create(tok, admin["id"], user_agent="test", ip="127.0.0.1")
     client.headers["Authorization"] = f"Bearer {tok}"
@@ -200,6 +218,7 @@ def test_assigned_verb_kept_for_non_null(client, captured_events):
     conv_id, _ = _make_open_conversation("5511900000005")
     user = user_repo.create(email="c0assignee@test.com", name="C0 Assignee",
                             password_hash="x")
+    _CREATED_USER_IDS.append(user["id"])
     uid = user["id"]
     _auth_admin(client)  # mutating route needs a session now that a user exists
     captured_events.clear()

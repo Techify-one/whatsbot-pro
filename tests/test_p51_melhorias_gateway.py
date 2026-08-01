@@ -808,8 +808,7 @@ def test_failure_rows_carry_the_kind_and_stay_out_of_the_resume(plugin_app):
 
     with patch.object(ai_client, "resume", side_effect=fake_resume), \
          patch.object(chat_logic, "ensure_consumer", lambda *a, **k: None):
-        asyncio.get_event_loop().run_until_complete(
-            chat_logic.resume_conversation(cid))
+        asyncio.run(chat_logic.resume_conversation(cid))
     assert all(h["role"] in ("user", "assistant") for h in seen["history"])
     chat_logic.clear_session_state()
 
@@ -936,8 +935,7 @@ def _drive_stream(chat_logic, ai_client, cid, sid, frames, *, rounds=2, clock=No
          patch.object(chat_logic, "now", clock.now), \
          patch.object(chat_logic.asyncio, "sleep", side_effect=fake_sleep):
         try:
-            asyncio.get_event_loop().run_until_complete(
-                chat_logic._consume_stream(cid, sid))
+            asyncio.run(chat_logic._consume_stream(cid, sid))
         except asyncio.CancelledError:
             pass
     waits = [s for kind, s in events if kind == "sleep"]
@@ -982,7 +980,7 @@ def test_consumer_shares_a_cooldown_across_conversations(plugin_app):
     # A conversa A apanha do executor (sem rodar o laço: o sleep pós-rodada
     # consumiria justamente o cooldown que queremos observar na B).
     with patch.object(chat_logic, "now", clock.now):
-        asyncio.get_event_loop().run_until_complete(chat_logic._handle_error_frame(
+        asyncio.run(chat_logic._handle_error_frame(
             cid_a, sid_a, {"kind": "overloaded", "message": "529"}))
         assert chat_logic._cooldown_remaining() == chat_logic.OVERLOADED_FLOOR
 
@@ -1047,8 +1045,7 @@ def test_consumer_gives_up_loudly(plugin_app):
     with patch.object(ai_client, "open_stream", dead_open), \
          patch.object(chat_logic.asyncio, "sleep", side_effect=fake_sleep), \
          patch.object(chat_logic, "broadcast") as bc:
-        asyncio.get_event_loop().run_until_complete(
-            chat_logic._consume_stream(cid, sid))
+        asyncio.run(chat_logic._consume_stream(cid, sid))
         evs = [c.args[1] for c in bc.call_args_list
                if c.args[0] == "plugin_melhorias_ai_event"]
     assert evs and evs[-1]["event"] == "executor_failure"
@@ -1189,8 +1186,8 @@ def test_error_frame_without_kind_still_reads_the_lone_401(plugin_app):
     _reset_failure_state(chat_logic)
     sid, cid = _open_conversation(built, chat_logic, "5511960100092")
 
-    asyncio.get_event_loop().run_until_complete(
-        chat_logic._handle_error_frame(cid, sid, {"message": "HTTP 401 na sessão"}))
+    asyncio.run(chat_logic._handle_error_frame(
+        cid, sid, {"message": "HTTP 401 na sessão"}))
     assert chat_logic.get_conversation(cid)["status"] == "AUTH_EXPIRED"
     assert chat_logic.session_expired() is True
     chat_logic.clear_session_state()

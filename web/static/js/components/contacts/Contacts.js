@@ -40,7 +40,7 @@ const html = htm.bind(h);
 // together (in dependency order so every closure captures stable references) and
 // renders — it adds NO new behavior.
 //
-// ROUTE-OVERRIDE BOUNDARY (Q5, preserved): the `atendimentos` plugin claims the
+// ROUTE-OVERRIDE BOUNDARY (Q5, preserved): the `protocolos` plugin claims the
 // 'attendances' route via registry.overrideRoute, which is EXCLUSIVE/REPLACE
 // semantics (NOT compose) — it swaps the WHOLE rendered component for that tab.
 // This decomposition is purely INTERNAL to <Contacts/>: its export name + props

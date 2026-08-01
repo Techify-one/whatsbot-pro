@@ -125,7 +125,7 @@ class _FakeOpenAIClient:
 # SANDBOX  ·  /api/sandbox/send → process_message (SYNC seam)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _sandbox_case(build_app, *, golden, phone, reply, split=True,
+def _sandbox_case(build_app, authenticated_admin, *, golden, phone, reply, split=True,
                   tool_calls=None, contact_info=None, message="Oi sandbox"):
     """Drive one ``/api/sandbox/send`` with ``aprocess_message`` stubbed and
     snapshot the endpoint response + persisted messages.
@@ -138,6 +138,7 @@ def _sandbox_case(build_app, *, golden, phone, reply, split=True,
     built = build_app(["gowa"], settings_overrides={
         "split_messages": split,
     })
+    authenticated_admin(built.client)
     fake = _stub_process(reply, tool_calls=tool_calls, contact_info=contact_info)
     with patch.object(built.agent_handler, "aprocess_message", new=fake):
         r = built.client.post("/api/sandbox/send",
@@ -153,58 +154,64 @@ def _sandbox_case(build_app, *, golden, phone, reply, split=True,
     return built, r
 
 
-def test_sandbox_send_plain(build_app):
+def test_sandbox_send_plain(build_app, authenticated_admin):
     """Plain (non-array) reply, split ON → parse_split falls back to ONE part.
 
     Persisted: a ``user`` row (the inbound) + one ``assistant`` row (status=sent).
     Response: ``{reply, replies:[part], phone}``. This is the common happy path
     and the exact contract B5 must preserve when this caller goes async."""
-    _sandbox_case(build_app, golden="sandbox_improve_send_plain",
+    _sandbox_case(build_app, authenticated_admin,
+                  golden="sandbox_improve_send_plain",
                   phone="5511975000001", reply="claro, posso ajudar!", split=True)
 
 
-def test_sandbox_send_split_on(build_app):
+def test_sandbox_send_split_on(build_app, authenticated_admin):
     """JSON-array reply + split ON → parse_split_reply yields N parts, each saved
     as its own ``assistant`` row and joined with ``\\n`` in ``reply``."""
-    _sandbox_case(build_app, golden="sandbox_improve_send_split_on",
+    _sandbox_case(build_app, authenticated_admin,
+                  golden="sandbox_improve_send_split_on",
                   phone="5511975000002",
                   reply='["primeira parte", "segunda parte", "terceira parte"]',
                   split=True)
 
 
-def test_sandbox_send_split_off(build_app):
+def test_sandbox_send_split_off(build_app, authenticated_admin):
     """JSON-array reply + split OFF → the raw array string is sent/saved as ONE
     ``assistant`` row (no parsing)."""
-    _sandbox_case(build_app, golden="sandbox_improve_send_split_off",
+    _sandbox_case(build_app, authenticated_admin,
+                  golden="sandbox_improve_send_split_off",
                   phone="5511975000003",
                   reply='["primeira parte", "segunda parte"]',
                   split=False)
 
 
-def test_sandbox_send_system_notice(build_app):
+def test_sandbox_send_system_notice(build_app, authenticated_admin):
     """Reply starting with ``[WhatsBot]`` → shown verbatim, saved as a
     ``system_notice`` row, and ``replies`` comes back EMPTY (the notice is not a
     deliverable part). Characterizes the verbatim-notice branch of _sandbox_reply."""
-    _sandbox_case(build_app, golden="sandbox_improve_send_system_notice",
+    _sandbox_case(build_app, authenticated_admin,
+                  golden="sandbox_improve_send_system_notice",
                   phone="5511975000004",
                   reply="[WhatsBot] API key não configurada.", split=True)
 
 
-def test_sandbox_send_empty_reply(build_app):
+def test_sandbox_send_empty_reply(build_app, authenticated_admin):
     """Empty reply → ``_sandbox_reply`` returns ``[]`` early; only the inbound
     ``user`` row persists, response has empty ``reply``/``replies``."""
-    _sandbox_case(build_app, golden="sandbox_improve_send_empty_reply",
+    _sandbox_case(build_app, authenticated_admin,
+                  golden="sandbox_improve_send_empty_reply",
                   phone="5511975000005", reply="   ", split=True)
 
 
-def test_sandbox_send_with_tool_calls(build_app):
+def test_sandbox_send_with_tool_calls(build_app, authenticated_admin):
     """tool_calls present in the ProcessResult → ``broadcast_tool_calls`` runs and
     persists a ``tool_call`` card BEFORE the assistant reply rows.
 
     The card content is ``"🔧 <tool>\\n<key>: <value>\\n→ <result>"``. This locks
     the sandbox's tool-card side effect that B5 must keep across the async move."""
     _sandbox_case(
-        build_app, golden="sandbox_improve_send_with_tool_calls",
+        build_app, authenticated_admin,
+        golden="sandbox_improve_send_with_tool_calls",
         phone="5511975000006", reply="anotei seus dados!", split=True,
         tool_calls=[{
             "tool": "save_contact_info",
@@ -216,18 +223,20 @@ def test_sandbox_send_with_tool_calls(build_app):
     )
 
 
-def test_sandbox_send_no_phone(build_app):
+def test_sandbox_send_no_phone(build_app, authenticated_admin):
     """Validation: empty phone → 400 ``_err`` (process_message never reached)."""
     built = build_app(["gowa"])
+    authenticated_admin(built.client)
     r = built.client.post("/api/sandbox/send", json={"phone": "", "message": "Oi"})
     golden_assert("sandbox_improve_send_no_phone", normalize({
         "status_code": r.status_code, "response": r.json()}))
     assert r.status_code == 400
 
 
-def test_sandbox_send_no_message(build_app):
+def test_sandbox_send_no_message(build_app, authenticated_admin):
     """Validation: empty message → 400 ``_err``."""
     built = build_app(["gowa"])
+    authenticated_admin(built.client)
     r = built.client.post("/api/sandbox/send",
                           json={"phone": "5511975000007", "message": ""})
     golden_assert("sandbox_improve_send_no_message", normalize({
@@ -237,7 +246,7 @@ def test_sandbox_send_no_message(build_app):
 
 # ── B5/C-1 migration: the sandbox caller is now ASYNC ────────────────────────
 
-def test_sandbox_send_uses_async_aprocess_message(build_app):
+def test_sandbox_send_uses_async_aprocess_message(build_app, authenticated_admin):
     """AFTER Fase B5/C-1: the sandbox endpoint now drives the ASYNC
     ``aprocess_message`` (the sync ``process_message`` was REMOVED). This locks
     the migration end: ``/api/sandbox/send`` reaches ``aprocess_message`` and the
@@ -251,6 +260,7 @@ def test_sandbox_send_uses_async_aprocess_message(build_app):
     ``sandbox_improve_send_*`` goldens above, which now patch ``aprocess_message``.
     """
     built = build_app(["gowa"])
+    authenticated_admin(built.client)
     # The sync seam is gone — the facade no longer exposes process_message.
     assert not hasattr(built.agent_handler, "process_message")
 

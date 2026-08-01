@@ -115,7 +115,7 @@ class MetaGraphChannel(Channel):
     """Base class for providers speaking the Meta Send/Webhook API."""
 
     # ── Provider knobs (a subclass overrides what differs) ───────────
-    graph_host = "graph.facebook.com"        # Instagram uses graph.instagram.com
+    graph_host = "graph.facebook.com"        # Current IG-via-Facebook transport.
     token_credential_key = "access_token"    # Messenger: page_access_token
     #: Fields requested when enriching a sender's profile; empty disables it.
     profile_fields: tuple = ()

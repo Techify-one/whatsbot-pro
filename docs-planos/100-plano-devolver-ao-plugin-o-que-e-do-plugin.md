@@ -1,6 +1,13 @@
 # Plano 100 — Devolver ao plugin o que é do plugin
 
-**Status:** PLANEJADO — nada executado. Escrito em 2026-07-31.
+**Status:** EM EXECUÇÃO — F0 segura concluída; F1 já existia e foi confirmado; F2 GOWA
+bloqueado pelos gates. Escrito em 2026-07-31, atualizado em 2026-07-31.
+
+> **Estado honesto desta tranche.** Foram removidos somente frontend morto, helpers órfãos e
+> o catálogo enganoso de um filtro sem produtor. O gate assíncrono de `/protocolos` foi
+> preservado por ser infraestrutura necessária de `overrideRoute`; nenhuma fonte de plugin
+> em `assets/plugin_examples/` foi removida. Em paralelo, o plano 83 recebeu fundações de
+> teste/empacotamento, mas publicação e extração GOWA continuam bloqueadas.
 
 **Objetivo do usuário:** *"tudo que seja possível ir pro plugin vá somente pro plugin, com o
 mínimo possível de coisa no core"* — diretriz dada na execução do plano 84, e a base da
@@ -19,16 +26,19 @@ Os dois falam de fronteira core↔plugin, mas em eixos diferentes:
 | Pergunta | "esta pasta pode sair de `assets/plugin_examples/`?" | "este código deveria estar no core?" |
 | Unidade | pasta de plugin | comportamento / gancho |
 | Entregável | `.zip` publicado + pasta removida | linha a menos no core |
-| Toca o plugin? | não muda uma linha de código | reescreve os dois lados |
+| Toca o plugin? | não muda comportamento de produção por objetivo; pode mover testes/metadados | pode reescrever os dois lados |
 
-Não há sobreposição de arquivos: nenhum dos candidatos deste plano é citado no 83.
+Os eixos são distintos, mas a implementação se encontra nas fundações de teste/distribuição,
+na documentação e no bloco GOWA. Essa sobreposição operacional é justamente o motivo da
+ordem abaixo.
 
 ### ⚠️ Ordem obrigatória: **o 100 vem ANTES do 83**
 
 A evidência é o próprio plano 84, entregue esta semana. Os 5 arquivos que nasceram dele
 (`alerts.py`, `filters.py`, `events.py`, `lifecycle.py`, `migrations/002_alert_state.sql`)
 foram escritos **dentro de `assets/plugin_examples/whatsapp_cloud/`**, revisados por `git
-diff`, exercitados pela suíte do core e só então empacotados para o zip publicado.
+diff` e exercitados pela suíte do core. A release 1.10.1 foi empacotada/publicada nesse
+fluxo; a revisão posterior levou fonte/instalação e artefato publicado a 1.10.2.
 
 A pasta no repo do core é a **bancada e o banco de testes** de todo movimento core→plugin.
 O plano 83 remove exatamente essa bancada. Na ordem invertida, cada extração passaria a
@@ -47,7 +57,9 @@ verdade ao mesmo tempo:
 2. **nenhum gancho existente enxerga o sinal**;
 3. **usar o gancho existente custaria caro no caminho quente**.
 
-Falhando **qualquer um** dos três, o comportamento vai inteiro para o plugin.
+Falhando **qualquer um** dos três, o comportamento de negócio vai inteiro para o plugin.
+**Exceção explícita:** procedência, autenticação e autorização verificáveis na borda são
+seams de fronteira de confiança do core, mesmo quando só um plugin consome o resultado.
 
 Como o plano 84 mediu cada um, ao decidir entre `kind="account"` no core (opção *a*, a
 recomendação escrita) e `filter.webhook.payload` dentro do plugin (opção *b*, a executada):
@@ -58,25 +70,33 @@ recomendação escrita) e `filter.webhook.payload` dentro do plugin (opção *b*
 | (ii) sem gancho | `filter.webhook.payload` já enxergava — e `janela_72h` + `debug_bus` **já o usavam em produção** pelo mesmo motivo | falha |
 | (iii) custo no hot path | 0,32 µs por payload GOWA; 0,73 µs por inbound normal da Meta | falha |
 
-Três falhas ⇒ plugin. O core não recebeu uma linha.
+Três falhas ⇒ a **classificação e o alerta de conta** ficaram no plugin; não nasceu
+`kind="account"`, ramo de dispatch nem estado de alerta no core. A execução final do plano
+84, porém, adicionou ao core o seam genérico de **procedência e autenticação**
+(`provider`, `channel_id`, `signature_authenticated`). Isso pertence à fronteira de confiança
+da rota, não ao comportamento de negócio do plugin. A formulação antiga “o core não recebeu
+uma linha” estava desatualizada.
 
 > **Precedente é evidência.** Quando dois plugins já resolveram o mesmo problema pelo mesmo
 > gancho em produção, o gancho está provado — o ônus da prova passa para quem quer o ramo no
 > core, não para quem quer o gancho.
 
-### 2.1 O ganho real não é estético: é ordem de deploy
+### 2.1 O ganho real não é estético: a dependência de deploy fica explícita
 
-A F8 original do plano 84 exigia **"core antes do zip"** — zip novo rodando em core velho
-descartaria os eventos em silêncio. Com a reimplementação zero-core esse item foi **riscado**
-do checklist e virou *"basta importar o zip"*.
+A execução final do plano 84 **manteve** a ordem “core antes do zip” para a fonte webhook:
+em core antigo, `ctx.extras` não prova procedência/assinatura e o plugin degrada fechado, sem
+enviar esse alerta. As outras fontes (`message.failed` e polling) continuam funcionando. O
+ganho correto foi restringir a mudança do core a um seam de confiança reutilizável, em vez
+de ensinar o core sobre eventos de conta da Meta.
 
-Critério de aceite herdável por qualquer plugin: **o plugin instala e funciona num core da
-release anterior.** Verificável, e é exatamente a premissa de que o plano 83 depende para o
-`.zip` virar unidade de deploy autônoma.
+Critério de aceite herdável: **o plugin deve ao menos carregar num core da release anterior,
+e toda feature que dependa de seam novo deve degradar de forma explícita e segura.** Quando a
+feature exige o seam, a ordem de deploy precisa constar no release/deploy; não se promete
+autonomia que os testes não demonstram.
 
-### 2.2 "Não muda o core" ≠ "não depende do core"
+### 2.2 "Pouco core" não significa "sem dependência do core"
 
-O plano 84 não mudou uma linha do core **e mesmo assim importa o core em 4 pontos**:
+O plugin do plano 84 importa o core em 4 pontos:
 `db.repositories`, `plugins.context`, `runtime.supervisor`, `server.message_errors`.
 
 O que torna isso seguro num plugin distribuído por zip é o **import defensivo**: cada
@@ -117,7 +137,7 @@ arquivo:linha, consumidores reais e existência do gancho proposto → crítico 
 | 9 | `SetupWizard` passo 1 (QR do GOWA) | A saída preferida troca um arquivo do core por outro arquivo do core: é deduplicação interna, **não extração**. O slot `wizard.steps` não existe |
 | 10 | Tombstone do `gowa` + rotas SPA `/protocolos` | Existe (`plugins.py:261`, `app.py:542/700-702`) e é dívida real, mas cada um tem motivo estrutural distinto — ver §5.C1 |
 | 11 | `if provider == "gowa"` no inbound | Citações corretas, premissa central errada — **são 7 sites, não 3**, e três deles nenhum candidato listou (`channels/registry.py:108`, `server/app.py:185`, `message_ingest_service.py:364`) |
-| 12 | Provider GOWA inteiro (2.301 linhas) | **Diagnóstico verdadeiro, extração como descrita refutada**: "todos os ganchos já existem" é falso. Vira o §6 |
+| 12 | Provider GOWA inteiro (2.426 linhas, incluindo `gowa/__init__.py`) | **Diagnóstico verdadeiro, extração como descrita refutada**: "todos os ganchos já existem" é falso. Vira o §6 |
 | 13 | Falta seam de render de mídia no painel | A premissa (`filter.media.unknown` deixa um plugin criar tipo novo) é **falsa**: o gancho está morto — ver §7.2 |
 
 ---
@@ -131,22 +151,29 @@ arquivo:linha, consumidores reais e existência do gancho proposto → crítico 
 alcançável**.
 
 Provado por 4 vias independentes: nenhum `import` do diretório em todo o `web/`; nenhum
-import dinâmico; as únicas menções fora dele são **2 comentários** no próprio plugin; e o
-ramo em `ScreenRouter.js:159-171` retorna `null` + `setTab('contacts')` quando não há
-override. `git status` limpo nesses arquivos — o estado morto é o commitado.
+import dinâmico; as únicas menções fora dele eram comentários no próprio plugin; e o
+renderer só podia ser alcançado dentro da árvore isolada. A tranche apagou os oito arquivos
+e corrigiu o comentário residual do plugin.
 
-Efeito colateral: o slot `attendances.toolbar` tem seu **único** render site em
-`Attendances.js:386` — o slot também está morto.
+Efeito colateral medido antes da deleção: o slot `attendances.toolbar` tinha seu **único**
+render site no `Attendances.js` hoje removido — por isso sua documentação também pôde sair.
 
 | Decisão | Risco |
 |---|---|
-| (a) apagar os 8 arquivos + o ramo `ScreenRouter.js:159-171` + a doc do slot | **zero** — nenhum teste quebra |
+| (a) apagar os 8 arquivos + a doc do slot, preservando o gate de `ScreenRouter.js` | **executado** — remove a tela nativa sem quebrar o carregamento assíncrono do override |
 | (b) tirar `/protocolos` do roteador do core (fazer o `opts` de `overrideRoute` carregar o path) | **não é grátis** — quebra `routing.test.js` e o hardcode em `server/app.py:542` + `:700-702` é o que faz um reload duro em `/protocolos` ser servido |
 
-⚠️ Cascata: `getConversationLabelsBatch` (`services/api.js:642`) perde o único consumidor
-com a remoção. As outras 9 funções correlatas **não** ficam órfãs.
+✅ `getConversationLabelsBatch` saiu de `services/api.js` e da superfície 2.x (o adapter 1.x
+o preserva durante a transição); o slot `attendances.toolbar`, sem render site, foi removido
+de fato. As outras funções correlatas permaneceram.
 
-### C2 — `getGowaAlertSettings` — 6 linhas, o core chamando endpoint de plugin
+> **Correção importante da auditoria:** o ramo `tab === 'attendances'` de `ScreenRouter` não
+> era parte da tela morta. Ele espera `extensionsLoaded` para impedir que um F5 em
+> `/protocolos` renderize fallback/redirecione antes de `extends.js` registrar
+> `overrideRoute('attendances')`; depois do load, sem plugin, volta para Contatos. O ramo e o
+> estado em `App.js` foram preservados e tiveram os comentários generalizados.
+
+### C2 — `getGowaAlertSettings` — removido da superfície atual; adapter legado isolado
 
 `web/static/js/services/api.js:94-99` — `GET /api/plugins/gowa/alert-settings`. É o **único**
 helper do core que nomeia um plugin numa URL, e viola a regra que o plano 76 registrou 700
@@ -157,10 +184,21 @@ por acesso dinâmico. O comentário acima da função documenta um uso que **nã
 (o consumidor real morreu no refactor descriptor-driven). O papel dele migrou para o backend
 do plugin (`gowa/alerts.py:369-374`) e o toggle virou `config_field` do descriptor.
 
-Agravante: por não estar em `PLUGIN_SERVICES_DENY`, a função é exportada **a todos os
-plugins** via `api.services`. Apagar o export a remove da superfície automaticamente.
+O agravante histórico era ele ser exportado a todos os plugins via `api.services`. A
+execução foi deliberadamente em duas camadas:
 
-### C3 — `agent/group_mentions.py` — 432 linhas de WhatsApp puro no core
+- ✅ o helper saiu de `web/static/js/services/api.js` e da superfície atual 2.x;
+- ✅ `PLUGIN_SERVICES_VERSION` subiu de 1.0 para 2.0;
+- ✅ `plugin_services_version` passou a ser publicado no manifest e verificado pelo loader;
+  range inválido/incompatível pula o `frontend_extends` (fail-closed);
+- ✅ manifests antigos/ausentes negociam 1.x e recebem um adapter estreito em
+  `plugins/api.js`, que preserva os dois helpers removidos por chamadas HTTP genéricas.
+
+Assim, o core corrente não oferece mais o helper na API normal nem na superfície 2.x, mas
+uma extensão externa legada não quebra silenciosamente durante a transição. Plugins novos
+devem declarar `plugin_services_version: ">=2.0,<3.0"` e ainda fazer feature detection.
+
+### C3 — `agent/group_mentions.py` — 439 linhas de WhatsApp puro no core
 
 **Sobreviveu na substância, com o escopo corrigido para maior.** O serviço é modelado sobre o
 fio do WhatsApp (`@<número>` ↔ `@<Nome>`, `lid`, `@everyone`), só funciona com o `GOWAClient`
@@ -188,6 +226,9 @@ literalmente o contrário do que o código faz). São **dois** caminhos, não um
 > **Veredito:** C3 **não é uma extração autônoma**. É uma fatia da mudança do §6 e só deve ser
 > feita no mesmo lote. Risco **alto**.
 
+⏳ **Estado:** não executado nesta tranche. Nenhum arquivo de `agent/group_mentions.py`,
+`gowa/`, `channels/providers/gowa_channel.py` ou das rotas/background GOWA foi movido.
+
 ---
 
 ## 6. A área que ninguém varreu: o pacote `gowa/` no core
@@ -198,15 +239,20 @@ exclusivamente GOWA **no core** — e o **plugin `gowa` importa de volta desse p
 própria docstring ser *"o equivalente GOWA do `WhatsAppCloudChannel.parse_inbound`"*.
 
 Somado ao resto do provider (`channels/providers/gowa_channel.py` 434, `routes/whatsapp.py`
-78, os 123 linhas de polling em `server/background.py`), são **2.301 linhas** e **29 arquivos
-`.py` do core** que citam `gowa`.
+78 e 123 linhas de polling em `server/background.py`), são **2.426 linhas** contando o
+`gowa/__init__.py` de 2 linhas (**2.424** sem ele), além de **29 arquivos `.py` do core** que
+citam `gowa`.
 
-É o **maior bloco de código de provider no core** e o **único caso em que o plugin depende do
-core por import direto de um pacote que não é contrato** — a relação está invertida em
-relação a todos os outros providers.
+É o **maior bloco de código de provider no core** e o **único caso em que um plugin importa
+do core a própria implementação específica do provider** (`gowa/`) — nesse recorte, a
+relação está invertida. Os demais plugins também importam muitos módulos internos genéricos,
+dívida separada medida em R1.
 
-O plano 83 mantém o `gowa` no core, então isto não o bloqueia. Mas é aqui que a revisão geral
-tem o maior retorno, e é o pré-requisito de C3.
+O texto original do plano 83 dizia manter `gowa` como o único plugin bundled; isso não deve
+ser confundido com manter sua implementação de provider no core para sempre. A F2 pode
+devolver essa implementação ao próprio plugin, mas só depois dos contratos abaixo e sem
+antecipar os gates de empacotamento/publicação do 83. É aqui que a revisão geral tem o maior
+retorno, e é o pré-requisito de C3.
 
 ⚠️ Não é trivial: `create_app(settings, gowa_manager, gowa_client, agent_handler)` recebe os
 dois objetos como **parâmetros posicionais obrigatórios**, e `main.py` + `server/dev.py` os
@@ -217,42 +263,41 @@ follow-up"* (plano 13 §2.1).
 
 ## 7. Os ganchos que faltam (o que hoje impede o zero-core)
 
-### 7.1 A única linha do core que barateia todos os plugins de canal de uma vez
+### 7.1 A costura de proveniência já existia — confirmada nesta tranche
 
-`server/routes/channel_webhook.py:673` passa `{}` como extras:
+O documento estava desatualizado: `server/routes/channel_webhook.py:734-741` já aplica o
+filtro depois da resolução de rota/provider e da verificação de assinatura:
 
 ```python
-raw = await apply_filter("filter.webhook.payload", raw, {})
+raw = await apply_filter("filter.webhook.payload", raw, {
+    "provider": provider,
+    "channel_id": channel_id,
+    "signature_authenticated": signature_authenticated,
+})
 ```
 
-Não é "ainda não preenchido" — o core passa literalmente vazio, e o construtor do contexto só
-atribui `extras` quando o dict é truthy. **Consequência:** nenhum plugin que use este gancho
-sabe qual canal recebeu o payload, nem mesmo para o GOWA, cujo `channel_id` está na URL.
+Os testes de integração do plano 84 já cobrem o loader/endpoint real e os casos negativos de
+assinatura/provider/WABA. Portanto a F1 não exigiu mudança nesta tranche; foi
+**confirmada como previamente entregue**, inclusive com um sinal mais forte que o proposto
+originalmente.
 
-Passar `{"provider": provider, "channel_id": channel_id}` é **uma linha** e beneficia todos os
-plugins de canal extraídos. É a única mudança de core que este plano recomenda sem reservas.
-
-Enquanto ela não existe, o padrão é a **cascata de auto-resolução em 3 níveis do plano 84**,
-que nunca degrada para silêncio:
-
-1. casar o identificador do payload (`entry[].id` = WABA id) contra a credencial declarada do
-   canal (`waba_id`);
-2. não casando, se existir **exatamente um** canal habilitado daquele provider, é ele;
-3. sem nada disso, seguir mesmo assim com o identificador no texto — *melhor um alerta sem
-   etiqueta do que silêncio*.
+Não existe cascata permissiva nesse consumidor: o plugin exige simultaneamente provider
+Cloud, canal ativo exato, `signature_authenticated=True` e `entry[].id == waba_id` daquele
+canal. Num core anterior, sem esses extras, a captura webhook degrada **fechada**; polling e
+`message.failed` seguem disponíveis. Essa é uma dependência de deploy intencional e testada,
+não compatibilidade total com core antigo.
 
 > **Regra generalizável:** toda credencial que identifica a conta (`waba_id`, `page_id`,
 > `phone_number_id`, `bot_id`) é **também** a chave de auto-resolução do plugin — o mesmo
 > namespace que o contrato `AccountIdentity` do plano 32 já usa.
 
-### 7.2 `filter.media.unknown` está MORTO
+### 7.2 `filter.media.unknown` foi enterrado explicitamente
 
-Declarado em `KNOWN_FILTERS` (`plugins/events.py:139`) e documentado no CLAUDE.md e no
-`/new-plugin` como gancho vivo — **mas não existe nenhum `apply_filter("filter.media.unknown",
-…)` no repositório**. O call site existiu (commit `755cb1a`) e sumiu no refactor do webhook.
-
-Um plugin que o registre **nunca é chamado, e nem leva WARNING**, porque o nome está no
-catálogo. Hoje **não há como um plugin reivindicar um media type novo**.
+✅ O nome legado foi removido de `KNOWN_FILTERS` e da documentação de criação de plugin. O
+CLAUDE.md agora registra que mídia deve ser normalizada pelo provider em
+`Channel.parse_inbound()` para um `InboundEvent.kind` suportado. Um plugin que ainda tente
+registrar `filter.media.unknown` recebe WARNING de filtro desconhecido, coberto por teste de
+regressão, em vez de aceitar silenciosamente um gancho que nunca seria chamado.
 
 ### 7.3 Inventário do que não tem gancho
 
@@ -266,8 +311,8 @@ catálogo. Hoje **não há como um plugin reivindicar um media type novo**.
 | **Batching do inbound** | o acúmulo e a junção dos textos acontecem sem filtro |
 | **Frontend: render de mensagem** | não há slot nem filtro para o corpo de uma bolha/card — os roles painel-only são `if` dentro do `ContactDetail.js`. Também não há slot no compositor |
 
-Os **9 slots** que existem hoje: `channel.card.rows`, `sidebar.row.badges`,
-`ai.settings.sections`, `attendances.toolbar` (morto — C1), `conversation.info.panel`,
+Os **8 slots** que permanecem: `channel.card.rows`, `sidebar.row.badges`,
+`ai.settings.sections`, `conversation.info.panel`,
 `chat.header.banner`, `gear.menu.items`, `app.overlay`, `conversation.header.actions`.
 
 ⚠️ `EventContext` **não tem** campo `extras` — só `FilterContext` tem. Um handler de evento
@@ -296,14 +341,15 @@ não folclore copiado:
 
 ## 9. Riscos
 
-### R1 — A superfície de import não é versionada (o risco maior)
+### R1 — A superfície de import Python não é versionada (o risco maior)
 
 Os plugins de `assets/` fazem **100+ imports de módulos internos do core** (45 de
 `db.repositories`, 30 de `plugins.context`, 14 de `channels.base`, mais `server.routes.*`,
 `server.background`, `server.authz`, `ai_engine`, `app.services`, `gowa.manager`,
 `runtime.supervisor`, `db.tables`, `agent`) — **nenhum deles é API declarada**.
 
-E **todos os 22 plugins** declaram o mesmo `whatsbot_api_version: ">=1.0,<2.0"` contra
+E **os 22 manifests/cópias não ocultos medidos** (15 ids únicos) declaram o mesmo
+`whatsbot_api_version: ">=1.0,<2.0"` contra
 `WHATSBOT_API_VERSION = "1.0.0"`, que **nunca foi bumpada** desde a criação do sistema de
 plugins. O guard nunca rejeitou nada e, como está, nunca vai rejeitar.
 
@@ -334,22 +380,32 @@ no próximo code review.
 
 ## 10. Fases sugeridas
 
-### F0 — Grátis, sem risco, faz sozinho (fazer já)
-1. Apagar `web/static/js/components/attendances/` (932 linhas) + o ramo `ScreenRouter.js:159-171`
-   + a doc do slot morto + `getConversationLabelsBatch`.
-2. Apagar `getGowaAlertSettings` e o comentário que documenta o uso inexistente.
-3. Corrigir a documentação de `filter.media.unknown` (§7.2) — ou revivê-lo, ou marcá-lo como
-   morto. Hoje ela mente para quem for escrever plugin.
+### F0 — ✅ Tranche segura concluída
+1. ✅ Apagados os oito arquivos de `web/static/js/components/attendances/`, a doc do slot
+   morto e `getConversationLabelsBatch`.
+2. ✅ Removido `getGowaAlertSettings` da API normal e da superfície 2.x, com adapter apenas
+   na compatibilidade 1.x; `plugin_services_version` agora é negociado pelo manifest/loader.
+3. ✅ `filter.media.unknown` enterrado no catálogo e na documentação, com teste de regressão.
+4. ✅ Preservados `extensionsLoaded` e o ramo de `ScreenRouter` que aguardam o
+   `overrideRoute`; a decisão (b), os paths SPA e o reload duro de `/protocolos` ficaram fora.
 
-**Gate:** suíte verde; `routing.test.js` intacto (a decisão (b) do C1 fica de fora da F0).
+**Limite do gate:** esta conclusão cobre a limpeza segura. Não autoriza F2 nem remoção de
+fontes de plugin; esses passos dependem dos gates descritos abaixo e no plano 83.
 
-### F1 — A linha que barateia tudo
-Passar `{"provider", "channel_id"}` no `filter.webhook.payload` (§7.1). Manter a cascata de
-auto-resolução nos plugins — ela continua sendo o caminho para quem roda em core antigo.
+### F1 — ✅ Já existia; confirmado
+O filtro já recebe `provider`, `channel_id` e `signature_authenticated` (§7.1). O consumidor
+Cloud é fail-closed e requer esse seam; em core antigo, apenas suas outras fontes de alerta
+continuam funcionando.
 
-### F2 — O bloco GOWA (§6 + C3)
-Único lote grande. Pré-requisito: `create_app` aceitar `gowa_manager`/`gowa_client` opcionais.
-Ganho colateral: mata os 2 caminhos do bug Telegram→GOWA.
+### F2 — ⏳ O bloco GOWA (§6 + C3) — BLOQUEADO
+Único lote grande. Antes de mover código, o core precisa de construção genérica de provider,
+`create_app` com `gowa_manager`/`gowa_client` opcionais, contratos de grupos/menções/membros,
+`can_send_in_chat`/`delete_for_me`, resolução de device/webhook e separação entre tarefas
+GOWA e tarefas genéricas de background. Também faltam boot real sem GOWA e regressões
+cross-provider. As fundações de teste do plano 83 ajudam, mas não fecham esses gates.
+
+**Não remover/publicar GOWA ainda:** nenhuma fonte GOWA foi movida e a publicação permanece
+bloqueada pelos gates de distribuição, compatibilidade de imports e suíte do plano 83.
 
 ### F3 — A revisão geral, plugin a plugin
 Com o checklist do §11.
@@ -380,21 +436,20 @@ Para cada plugin instalado, responder:
 
 ## 12. Perguntas em aberto
 
-**P1 — A linha do `extras` (§7.1) entra ou não?**
-É a única mudança de core que este plano propõe. Contra: o 84 provou que dá para viver sem
-ela. A favor: barateia **todos** os plugins de canal de uma vez e não muda comportamento
-nenhum. **Recomendação: entra**, na F1, e os plugins mantêm a cascata como fallback.
+**P1 — A linha do `extras` (§7.1) entra ou não? — RESOLVIDA**
+Já existia com `provider`, `channel_id` e `signature_authenticated`; nenhuma mudança foi
+necessária nesta tranche. O consumidor Cloud exige esse contexto e degrada fechado em core
+antigo; não existe cascata permissiva.
 
-**P2 — `filter.media.unknown`: reviver ou enterrar?**
-Reviver custa um call site no funil de inbound; enterrar custa admitir que um plugin não pode
-criar media type. **Recomendação: decidir explicitamente**, e nunca deixar como está — um
-gancho documentado que não é chamado é pior que gancho nenhum.
+**P2 — `filter.media.unknown`: reviver ou enterrar? — RESOLVIDA**
+Enterrado explicitamente; providers normalizam para kinds suportados em `parse_inbound`.
 
-**P3 — A decisão (b) do C1 (tirar `/protocolos` do roteador do core)?**
-Custa um teste e o hardcode de SPA. **Recomendação: ⏸️ adiar** — a F0 já entrega 99% do ganho
-com risco zero.
+**P3 — A decisão (b) do C1 (tirar `/protocolos` do roteador do core)? — ADIADA**
+O hardcode SPA e o gate assíncrono foram preservados; a F0 removeu apenas a implementação
+nativa morta.
 
 **P4 — Versionar a superfície de import (R1) agora ou junto do 83?**
-É pré-requisito do 83, não deste plano. **Recomendação:** decidir no 83, mas registrar aqui
-que **F4/F5 do 83 não devem rodar** sem uma das duas saídas (contract test contra os zips, ou
-superfície pública versionada).
+O frontend já ganhou um gate separado para `api.services`, mas isso não versiona os 100+
+imports Python internos. O P4 continua pré-requisito do 83: **F1–F7 não devem remover fonte**
+sem uma das duas saídas (contract test contra os zips, ou superfície Python pública
+versionada).

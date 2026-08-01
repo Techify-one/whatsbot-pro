@@ -91,13 +91,6 @@ export async function getRuntimeSubprocesses() {
   return request('GET', '/api/runtime/subprocesses');
 }
 
-// GOWA disconnect-alert settings (bundled plugin). Read-only here: used by the
-// channel edit form to seed the per-channel on/off toggle from the plugin's legacy
-// global `enabled` value when the channel hasn't set its own yet.
-export async function getGowaAlertSettings() {
-  return request('GET', '/api/plugins/gowa/alert-settings');
-}
-
 export async function getStatus() {
   return request('GET', '/api/status');
 }
@@ -664,12 +657,6 @@ export async function deleteConversationLabel(id) {
 // Labels currently attached to ONE conversation: {conversation_id, labels:[...]}.
 export async function getConversationLabelsFor(convId) {
   return request('GET', `/api/atendimentos/${convId}/labels`);
-}
-
-// plano 50 F13 — etiquetas de VÁRIAS conversas numa request: {labels_by_conv:{id:[...]}}.
-// Substitui o fan-out de 1 GET por atendimento no modo etiqueta do Kanban.
-export async function getConversationLabelsBatch(ids) {
-  return request('POST', '/api/atendimentos/labels-batch', { ids });
 }
 
 // Replace a conversation's labels (snapshot of names).

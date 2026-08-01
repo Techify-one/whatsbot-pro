@@ -28,7 +28,7 @@
 //     • chat.header.banner  — ctx {conv, conversationId, phone,  (ContactDetail,
 //                                   channelId, contact}           below the header)
 //     • conversation.header.actions, conversation.info.panel,
-//       attendances.toolbar, gear.menu.items                     (pre-existing)
+//       gear.menu.items, app.overlay                            (pre-existing)
 //     • ai.settings.sections — ctx {}                            (AI settings tab,
 //                                   at the bottom of "Configurações")
 //     • channel.card.rows   — ctx {channel, descriptor}          (ChannelCard, no
@@ -65,7 +65,7 @@
 //   ROUTE OVERRIDE (overrideRoute/getRouteOverride) — EXCLUSIVE: first registrant
 //   wins, later claims are LOGGED + ignored (never silent). Decision Q5: keep
 //   override (replace) semantics — do NOT compose. D2/D3 must preserve the
-//   'attendances' claim. Used by the `atendimentos` plugin.
+//   'attendances' claim. Used by the `protocolos` plugin.
 //
 //   COMPONENT OVERRIDE (overrideComponent/getComponentOverride) — same EXCLUSIVE
 //   contract as the route override, but for a UI piece that is not a route. The
@@ -153,7 +153,7 @@ export function getSlot(name) { return _slots.get(name) || []; }
  * Claim a core route (`tabId`) and REPLACE its component. EXCLUSIVE contract
  * (Plano 23 · D1, decision Q5 = keep override/replace, do NOT change to compose):
  * the first registrant wins; any later claim for the same `tabId` is logged and
- * ignored (anti-conflict policy — never fails silently). The `atendimentos`
+ * ignored (anti-conflict policy — never fails silently). The `protocolos`
  * plugin claims 'attendances'; D2/D3 must preserve this claim.
  */
 export function overrideRoute(tabId, component, opts = {}, pluginId = 'core') {

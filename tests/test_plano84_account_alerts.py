@@ -184,9 +184,17 @@ def test_cloud_signature_is_strict_when_configured_and_warns_once_when_missing(c
         channel_id="p84_sem_secret", registry=None,
         credentials={"access_token": "T", "phone_number_id": PHONE_NUMBER_ID,
                      "verify_token": "V", "waba_id": WABA_ID})
-    with caplog.at_level("WARNING"):
-        assert legacy.verify_inbound_signature(body, {}) is True
-        assert legacy.verify_inbound_signature(body, {}) is True
+    # Alembic's ``fileConfig`` disables loggers imported during collection.
+    # The production loader imports this module after migrations, but a serial
+    # test session may already have booted another app before reaching here.
+    previous_disabled = _cloud.logger.disabled
+    _cloud.logger.disabled = False
+    try:
+        with caplog.at_level("WARNING", logger=_cloud.logger.name):
+            assert legacy.verify_inbound_signature(body, {}) is True
+            assert legacy.verify_inbound_signature(body, {}) is True
+    finally:
+        _cloud.logger.disabled = previous_disabled
     matching = [r for r in caplog.records if "sem app_secret" in r.message]
     assert len(matching) == 1
     assert legacy.verify_inbound_signature_result(body, {}) == (True, False)
@@ -753,7 +761,7 @@ def test_irrelevant_account_change_sends_nothing(alert_ready):
 # ── F6 · rotas de configuração ──────────────────────────────────────────────
 
 @pytest.fixture
-def admin_client(build_app):
+def admin_client(build_app, authenticated_admin):
     """``built`` com o client autenticado como admin, e o usuário REMOVIDO no fim.
 
     As rotas de alerta exigem ``channel.manage``, e o plano 48 fecha a API assim
@@ -761,24 +769,9 @@ def admin_client(build_app):
     autenticar torna o teste independente da ordem — e apagar o usuário no
     teardown evita fechar a API para os testes seguintes, que não autenticam.
     """
-    from db.repositories import session_repo, user_repo
-    from server.auth import generate_session_token
-
     built = build_app(["whatsapp_cloud"])
-    email = "p84@teste.local"
-    created = user_repo.get_by_email(email) is None
-    op = (user_repo.get_by_email(email)
-          or user_repo.create(email=email, name="P84 Operador",
-                              password_hash="x", role_keys=["admin"]))
-    tok = generate_session_token()
-    session_repo.create(tok, op["id"], user_agent="test", ip="127.0.0.1")
-    built.client.headers["Authorization"] = f"Bearer {tok}"
+    authenticated_admin(built.client, name="P84 Operador")
     yield built
-    if created:
-        try:
-            user_repo.delete(op["id"])
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def test_new_cloud_channel_endpoint_requires_app_secret(admin_client):

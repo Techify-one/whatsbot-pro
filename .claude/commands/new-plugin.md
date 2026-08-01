@@ -15,8 +15,8 @@ Use `AskUserQuestion` para coletar (ou inferir do `$ARGUMENTS`):
 5. **Precisa injetar conteúdo no system prompt?** (ex: cardápio). Se sim, descreva o que injetar.
 6. **Tabelas no banco**: lista de `{name, columns}` (sem o prefixo, vou adicionar). Pode ser vazia.
 7. **Settings declaráveis** (Pydantic Valves) — campos configuráveis pelo usuário. **Toda configuração do plugin vive na aba de configuração DO PRÓPRIO plugin** (botão "Configurar" em `/plugins`), NUNCA numa aba nova do painel de Configurações do core. Escolha: (a) `settings.py` com `class Settings(BaseModel)` → form auto-gerado; e/ou (b) uma screen `config: true` com UI custom. Pode ser vazio se o plugin não tem o que configurar.
-8. **Events que o plugin observa** (fire-and-forget, paralelo): lista de nomes a assinar — ex: `message.received`, `message.sent`, `llm.after`, `tool.after`, `*` (catch-all). Pode ser vazia. Veja a tabela completa em `CLAUDE.md` → Events.
-9. **Filters que o plugin intercepta** (síncronos, podem modificar ou abortar): lista de nomes a interceptar — ex: `filter.message.before_save`, `filter.reply.part`, `filter.system_prompt`, `filter.tool.args`. Retornar `None` aborta a ação. Pode ser vazia. Veja a tabela completa em `CLAUDE.md` → Filters.
+8. **Events que o plugin observa** (fire-and-forget, paralelo): lista de nomes a assinar — ex: `message.received`, `message.sent`, `llm.after`, `tool.after`, `*` (catch-all). Pode ser vazia. Use `plugins/events.py::KNOWN_EVENTS` como fonte executável; a tabela do `CLAUDE.md` é guia de payloads, não catálogo exaustivo.
+9. **Filters que o plugin intercepta** (síncronos, podem modificar ou abortar): lista de nomes a interceptar — ex: `filter.message.before_save`, `filter.reply.part`, `filter.system_prompt`, `filter.tool.args`. Retornar `None` aborta a ação. Pode ser vazia. Use `plugins/events.py::KNOWN_FILTERS` como catálogo executável e `CLAUDE.md` para tipos/contexto.
 10. **Controle de acesso (RBAC)**: "Quais funcionalidades têm controle de acesso? Para cada uma, quais ações (ver/editar/excluir)?" → gera o bloco `rbac:` no manifest. Convenção forte de chaves: `view`/`edit`/`delete`. Pode ser vazia (plugin acessível a todos, como hoje).
 
 Se o usuário escreveu tudo no `$ARGUMENTS`, deduza e confirme com **uma** pergunta de validação.
@@ -25,17 +25,18 @@ Se o usuário escreveu tudo no `$ARGUMENTS`, deduza e confirme com **uma** pergu
 
 Antes de gerar qualquer arquivo, **leia** estes arquivos para seguir os padrões existentes:
 
-- [agent/tools/save_contact_info.py](agent/tools/save_contact_info.py) — padrão de tool (schema dict + `execute(ctx, args)`)
-- [agent/handler.py](agent/handler.py) linhas 227-300 — como prompt fragments são chamados
-- [db/tables.py](db/tables.py) — `Table` objects do core (referência de tipos e nomes)
-- [server/routes/tags.py](server/routes/tags.py) — padrão de APIRouter + helpers `_ok`/`_err`
-- [web/static/js/components/Dashboard.js](web/static/js/components/Dashboard.js) — padrão de componente Preact + HTM
-- [storages/plugins/lembretes/](storages/plugins/lembretes/) — plugin completo de referência (copie e adapte)
-- [assets/plugin_examples/event_logger/events.py](assets/plugin_examples/event_logger/events.py) — exemplo de `EVENT_HANDLERS` com catch-all `*` + handler específico
-- [assets/plugin_examples/blacklist/filters.py](assets/plugin_examples/blacklist/filters.py) — exemplo de filter que retorna `None` pra abortar (`filter.message.before_save`)
-- [assets/plugin_examples/auto_signature/filters.py](assets/plugin_examples/auto_signature/filters.py) — exemplo de filter que modifica valor (`filter.reply.part`)
-- [plugins/events.py](plugins/events.py) — implementação do bus (assinaturas reais, prioridade, sync/async)
-- [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md) — como registrar as ações do plugin na trilha de Auditoria (leia se o plugin tiver `routes.py`)
+- [agent/tools/save_contact_info.py](../../agent/tools/save_contact_info.py) — padrão de tool (schema dict + `execute(ctx, args)`)
+- [agent/handler.py](../../agent/handler.py) `register_plugin_prompts` — registro dos fragments
+- [agent/prompt_builder.py](../../agent/prompt_builder.py) — chamada e isolamento dos prompt fragments
+- [db/tables.py](../../db/tables.py) — `Table` objects do core (referência de tipos e nomes)
+- [server/routes/tags.py](../../server/routes/tags.py) — padrão de APIRouter + helpers `_ok`/`_err`
+- [web/static/js/components/Dashboard.js](../../web/static/js/components/Dashboard.js) — padrão de componente Preact + HTM
+- [assets/plugin_examples/protocolos/](../../assets/plugin_examples/protocolos/) — plugin completo de referência (routes/settings/events/filters/lifecycle/UI/migrations)
+- [assets/plugin_examples/melhorias/events.py](../../assets/plugin_examples/melhorias/events.py) — exemplo de `EVENT_HANDLERS`
+- [assets/plugin_examples/protocolos/filters.py](../../assets/plugin_examples/protocolos/filters.py) — filtros de lifecycle de conversa
+- [assets/plugin_examples/whatsapp_cloud/filters.py](../../assets/plugin_examples/whatsapp_cloud/filters.py) — observador defensivo de webhook bruto
+- [plugins/events.py](../../plugins/events.py) — implementação do bus (assinaturas reais, prioridade, sync/async)
+- [docs/PLUGINS_AUDITAVEIS.md](../../docs/PLUGINS_AUDITAVEIS.md) — como registrar as ações do plugin na trilha de Auditoria (leia se o plugin tiver `routes.py`)
 
 ## Passo 3 — Gerar a estrutura
 
@@ -94,19 +95,29 @@ rbac:
     - { key: edit,   label: "Criar/editar <funcionalidade>" }
     - { key: delete, label: "Excluir <funcionalidade>" }
 dependencies: []
+
+# Somente se houver um módulo frontend_extends que recebe buildPluginApi:
+# frontend_extends: /plugins/<id>/static/extends.js
+# frontend_api_version: "1.0"
+# plugin_services_version: ">=2.0,<3.0"
 ```
+
+`plugin_services_version` negocia separadamente a allowlist `api.services`.
+Manifest legado sem o campo recebe a superfície de compatibilidade 1.x; plugin
+novo deve declarar 2.x e ainda feature-detectar funções opcionais. Range inválido
+ou incompatível faz o core pular o `frontend_extends` (fail-closed).
 
 **Onde fica a configuração (REGRA):** se o plugin tem opções configuráveis, elas
 vivem na aba de configuração DO PRÓPRIO plugin — `settings.py` (form auto-gerado)
 e/ou uma screen `config: true` (UI custom no mesmo modal "Configurar"). **Nunca**
 adicione opção de plugin ao painel de Configurações do core (`ConfigPanel.js`).
 Quando há uma screen `config: true`, o modal renderiza ela no lugar do form
-declarativo. Veja `assets/plugin_examples/notifications/` (screen `config: true`
-somente-UI que lê/grava `localStorage`) e `assets/plugin_examples/custom_sounds/`.
+declarativo. Veja as screens `config: true` em
+`assets/plugin_examples/website/` e `assets/plugin_examples/protocolos/`.
 
 ### tools.py (se houver tools)
 
-Cada tool é um par `(schema, executor)`. O executor recebe `ToolContext` (ver [plugins/context.py](plugins/context.py)) e retorna `str | None` (string vira `tool` reply no follow-up; `None` usa o default).
+Cada tool é um par `(schema, executor)`. O executor recebe `ToolContext` (ver [plugins/context.py](../../plugins/context.py)) e retorna `str | None` (string vira `tool` reply no follow-up; `None` usa o default).
 
 ```python
 import logging
@@ -284,7 +295,7 @@ EVENT_HANDLERS = {
 }
 ```
 
-**Eventos disponíveis** (lista completa em `CLAUDE.md`):
+**Eventos comuns** (catálogo executável completo em `plugins/events.py::KNOWN_EVENTS`):
 
 - Mensagem: `message.received` (pre-DB), `message.saved` (post-DB, **use este pra ler do DB**), `message.sent`, `message.any`, `message.reaction`, `message.edited`, `message.revoked`, `message.deleted`
 - Conexão/grupo: `presence.changed`, `receipt.changed`, `group.participants_changed`, `group.joined`, `call.received`, `connection.changed`, `chat.archived`
@@ -326,12 +337,11 @@ FILTERS = {
 
 | Filter | `value` | `None` faz |
 |---|---|---|
-| `filter.webhook.payload` | `dict` (raw GOWA) | webhook responde 200 sem processar |
+| `filter.webhook.payload` | `dict` (body bruto de qualquer provider; `ctx.extras` traz provider/canal/assinatura) | webhook responde 200 sem processar |
 | `filter.message.before_save` | `dict` (mensagem tipada com `media_extras`) | mensagem ignorada |
 | `filter.message.outgoing` | `dict` (echo do celular do usuário) | echo ignorado |
 | `filter.transcription.should_run` | `bool` (default `True`) | pula transcribe/describe (mesmo que `False`) |
 | `filter.transcription.result` | `str` (transcrição/descrição já gerada) | trata como vazia |
-| `filter.media.unknown` | `None` ou `dict` (último recurso, antes do "ignored") | cai no "ignored" original |
 | `filter.contact.tags` | `list[str]` (tags pretendidas) | mantém tags atuais |
 | `filter.event.before_emit` | `dict` (payload de qualquer evento exceto lifecycle) | cancela o emit |
 | `filter.system_prompt` | `str` | system prompt vazio |
@@ -342,6 +352,17 @@ FILTERS = {
 | `filter.reply.raw` | `str` | nada é enviado |
 | `filter.reply.parts` | `list[str]` | nada é enviado |
 | `filter.reply.part` | `str` (cada parte) | parte é pulada |
+| `filter.outbound.text` | `str` wire-only antes do provider | mantém texto anterior |
+| `filter.conversation.before_status` | `dict` da mudança de status | aborta fechamento |
+| `filter.conversation.before_assign` | `dict` da atribuição | aborta atribuição |
+| `filter.conversation.clear_assignee_on_close` | `bool` | default seguro limpa assignee |
+| `filter.agent.resolve` | `AgentSpec` | mantém agente default |
+| `filter.conversation.assignment` | `dict` de destino | mantém atribuição default |
+
+Não existe um filtro genérico para mídia desconhecida. O antigo nome
+`filter.media.unknown` nunca teve produtor após o refactor do webhook e foi
+retirado do catálogo: um provider deve normalizar o payload no próprio
+`Channel.parse_inbound()` para um `InboundEvent.kind` suportado.
 
 **Filter síncrono trava o pipeline** — mantenha rápido. Persistência pesada / network → joga num event handler em `events.py`.
 
@@ -436,10 +457,10 @@ Ao terminar, mostre:
 - **Nunca modifique arquivos do core** (`agent/`, `db/`, `server/`, `web/`). Plugin é totalmente isolado.
 - **Sempre prefixe tabelas com `plugin_<id>_`**. O migrator rejeita o contrário.
 - **Não invente nomes de imports** — use os do importmap (`preact`, `preact/hooks`, `htm`) e os módulos que o core já expõe (`db.engine`, `db.tables`, `db.repositories.*`, `agent.memory`, `plugins.context`). Para acesso ao banco em plugin: `from plugins.context import make_plugin_db` e `from sqlalchemy import text`.
-- **Tool name é global**: se conflitar com um nome existente o loader rejeita o plugin. Prefira nomes específicos como `<id>_<verbo>` (ex: `orders_create`, `cardapio_listar`).
+- **Tool name é global**: se conflitar com um nome existente, o registry loga warning e ignora apenas a tool duplicada; o restante do plugin continua carregado. Prefira nomes específicos como `<id>_<verbo>` (ex: `orders_create`, `cardapio_listar`).
 - **RBAC é declarativo no manifest** (bloco `rbac:`); **nunca cheque permissão na mão** — gate rotas com `dependencies=[plugin_permission("<key>")]` e esconda ações na UI com `can(key)`. Esconda a screen sem permissão com `requires:` no manifest. Convenção de chaves: `view`/`edit`/`delete`. As permissões aparecem sozinhas na tela Usuários, agrupadas pelo plugin.
-- **Settings UI é gerada automaticamente** a partir do schema Pydantic — strings, ints, floats, bools, enums. Não escreva form manual.
-- **Toda rota que MUDA algo chama `_audit(...)`** (helper com import defensivo de `plugins.context.audit`) — configuração, mudança de estado com dono, escrita em recurso do core. `GET`/teste de conexão/preferência pessoal não. Segredo nunca entra no `before`/`after`. Guia: [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md).
+- **Settings declarativas** geram UI automaticamente a partir do schema Pydantic — strings, ints, floats, bools, enums; não duplique esse form na mão. Quando a configuração exigir UI rica, use a screen `config: true` permitida acima.
+- **Toda rota que MUDA algo chama `_audit(...)`** (helper com import defensivo de `plugins.context.audit`) — configuração, mudança de estado com dono, escrita em recurso do core. `GET`/teste de conexão/preferência pessoal não. Segredo nunca entra no `before`/`after`. Guia: [docs/PLUGINS_AUDITAVEIS.md](../../docs/PLUGINS_AUDITAVEIS.md).
 - **Configuração SEMPRE na aba do próprio plugin** (settings declarativas e/ou screen `config: true` → modal "Configurar" em `/plugins`). **NUNCA** adicione seção/aba ao painel de Configurações do core (`web/static/js/components/ConfigPanel.js`) — isso é mexer no core e é proibido.
 - **Migrations rodam uma única vez** por versão. Para evoluir o schema, crie `002_*.sql`, `003_*.sql` — não edite `001`.
 

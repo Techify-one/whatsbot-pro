@@ -16,21 +16,22 @@ Postgres test engine) of the two core seams this plugin needs:
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 from pathlib import Path
 
 import pytest
+from tests.plugin_test_utils import load_plugin_module, resolve_plugin_source
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN = ROOT / "storages" / "plugins" / "website"
+PLUGIN = resolve_plugin_source("website")
+_PACKAGE = "website_widget_ut"
 
 
 def _load(mod_name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(mod_name, PLUGIN / filename)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
+    del mod_name  # compatibility with the existing call sites below
+    return load_plugin_module(
+        "website", Path(filename).stem, package_name=_PACKAGE,
+    )
 
 
 channels_mod = _load("website_channels_ut", "channels.py")

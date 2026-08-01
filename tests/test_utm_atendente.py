@@ -11,8 +11,10 @@ Três níveis (§7 do plano):
   ``private_ai_note`` (aplicar/aplicar/pular) + fail-open absoluto (nunca ``None``, nunca
   levanta) + smoke de rotas/screen via ``build_test_app``.
 
-Roda contra o Postgres de teste (``WHATSBOT_TEST_DB_URL``; ver [[postgres-test-db-needs-utf8]]).
-Rodar POR ARQUIVO (a coleção inteira quebra por scripts standalone — [[pytest-tests-nao-roda-inteiro]]):
+Roda contra o Postgres de teste (``WHATSBOT_TEST_DB_URL``). Quando a fonte
+distribuída não está instalada, o módulo é pulado de forma explícita; os scripts
+standalone são encapsulados por ``tests/test_legacy_suite.py`` na coleção global.
+Para uma execução focada:
 
     WHATSBOT_TEST_DB_URL="...whatsbot_test_49?sslmode=require" \
         venv/bin/python -m pytest tests/test_utm_atendente.py -q
@@ -24,6 +26,7 @@ import importlib.util
 import re
 import sys
 import types
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +34,25 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "storages" / "plugins" / "utm_atendente"
+if not (PLUGIN / "plugin.yaml").is_file():
+    pytest.skip(
+        "plugin utm_atendente não instalado em storages/plugins "
+        "(distribuído separadamente)",
+        allow_module_level=True,
+    )
+
+_CREATED_USER_IDS: list[int] = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_utm_users(_engine_ready):
+    yield
+    from db.repositories import session_repo, user_repo
+
+    for user_id in reversed(_CREATED_USER_IDS):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), f"could not remove UTM test user {user_id}"
+    _CREATED_USER_IDS.clear()
 
 # ── Carregamento isolado dos módulos do plugin ──────────────────────────────
 # Package sintético PRÓPRIO (``utm_ut_pkg``, não ``whatsbot_plugins.utm_atendente``)
@@ -58,6 +80,10 @@ utm = _load("utm")
 config_store = _load("config_store")
 selection = _load("selection")
 filters = _load("filters")
+
+_DEFAULT_SALES_DOMAINS = tuple(config_store.DEFAULT_SALES_DOMAINS)
+_PRIMARY_SALES_DOMAIN = _DEFAULT_SALES_DOMAINS[0]
+_SECONDARY_SALES_DOMAIN = _DEFAULT_SALES_DOMAINS[-1]
 
 SALES = re.compile(r"^https?://exemplo\.cc/")
 
@@ -166,28 +192,32 @@ def test_apply_utm_trailing_punct_is_idempotent():
 
 
 def test_default_domain_matcher_covers_both_sales_domains():
-    # Regressão do caso real: a oferta OFERTAX usa exemplo.net (não exemplo.cc).
+    # Regressão do caso real: uma oferta usa o segundo domínio default.
     # O matcher é DERIVADO da lista de domínios (config em banco), não hardcoded.
     default_re = config_store.build_domain_regex(config_store.DEFAULT_SALES_DOMAINS)
 
     def ap(t):
         return utm.apply_utm(t, "ia-atendente", param="utm_term", base="ia", sales_re=default_re)
 
-    # exemplo.net (link sem utm_term) → anexa
-    assert ap("Segue o link para garantir sua vaga: https://exemplo.net/online-ofertax") == \
-        "Segue o link para garantir sua vaga: https://exemplo.net/online-ofertax?utm_term=ia-atendente"
-    # exemplo.cc segue casando (substitui a base)
-    assert ap("https://exemplo.cc/scripts-vd-ia?utm_term=ia") == \
-        "https://exemplo.cc/scripts-vd-ia?utm_term=ia-atendente"
-    assert ap("https://exemplo.cc/c.mtr-ia") == "https://exemplo.cc/c.mtr-ia?utm_term=ia-atendente"
-    # subdomínio também casa (www.exemplo.cc)
-    assert ap("https://www.exemplo.cc/x") == "https://www.exemplo.cc/x?utm_term=ia-atendente"
+    secondary = f"https://{_SECONDARY_SALES_DOMAIN}/online-ofertax"
+    assert ap(f"Segue o link para garantir sua vaga: {secondary}") == \
+        f"Segue o link para garantir sua vaga: {secondary}?utm_term=ia-atendente"
+    # O primeiro domínio segue casando (substitui a base e também anexa).
+    primary = f"https://{_PRIMARY_SALES_DOMAIN}"
+    assert ap(f"{primary}/scripts-vd-ia?utm_term=ia") == \
+        f"{primary}/scripts-vd-ia?utm_term=ia-atendente"
+    assert ap(f"{primary}/c.mtr-ia") == f"{primary}/c.mtr-ia?utm_term=ia-atendente"
+    # Subdomínio também casa.
+    assert ap(f"https://www.{_PRIMARY_SALES_DOMAIN}/x") == \
+        f"https://www.{_PRIMARY_SALES_DOMAIN}/x?utm_term=ia-atendente"
     # o checkout (ticto) e domínios de terceiros NÃO recebem UTM
     assert ap("http://checkout.ticto.app/O5428A72F") == "http://checkout.ticto.app/O5428A72F"
     assert ap("https://google.com/?utm_term=ia") == "https://google.com/?utm_term=ia"
     # anti-spoof: um domínio que só CONTÉM o alvo não casa
-    assert ap("https://exemplo.cc.evil.com/x") == "https://exemplo.cc.evil.com/x"
-    assert ap("https://notexemplo.cc/x") == "https://notexemplo.cc/x"
+    spoof = f"https://{_PRIMARY_SALES_DOMAIN}.evil.com/x"
+    assert ap(spoof) == spoof
+    prefixed = f"https://not{_PRIMARY_SALES_DOMAIN}/x"
+    assert ap(prefixed) == prefixed
 
 
 def test_normalize_domain():
@@ -231,16 +261,16 @@ def test_legacy_regex_override_auto_heals(_engine_ready):
     # Instalação que atualizou com a regex-default ANTIGA salva no override: o plugin
     # trata como vazio (usa a lista) — senão exemplo.net ficaria de fora (o bug real).
     from db.repositories import config_repo
-    for legacy in (r"^https?://exemplo\.cc/", r"^https?://(www\.)?(exemplo\.cc|exemplo\.net)/"):
+    for legacy in sorted(config_store._LEGACY_SALES_REGEX_DEFAULTS):
         config_repo.set_many({
-            "plugin.utm_atendente.sales_domains": ["exemplo.cc", "exemplo.net"],
+            "plugin.utm_atendente.sales_domains": list(_DEFAULT_SALES_DOMAINS),
             "plugin.utm_atendente.sales_link_regex": legacy,
         })
         config_store.invalidate_cache()
         cfg = config_store.get_settings()
         assert cfg.sales_link_regex == ""                      # auto-heal → tela mostra vazio
         rx = config_store.effective_sales_regex(cfg)
-        assert rx.search("https://exemplo.net/online-ofertax")  # a lista volta a valer
+        assert rx.search(f"https://{_SECONDARY_SALES_DOMAIN}/online-ofertax")
     # já um override REAL do operador é preservado
     config_repo.set("plugin.utm_atendente.sales_link_regex", r"^https?://meusite\.com/")
     config_store.invalidate_cache()
@@ -250,7 +280,8 @@ def test_legacy_regex_override_auto_heals(_engine_ready):
 def test_routes_put_legacy_regex_persists_as_empty(utm_app):
     c = utm_app.client
     put = c.put("/api/plugins/utm_atendente/mapping",
-                json={"sales_link_regex": r"^https?://exemplo\.cc/"}).json()
+                json={"sales_link_regex": sorted(
+                    config_store._LEGACY_SALES_REGEX_DEFAULTS)[0]}).json()
     assert put["ok"] is True
     assert put["data"]["settings"]["sales_link_regex"] == ""   # persistido vazio (auto-heal)
 
@@ -498,25 +529,18 @@ def test_filter_applies_on_newly_added_domain(_engine_ready):
 # ══════════════════════════════════════════════════════════════════════════
 
 @pytest.fixture
-def utm_app(_engine_ready):
+def utm_app(_engine_ready, authenticated_admin):
     """App hermético com gowa + utm_atendente carregados (fonte = storages/plugins)."""
     import tests.support as support
     orig = support.REAL_PLUGIN_EXAMPLES
     support.REAL_PLUGIN_EXAMPLES = ROOT / "storages" / "plugins"
     built = support.build_test_app(["gowa", "utm_atendente"])
+    authenticated_admin(built.client)
     try:
         yield built
     finally:
         support.REAL_PLUGIN_EXAMPLES = orig
-        try:
-            built.client.__exit__(None, None, None)
-        except Exception:
-            pass
-        try:
-            if built._tmp is not None:
-                built._tmp.cleanup()
-        except Exception:
-            pass
+        built.close()
 
 
 def _plugins_list(client):
@@ -566,7 +590,12 @@ def test_routes_put_invalid_term_400(utm_app):
 
 def test_routes_users_lists_seeded_user(utm_app):
     from db.repositories import user_repo
-    user_repo.create(email="anna.utm@test.com", name="Atendente UTM", password_hash="x")
+    user = user_repo.create(
+        email=f"anna.utm.{uuid.uuid4().hex}@test.com",
+        name="Atendente UTM",
+        password_hash="x",
+    )
+    _CREATED_USER_IDS.append(user["id"])
     u = utm_app.client.get("/api/plugins/utm_atendente/users").json()
     assert u["ok"] is True
     names = [x["name"] for x in u["data"]["users"]]

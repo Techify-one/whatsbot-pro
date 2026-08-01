@@ -21,6 +21,11 @@ import pytest
 
 # Exercita a cópia INSTALADA (real) em ``storages/plugins/protocolos``.
 _STORAGES_PLUGINS = Path(__file__).resolve().parents[1] / "storages" / "plugins"
+pytestmark = pytest.mark.skipif(
+    not (_STORAGES_PLUGINS / "protocolos" / "plugin.yaml").is_file(),
+    reason="plugin protocolos não instalado em storages/plugins "
+           "(fonte intencional deste módulo)",
+)
 
 
 @pytest.fixture(autouse=True)

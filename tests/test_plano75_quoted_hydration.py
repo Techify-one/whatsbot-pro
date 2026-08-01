@@ -93,6 +93,23 @@ _AUTH_PERMISSIONS = ["conversation.read", "conversation.read_all", "contact.read
 # Cache de processo: o token vive na tabela ``sessions`` (banco compartilhado),
 # então serve para qualquer app construído depois.
 _auth_headers: dict[str, str] | None = None
+_created_auth_user_id: int | None = None
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_contingency_auth(_engine_ready):
+    """Remove the fallback identity if an earlier module forced RBAC on."""
+    yield
+    global _auth_headers, _created_auth_user_id
+    if _created_auth_user_id is not None:
+        from db.repositories import session_repo, user_repo
+
+        session_repo.delete_for_user(_created_auth_user_id)
+        assert user_repo.delete(_created_auth_user_id), (
+            f"could not remove quoted-hydration user {_created_auth_user_id}"
+        )
+    _auth_headers = None
+    _created_auth_user_id = None
 
 
 def _authenticate(client) -> dict[str, str]:
@@ -100,7 +117,7 @@ def _authenticate(client) -> dict[str, str]:
 
     Chamada APENAS depois de um 401 — ver a nota no topo do módulo.
     """
-    global _auth_headers
+    global _auth_headers, _created_auth_user_id
     if _auth_headers is not None:
         return _auth_headers
 
@@ -108,10 +125,11 @@ def _authenticate(client) -> dict[str, str]:
     from server.auth import hash_password_argon2
 
     if user_repo.get_by_email(_AUTH_EMAIL) is None:
-        user_repo.create(
+        created = user_repo.create(
             email=_AUTH_EMAIL, name="Plano75 Quoted",
             password_hash=hash_password_argon2(_AUTH_PASSWORD),
             permission_keys=_AUTH_PERMISSIONS, custom=True)
+        _created_auth_user_id = created["id"]
 
     r = client.post("/api/auth/login",
                     json={"email": _AUTH_EMAIL, "password": _AUTH_PASSWORD})
@@ -171,7 +189,7 @@ def test_snippet_is_truncated_and_light(client, thread_two_pages):
     assert len(quoted["content"]) == message_repo.QUOTED_SNIPPET_MAX
     assert "media_path" not in quoted and "raw" not in quoted
     assert set(quoted) == {"_id", "msg_id", "role", "content", "media_type",
-                           "status", "sent_by_name"}
+                           "media_caption", "status", "sent_by_name"}
 
 
 def test_target_inside_page_is_not_hydrated(client, thread_two_pages):

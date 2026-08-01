@@ -23,6 +23,22 @@ operator and prove:
 
 from __future__ import annotations
 
+import pytest
+
+
+_CREATED_USER_IDS: list[int] = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_p69_users(_engine_ready):
+    yield
+    from db.repositories import session_repo, user_repo
+
+    for user_id in reversed(_CREATED_USER_IDS):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), f"could not remove plano 69 user {user_id}"
+    _CREATED_USER_IDS.clear()
+
 
 def _auth(built, email: str):
     """Authenticate ``built.client`` as a fresh admin operator (read_all + assign).
@@ -31,9 +47,13 @@ def _auth(built, email: str):
     Returns the operator's user id."""
     from db.repositories import user_repo, session_repo
     from server.auth import generate_session_token
-    op = (user_repo.get_by_email(email)
-          or user_repo.create(email=email, name="P69 Operador",
-                              password_hash="x", role_keys=["admin"]))
+    op = user_repo.get_by_email(email)
+    if op is None:
+        op = user_repo.create(
+            email=email, name="P69 Operador",
+            password_hash="x", role_keys=["admin"],
+        )
+        _CREATED_USER_IDS.append(op["id"])
     tok = generate_session_token()
     session_repo.create(tok, op["id"], user_agent="test", ip="127.0.0.1")
     built.client.headers["Authorization"] = f"Bearer {tok}"
@@ -105,6 +125,7 @@ def test_agent_filter_list_matches_count(build_app):
     from db.repositories import user_repo
     agent = user_repo.create(email="p69_assignee@test.com", name="Atendente X Teste",
                              password_hash="x", role_keys=["atendente"])
+    _CREATED_USER_IDS.append(agent["id"])
 
     ids = []
     for i in range(3):

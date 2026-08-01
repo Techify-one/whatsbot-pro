@@ -31,6 +31,7 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -54,9 +55,13 @@ os.environ.setdefault("WHATSBOT_TEST", "1")
 # tool and is never run automatically.
 collect_ignore = [
     "test_endpoints.py",
+    "test_agent_json_hardening.py",
+    "test_ai_agents_jsonb.py",
     "test_audit.py",
     "test_agent_routing.py",
+    "test_coerce_json.py",
     "test_events_filters.py",
+    "test_gowa_alert_migration.py",
     "test_gowa_plugin.py",
     "test_hooks.py",
     "test_model_factory.py",
@@ -318,14 +323,70 @@ def client(app):
         yield test_client
 
 
+@pytest.fixture
+def authenticated_admin(_engine_ready):
+    """Authenticate a test client as an isolated admin and tear it down.
+
+    Plugin integration tests share one process-global database. Creating a user
+    closes the formerly-open API for every later test, so ad-hoc auth helpers that
+    leave users/sessions behind make results depend on collection order. This
+    factory owns every session it creates and removes a user only when it created
+    that row itself.
+
+    Usage::
+
+        admin = authenticated_admin(built.client)
+        assert admin["is_admin"] is True
+    """
+    from db.repositories import session_repo, user_repo
+    from server.auth import generate_session_token
+
+    cleanup: list[tuple[str, int, bool, object, str | None]] = []
+
+    def _authenticate(client, *, email: str | None = None, name: str = "Test Admin"):
+        address = email or f"plugin-admin-{uuid.uuid4().hex}@test.local"
+        user = user_repo.get_by_email(address)
+        created = user is None
+        if user is None:
+            user = user_repo.create(
+                email=address,
+                name=name,
+                password_hash="test-only",
+                role_keys=["admin"],
+            )
+        elif not user.get("is_admin"):
+            raise ValueError(
+                f"authenticated_admin: existing user {address!r} is not an admin"
+            )
+        token = generate_session_token()
+        session_repo.create(token, user["id"], user_agent="pytest", ip="127.0.0.1")
+        previous = client.headers.get("Authorization")
+        client.headers["Authorization"] = f"Bearer {token}"
+        cleanup.append((token, user["id"], created, client, previous))
+        return user
+
+    yield _authenticate
+
+    for token, user_id, created, client_obj, previous in reversed(cleanup):
+        session_repo.delete(token)
+        if previous is None:
+            client_obj.headers.pop("Authorization", None)
+        else:
+            client_obj.headers["Authorization"] = previous
+        if created:
+            assert user_repo.delete(user_id), (
+                f"authenticated_admin: could not remove test user {user_id}"
+            )
+
+
 # ── Hermetic app builder (Phase G1-min) ─────────────────────────────────────
 
 @pytest.fixture
 def build_app(_engine_ready):
     """Factory fixture wrapping :func:`tests.support.build_test_app`.
 
-    Boots a hermetic app with a CHOSEN set of bundled plugins (default
-    ``("gowa",)``) — see ``tests/support.py`` for the shared-engine contract.
+    Boots a hermetic app with a CHOSEN set of source/installed/explicit plugins
+    (default ``("gowa",)``) — see ``tests/support.py`` for the shared-engine contract.
     Depends on ``_engine_ready`` so the process-global DB is initialized before
     the first build. Every app created via the factory is torn down (TestClient
     exited) at the end of the test.
@@ -347,16 +408,8 @@ def build_app(_engine_ready):
 
     yield _factory
 
-    for built in built_apps:
-        try:
-            built.client.__exit__(None, None, None)
-        except Exception:
-            pass
-        try:
-            if built._tmp is not None:
-                built._tmp.cleanup()
-        except Exception:
-            pass
+    for built in reversed(built_apps):
+        built.close()
 
 
 # ── Real-app-with-plugin fixture (Phase G2) ─────────────────────────────────
@@ -389,13 +442,5 @@ def plugin_app(_engine_ready):
 
     yield _factory
 
-    for built in built_apps:
-        try:
-            built.client.__exit__(None, None, None)
-        except Exception:
-            pass
-        try:
-            if built._tmp is not None:
-                built._tmp.cleanup()
-        except Exception:
-            pass
+    for built in reversed(built_apps):
+        built.close()

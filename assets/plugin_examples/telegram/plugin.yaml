@@ -1,5 +1,5 @@
 id: telegram
-name: Telegram
+name: Canal · Telegram
 version: 1.3.1
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-

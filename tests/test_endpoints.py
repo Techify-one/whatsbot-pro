@@ -1,6 +1,6 @@
 """Comprehensive endpoint tests for WhatsBot API.
 
-Uses FastAPI TestClient with a real temporary SQLite database.
+Uses FastAPI TestClient with the configured PostgreSQL test database.
 No external services needed (GOWA/OpenRouter are mocked).
 """
 
@@ -2553,8 +2553,9 @@ section("Protocolos Kanban Views")
 import importlib.util as _ilu
 from plugins.manifest import load_manifest as _load_manifest, _parse_yaml as _parse_yaml
 from plugins.migrator import run_pending_migrations as _run_pending
+from tests.plugin_test_utils import resolve_plugin_source as _resolve_plugin_source
 
-_atd_dir = Path(PROJECT_ROOT) / "storages" / "plugins" / "protocolos"
+_atd_dir = _resolve_plugin_source("protocolos")
 
 # 1) Manifest declara a permissão nova manage_team_views (aparece no PermissionPicker).
 _atd_yaml = _parse_yaml((_atd_dir / "plugin.yaml").read_text(encoding="utf-8"))

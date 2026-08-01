@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from channels.base import AccountIdentity, Channel
 from channels.providers.gowa_channel import GOWAChannel, _canonical_phone
+from tests.plugin_test_utils import load_plugin_module
 
 
 # ── GOWA (live, kind="phone", canonical BR) ────────────────────────────────
@@ -43,14 +44,9 @@ def test_gowa_identity_from_credentials_is_none():
 
 # ── WhatsApp Cloud (create-time, kind="phone_number_id") ───────────────────
 def _cloud_cls():
-    import importlib.util
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    spec = importlib.util.spec_from_file_location(
-        "wa_cloud_channels_test",
-        root / "storages" / "plugins" / "whatsapp_cloud" / "channels.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = load_plugin_module(
+        "whatsapp_cloud", "channels", package_name="channel_identity_cloud",
+    )
     return mod.WhatsAppCloudChannel
 
 
@@ -68,14 +64,9 @@ def test_cloud_identity_missing_is_none():
 
 # ── Telegram (bot_id from token, consistent kind) ──────────────────────────
 def _tg_cls():
-    import importlib.util
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    spec = importlib.util.spec_from_file_location(
-        "telegram_channels_test",
-        root / "storages" / "plugins" / "telegram" / "channels.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = load_plugin_module(
+        "telegram", "channels", package_name="channel_identity_telegram",
+    )
     return mod.TelegramChannel
 
 

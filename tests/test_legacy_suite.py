@@ -28,9 +28,13 @@ REPO_ROOT = TESTS_DIR.parent
 # Same list as conftest.collect_ignore, MINUS manual_cloud_api_test.py.
 LEGACY_FILES = [
     "test_endpoints.py",
+    "test_agent_json_hardening.py",
+    "test_ai_agents_jsonb.py",
     "test_audit.py",
     "test_agent_routing.py",
+    "test_coerce_json.py",
     "test_events_filters.py",
+    "test_gowa_alert_migration.py",
     "test_gowa_plugin.py",
     "test_hooks.py",
     "test_model_factory.py",

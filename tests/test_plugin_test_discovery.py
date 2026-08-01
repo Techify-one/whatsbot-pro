@@ -6,16 +6,17 @@ Two things are proven here:
    runs tests that live INSIDE a plugin at ``storages/plugins/<id>/tests/``. We
    prove it the honest way: drop a throwaway plugin (manifest + a trivial
    ``tests/test_*.py``) into the REAL ``storages/plugins/`` tree, run pytest as a
-   subprocess scoped to just that file, assert it is collected + passes, then
+   subprocess using bare pytest discovery plus a unique ``-k`` selector, assert
+   the embedded file is collected + passes, then
    remove the temp plugin. Nothing permanent is left behind.
 
-   We also prove the hook is a strict no-op when no plugin ships tests: a
-   ``--collect-only`` subprocess (with ``storages/plugins`` holding no plugin
-   ``tests/`` dir) finishes with zero collection errors.
+   We also prove the discovery function is a strict no-op for a genuinely empty
+   plugin root. The real local ``storages/plugins`` is not assumed empty: an
+   operator may legitimately have plugins with embedded tests installed.
 
 2. **Real-app-with-plugin** — the ``plugin_app`` fixture boots the live app with
-   one bundled plugin enabled, so a plugin test can POST/GET
-   ``/api/plugins/<id>/...`` against the real server. We hit the bundled
+   one selected source plugin enabled, so a plugin test can POST/GET
+   ``/api/plugins/<id>/...`` against the real server. We hit the workbench
    ``telegram`` plugin's ``GET /channels`` route as the demonstration.
 
 All of this is hermetic: the temp plugin lives in a uniquely-named folder, is
@@ -119,33 +120,29 @@ def test_plugin_tests_dir_is_collected_and_run():
     assert not plugin_dir.exists()
 
 
-def test_collection_is_noop_when_no_plugin_tests():
-    """With no plugin shipping tests, a full collect-only has zero errors.
+def test_collection_is_noop_when_no_plugin_tests(tmp_path):
+    """A missing or empty plugin root contributes no collection directories."""
+    from tests.conftest import _discover_plugin_test_dirs
 
-    Guards the central promise: the discovery hook adds nothing (and certainly no
-    collection ERROR) in the common/CI case where ``storages/plugins`` holds no
-    ``<id>/tests/`` dir. We assert no plugin-rooted node was collected and that
-    pytest reported no errors.
-    """
     # Sanity: no leftover probe plugin from the test above (or anywhere).
     assert not any(PLUGINS_ROOT.glob("g2probe_*")), (
         "a leftover g2probe_* plugin would taint this no-op assertion")
-
-    proc = _run_pytest("--collect-only", "-q", "-m", "not legacy")
-    combined = proc.stdout + "\n" + proc.stderr
-    assert proc.returncode == 0, "collection errored:\n" + combined
-    assert " error" not in combined.lower().replace("0 errors", ""), (
-        "collection reported errors:\n" + combined)
-    # No node id should come from a plugin tests/ dir when none ship tests.
-    assert "storages/plugins" not in combined, (
-        "unexpected plugin node collected when none ship tests:\n" + combined)
+    missing_root = tmp_path / "missing"
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+    assert _discover_plugin_test_dirs(missing_root) == []
+    assert _discover_plugin_test_dirs(empty_root) == []
 
 
 # ── 2) Real-app-with-plugin: hit a plugin route against the live app ────────
 
-def test_plugin_app_fixture_boots_and_serves_plugin_route(plugin_app):
+def test_plugin_app_fixture_boots_and_serves_plugin_route(
+    plugin_app,
+    authenticated_admin,
+):
     """`plugin_app('telegram')` boots the real app + serves the plugin's route."""
     built = plugin_app("telegram")
+    authenticated_admin(built.client)
 
     # The plugin's router is mounted under /api/plugins/<id>.
     r = built.client.get("/api/plugins/telegram/channels")
@@ -154,5 +151,5 @@ def test_plugin_app_fixture_boots_and_serves_plugin_route(plugin_app):
     assert body["ok"] is True
     assert isinstance(body["data"], list)
 
-    # And the plugin is reported as loaded (router wired up).
-    assert "telegram" in built.plugins
+    # And the production registry, not merely the requested-id tuple, reports it loaded.
+    assert "telegram" in built.app.state.deps.plugins_registry.loaded

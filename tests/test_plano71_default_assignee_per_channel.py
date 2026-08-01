@@ -18,16 +18,34 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from db.repositories import (conversation_repo, config_repo, channel_repo,
                              inbox_repo, user_repo)
 from channels import ai_settings
 
 
+_CREATED_USER_IDS: list[int] = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_p71_users(_engine_ready):
+    yield
+    from db.repositories import session_repo
+
+    for user_id in reversed(_CREATED_USER_IDS):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), f"could not remove plano 71 user {user_id}"
+    _CREATED_USER_IDS.clear()
+
+
 def _mk_user(email: str, *, active: bool = True) -> int:
     """Cria (idempotente) um usuário e devolve o id. ``active=False`` desativa
     (para exercitar a guarda P5 — atendente inativo não carimba)."""
-    u = user_repo.get_by_email(email) or user_repo.create(
-        email=email, name="Atendente 71", password_hash="x")
+    u = user_repo.get_by_email(email)
+    if u is None:
+        u = user_repo.create(email=email, name="Atendente 71", password_hash="x")
+        _CREATED_USER_IDS.append(u["id"])
     if not active:
         from db.engine import get_engine
         from db.tables import users

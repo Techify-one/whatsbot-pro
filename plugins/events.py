@@ -122,8 +122,11 @@ KNOWN_EVENTS: set[str] = {
 # legal, just worth flagging.
 #
 # Versioning contract (``WHATSBOT_API_VERSION`` semver): adding a filter name is
-# ADDITIVE → a MINOR bump. Removing or renaming a filter, or changing the type of
-# its piped value / abort (``None``) semantics, is a breaking change → MAJOR.
+# ADDITIVE → a MINOR bump. Removing or renaming a filter WITH A LIVE PRODUCER, or
+# changing the type of its piped value / abort (``None``) semantics, is a breaking
+# change → MAJOR. A catalogue-only typo/dead name with no producer in the current
+# supported core is not an executable contract: retiring it is a bugfix, must be
+# measured repo-wide, documented, and covered by the unknown-filter WARNING test.
 # Seams that are still in flux are marked ``experimental`` below and may move
 # without a MAJOR until they graduate; depend on them at your own risk.
 #
@@ -134,10 +137,12 @@ KNOWN_FILTERS: set[str] = {
     # Inbound webhook / message ingest
     "filter.webhook.payload",
     "filter.message.before_save", "filter.message.outgoing",
-    # Transcription / media (``filter.media.unknown`` is the last-resort hook for
-    # a plugin to claim an otherwise-unrecognised media type).
+    # Transcription / media. There is deliberately no generic "unknown media"
+    # seam: providers must normalize inbound payloads to a supported InboundEvent
+    # kind in ``Channel.parse_inbound``.  The old ``filter.media.unknown`` name
+    # never had a live producer after the webhook refactor; keeping it here made
+    # broken plugins fail silently instead of triggering the unknown-filter warning.
     "filter.transcription.should_run", "filter.transcription.result",
-    "filter.media.unknown",
     # Contact / tags
     "filter.contact.tags",
     # Event bus self-interception

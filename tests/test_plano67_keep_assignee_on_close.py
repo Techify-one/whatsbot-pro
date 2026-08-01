@@ -16,7 +16,23 @@ that ``active_agent_key`` is ALWAYS cleared regardless of the seam (D2).
 
 from __future__ import annotations
 
+import pytest
+
 _OPERATOR_TOKEN = None
+_CREATED_USER_IDS: list[int] = []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_p67_users(_engine_ready):
+    yield
+    global _OPERATOR_TOKEN
+    from db.repositories import session_repo, user_repo
+
+    for user_id in reversed(_CREATED_USER_IDS):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), f"could not remove plano 67 user {user_id}"
+    _CREATED_USER_IDS.clear()
+    _OPERATOR_TOKEN = None
 
 
 def _operator_client(built):
@@ -26,9 +42,13 @@ def _operator_client(built):
     from db.repositories import user_repo, session_repo
     from server.auth import generate_session_token
     if _OPERATOR_TOKEN is None:
-        op = (user_repo.get_by_email("p67_operator@test.com")
-              or user_repo.create(email="p67_operator@test.com", name="Operador",
-                                  password_hash="x", role_keys=["admin"]))
+        op = user_repo.get_by_email("p67_operator@test.com")
+        if op is None:
+            op = user_repo.create(
+                email="p67_operator@test.com", name="Operador",
+                password_hash="x", role_keys=["admin"],
+            )
+            _CREATED_USER_IDS.append(op["id"])
         _OPERATOR_TOKEN = generate_session_token()
         session_repo.create(_OPERATOR_TOKEN, op["id"], user_agent="test", ip="127.0.0.1")
     built.client.headers["Authorization"] = f"Bearer {_OPERATOR_TOKEN}"
@@ -49,6 +69,7 @@ def _make_assigned_conversation(phone: str):
         contact["id"], f"{phone}@s.whatsapp.net")
     user = user_repo.create(
         email=f"p67_{phone}@test.com", name="Atendente 67", password_hash="x")
+    _CREATED_USER_IDS.append(user["id"])
     # assign_agent sets BOTH assignee_user_id and active_agent_key atomically, so we
     # can later prove that close keeps the assignee (seam) yet still drops the agent.
     conversation_repo.assign_agent(
