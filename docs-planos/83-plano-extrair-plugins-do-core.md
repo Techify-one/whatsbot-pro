@@ -1,6 +1,7 @@
 # Plano 83 — Extrair os plugins do repositório do core
 
-**Status:** EM EXECUÇÃO — fundações da F0 entregues; nenhuma fonte de plugin removida.
+**Status:** EM EXECUÇÃO — fundações da F0 entregues e publicação externa preparada;
+nenhuma fonte de plugin removida.
 Escrito em 2026-07-25.
 **Revisado e iniciado em 2026-07-31** (auditoria de 25 agentes + tranche de fundações):
 todos os números medidos foram re-medidos. **Nenhuma linha da matriz de paridade e nenhuma
@@ -8,11 +9,13 @@ linha da matriz de testes sobreviveu intacta.** As correções estão marcadas c
 
 > **Estado honesto desta tranche (2026-07-31).** Foram adicionados o builder reproduzível de
 > ZIP, o resolver de fonte `assets/` → `storages/`, o loader DB-free para módulos de teste, o
-> provider sintético e a fixture de autenticação com teardown. Isso prepara a extração, mas
-> **não publica plugin, não torna os ZIPs disponíveis no servidor e não remove nenhuma pasta
-> de `assets/plugin_examples/`**. O boot real sem qualquer fonte de plugin foi provado pelo
-> loader/endpoint; os gates de publicação, superfície de import e suíte completa continuam
-> bloqueando F1–F7.
+> provider sintético e a fixture de autenticação com teardown. Em 01/08, cinco artefatos
+> reconciliados foram enviados ao `whatsbot-pro-plugins` no
+> [PR #1](https://github.com/Techify-one/whatsbot-pro-plugins/pull/1): `protocolos` 1.24.0,
+> `telegram` 1.3.1, `website` 1.1.1 e as primeiras publicações de `facebook_messenger`
+> 1.5.0 e `instagram` 2.2.0. O PR permanece draft até confirmar a ordem de release com o
+> core `developer` (`440536b`). **Nenhuma pasta de `assets/plugin_examples/` foi removida.**
+> P4, a migração dos testes e a suíte completa continuam bloqueando F1–F7.
 
 **Objetivo do usuário:** o repositório `whatsbot-pro` (core) não deve mais carregar o
 código-fonte dos plugins em `assets/plugin_examples/`. Cada plugin vira um `.zip`
@@ -53,8 +56,8 @@ ficou de fora da tabela, das fases e da matriz. Hoje são **8** (entrou `instagr
 | `website` | removível com trabalho | médio | 3 |
 | `telegram` | removível com trabalho | alto | 5 |
 | `whatsapp_cloud` | removível com trabalho | alto | 6 |
-| 🔄 `facebook_messenger` | **fora do plano original** | alto | não publicado em lugar nenhum |
-| 🔄 `instagram` | **fora do plano original** | alto | não publicado em lugar nenhum |
+| 🔄 `facebook_messenger` | **fora do plano original** | alto | artefato inédito no PR externo #1; 38 testes ainda no core |
+| 🔄 `instagram` | **fora do plano original** | alto | artefato inédito no PR externo #1; 28 testes ainda no core |
 
 🔄 **`protocolos` não tem acoplamento "nenhum".** O core **hardcoda o path do plugin em duas
 listas de rota SPA**: `server/app.py:542` inclui `/protocolos` e `/attendances` no
@@ -107,27 +110,28 @@ dele.
 
 Isso já é verdade hoje. Remover as pastas **piora** um problema que ninguém tinha enunciado.
 
-#### 🔄 Estado do repo de plugins (medido em 2026-07-31)
+#### 🔄 Estado do repo de plugins (medido em 2026-07-31; publicação preparada em 2026-08-01)
 
 O `Techify-one/whatsbot-pro-plugins` publica **16 plugins** (não 14), e os 3 rótulos de
 versão (catalog.json, `<id>.json`, `plugin.yaml` dentro do zip) **batem nos 16** — a
 inconsistência do commit `df71378` não se repetiu.
 
-**Mas `instagram` e `facebook_messenger` NÃO estão publicados em lugar nenhum.** Para eles
-o P1 ainda é bloqueador de **existência**, não de paridade.
+O [PR externo #1](https://github.com/Techify-one/whatsbot-pro-plugins/pull/1) adiciona
+`instagram` e `facebook_messenger` e atualiza os três artefatos atrasados não-GOWA. Enquanto
+o PR estiver draft/sem merge, `master` continua com 16 plugins; depois do merge serão 18.
 
 #### 🔄 Matriz de paridade re-medida (2026-07-31)
 
-| plugin | publicado | HEAD (git do core) | worktree (`assets/`) | instalado |
+| plugin | publicado em `master` → PR #1 | HEAD (git do core) | worktree (`assets/`) | instalado |
 |---|---|---|---|---|
 | `gowa` | **1.2.0** ⬅ atrás | 1.3.1 | 1.3.1 | 1.3.1 |
-| `telegram` | **1.3.0** ⬅ atrás | 1.3.1 | 1.3.1 | 1.3.1 |
+| `telegram` | 1.3.0 → **1.3.1** | 1.3.1 | 1.3.1 | 1.3.1 |
 | `whatsapp_cloud` | 1.10.2 | 1.10.2 | 1.10.2 | 1.10.2 |
-| `website` | **1.0.0** ⬅ atrás | 1.1.1 | 1.1.1 | 1.1.1 |
+| `website` | 1.0.0 → **1.1.1** | 1.1.1 | 1.1.1 | 1.1.1 |
 | `melhorias` | 1.7.0 | 1.7.0 | 1.7.0 | 1.7.0 |
-| `protocolos` | **1.23.0** ⬅ atrás | 1.24.0 | 1.24.0 | 1.23.0 |
-| `facebook_messenger` | **ausente** | 1.5.0 | 1.5.0 | — |
-| `instagram` | **ausente** | 2.2.0 | 2.2.0 | 2.2.0 |
+| `protocolos` | 1.23.0 → **1.24.0** | 1.24.0 | 1.24.0 | 1.23.0 |
+| `facebook_messenger` | ausente → **1.5.0** | 1.5.0 | 1.5.0 | — |
+| `instagram` | ausente → **2.2.0** | 2.2.0 | 2.2.0 | 2.2.0 |
 
 **O aviso de 25/07 ("as linhagens divergem nos DOIS sentidos") continua válido em espírito,
 mas os exemplos concretos não descrevem mais o estado atual** — reusá-los induziria a uma
@@ -147,15 +151,15 @@ publicado está ausente de `assets/`**.
 > sozinho. Vale uma regra explícita no catálogo.
 
 **Ação / estado:**
-1. ⏳ Reconciliar plugin a plugin, comparando **conteúdo**. 🔄 Hoje **4 dos 6** publicados
-   comparados estão atrás (`gowa`, `telegram`, `website`, `protocolos`),
-   mais 2 nunca publicados.
+1. 🟡 Reconciliar plugin a plugin, comparando **conteúdo**. Os sete não-GOWA estão
+   reconciliados: dois já eram idênticos e cinco estão no PR externo #1. O `gowa` 1.3.1
+   continua deliberadamente fora enquanto o plano 100 F2 estiver bloqueado.
 2. ✅ Criar `scripts/build_plugin_zips.py` no lugar do snippet manual. O builder descobre
    qualquer plugin válido ou aceita ids explícitos; a seleção do que publicar continua sendo
    uma decisão de release.
-3. ⏳ 🔄 **Resolver a disponibilidade:** o build script não basta, o zip precisa **chegar
-   ao servidor**. Três saídas: zip trackeado no git, uma rota "instalar bundled a partir de
-   `assets/`", ou o catálogo remoto do §5.
+3. 🟡 🔄 **Resolver a disponibilidade:** os cinco ZIPs já chegaram a uma branch remota
+   revisável; falta mergear o PR #1. O core ainda não consome `catalog.json`, então instalação
+   pela UI continua exigindo baixar o ZIP e usar **Importar (.zip)**.
 4. ⏳ Só então remover as pastas do core. **Nenhuma foi removida nesta tranche.**
 
 ### P2 — "O plugin traz os próprios testes" só funciona pela metade
@@ -349,8 +353,9 @@ cada.**
    `parse_inbound` capaz de emitir 🔄 `kind ∈ {message, system, receipt, reaction, edited}`.
    ⏳ A migração dos testes/fakes existentes continua pendente.
 3. ✅ `scripts/build_plugin_zips.py` — build reproduzível dos zips (P1).
-4. ⏳ 🔄 **Resolver a disponibilidade do zip no servidor** (P1 · ação 3).
-5. ⏳ Publicar os plugins no `whatsbot-pro-plugins` **antes** de remover (P1).
+4. 🟡 🔄 **Resolver a disponibilidade do zip no servidor**: PR externo #1 aberto; falta merge.
+5. 🟡 Cinco artefatos enviados ao `whatsbot-pro-plugins`; nenhuma fonte será removida antes
+   do merge e dos gates P2–P4.
 6. ✅ 🔄 Helper único de load, fixture de auth com teardown, guards de skip e primeiras
    adoções pelos testes existentes entregues (P2 · ações 2-4). A migração física dos testes
    para cada zip continua pertencendo às fases F1–F7.
@@ -419,9 +424,9 @@ Fica no core, e **está certo que fique** (valores duplicados, não import do pl
 `media_limits`.
 
 ### 🔄 F6 / F7 — `facebook_messenger` e `instagram` (NOVOS)
-Fora do plano original. São os **únicos dois plugins de `assets/` que não estão publicados em
-lugar nenhum** — para eles, P1 é bloqueador de existência. `facebook_messenger` tem 38
-testes em 2 arquivos, `instagram` 28.
+Fora do plano original. Os primeiros ZIPs estão no PR externo #1, portanto o bloqueio de
+existência está encaminhado, mas só termina no merge. `facebook_messenger` ainda tem 38
+testes em 2 arquivos no core, e `instagram` 28; P2–P4 continuam bloqueando a remoção.
 
 ---
 
@@ -461,7 +466,8 @@ Contraste com o `gowa`: `plugins/bootstrap.py:127-173` compara semver e substitu
 > 🔄 **A mitigação sugerida tem um pré-requisito.** O `catalog.json` já existe, e **hoje seria
 > uma fonte ruim justamente para canais**: lista `gowa 1.2.0` (core e produção em 1.3.1),
 > `telegram 1.3.0` (core 1.3.1), `website 1.0.0` (core 1.1.1) e **não lista
-> `facebook_messenger` nem `instagram`**. Um check ingênuo diria *"gowa desatualizado"* para
+> `facebook_messenger` nem `instagram`**. O PR externo #1 corrige esses cinco casos, mas não
+> o `gowa`. Um check ingênuo ainda diria *"gowa desatualizado"* para
 > uma instância que está na versão MAIS NOVA, e o "update" seria um **downgrade que o próximo
 > boot desfaz sozinho**. **O catálogo só vira fonte de verdade DEPOIS que o canal sair do
 > core** — enquanto os dois coexistirem, o check tem de ignorar plugin bundled.
@@ -479,12 +485,12 @@ Contraste com o `gowa`: `plugins/bootstrap.py:127-173` compara semver e substitu
 | Fase | Recomendação |
 |---|---|
 | 🔄 **Plano 100 antes de tudo** | F0 segura concluída e F1 confirmado; F2 GOWA ainda bloqueado pelos contratos/gates |
-| F0 | **Em andamento:** builder, resolver/loader dual, fake provider, auth e boot sem fontes entregues; publicação, P4, migração dos testes e suíte completa pendentes |
-| F1 `protocolos` | **Bloqueada por F0/P4:** nenhuma fonte foi removida nem publicada |
+| F0 | **Em andamento:** fundações entregues e cinco artefatos no PR externo #1; merge, P4, migração dos testes e suíte completa pendentes |
+| F1 `protocolos` | **Bloqueada por F0/P4:** ZIP 1.24.0 preparado, fonte/testes ainda no core |
 | F2 `melhorias` | **Bloqueada pela F0/P4**; é o próximo candidato de baixo risco quando o gate fechar e precisa de data-alvo |
 | F3 `website` | **Bloqueada pela F0/P4**; números reconfirmados, pronta como candidata depois do gate |
 | F4/F5 `telegram`/`whatsapp_cloud` | **Adiar** — bloqueadas por F0/P4 e pelo acoplamento de testes/providers |
-| 🔄 F6/F7 `facebook_messenger`/`instagram` | **Adiar** — F0/P4 bloqueiam a remoção e P1 bloqueia a própria disponibilidade |
+| 🔄 F6/F7 `facebook_messenger`/`instagram` | **Adiar remoção** — primeiros ZIPs no PR externo #1; testes e P2–P4 continuam no caminho |
 
 ---
 
