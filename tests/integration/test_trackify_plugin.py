@@ -1450,7 +1450,9 @@ def _ev(tipo, quando, campos, valor=None, effect="add"):
     evento, que decide se a linha cria produto.
     """
     import datetime as _dt
-    return {"id": f"e-{quando}", "event_type": tipo, "effect": effect,
+    # ``title`` faz parte da linha porque o histórico por produto reusa o
+    # ``_event_row`` da linha do tempo — é o corpo da linha no ``EventRow``.
+    return {"id": f"e-{quando}", "event_type": tipo, "title": tipo, "effect": effect,
             "value": Decimal(str(valor)) if valor is not None else None,
             "occurred_at": _dt.datetime(2026, 1, quando, 12, 0),
             "channel": "ticto", "fields": campos}
@@ -1629,6 +1631,39 @@ def test_compra_sem_nome_nem_id_e_reportada(journey, monkeypatch):
                                "events": 4}]
 
 
+def test_cada_produto_carrega_o_proprio_historico(journey, monkeypatch):
+    """"Ver histórico" abre sem roundtrip porque a consulta JÁ lê estas linhas —
+    antes elas eram agrupadas e jogadas fora. Inclui o evento de ESTADO: é ele
+    que explica o selo que a linha mostra."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("subscription_canceled", 20, {"product_name": "Combo"}, effect="ignore"),
+        _ev("charge.paid", 10, {"product_name": "Combo", "status": "paid"}, 97),
+        _ev("charge.paid", 5, {"product_name": "Combo", "status": "paid"}, 97),
+    ])
+    p = journey.fetch_purchases("uuid-1")["items"][0]
+    assert p["purchases"] == 2                       # o cancelamento não é compra…
+    assert len(p["events"]) == 3                     # …mas ENTRA no histórico
+    assert [e["event_type"] for e in p["events"]] == [
+        "subscription_canceled", "charge.paid", "charge.paid"]   # mais novo primeiro
+
+
+def test_historico_do_produto_usa_o_mesmo_formato_da_linha_do_tempo(journey, monkeypatch):
+    """Mesmo serializador (`_event_row`) ⇒ o modal reusa o `EventRow` da timeline
+    em vez de um segundo jeito de desenhar evento. Trocar o formato aqui quebra
+    a tela em silêncio."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("charge.paid", 10, {"product_name": "Combo", "transaction_id": "tx-1"}, 97),
+    ])
+    evento = journey.fetch_purchases("uuid-1")["items"][0]["events"][0]
+    modelo = journey._event_row({
+        "id": "x", "event_type": "t", "title": "T", "value": None,
+        "occurred_at": None, "channel": "c", "fields": {}})
+    assert set(evento) == set(modelo)
+    assert evento["value"] == "R$ 97,00" and evento["fields"]["transaction_id"] == "tx-1"
+    # `title` é o corpo da linha no EventRow — sem ele no SQL, a tela fica muda.
+    assert "p.title" in journey._SQL_PURCHASE_EVENTS
+
+
 def test_campos_de_identificacao_saem_da_configuracao(journey, monkeypatch):
     """Gateway novo com slug próprio vira CONFIGURAÇÃO, não release do plugin."""
     monkeypatch.setattr(journey._config, "product_identity_fields",
@@ -1713,6 +1748,15 @@ def test_campo_novo_de_settings_tem_interface(journey):
         if campo in por_rota_propria:
             continue
         assert campo in telas, f"setting '{campo}' não tem campo na tela Configurar"
+
+
+def test_modal_reusa_o_event_row_no_historico_do_produto():
+    """Se alguém escrever um segundo componente de evento, as duas telas
+    divergem e campo de gateway novo passa a aparecer só numa delas."""
+    js = (_SRC / "static" / "JourneyModal.js").read_text(encoding="utf-8")
+    corpo = js[js.index("function PurchaseRow("):js.index("const JOURNEY_TABS")]
+    assert "ver histórico" in corpo
+    assert "<${EventRow}" in corpo
 
 
 def test_modal_aponta_a_configuracao_dos_campos():

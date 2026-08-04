@@ -1,6 +1,6 @@
 id: trackify
 name: Trackify (Jornada do cliente)
-version: "1.3.0"
+version: "1.4.0"
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Mostra a JORNADA do contato no Trackify (o CDP do Nexus) sem sair do atendimento:
@@ -45,6 +45,12 @@ description: >-
   não atualização do plugin — e quando uma cobrança não pode ser listada, a
   própria aba diz quais campos aqueles eventos trazem, apontando o slug a
   acrescentar.
+
+  Cada produto abre o PRÓPRIO histórico ("ver histórico"): as compras daquele
+  item, uma a uma, com data, valor, forma de pagamento, parcelas, cartão, id da
+  transação e o que mais o gateway tiver mandado — além dos eventos de estado
+  (cancelamento, atraso) que explicam o selo. É a mesma linha da aba Jornada,
+  então campo novo de gateway aparece sozinho. Abre na hora, sem nova consulta.
 short_description: >-
   Jornada do contato no Trackify (CDP) num modal do cabeçalho da conversa, em duas
   abas: quem é o cliente + linha do tempo, e o que ele comprou (inclusive o que

@@ -352,7 +352,7 @@ def fetch_subscriptions(contact_id: str, *, today: date | None = None) -> list[d
 # 0,918 ms); a forma "agrega tudo e limita no fim" volta a fazer seq scan.
 _SQL_PURCHASE_EVENTS = """
 WITH page AS (
-  SELECT e.id, e.event_type, e.value, e.occurred_at, e.channel_id,
+  SELECT e.id, e.event_type, e.title, e.value, e.occurred_at, e.channel_id,
          COALESCE(vr.effect::text, 'ignore') AS effect
   FROM events e
   LEFT JOIN channel_value_rules vr
@@ -363,14 +363,14 @@ WITH page AS (
   ORDER BY e.occurred_at DESC
   LIMIT :limit
 )
-SELECT p.id::text AS id, p.event_type, p.value, p.occurred_at, p.effect,
+SELECT p.id::text AS id, p.event_type, p.title, p.value, p.occurred_at, p.effect,
        ch.slug AS channel,
        jsonb_object_agg(ecf.slug, efv.value) FILTER (WHERE ecf.slug IS NOT NULL) AS fields
 FROM page p
 JOIN channels ch ON ch.id = p.channel_id
 LEFT JOIN event_field_values efv ON efv.event_id = p.id
 LEFT JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-GROUP BY p.id, p.event_type, p.value, p.occurred_at, p.effect, ch.slug
+GROUP BY p.id, p.event_type, p.title, p.value, p.occurred_at, p.effect, ch.slug
 ORDER BY p.occurred_at DESC
 """
 # ``vr.effect::text``, nunca ``vr.effect IN (...)``: comparar o enum com um
@@ -579,6 +579,13 @@ def fetch_purchases(contact_id: str) -> dict:
             "last_event_at": None,
             "gateway_status": None,
             "channel": None,
+            # O histórico DAQUELE produto, no MESMO formato da linha do tempo
+            # (``_event_row``) — o modal reusa o componente de evento em vez de
+            # inventar um segundo jeito de desenhar a mesma coisa. Embutir sai
+            # de graça: a consulta já lê estas linhas, e o contato mais pesado
+            # da produção tem 26 eventos (média 1,2), ~16 KB — menos que a 1ª
+            # página da timeline, que o modal já carrega sempre.
+            "events": [],
         })
         s = somas.setdefault(key, {"add": Decimal(0), "sub": Decimal(0)})
 
@@ -600,7 +607,8 @@ def fetch_purchases(contact_id: str) -> dict:
             if f.get(src) and not g.get(dst):
                 g[dst] = f[src]
 
-    # 2ª passada — o selo. Percorre TUDO (inclusive os ``ignore``), mas só
+    # 2ª passada — o selo e o HISTÓRICO. Percorre TUDO (inclusive os ``ignore``),
+    # mas só
     # escreve em grupo que JÁ existe: é isso que impede um cancelamento órfão
     # (produto comprado antes do CDP, sem nenhum evento de dinheiro) de virar
     # produto — ele rotula quem existe e é ignorado quando não há quem rotular.
@@ -610,13 +618,17 @@ def fetch_purchases(contact_id: str) -> dict:
         if ident is None:
             continue
         g = groups.get(ident[0])
-        if g is None or g["last_event_at"] is not None:
+        if g is None:
             continue
-        g["last_event_at"] = _iso(r["occurred_at"])
-        g["last_event_type"] = r["event_type"]
-        g["last_effect"] = r.get("effect")
-        g["gateway_status"] = f.get("status")
-        g["channel"] = r.get("channel")
+        if g["last_event_at"] is None:      # o 1º que chega é o mais recente
+            g["last_event_at"] = _iso(r["occurred_at"])
+            g["last_event_type"] = r["event_type"]
+            g["last_effect"] = r.get("effect")
+            g["gateway_status"] = f.get("status")
+            g["channel"] = r.get("channel")
+        # O histórico leva TAMBÉM os eventos de estado (cancelamento, atraso):
+        # é o que explica o selo que a linha já mostra.
+        g["events"].append(_event_row(r))
 
     out = list(groups.values())
     for g in out:

@@ -238,6 +238,13 @@ function PurchaseRow({ p }) {
     : p.last_effect === 'subtract' ? 'bad'
     : NEGATIVE.has(p.last_event_type) ? 'bad' : 'neutral';
 
+  // O histórico daquele produto usa o MESMO `EventRow` da linha do tempo: o
+  // backend já devolve os eventos no formato de `_event_row`, então não existe
+  // um segundo jeito de desenhar um evento (e campo de gateway novo aparece
+  // sozinho no "ver detalhes", sem tocar em código).
+  const [open, setOpen] = useState(false);
+  const eventos = p.events || [];
+
   return html`
     <li class="border border-wa-border rounded-lg p-3 bg-wa-panel min-w-0">
       <div class="flex items-start justify-between gap-3 flex-wrap">
@@ -265,6 +272,16 @@ function PurchaseRow({ p }) {
         <${Stat} label="Situação no gateway" value=${p.gateway_status} />
         ${p.refunded ? html`<${Stat} label="Reembolsado" value=${p.refunded} />` : null}
       </div>
+
+      ${eventos.length ? html`
+        <button type="button" onClick=${() => setOpen(!open)}
+          class="text-[11px] text-wa-teal hover:underline mt-2">
+          ${open ? 'ocultar histórico' : `ver histórico (${eventos.length})`}
+        </button>` : null}
+      ${open ? html`
+        <ul class="space-y-2 mt-2 pt-2 border-t border-wa-border">
+          ${eventos.map((ev) => html`<${EventRow} key=${ev.id} ev=${ev} />`)}
+        </ul>` : null}
     </li>`;
 }
 
@@ -598,7 +615,8 @@ export function JourneyModal({ api, contactId, onClose }) {
     tabStrip = html`<${JourneyTabs} value=${tab} onChange=${setTab} count=${compras.length} />`;
     // A aba inativa é DESMONTADA (o que todo strip do repo faz). Consequência
     // aceita: voltar para a Jornada colapsa o "ver detalhes" de cada `EventRow`
-    // (esse `open` é `useState` local). Não se perde o filtro nem as páginas já
+    // e o "ver histórico" de cada `PurchaseRow` (esses `open` são `useState`
+    // locais). Não se perde o filtro nem as páginas já
     // carregadas da timeline — moram em `state.data.timeline`, aqui no
     // componente raiz, então trocar de aba não dispara fetch nenhum. Não "conserte"
     // subindo o `open` para cá.
