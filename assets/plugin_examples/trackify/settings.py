@@ -55,6 +55,19 @@ class Settings(BaseModel):
         default=25, ge=5, le=100,
         title="Eventos por página na linha do tempo",
     )
+    product_identity_fields: str = Field(
+        default="product_name,offer_name,product_id,offer_id",
+        title="Campos que identificam o produto (em ordem)",
+        description=(
+            "Lista separada por vírgula dos campos de evento do CDP usados para "
+            "nomear um produto na aba Produtos — o primeiro preenchido ganha. "
+            "Existe porque cada gateway nomeia de um jeito: o ticto preenche "
+            "product_name/offer_name e o pagarme só product_id/offer_id. Se um "
+            "canal novo passar a usar um campo diferente, acrescente o slug dele "
+            "aqui em vez de esperar uma atualização do plugin — a própria aba avisa "
+            "quais campos as compras não identificadas trazem. Vazio volta ao padrão."
+        ),
+    )
     statement_timeout_ms: int = Field(
         default=5000, ge=500, le=30000,
         title="Tempo máximo de cada consulta (ms)",

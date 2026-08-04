@@ -1629,6 +1629,58 @@ def test_compra_sem_nome_nem_id_e_reportada(journey, monkeypatch):
                                "events": 4}]
 
 
+def test_campos_de_identificacao_saem_da_configuracao(journey, monkeypatch):
+    """Gateway novo com slug próprio vira CONFIGURAÇÃO, não release do plugin."""
+    monkeypatch.setattr(journey._config, "product_identity_fields",
+                        lambda: ["plan_name"])
+    _mock_compras(journey, monkeypatch, [
+        _ev("purchase", 10, {"plan_name": "Plano Anual"}, 500),
+        _ev("purchase", 5, {"product_name": "Fora da lista"}, 100),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert [p["name"] for p in itens] == ["Plano Anual"]
+
+
+def test_slug_novo_de_id_e_traduzido_pelo_par_name(journey, monkeypatch):
+    """O par id↔nome é DERIVADO (`plan_id` → `plan_name`), não uma dupla
+    chumbada — senão um slug novo voltaria a partir o produto em duas linhas."""
+    assert journey._name_partner("plan_id") == "plan_name"
+    assert journey._name_partner("product_name") is None
+    monkeypatch.setattr(journey._config, "product_identity_fields",
+                        lambda: ["plan_name", "plan_id"])
+    _mock_compras(journey, monkeypatch, [
+        _ev("purchase", 20, {"plan_id": "p-9"}, 100),
+        _ev("purchase", 10, {"plan_id": "p-9", "plan_name": "Plano Anual"}, 100),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert len(itens) == 1
+    assert itens[0]["name"] == "Plano Anual" and itens[0]["purchases"] == 2
+
+
+def test_lista_de_campos_vazia_volta_ao_padrao(journey, monkeypatch):
+    """Apagar o campo na tela não pode apagar a aba Produtos inteira."""
+    cfg = journey._config
+    monkeypatch.setattr(cfg, "setting", lambda k, d=None: "" if k == "product_identity_fields" else d)
+    assert cfg.product_identity_fields() == list(cfg.PRODUCT_IDENTITY_FIELDS)
+    # Espaço solto e duplicata não viram campo fantasma, e a ORDEM é preservada.
+    monkeypatch.setattr(cfg, "setting",
+                        lambda k, d=None: " offer_id , product_name ,offer_id" if k == "product_identity_fields" else d)
+    assert cfg.product_identity_fields() == ["offer_id", "product_name"]
+
+
+def test_diagnostico_diz_quais_campos_o_evento_traz(journey, monkeypatch):
+    """Sem isso o operador não teria como adivinhar qual slug configurar."""
+    _mock_compras(journey, monkeypatch, [], unnamed=[
+        {"channel": "pagarme", "event_type": "charge.paid", "events": 4,
+         "fields": "card_brand, status, transaction_id"},
+    ])
+    assert journey.fetch_purchases("uuid-1")["unnamed"][0]["fields"] == (
+        "card_brand, status, transaction_id")
+    # E a consulta pergunta pelos campos CONFIGURADOS, não por uma lista fixa.
+    assert ":id_fields" in journey._SQL_UNNAMED_PURCHASE_EVENTS
+    assert ":id_fields" in journey._SQL_UNRULED_PRODUCT_EVENTS
+
+
 def test_os_dois_diagnosticos_sao_consultas_opostas(journey):
     """Trocar um pelo outro aponta o operador para o canal errado."""
     sem_regra = journey._SQL_UNRULED_PRODUCT_EVENTS
@@ -1637,7 +1689,37 @@ def test_os_dois_diagnosticos_sao_consultas_opostas(journey):
     assert "NOT EXISTS" in sem_regra and "SELECT 1 FROM channel_value_rules" in sem_regra
     # "sem nome": exige regra de valor e EXCLUI quem tem qualquer identificação.
     assert "JOIN channel_value_rules vr" in sem_nome
-    assert "'product_name', 'offer_name', 'product_id', 'offer_id'" in sem_nome
+    assert "ecf.slug = ANY(:id_fields)" in sem_nome
+
+
+def test_campo_novo_de_settings_tem_interface(journey):
+    """O core renderiza a screen `config:true` NO LUGAR do form declarativo, então
+    setting sem campo em `config.js` fica sem interface nenhuma — e o PUT é
+    destrutivo, então um campo esquecido volta ao default a cada save."""
+    settings = _load("settings")
+    # A tela é composta: `config.js` + o `FieldSync.js` que ela embute.
+    telas = "".join((_SRC / "static" / n).read_text(encoding="utf-8")
+                    for n in ("config.js", "FieldSync.js"))
+    # Settings que NÃO passam pelo PUT de settings — têm rota própria de propósito:
+    por_rota_propria = {
+        # Vive ao lado da senha da conta de serviço, que não pode trafegar em
+        # claro pelo GET /settings: as duas vão por PUT /service-account.
+        "service_email",
+        # Opcional e DEDUZIDA das outras URLs (`_config.api_base`); o valor
+        # efetivo aparece read-only no painel da conta de serviço.
+        "sync_api_base",
+    }
+    for campo in settings.Settings.model_fields:
+        if campo in por_rota_propria:
+            continue
+        assert campo in telas, f"setting '{campo}' não tem campo na tela Configurar"
+
+
+def test_modal_aponta_a_configuracao_dos_campos():
+    """A aba tem que dizer o que fazer, não só que não deu."""
+    js = (_SRC / "static" / "JourneyModal.js").read_text(encoding="utf-8")
+    assert "Campos que identificam o produto" in js
+    assert "u.fields" in js       # lista os slugs que aqueles eventos trazem
 
 
 def test_dinheiro_de_produto_soma_em_decimal(journey, monkeypatch):

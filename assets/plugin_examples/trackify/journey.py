@@ -396,7 +396,7 @@ FROM events e
 JOIN channels ch ON ch.id = e.channel_id
 JOIN event_field_values efv ON efv.event_id = e.id
 JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-                             AND ecf.slug IN ('product_name', 'offer_name')
+                             AND ecf.slug = ANY(:id_fields)
 WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
   AND COALESCE(efv.value, '') <> ''
   AND NOT EXISTS (
@@ -413,21 +413,33 @@ ORDER BY 3 DESC, 1, 2
 # então não vira linha. Sem ele, o caso do ``pagarme`` mandava o operador
 # configurar o canal de checkout (que é o que o outro aviso nomeia) quando o
 # problema estava no canal de cobrança, que já tinha regra.
+# Devolve também ``fields`` — os campos que aqueles eventos DE FATO carregam.
+# É o que torna a lista de identificação self-service: em vez de "não deu para
+# nomear", a aba diz o que existe ali, e o operador acrescenta o slug certo na
+# configuração sem esperar release nenhuma.
 _SQL_UNNAMED_PURCHASE_EVENTS = """
-SELECT ch.slug AS channel, e.event_type, count(*)::int AS events
-FROM events e
-JOIN channels ch ON ch.id = e.channel_id
-JOIN channel_value_rules vr ON vr.channel_id = e.channel_id
-                           AND vr.event_type = e.event_type
-                           AND vr.effect::text IN ('add', 'subtract')
-WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM event_field_values efv
-    JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-    WHERE efv.event_id = e.id
-      AND ecf.slug IN ('product_name', 'offer_name', 'product_id', 'offer_id')
-      AND COALESCE(efv.value, '') <> '')
-GROUP BY ch.slug, e.event_type
+WITH sem_identidade AS (
+  SELECT e.id, ch.slug AS channel, e.event_type
+  FROM events e
+  JOIN channels ch ON ch.id = e.channel_id
+  JOIN channel_value_rules vr ON vr.channel_id = e.channel_id
+                             AND vr.event_type = e.event_type
+                             AND vr.effect::text IN ('add', 'subtract')
+  WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM event_field_values efv
+      JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
+      WHERE efv.event_id = e.id
+        AND ecf.slug = ANY(:id_fields)
+        AND COALESCE(efv.value, '') <> '')
+)
+SELECT s.channel, s.event_type, count(DISTINCT s.id)::int AS events,
+       COALESCE(string_agg(DISTINCT ecf.slug, ', ' ORDER BY ecf.slug), '') AS fields
+FROM sem_identidade s
+LEFT JOIN event_field_values efv ON efv.event_id = s.id
+                                AND COALESCE(efv.value, '') <> ''
+LEFT JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
+GROUP BY s.channel, s.event_type
 ORDER BY 3 DESC, 1, 2
 """
 
@@ -442,26 +454,37 @@ def _amount(value) -> Decimal:
         return Decimal(0)
 
 
-def _identity_map(rows: list[dict]) -> dict[str, str]:
-    """``product_id``/``offer_id`` → nome, colhido dos eventos que trazem os DOIS.
+def _name_partner(campo: str) -> str | None:
+    """``product_id`` → ``product_name``. Convenção de nomenclatura do CDP.
+
+    Derivar o par em vez de chumbar a dupla é o que faz um slug NOVO
+    (``plan_id``/``plan_name``) funcionar só por ser acrescentado à setting.
+    """
+    return campo[:-3] + "_name" if campo.endswith("_id") else None
+
+
+def _identity_map(rows: list[dict], campos: list[str]) -> dict[str, str]:
+    """id do produto → nome, colhido dos eventos que trazem os DOIS.
 
     Existe para não PARTIR um produto em duas linhas: no ``ticto`` parte dos
     eventos de um mesmo produto traz o nome e parte só o id. Sem este mapa, o
     recurso ao id (abaixo) daria uma linha "Combo de Redes" e outra
     "prod-1234" para a mesma coisa.
     """
+    pares = [(c, _name_partner(c)) for c in campos]
+    pares = [(i, n) for i, n in pares if n and n in campos]
     m: dict[str, str] = {}
     for r in rows:
         f = r.get("fields") or {}
-        for campo_id, campo_nome in (("product_id", "product_name"),
-                                     ("offer_id", "offer_name")):
+        for campo_id, campo_nome in pares:
             i, n = f.get(campo_id), f.get(campo_nome)
             if i and n:
                 m.setdefault(str(i), n)
     return m
 
 
-def _product_identity(fields: dict, id2name: dict | None = None) -> tuple[str, str] | None:
+def _product_identity(fields: dict, id2name: dict | None = None,
+                      campos: list[str] | None = None) -> tuple[str, str] | None:
     """``(chave, nome)`` do produto, ou ``None`` quando o evento não identifica um.
 
     A guarda do ``None`` é o que impede inventar um produto chamado "purchase":
@@ -470,22 +493,26 @@ def _product_identity(fields: dict, id2name: dict | None = None) -> tuple[str, s
     o id da assinatura é o único estável entre renovações e os lançamentos
     antigos não o trazem.
 
-    O nome sai de ``product_name`` → ``offer_name`` e, se nenhum dos dois vier,
-    recorre a ``product_id`` → ``offer_id``. Esse último degrau NÃO é firula:
-    medido na produção, o canal ``pagarme`` **nunca** preenche os campos de
-    nome (1.281 ``charge.paid``, zero com nome) — ele grava ``product_id`` /
-    ``offer_id`` (``produto``, ``oferta-principal``, ``upssel``). Sem o recurso
-    ao id, uma compra paga e conferida no "Total gasto" não vira linha nenhuma.
-    O id cru só aparece na tela quando ``id2name`` não souber traduzi-lo.
+    ``campos`` é a ordem de precedência CONFIGURÁVEL (``_config``), e não uma
+    lista chumbada, porque cada gateway do CDP nomeia de um jeito: o ``ticto``
+    preenche ``product_name``/``offer_name``, e o ``pagarme`` **nunca** preenche
+    nome nenhum (medido: 1.281 ``charge.paid``, zero com nome) — só
+    ``product_id``/``offer_id``. Sem o degrau de id, uma compra paga e já
+    contada no "Total gasto" não virava linha nenhuma; sem a setting, cada
+    gateway novo com um slug próprio exigiria release do plugin.
+
+    O id cru só chega à tela quando ``id2name`` não souber traduzi-lo — rótulo
+    feio é melhor que compra invisível.
     """
-    nome = fields.get("product_name") or fields.get("offer_name")
-    if not nome:
-        mapa = id2name or {}
-        for campo_id in ("product_id", "offer_id"):
-            bruto = fields.get(campo_id)
-            if bruto:
-                nome = mapa.get(str(bruto)) or str(bruto)
-                break
+    campos = campos or list(_config.PRODUCT_IDENTITY_FIELDS)
+    nome = None
+    for campo in campos:
+        bruto = fields.get(campo)
+        if not bruto:
+            continue
+        traduzido = (id2name or {}).get(str(bruto)) if _name_partner(campo) else None
+        nome = traduzido or bruto
+        break
     if not nome:
         return None
     return (fields.get("subscription_id") or nome), nome
@@ -510,6 +537,7 @@ def fetch_purchases(contact_id: str) -> dict:
     mesma regra do CDP", e centavos em ``float`` quebram isso num contato com
     muitas parcelas. O JSON expõe ``float(...)`` só na borda.
     """
+    campos = _config.product_identity_fields()
     rows = trackify_db.run_read(_SQL_PURCHASE_EVENTS, {
         "cid": contact_id,
         "state_types": list(_PRODUCT_STATE_EVENTS),
@@ -520,7 +548,7 @@ def fetch_purchases(contact_id: str) -> dict:
     somas: dict[str, dict[str, Decimal]] = {}
     # Antes de qualquer passada: quem sabe traduzir id de produto em nome são os
     # próprios eventos do contato que trazem os dois campos.
-    id2name = _identity_map(rows)
+    id2name = _identity_map(rows, campos)
 
     # 1ª passada — só dinheiro. É ela que CRIA o produto.
     for r in rows:                      # já vem do mais novo para o mais antigo
@@ -528,7 +556,7 @@ def fetch_purchases(contact_id: str) -> dict:
         if effect not in ("add", "subtract"):
             continue
         f = r.get("fields") or {}
-        ident = _product_identity(f, id2name)
+        ident = _product_identity(f, id2name, campos)
         if ident is None:
             continue
         key, nome = ident
@@ -578,7 +606,7 @@ def fetch_purchases(contact_id: str) -> dict:
     # produto — ele rotula quem existe e é ignorado quando não há quem rotular.
     for r in rows:
         f = r.get("fields") or {}
-        ident = _product_identity(f, id2name)
+        ident = _product_identity(f, id2name, campos)
         if ident is None:
             continue
         g = groups.get(ident[0])
@@ -607,9 +635,14 @@ def fetch_purchases(contact_id: str) -> dict:
     out.sort(key=lambda g: g.get("last_event_at") or "", reverse=True)
 
     def _diag(sql) -> list[dict]:
-        return [{"channel": u["channel"], "event_type": u["event_type"],
-                 "events": int(u["events"] or 0)}
-                for u in trackify_db.run_read(sql, {"cid": contact_id})]
+        out_diag = []
+        for u in trackify_db.run_read(sql, {"cid": contact_id, "id_fields": campos}):
+            item = {"channel": u["channel"], "event_type": u["event_type"],
+                    "events": int(u["events"] or 0)}
+            if "fields" in u:          # só o diagnóstico de "sem identidade"
+                item["fields"] = u.get("fields") or ""
+            out_diag.append(item)
+        return out_diag
 
     return {
         "items": out,

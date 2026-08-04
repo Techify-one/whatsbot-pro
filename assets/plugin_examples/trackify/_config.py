@@ -17,6 +17,7 @@ DEFAULTS: dict = {
     "nexus_base_url": "",
     "cache_ttl_seconds": 60,
     "timeline_page_size": 25,
+    "product_identity_fields": "product_name,offer_name,product_id,offer_id",
     "statement_timeout_ms": 5000,
     "mirror_enabled": False,
     "mirror_dry_run": True,
@@ -81,6 +82,27 @@ def timeline_page_size() -> int:
     except (TypeError, ValueError):
         return 25
     return min(max(v, 5), 100)
+
+
+# Piso do que a aba Produtos consegue nomear. É o DEFAULT, não uma allow-list:
+# a setting substitui a lista inteira, e o único caso em que este piso reaparece
+# é o operador ter apagado o campo.
+PRODUCT_IDENTITY_FIELDS = ("product_name", "offer_name", "product_id", "offer_id")
+
+
+def product_identity_fields() -> list[str]:
+    """Campos que nomeiam um produto, EM ORDEM (o 1º preenchido ganha).
+
+    Configurável de propósito: cada gateway do CDP nomeia de um jeito (o ``ticto``
+    preenche ``product_name``/``offer_name``, o ``pagarme`` só os ``*_id``), e um
+    canal novo com um slug diferente não pode exigir release do plugin. Lista
+    vazia/ilegível volta ao piso — nunca devolve vazio, que apagaria a aba.
+    """
+    bruto = setting("product_identity_fields", "")
+    campos = [p.strip() for p in str(bruto or "").split(",") if p.strip()]
+    # Sem duplicata e preservando a ORDEM digitada (dict mantém inserção).
+    campos = list(dict.fromkeys(campos))
+    return campos or list(PRODUCT_IDENTITY_FIELDS)
 
 
 def api_base() -> str:

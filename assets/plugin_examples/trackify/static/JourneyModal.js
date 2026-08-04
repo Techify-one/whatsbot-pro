@@ -193,10 +193,19 @@ function PurchasesBlock({ purchases }) {
   }
   if (unnamed.length) {
     // O oposto: é dinheiro reconhecido, mas o evento não diz O QUÊ foi comprado.
+    // Listar os campos que ele DE FATO traz é o que torna a lista de
+    // identificação self-service — sem isso o operador não teria como adivinhar
+    // qual slug acrescentar na configuração.
+    const vistos = [...new Set(unnamed.flatMap(
+      (u) => String(u.fields || '').split(',').map((s) => s.trim()).filter(Boolean)))];
     avisos.push(html`
       <div key="unnamed" class="text-[12px] text-wa-secondary">
         ${total(unnamed)} cobrança(s) de ${origens(unnamed)} entraram no total gasto,
-        mas não trazem nome nem id de produto — não dá para listá-las como linha.
+        mas nenhum campo configurado identifica o produto.
+        ${vistos.length ? html`
+          Esses eventos trazem <span class="text-wa-text">${vistos.join(', ')}</span> —
+          se algum deles nomeia o produto, acrescente o slug em Plugins → Trackify →
+          Configurar → "Campos que identificam o produto".` : null}
       </div>`);
   }
 

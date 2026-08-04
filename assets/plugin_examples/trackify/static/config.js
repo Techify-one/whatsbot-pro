@@ -12,7 +12,8 @@
 // formulário declarativo, na aba Configurações abaixo". ESSA ABA NÃO EXISTE.
 // O core escolhe UM dos dois (PluginsManager.js): screen `config:true` OU
 // `PluginSettingsForm` — nunca os dois. Enquanto esta tela não tinha os campos,
-// as 11 settings de `settings.py` ficavam sem interface nenhuma.
+// as settings de `settings.py` ficavam sem interface nenhuma. Campo novo lá
+// precisa de campo novo AQUI — não existe form automático de reserva.
 //
 // ⚠️ O `PUT /api/plugins/trackify/settings` é DESTRUTIVO por construção: o core
 // faz `Settings(**body)` e grava `model_dump()` inteiro, então todo campo ausente
@@ -243,6 +244,7 @@ function ReadSettings({ values, onSave, busy }) {
       cache_ttl_seconds: clampNum('cache_ttl_seconds', v.cache_ttl_seconds),
       timeline_page_size: clampNum('timeline_page_size', v.timeline_page_size),
       statement_timeout_ms: clampNum('statement_timeout_ms', v.statement_timeout_ms),
+      product_identity_fields: String(v.product_identity_fields || '').trim(),
     });
     setMsg(r && r.ok ? 'Salvo.' : `Não foi possível salvar${r && r.error ? `: ${r.error}` : '.'}`);
   }
@@ -298,6 +300,18 @@ function ReadSettings({ values, onSave, busy }) {
               value=${v.statement_timeout_ms} onInput=${(e) => set('statement_timeout_ms')(e.target.value)} />
           <//>
         </div>
+
+        <${Field} label="Campos que identificam o produto (em ordem)"
+          hint=${'Separados por vírgula; o primeiro preenchido nomeia a linha na aba Produtos. '
+            + 'Cada gateway nomeia de um jeito — o ticto preenche product_name/offer_name e o '
+            + 'pagarme só product_id/offer_id. Canal novo com um campo diferente entra aqui, sem '
+            + 'atualizar o plugin: quando uma cobrança não pode ser listada, a própria aba diz '
+            + 'quais campos aqueles eventos trazem. Vazio volta ao padrão.'}>
+          <input type="text" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
+            placeholder="product_name,offer_name,product_id,offer_id"
+            value=${v.product_identity_fields || ''}
+            onInput=${(e) => set('product_identity_fields')(e.target.value)} />
+        <//>
 
         <div class="flex items-center gap-2">
           <button type="submit" disabled=${busy}
