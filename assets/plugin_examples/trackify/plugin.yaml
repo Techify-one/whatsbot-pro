@@ -1,6 +1,6 @@
 id: trackify
 name: Trackify (Jornada do cliente)
-version: "1.1.0"
+version: "1.2.0"
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Mostra a JORNADA do contato no Trackify (o CDP do Nexus) sem sair do atendimento:
@@ -23,9 +23,22 @@ description: >-
   periódica ao histórico de alterações do CDP, já que ele não emite webhook de
   contato. Só contatos JÁ vinculados sincronizam: esta função nunca cria cadastro no
   Trackify. Nasce desligada e em modo seco.
+
+  Na 1.2.0 o modal passou a ter DUAS ABAS — "Jornada" (quem é o cliente e a linha
+  do tempo) e "Produtos" (o que ele comprou, mais as assinaturas) — porque
+  empilhar tudo numa coluna só obrigava a rolar por cima do cadastro inteiro para
+  achar um produto. E a definição de compra mudou: agora sai da regra de valor do
+  próprio Trackify (channel_value_rules) em vez de uma lista fixa de tipos de
+  evento. Produto CANCELADO OU REEMBOLSADO CONTINUA LISTADO — se o contato
+  comprou alguma vez, ele aparece, e o selo apenas rotula o último estado em vez
+  de sumir com a linha. Cada produto vira uma linha só, com o número de compras e
+  o total pago (descontado o reembolso, com piso em zero, igual ao CDP). Evento
+  com produto vindo de um canal sem regra de valor não some calado: é reportado
+  na própria aba, apontando o canal e o tipo a configurar no Trackify.
 short_description: >-
-  Jornada do contato no Trackify (CDP) num modal do cabeçalho da conversa: gasto
-  total, compras, falhas, cancelamentos e próxima cobrança. Leitura pura.
+  Jornada do contato no Trackify (CDP) num modal do cabeçalho da conversa, em duas
+  abas: quem é o cliente + linha do tempo, e o que ele comprou (inclusive o que
+  cancelou) + assinaturas. Leitura pura.
 author: WhatsBot
 entry:
   routes: routes        # REST: /journey, /journey/events, /health, /outbox

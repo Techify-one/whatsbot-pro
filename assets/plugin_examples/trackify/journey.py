@@ -29,21 +29,24 @@ _SUBSCRIPTION_EVENTS = (
 )
 _SUBSCRIPTION_SCAN_LIMIT = 500
 
-# Eventos que dizem alguma coisa sobre POSSE de produto. Lista fixa, e não a
-# tabela ``channel_value_rules`` do CDP (que seria o oráculo "isto é receita?"),
-# porque aquela é POR CANAL e canal sem regra cai em "ignorar" — uma compra
-# legítima sumiria do painel em silêncio. Aqui errar para mais é inofensivo:
-# a tela é de leitura.
-_PRODUCT_EVENTS = (
-    "purchase", "authorized", "active_subscription", "charge.paid", "order.paid",
+# O que conta como COMPRA sai da tabela ``channel_value_rules`` do CDP (o
+# oráculo "isto é dinheiro?"), e não de uma lista chumbada de tipos de evento.
+# A troca foi MEDIDA na produção: a regra por ``effect`` concorda com a lista
+# antiga em 11.166 dos 11.173 pares contato↔produto; os 7 divergentes são
+# produtos cuja compra é anterior ao CDP e cujo único rastro é o cancelamento —
+# exatamente os que a regra nova RECUPERA (``subtract`` prova que houve venda).
+# O risco de canal mal configurado (compra que cairia em ``ignore`` e sumiria em
+# silêncio) não desapareceu: virou o diagnóstico ``_SQL_UNRULED_PRODUCT_EVENTS``,
+# reportado na tela em vez de escondido.
+#
+# Tipos que ROTULAM sem criar produto: não são dinheiro (``effect='ignore'`` no
+# canal ``ticto``), mas são o estado que o selo precisa mostrar. Incluir os de
+# reembolso aqui é de graça — onde eles têm ``effect='subtract'`` a linha já
+# entra pelo caminho do dinheiro; onde caíram em ``ignore``, ainda rotulam.
+_PRODUCT_STATE_EVENTS = (
     "subscription_canceled", "subscription_delayed",
     "refunded", "chargeback", "charge.refunded", "order.canceled",
 )
-# O evento MAIS RECENTE do produto decide se o cliente ainda o tem.
-_PRODUCT_LOST = {"subscription_canceled", "refunded", "chargeback",
-                 "charge.refunded", "order.canceled"}
-_PRODUCT_PAID = {"purchase", "authorized", "active_subscription",
-                 "charge.paid", "order.paid"}
 _PRODUCT_SCAN_LIMIT = 500
 
 # Campo dinâmico do evento → chave do bloco de assinatura.
@@ -344,49 +347,130 @@ def fetch_subscriptions(contact_id: str, *, today: date | None = None) -> list[d
 
 # ── Bloco 4: produtos que o cliente possui ───────────────────────────────
 
-_SQL_PRODUCT_EVENTS = """
-SELECT e.id::text AS id, e.event_type, e.title, e.value, e.occurred_at,
+# ⚠️ Mesma forma CTE-primeiro do ``_SQL_TIMELINE``: pagina antes de juntar os
+# campos dinâmicos. A lição de performance já foi paga naquele SQL (24,3 ms →
+# 0,918 ms); a forma "agrega tudo e limita no fim" volta a fazer seq scan.
+_SQL_PURCHASE_EVENTS = """
+WITH page AS (
+  SELECT e.id, e.event_type, e.value, e.occurred_at, e.channel_id,
+         COALESCE(vr.effect::text, 'ignore') AS effect
+  FROM events e
+  LEFT JOIN channel_value_rules vr
+         ON vr.channel_id = e.channel_id AND vr.event_type = e.event_type
+  WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
+    AND (vr.effect::text IN ('add', 'subtract')
+         OR e.event_type = ANY(:state_types))
+  ORDER BY e.occurred_at DESC
+  LIMIT :limit
+)
+SELECT p.id::text AS id, p.event_type, p.value, p.occurred_at, p.effect,
+       ch.slug AS channel,
        jsonb_object_agg(ecf.slug, efv.value) FILTER (WHERE ecf.slug IS NOT NULL) AS fields
-FROM events e
-LEFT JOIN event_field_values efv ON efv.event_id = e.id
+FROM page p
+JOIN channels ch ON ch.id = p.channel_id
+LEFT JOIN event_field_values efv ON efv.event_id = p.id
 LEFT JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
+GROUP BY p.id, p.event_type, p.value, p.occurred_at, p.effect, ch.slug
+ORDER BY p.occurred_at DESC
+"""
+# ``vr.effect::text``, nunca ``vr.effect IN (...)``: comparar o enum com um
+# literal que não existe no tipo levanta erro; o cast para texto nunca levanta.
+# ``p.effect``/``ch.slug`` precisam entrar no GROUP BY (a dependência funcional
+# da PK não cobre coluna vinda de join); ``channel_value_rules`` é única em
+# ``(channel_id, event_type)``, então o LEFT JOIN não multiplica linha.
+
+# Diagnóstico: evento que NOMEIA um produto mas cujo ``(canal, tipo)`` não tem
+# regra de valor. É o medo legítimo da regra antiga — compra de canal mal
+# configurado sumindo em silêncio. Em vez de descartar a regra nova, a gente
+# REPORTA na tela. Casa por ``(channel_id, event_type)``, não só por canal:
+# assim pega também o canal configurado onde ``purchase`` foi marcado
+# ``ignore`` por engano — o caso mais provável e o mais invisível.
+#
+# O join com ``event_field_values`` é o que torna o aviso preciso: só conta
+# evento que nomeia produto. Sem ele, um lead com 40 ``lead_email`` dispararia
+# alarme falso. Roda SEMPRE, não só quando a lista sai vazia — "tem produto do
+# canal A e perda silenciosa no canal B" é o caso que ninguém descobriria.
+_SQL_UNRULED_PRODUCT_EVENTS = """
+SELECT ch.slug AS channel, e.event_type, count(DISTINCT e.id)::int AS events
+FROM events e
+JOIN channels ch ON ch.id = e.channel_id
+JOIN event_field_values efv ON efv.event_id = e.id
+JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
+                             AND ecf.slug IN ('product_name', 'offer_name')
 WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-  AND e.event_type = ANY(:types)
-GROUP BY e.id
-ORDER BY e.occurred_at DESC
-LIMIT :limit
+  AND COALESCE(efv.value, '') <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM channel_value_rules vr
+    WHERE vr.channel_id = e.channel_id AND vr.event_type = e.event_type
+      AND vr.effect::text IN ('add', 'subtract'))
+GROUP BY ch.slug, e.event_type
+ORDER BY 3 DESC, 1, 2
 """
 
 
-def fetch_products(contact_id: str, *, today: date | None = None) -> list[dict]:
-    """Bloco 4. Produtos que o contato possui (ou perdeu), agrupados.
+def _amount(value) -> Decimal:
+    """``events.value`` → ``Decimal``. ``None`` e lixo viram ``0``."""
+    if value is None:
+        return Decimal(0)
+    try:
+        return Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return Decimal(0)
 
-    O Trackify **não tem tabela de produto**: posse é implícita em ``events`` +
-    ``event_field_values``, e a arquitetura de lá é deliberadamente "um evento é
-    um evento", sem tratamento especial por nome. Então a regra de posse mora
-    aqui:
 
-    * a chave do produto é ``subscription_id`` → ``product_name`` → ``offer_name``
-      (a primeira que existir), porque o id da assinatura é o único estável entre
-      renovações e lançamentos antigos não o trazem;
-    * o evento MAIS RECENTE do grupo decide o estado — cancelamento, reembolso e
-      chargeback tiram a posse, o resto mantém;
-    * evento sem nome de produto NÃO vira produto. Sem essa guarda, cair no
-      ``event_type`` como chave inventaria um produto chamado "purchase".
+def _product_identity(fields: dict) -> tuple[str, str] | None:
+    """``(chave, nome)`` do produto, ou ``None`` quando o evento não nomeia um.
+
+    A guarda do ``None`` é o que impede inventar um produto chamado "purchase":
+    sem nome, cair no ``event_type`` como chave viraria uma linha fantasma na
+    tela do atendente. A chave é ``subscription_id`` → ``product_name`` →
+    ``offer_name``, porque o id da assinatura é o único estável entre renovações
+    e os lançamentos antigos não o trazem.
     """
-    today = today or date.today()
-    rows = trackify_db.run_read(_SQL_PRODUCT_EVENTS, {
-        "cid": contact_id, "types": list(_PRODUCT_EVENTS),
+    nome = fields.get("product_name") or fields.get("offer_name")
+    if not nome:
+        return None
+    return (fields.get("subscription_id") or nome), nome
+
+
+def fetch_purchases(contact_id: str) -> dict:
+    """Bloco 4. O que o contato COMPROU, uma linha por produto.
+
+    Compra é o que a ``channel_value_rules`` do CDP diz que é: ``effect='add'``.
+    ``subtract`` (reembolso/chargeback) também PROVA a compra — não existe
+    reembolso sem venda —, mas desconta o dinheiro. Estado (cancelamento,
+    atraso) apenas ROTULA: nunca cria produto nem filtra a linha. Se o contato
+    comprou alguma vez, ele aparece.
+
+    Piso em zero: o CDP trava ``total_spent`` em zero (``clampFloor`` no
+    ``pipeline.ts`` e ``GREATEST(0, …)`` na migration de backfill). A linha de
+    produto ESPELHA esse piso de propósito — para as duas telas contarem a mesma
+    história — e o valor descontado aparece à parte em ``refunded``. Não é
+    arredondamento nosso.
+
+    Dinheiro acumula em ``Decimal``, nunca ``float``: o contrato é "a soma usa a
+    mesma regra do CDP", e centavos em ``float`` quebram isso num contato com
+    muitas parcelas. O JSON expõe ``float(...)`` só na borda.
+    """
+    rows = trackify_db.run_read(_SQL_PURCHASE_EVENTS, {
+        "cid": contact_id,
+        "state_types": list(_PRODUCT_STATE_EVENTS),
         "limit": _PRODUCT_SCAN_LIMIT,
     })
 
     groups: dict[str, dict] = {}
+    somas: dict[str, dict[str, Decimal]] = {}
+
+    # 1ª passada — só dinheiro. É ela que CRIA o produto.
     for r in rows:                      # já vem do mais novo para o mais antigo
-        f = r.get("fields") or {}
-        nome = f.get("product_name") or f.get("offer_name")
-        if not nome:
+        effect = r.get("effect")
+        if effect not in ("add", "subtract"):
             continue
-        key = f.get("subscription_id") or nome
+        f = r.get("fields") or {}
+        ident = _product_identity(f)
+        if ident is None:
+            continue
+        key, nome = ident
         g = groups.setdefault(key, {
             "key": key,
             "name": nome,
@@ -394,70 +478,104 @@ def fetch_products(contact_id: str, *, today: date | None = None) -> list[dict]:
             "subscription_id": f.get("subscription_id"),
             "interval": f.get("subscription_interval"),
             "payment_method": f.get("payment_method"),
-            "gateway_status": None,
-            "last_event_type": None,
-            "last_event_at": None,
-            "last_value": None,
-            "first_event_at": None,
-            "active": True,
-            "canceled_at": None,
-            "next_charge": None,
-            "next_charge_raw": None,
-            "days_left": None,
+            "purchases": 0,
             "paid_total_raw": 0.0,
             "paid_total": None,
-            "events": 0,
+            "refunded_raw": 0.0,
+            "refunded": None,
+            "first_purchase_at": None,
+            "last_purchase_at": None,
+            "last_event_type": None,
+            "last_effect": None,
+            "last_event_at": None,
+            "gateway_status": None,
+            "channel": None,
         })
-        g["events"] += 1
+        s = somas.setdefault(key, {"add": Decimal(0), "sub": Decimal(0)})
 
-        if g["last_event_at"] is None:
-            # O primeiro que chega é o mais recente: é ele que define o estado.
-            g["last_event_at"] = _iso(r["occurred_at"])
-            g["last_event_type"] = r["event_type"]
-            g["last_value"] = _money(r.get("value"))
-            g["gateway_status"] = f.get("status")
-            g["active"] = r["event_type"] not in _PRODUCT_LOST
-        # ...e o último a chegar é o mais antigo: quando o cliente adquiriu.
-        g["first_event_at"] = _iso(r["occurred_at"])
+        if effect == "add":
+            g["purchases"] += 1
+            s["add"] += _amount(r.get("value"))
+            # Vem DESC: o primeiro a chegar é o mais recente (grava só se ainda
+            # não gravou), e o último a chegar é o mais antigo (sobrescreve).
+            if g["last_purchase_at"] is None:
+                g["last_purchase_at"] = _iso(r["occurred_at"])
+            g["first_purchase_at"] = _iso(r["occurred_at"])
+        else:
+            s["sub"] += _amount(r.get("value"))
 
-        if r["event_type"] in _PRODUCT_PAID and r.get("value") is not None:
-            try:
-                g["paid_total_raw"] += float(r["value"])
-            except (TypeError, ValueError):
-                pass
-
-        # Eventos antigos costumam trazer o que os novos omitem.
+        # Evento antigo costuma trazer o que o novo omite.
         for src, dst in (("offer_name", "offer"), ("subscription_interval", "interval"),
                          ("payment_method", "payment_method"),
                          ("subscription_id", "subscription_id")):
             if f.get(src) and not g.get(dst):
                 g[dst] = f[src]
 
-        if g["next_charge"] is None and f.get("next_charge_date"):
-            g["next_charge_raw"] = str(f["next_charge_date"])
-            parsed = _parse_loose_date(f["next_charge_date"])
-            if parsed:
-                g["next_charge"] = parsed.isoformat()
-                g["days_left"] = (parsed - today).days
-
-        if g["canceled_at"] is None and f.get("subscription_canceled_at"):
-            parsed = _parse_loose_date(f["subscription_canceled_at"])
-            if parsed:
-                g["canceled_at"] = parsed.isoformat()
+    # 2ª passada — o selo. Percorre TUDO (inclusive os ``ignore``), mas só
+    # escreve em grupo que JÁ existe: é isso que impede um cancelamento órfão
+    # (produto comprado antes do CDP, sem nenhum evento de dinheiro) de virar
+    # produto — ele rotula quem existe e é ignorado quando não há quem rotular.
+    for r in rows:
+        f = r.get("fields") or {}
+        ident = _product_identity(f)
+        if ident is None:
+            continue
+        g = groups.get(ident[0])
+        if g is None or g["last_event_at"] is not None:
+            continue
+        g["last_event_at"] = _iso(r["occurred_at"])
+        g["last_event_type"] = r["event_type"]
+        g["last_effect"] = r.get("effect")
+        g["gateway_status"] = f.get("status")
+        g["channel"] = r.get("channel")
 
     out = list(groups.values())
     for g in out:
-        g["paid_total"] = _money(g["paid_total_raw"]) if g["paid_total_raw"] else None
-    # Ativos primeiro, e dentro de cada bloco o mais recente na frente. Dois
-    # sorts em vez de uma chave composta: o ``sort`` do Python é ESTÁVEL, então
-    # o segundo preserva a ordenação por data feita pelo primeiro.
+        s = somas[g["key"]]
+        pago = s["add"] - s["sub"]
+        if pago < 0:
+            pago = Decimal(0)           # espelho do clampFloor do CDP
+        g["paid_total_raw"] = float(pago)
+        g["paid_total"] = _money(pago)          # SEMPRE preenchido, inclusive "R$ 0,00"
+        g["refunded_raw"] = float(s["sub"])
+        g["refunded"] = _money(s["sub"]) if s["sub"] > 0 else None
+
+    # Dois sorts estáveis em vez de uma chave composta: o ``sort`` do Python
+    # preserva a ordem anterior, então o segundo desempata pelo primeiro.
+    out.sort(key=lambda g: (g.get("name") or "").lower())
     out.sort(key=lambda g: g.get("last_event_at") or "", reverse=True)
-    out.sort(key=lambda g: not g["active"])
-    return out
+
+    unruled = trackify_db.run_read(_SQL_UNRULED_PRODUCT_EVENTS, {"cid": contact_id})
+    return {
+        "items": out,
+        "unruled": [{"channel": u["channel"], "event_type": u["event_type"],
+                     "events": int(u["events"] or 0)} for u in unruled],
+    }
+
+
+def _purchases_block(contact_id: str) -> dict:
+    """Fachada com guarda. A função pura continua levantando (e testável).
+
+    ``channel_value_rules`` é dependência NOVA: um CDP mais antigo pode não ter
+    a tabela, e sem esta guarda um ``UndefinedTable`` apagaria também a aba
+    Jornada — o docstring do módulo promete o contrário.
+    """
+    try:
+        return fetch_purchases(contact_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("trackify: bloco de compras indisponível", exc_info=True)
+        return {"items": [], "unruled": [], "unavailable": True}
 
 
 def build_journey(contact_id: str) -> dict:
-    """Os 3 blocos de um contato JÁ resolvido no Trackify."""
+    """Os blocos de um contato JÁ resolvido no Trackify.
+
+    A chave é ``purchases`` (dict), não mais ``products`` (lista): o rename é
+    deliberado. Um ``JourneyModal.js`` velho em cache lê ``data.purchases ===
+    undefined`` e simplesmente não renderiza o bloco; se a chave continuasse
+    ``products`` com um dict dentro, ``products.filter`` explodiria e apagaria o
+    modal inteiro.
+    """
     ident = fetch_identity(contact_id)
     if ident is None:
         return {"found": False, "contact_id": contact_id}
@@ -465,7 +583,7 @@ def build_journey(contact_id: str) -> dict:
         "found": True,
         "identity": ident,
         "subscriptions": fetch_subscriptions(contact_id),
-        "products": fetch_products(contact_id),
+        "purchases": _purchases_block(contact_id),
         "timeline": fetch_timeline(contact_id),
         "event_types": fetch_event_types(contact_id),
     }

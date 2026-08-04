@@ -1442,76 +1442,253 @@ def test_cadastro_le_de_custom_fields_e_nao_dos_valores(journey):
     assert "cf.is_active" in sql
 
 
-def _ev(tipo, quando, campos, valor=None):
+def _ev(tipo, quando, campos, valor=None, effect="add"):
+    """Uma linha de ``_SQL_PURCHASE_EVENTS``.
+
+    ``effect`` é o veredito da ``channel_value_rules`` do CDP — ``add`` (compra),
+    ``subtract`` (reembolso) ou ``ignore`` (só estado). É ele, e não o tipo do
+    evento, que decide se a linha cria produto.
+    """
     import datetime as _dt
-    return {"id": f"e-{quando}", "event_type": tipo, "title": tipo,
+    return {"id": f"e-{quando}", "event_type": tipo, "effect": effect,
             "value": Decimal(str(valor)) if valor is not None else None,
-            "occurred_at": _dt.datetime(2026, 1, quando, 12, 0), "fields": campos}
+            "occurred_at": _dt.datetime(2026, 1, quando, 12, 0),
+            "channel": "ticto", "fields": campos}
 
 
-def test_produtos_o_evento_mais_recente_decide_a_posse(journey, monkeypatch):
-    """O Trackify não tem tabela de produto: posse é derivada dos eventos."""
-    linhas = [   # a consulta devolve do mais NOVO para o mais antigo
-        _ev("subscription_canceled", 20, {"product_name": "Combo de Redes"}),
-        _ev("active_subscription", 10, {"product_name": "Combo de Redes",
-                                        "subscription_interval": "Mensal"}, 97),
+def _mock_compras(journey, monkeypatch, linhas, unruled=()):
+    """``fetch_purchases`` faz DUAS consultas — os eventos e o diagnóstico."""
+    def fake(sql, params=None):
+        return list(linhas) if "WITH page AS" in sql else list(unruled)
+    monkeypatch.setattr(journey.trackify_db, "run_read", fake)
+
+
+def test_compra_e_o_que_a_regra_de_valor_diz_que_e(journey, monkeypatch):
+    """A definição de compra sai do CDP (``effect='add'``), não de uma lista de
+    tipos chumbada aqui. Um evento que o canal marcou ``ignore`` e que não é
+    estado de nada não inventa produto."""
+    _mock_compras(journey, monkeypatch, [
         _ev("purchase", 5, {"product_name": "Curso Avulso",
                             "payment_method": "Pix"}, 197),
-    ]
-    monkeypatch.setattr(journey.trackify_db, "run_read", lambda *a, **k: linhas)
-    produtos = journey.fetch_products("uuid-1", today=datetime.date(2026, 2, 1))
+        _ev("webinar_assistido", 4, {"product_name": "Curso Avulso"}, effect="ignore"),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert [p["name"] for p in itens] == ["Curso Avulso"]
+    assert itens[0]["purchases"] == 1
+    assert itens[0]["paid_total"] == "R$ 197,00"
+    assert itens[0]["payment_method"] == "Pix"
 
-    assert [p["name"] for p in produtos] == ["Curso Avulso", "Combo de Redes"]
-    combo = next(p for p in produtos if p["name"] == "Combo de Redes")
-    assert combo["active"] is False and combo["last_event_type"] == "subscription_canceled"
+
+def test_reembolso_prova_que_houve_compra_e_lista_o_produto(journey, monkeypatch):
+    """Os 7 pares recuperados pela regra nova: produto comprado ANTES do CDP,
+    cujo único rastro é o reembolso. Não existe reembolso sem venda."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("refunded", 20, {"product_name": "Comprado antes do CDP"}, 97,
+            effect="subtract"),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert len(itens) == 1
+    p = itens[0]
+    assert p["name"] == "Comprado antes do CDP"
+    assert p["purchases"] == 0                  # nenhum evento de compra sobrou
+    assert p["last_event_type"] == "refunded" and p["last_effect"] == "subtract"
+
+
+def test_produto_cancelado_continua_na_lista(journey, monkeypatch):
+    """O selo ROTULA, nunca filtra: se o contato comprou alguma vez, aparece."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("subscription_canceled", 20, {"product_name": "Combo de Redes"},
+            effect="ignore"),
+        _ev("active_subscription", 10, {"product_name": "Combo de Redes",
+                                        "subscription_interval": "Mensal"}, 97),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert [p["name"] for p in itens] == ["Combo de Redes"]
+    p = itens[0]
+    assert p["last_event_type"] == "subscription_canceled"
+    assert p["last_effect"] == "ignore"
+    assert p["purchases"] == 1 and p["paid_total"] == "R$ 97,00"
     # Atributo que só o evento ANTIGO trazia é preservado.
-    assert combo["interval"] == "Mensal"
-    assert combo["events"] == 2
-    curso = next(p for p in produtos if p["name"] == "Curso Avulso")
-    assert curso["active"] is True and curso["paid_total"] == "R$ 197,00"
-    assert curso["payment_method"] == "Pix"
+    assert p["interval"] == "Mensal"
 
 
-def test_produtos_ativos_vem_antes_dos_perdidos(journey, monkeypatch):
-    linhas = [
-        _ev("refunded", 30, {"product_name": "Recente e reembolsado"}),
-        _ev("purchase", 1, {"product_name": "Antigo mas ativo"}, 50),
-    ]
-    monkeypatch.setattr(journey.trackify_db, "run_read", lambda *a, **k: linhas)
-    produtos = journey.fetch_products("uuid-1")
-    assert [p["active"] for p in produtos] == [True, False]
+def test_estado_sozinho_nao_inventa_produto(journey, monkeypatch):
+    """Trava a 2ª passada: cancelamento sem NENHUM evento de dinheiro é órfão —
+    rotula quem existe, e é descartado quando não há quem rotular."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("subscription_canceled", 20, {"product_name": "Fantasma"},
+            effect="ignore"),
+    ])
+    assert journey.fetch_purchases("uuid-1")["items"] == []
+
+
+def test_total_pago_soma_add_e_desconta_subtract(journey, monkeypatch):
+    _mock_compras(journey, monkeypatch, [
+        _ev("refunded", 20, {"product_name": "Curso"}, 50, effect="subtract"),
+        _ev("purchase", 10, {"product_name": "Curso"}, 200),
+    ])
+    p = journey.fetch_purchases("uuid-1")["items"][0]
+    assert p["paid_total"] == "R$ 150,00" and p["paid_total_raw"] == 150.0
+    assert p["refunded"] == "R$ 50,00" and p["refunded_raw"] == 50.0
+    assert p["purchases"] == 1
+
+
+def test_total_pago_nunca_fica_negativo(journey, monkeypatch):
+    """Espelho deliberado do ``clampFloor`` do CDP (que trava ``total_spent`` em
+    zero): as duas telas têm que contar a mesma história. O valor descontado não
+    some — aparece em ``refunded``."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("chargeback", 20, {"product_name": "Só perda"}, 97, effect="subtract"),
+    ])
+    p = journey.fetch_purchases("uuid-1")["items"][0]
+    assert p["paid_total"] == "R$ 0,00" and p["paid_total_raw"] == 0.0
+    assert p["refunded"] == "R$ 97,00"
+    assert p["first_purchase_at"] is None and p["last_purchase_at"] is None
+
+
+def test_uma_linha_por_produto_mesmo_com_varias_compras(journey, monkeypatch):
+    _mock_compras(journey, monkeypatch, [
+        _ev("purchase", 20, {"product_name": "Curso"}, 100),
+        _ev("purchase", 10, {"product_name": "Curso"}, 100),
+        _ev("purchase", 5, {"product_name": "Curso"}, 100),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert len(itens) == 1
+    p = itens[0]
+    assert p["purchases"] == 3 and p["paid_total"] == "R$ 300,00"
+    assert p["first_purchase_at"].startswith("2026-01-05")
+    assert p["last_purchase_at"].startswith("2026-01-20")
+
+
+def test_assinatura_id_agrupa_renovacoes_do_mesmo_produto(journey, monkeypatch):
+    """``subscription_id`` é a única chave estável entre renovações — inclusive
+    quando o nome do produto muda de grafia entre uma cobrança e outra."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("charge.paid", 20, {"product_name": "Combo de Redes (2026)",
+                                "subscription_id": "sub-7"}, 97),
+        _ev("active_subscription", 10, {"product_name": "Combo de Redes",
+                                        "subscription_id": "sub-7"}, 97),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert len(itens) == 1
+    assert itens[0]["key"] == "sub-7" and itens[0]["purchases"] == 2
 
 
 def test_evento_sem_nome_de_produto_nao_vira_produto(journey, monkeypatch):
     """Sem esta guarda, cair no ``event_type`` como chave inventaria um produto
     chamado "purchase" na tela do atendente."""
-    linhas = [_ev("purchase", 5, {"transaction_id": "abc"}, 10),
-              _ev("charge.paid", 6, {}, 10)]
-    monkeypatch.setattr(journey.trackify_db, "run_read", lambda *a, **k: linhas)
-    assert journey.fetch_products("uuid-1") == []
+    _mock_compras(journey, monkeypatch, [
+        _ev("purchase", 5, {"transaction_id": "abc"}, 10),
+        _ev("charge.paid", 6, {}, 10),
+    ])
+    assert journey.fetch_purchases("uuid-1")["items"] == []
 
 
-def test_data_torta_do_cdp_nao_derruba_os_produtos(journey, monkeypatch):
+def test_dinheiro_de_produto_soma_em_decimal(journey, monkeypatch):
+    """Trava a decisão contra quem "simplificar" para ``float``: três parcelas de
+    dez centavos têm que dar trinta, não R$ 0,30000000000000004."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("purchase", 5 + i, {"product_name": "Centavos"}, "0.10") for i in range(3)
+    ])
+    p = journey.fetch_purchases("uuid-1")["items"][0]
+    assert p["paid_total"] == "R$ 0,30"
+
+
+def test_canal_sem_regra_de_valor_e_reportado_em_vez_de_sumir_calado(journey, monkeypatch):
+    """O medo legítimo da regra antiga vira diagnóstico na tela: compra de canal
+    mal configurado não some em silêncio, ela é NOMEADA."""
+    _mock_compras(journey, monkeypatch, [], unruled=[
+        {"channel": "hotmart", "event_type": "purchase", "events": 4},
+    ])
+    out = journey.fetch_purchases("uuid-1")
+    assert out["items"] == []
+    assert out["unruled"] == [{"channel": "hotmart", "event_type": "purchase",
+                               "events": 4}]
+
+
+def test_produtos_indisponiveis_nao_derrubam_a_jornada(journey, monkeypatch):
+    """``channel_value_rules`` é dependência NOVA: num CDP antigo sem a tabela, o
+    bloco de compras cai sozinho — a aba Jornada continua de pé."""
+    def explode(cid):
+        raise RuntimeError("UndefinedTable: channel_value_rules")
+    monkeypatch.setattr(journey, "fetch_identity", lambda cid: {"contact_id": cid})
+    monkeypatch.setattr(journey, "fetch_subscriptions", lambda cid: [])
+    monkeypatch.setattr(journey, "fetch_purchases", explode)
+    monkeypatch.setattr(journey, "fetch_timeline", lambda cid: {"events": [1]})
+    monkeypatch.setattr(journey, "fetch_event_types", lambda cid: [])
+    out = journey.build_journey("uuid-1")
+    assert out["purchases"] == {"items": [], "unruled": [], "unavailable": True}
+    assert out["identity"] == {"contact_id": "uuid-1"}
+    assert out["timeline"] == {"events": [1]}
+
+
+def test_jornada_completa_carrega_as_compras(journey, monkeypatch):
+    monkeypatch.setattr(journey, "fetch_identity", lambda cid: {"contact_id": cid})
+    monkeypatch.setattr(journey, "fetch_subscriptions", lambda cid: [])
+    monkeypatch.setattr(journey, "fetch_purchases",
+                        lambda cid: {"items": [{"name": "X"}], "unruled": []})
+    monkeypatch.setattr(journey, "fetch_timeline", lambda cid: {"events": []})
+    monkeypatch.setattr(journey, "fetch_event_types", lambda cid: [])
+    out = journey.build_journey("uuid-1")
+    assert out["purchases"]["items"] == [{"name": "X"}]
+    assert "products" not in out       # o rename protege o JS velho em cache
+
+
+def test_consulta_de_compras_pergunta_a_regra_de_valor(journey):
+    """A definição de compra tem que morar no CDP, não numa lista aqui dentro."""
+    sql = journey._SQL_PURCHASE_EVENTS
+    assert "channel_value_rules" in sql
+    # Sem o FILTER, o Postgres levanta `field name must not be null`.
+    assert "FILTER (WHERE ecf.slug IS NOT NULL)" in sql
+    # A lista chumbada de tipos de compra morreu.
+    assert "'purchase'" not in sql and "'authorized'" not in sql
+
+
+def test_regra_de_valor_entra_no_schema_check(journey):
+    """Um Nexus sem a tabela tem que virar mensagem acionável no /health, não um
+    500 na cara do vendedor."""
+    required = dict(journey.trackify_db._REQUIRED)
+    assert "channel_value_rules" in required
+    assert {"channel_id", "event_type", "effect"} <= set(required["channel_value_rules"])
+    # A tabela NÃO tem soft-delete (verificado no information_schema).
+    assert "deleted_at" not in required["channel_value_rules"]
+
+
+def test_data_torta_do_cdp_nao_derruba_as_assinaturas(journey, monkeypatch):
     """`next_charge_date` é TEXT em dd/mm/aaaa e `subscription_canceled_at` chega
     valendo a string "system" — valores REAIS de produção."""
     linhas = [_ev("active_subscription", 10, {
         "product_name": "Combo", "next_charge_date": "25/02/2027",
         "subscription_canceled_at": "system"}, 97)]
     monkeypatch.setattr(journey.trackify_db, "run_read", lambda *a, **k: linhas)
-    p = journey.fetch_products("uuid-1", today=datetime.date(2026, 7, 31))[0]
-    assert p["next_charge"] == "2027-02-25" and p["days_left"] == 209
-    assert p["next_charge_raw"] == "25/02/2027"
-    assert p["canceled_at"] is None      # "system" NÃO virou data
+    s = journey.fetch_subscriptions("uuid-1", today=datetime.date(2026, 7, 31))[0]
+    assert s["next_charge"] == "2027-02-25" and s["days_left"] == 209
+    assert s["next_charge_raw"] == "25/02/2027"
+    assert s["canceled_at"] is None      # "system" NÃO virou data
 
 
-def test_jornada_completa_carrega_os_produtos(journey, monkeypatch):
-    monkeypatch.setattr(journey, "fetch_identity", lambda cid: {"contact_id": cid})
-    monkeypatch.setattr(journey, "fetch_subscriptions", lambda cid: [])
-    monkeypatch.setattr(journey, "fetch_products", lambda cid: [{"name": "X"}])
-    monkeypatch.setattr(journey, "fetch_timeline", lambda cid: {"events": []})
-    monkeypatch.setattr(journey, "fetch_event_types", lambda cid: [])
-    out = journey.build_journey("uuid-1")
-    assert out["products"] == [{"name": "X"}]
+def test_modal_da_jornada_tem_duas_abas():
+    """A aba Produtos existe e usa o mesmo strip do resto do plugin."""
+    js = (_SRC / "static" / "JourneyModal.js").read_text(encoding="utf-8")
+    assert "'Jornada'" in js and "'Produtos'" in js
+    assert "border-b-2" in js and "border-wa-teal" in js
+
+
+def test_modal_nao_filtra_produto_por_estado():
+    """A decisão central da 1.2.0: o selo rotula, nunca decide se a linha
+    aparece. Se `p.active` voltar ao arquivo, a regra morta voltou junto."""
+    js = (_SRC / "static" / "JourneyModal.js").read_text(encoding="utf-8")
+    assert "p.active" not in js
+
+
+def test_abas_nao_aparecem_sem_jornada():
+    """Os seis estados sem jornada (carregando/erro/não configurado/grupo/
+    ambíguo/não encontrado) renderizam como antes: `tabStrip` fica `null` e o
+    `htm` não desenha nada. Uma única atribuição prova que só o ramo terminal
+    da jornada completa preenche a variável."""
+    js = (_SRC / "static" / "JourneyModal.js").read_text(encoding="utf-8")
+    assert "let tabStrip = null;" in js
+    assert js.count("tabStrip = html`") == 1
 
 
 def test_modal_da_jornada_nao_deixa_valor_estourar_o_painel():

@@ -201,6 +201,9 @@ _REQUIRED = [
     ("event_field_values", ("event_id", "event_custom_field_id", "value")),
     ("event_custom_fields", ("id", "slug")),
     ("channels", ("id", "slug")),
+    # O oráculo de "isto é compra?" (bloco de produtos). Sem ``deleted_at``: a
+    # tabela não tem soft-delete (verificado no ``information_schema``).
+    ("channel_value_rules", ("channel_id", "event_type", "effect")),
     ("tags", ("id", "name")),
     ("contact_tags", ("contact_id", "tag_id")),
 ]

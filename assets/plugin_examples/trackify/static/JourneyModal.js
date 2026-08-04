@@ -1,7 +1,9 @@
 // Modal "Jornada do cliente" — o que o contato fez no Trackify (o CDP do Nexus).
 //
-// Três blocos: Identidade · Assinaturas · Linha do tempo. Sem build step
-// (Preact + HTM). Legível no modo escuro: só classes wa-* e .wa-field.
+// Duas abas: *Jornada* (Identidade + Linha do tempo) e *Produtos* (compras +
+// Assinaturas). Empilhar os quatro blocos numa coluna só obrigava a rolar por
+// cima do cadastro inteiro para achar um produto. Sem build step (Preact +
+// HTM). Legível no modo escuro: só classes wa-* e .wa-field.
 //
 // Estados de PRIMEIRA CLASSE, não casos de erro — o casamento por telefone acerta
 // ~43% (medido em produção), então "sem cadastro" é o desfecho MAIS COMUM e
@@ -154,64 +156,110 @@ function IdentityBlock({ ident }) {
     </section>`;
 }
 
-// Produtos que o cliente possui. O Trackify não tem tabela de produto — posse é
-// derivada dos eventos, e a regra mora no backend (``journey.fetch_products``):
-// o evento mais recente de cada produto decide se ele ainda é do cliente.
-function ProductsBlock({ products }) {
-  if (!products || !products.length) return null;
-  const ativos = products.filter((p) => p.active);
-  const perdidos = products.filter((p) => !p.active);
+// O que o cliente COMPROU. O Trackify não tem tabela de produto — a linha é
+// derivada dos eventos, e a regra mora no backend (``journey.fetch_purchases``):
+// compra é o que a ``channel_value_rules`` do CDP diz que é. Se o contato
+// comprou alguma vez, ele aparece — o selo ROTULA o último estado, nunca
+// decide se a linha existe.
+function PurchasesBlock({ purchases }) {
+  const bloco = purchases || {};
+  const items = bloco.items || [];
+  const unruled = bloco.unruled || [];
+
+  if (bloco.unavailable) {
+    return html`
+      <section class="py-8 text-center">
+        <div class="text-sm text-wa-text">Não foi possível carregar os produtos agora.</div>
+        <div class="text-[12px] text-wa-secondary mt-1">A aba Jornada continua disponível.</div>
+      </section>`;
+  }
+
+  // Canal (ou tipo de evento) sem regra de valor no CDP: a compra existe, mas o
+  // Trackify não a classifica como dinheiro. Nomear é acionável — aponta para a
+  // configuração do CDP, não para um bug do plugin.
+  const nota = unruled.length ? html`
+    <div class="text-[12px] text-wa-secondary">
+      ${unruled.reduce((a, u) => a + Number(u.events || 0), 0)} evento(s) com produto
+      vieram de ${unruled.map((u) => `${u.channel} · ${eventLabel(u.event_type)}`).join(', ')},
+      que não têm regra de valor no Trackify — compras assim não aparecem aqui.
+    </div>` : null;
+
+  if (!items.length) {
+    return html`
+      <section class="py-8 text-center">
+        <div class="text-sm text-wa-text">
+          ${unruled.length ? 'Nenhuma compra registrada.' : 'Este contato ainda não comprou nada.'}
+        </div>
+        ${nota ? html`<div class="max-w-md mx-auto mt-2">${nota}</div>` : null}
+      </section>`;
+  }
 
   return html`
-    <section class="mt-4">
-      <div class="flex items-baseline justify-between gap-2 flex-wrap">
-        <h4 class="text-sm font-semibold text-wa-text">Produtos do cliente (${products.length})</h4>
-        ${perdidos.length ? html`
-          <span class="text-[11px] text-wa-secondary">
-            ${ativos.length} ativo(s) · ${perdidos.length} cancelado(s)/reembolsado(s)
-          </span>` : null}
-      </div>
-      <ul class="space-y-2 mt-2">
-        ${products.map((p) => html`<${ProductRow} key=${p.key} p=${p} />`)}
+    <section>
+      <h4 class="text-[13px] font-semibold text-wa-text mb-2">Compras (${items.length})</h4>
+      <ul class="space-y-2">
+        ${items.map((p) => html`<${PurchaseRow} key=${p.key} p=${p} />`)}
       </ul>
+      ${nota ? html`<div class="mt-3">${nota}</div>` : null}
     </section>`;
 }
 
-function ProductRow({ p }) {
+function PurchaseRow({ p }) {
+  // O selo é informativo. ``last_effect`` vem da regra de valor do CDP e cobre
+  // tipo desconhecido de canal novo (sem entrada no EVENT_LABEL); ``NEGATIVE``
+  // cobre o estado que a regra marcou "ignore" (cancelamento, atraso).
+  const tone = p.last_effect === 'add' ? 'good'
+    : p.last_effect === 'subtract' ? 'bad'
+    : NEGATIVE.has(p.last_event_type) ? 'bad' : 'neutral';
+
   return html`
-    <li class=${`border rounded-lg p-3 bg-wa-panel min-w-0 ${
-        p.active ? 'border-wa-border' : 'border-wa-border opacity-70'}`}>
+    <li class="border border-wa-border rounded-lg p-3 bg-wa-panel min-w-0">
       <div class="flex items-start justify-between gap-3 flex-wrap">
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2 flex-wrap">
             <span class="text-sm font-semibold text-wa-text break-words">${p.name}</span>
-            <${Chip} tone=${p.active ? 'good' : 'bad'}>
-              ${p.active ? 'Ativo' : eventLabel(p.last_event_type)}
-            <//>
+            <${Chip} tone=${tone} title=${p.last_event_type}>${eventLabel(p.last_event_type)}<//>
             ${p.interval ? html`<${Chip}>${p.interval}<//>` : null}
           </div>
           ${p.offer && p.offer !== p.name ? html`
             <div class="text-[12px] text-wa-secondary mt-0.5 break-words">${p.offer}</div>` : null}
         </div>
         <div class="text-right shrink-0">
-          <div class="text-sm font-semibold text-wa-text">${p.paid_total || p.last_value || '—'}</div>
-          <div class="text-[11px] text-wa-secondary">${fmtDate(p.last_event_at, false)}</div>
+          <div class="text-sm font-semibold text-wa-text">${p.paid_total || 'R$ 0,00'}</div>
+          <div class="text-[11px] text-wa-secondary">
+            ${p.purchases} compra${p.purchases === 1 ? '' : 's'}
+          </div>
         </div>
       </div>
 
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3 pt-2 border-t border-wa-border">
-        <${Stat} label="Adquirido em" value=${fmtDate(p.first_event_at, false)} />
+        <${Stat} label="Primeira compra" value=${p.first_purchase_at ? fmtDate(p.first_purchase_at, false) : ''} />
+        <${Stat} label="Última compra" value=${p.last_purchase_at ? fmtDate(p.last_purchase_at, false) : ''} />
         <${Stat} label="Pagamento" value=${p.payment_method} />
         <${Stat} label="Situação no gateway" value=${p.gateway_status} />
-        ${p.active && p.next_charge ? html`
-          <${Stat} label="Próxima cobrança"
-            value=${`${fmtDate(p.next_charge, false)}${
-              p.days_left === null || p.days_left === undefined ? '' : ` · ${daysLabel(p.days_left)}`}`} />`
-          : p.canceled_at ? html`
-            <${Stat} label="Cancelado em" value=${fmtDate(p.canceled_at, false)} />`
-          : html`<${Stat} label="Eventos" value=${p.events} />`}
+        ${p.refunded ? html`<${Stat} label="Reembolsado" value=${p.refunded} />` : null}
       </div>
     </li>`;
+}
+
+// Strip de abas LOCAL, espelhando o de `config.js`. Importar de lá arrastaria a
+// tela de configuração inteira (~24 KB) para dentro do modal da conversa, e não
+// existe componente de aba compartilhado em lugar nenhum do repo — duplicar 12
+// linhas é o preço certo. Corrigido o que o `config.js` deixou passar:
+// `type="button"` explícito e `key=` nos botões mapeados.
+const JOURNEY_TABS = [['jornada', 'Jornada'], ['produtos', 'Produtos']];
+
+function JourneyTabs({ value, onChange, count }) {
+  return html`
+    <nav class="px-5 pt-3 flex gap-1 border-b border-wa-border overflow-x-auto">
+      ${JOURNEY_TABS.map(([id, label]) => html`
+        <button key=${id} type="button" onClick=${() => onChange(id)}
+          class=${`px-4 py-2 text-sm -mb-px border-b-2 transition-colors whitespace-nowrap ${
+            value === id ? 'border-wa-teal text-wa-text'
+              : 'border-transparent text-wa-secondary hover:text-wa-text'}`}>
+          ${id === 'produtos' ? `${label} (${count || 0})` : label}
+        </button>`)}
+    </nav>`;
 }
 
 function SubscriptionsBlock({ subs }) {
@@ -393,10 +441,18 @@ function CandidatePicker({ candidates, onPick }) {
 // tempo, 3xl (768px) espremia tudo em duas colunas e estourava com valor longo.
 // O `min-w-0` no painel é o que impede um filho de grade empurrar a largura para
 // fora da tela — sem ele, `max-w` não segura nada.
+//
+// Altura: o painel NÃO tem restrição de altura (quem rola é o backdrop), então
+// sem um piso a troca para a aba Produtos — quase sempre mais curta — encolhe o
+// painel e deixa o usuário olhando para espaço vazio. Daí o `min-h-[45vh]`.
 export function JourneyModal({ api, contactId, onClose }) {
   const [state, setState] = useState({ loading: true });
   const [filter, setFilter] = useState('');
   const [loadingMore, setLoadingMore] = useState(false);
+  // Sem persistência (precedente: o `ViewEditorModal` dos protocolos) e sem
+  // reset ao recarregar: quem estava em "Produtos" e escolheu outro cadastro no
+  // `CandidatePicker` volta já em "Produtos".
+  const [tab, setTab] = useState('jornada');
 
   const load = useCallback(async () => {
     setState({ loading: true });
@@ -472,7 +528,12 @@ export function JourneyModal({ api, contactId, onClose }) {
   }, [api]);
 
   // ── corpo ──
+  // A cadeia de ramos continua ÚNICA: os seis primeiros (carregando, erro, não
+  // configurado, grupo, ambíguo, sem cadastro) ficam intactos e deixam
+  // `tabStrip` em `null` — nesses estados o modal renderiza exatamente como
+  // antes, sem aba nenhuma. Só o ramo terminal da jornada completa preenche.
   let body;
+  let tabStrip = null;
   if (state.loading) {
     body = html`<div class="py-12 text-center text-sm text-wa-secondary">Consultando o Trackify…</div>`;
   } else if (state.error) {
@@ -507,12 +568,23 @@ export function JourneyModal({ api, contactId, onClose }) {
   } else {
     const tl = data.timeline || { events: [], total: 0 };
     const shown = tl.events.length;
-    body = html`
+    const compras = (data.purchases && data.purchases.items) || [];
+    tabStrip = html`<${JourneyTabs} value=${tab} onChange=${setTab} count=${compras.length} />`;
+    // A aba inativa é DESMONTADA (o que todo strip do repo faz). Consequência
+    // aceita: voltar para a Jornada colapsa o "ver detalhes" de cada `EventRow`
+    // (esse `open` é `useState` local). Não se perde o filtro nem as páginas já
+    // carregadas da timeline — moram em `state.data.timeline`, aqui no
+    // componente raiz, então trocar de aba não dispara fetch nenhum. Não "conserte"
+    // subindo o `open` para cá.
+    body = tab === 'produtos' ? html`
+      <div class="space-y-4">
+        <${PurchasesBlock} purchases=${data.purchases} />
+        <${SubscriptionsBlock} subs=${data.subscriptions} />
+      </div>`
+    : html`
       <div class="space-y-4">
         <${IdentityBlock} ident=${{ ...data.identity, events_total: (data.event_types || [])
           .reduce((a, t) => a + Number(t.total || 0), 0) }} />
-        <${ProductsBlock} products=${data.products} />
-        <${SubscriptionsBlock} subs=${data.subscriptions} />
 
         <section>
           <div class="flex items-center justify-between gap-3 flex-wrap mb-2">
@@ -564,7 +636,8 @@ export function JourneyModal({ api, contactId, onClose }) {
           <button type="button" onClick=${onClose} aria-label="Fechar"
             class="px-2 py-1 rounded-md text-wa-secondary hover:text-wa-text hover:bg-wa-hover transition-colors">✕</button>
         </header>
-        <div class="p-5">${body}</div>
+        ${tabStrip}
+        <div class="p-5 min-h-[45vh]">${body}</div>
       </div>
     </div>`;
 }
