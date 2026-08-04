@@ -1,6 +1,6 @@
 id: trackify
 name: Trackify (Jornada do cliente)
-version: 1.0.0
+version: "1.1.0"
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Mostra a JORNADA do contato no Trackify (o CDP do Nexus) sem sair do atendimento:
@@ -13,6 +13,16 @@ description: >-
   CPF — cadastro não encontrado é um estado normal e explícito, com busca manual
   dentro do próprio modal. Sem o DSN configurado o plugin fica em no-op: a tela diz
   "não configurado" e nada mais acontece. Zero mudança no core.
+
+  Desde a 1.1.0 também SINCRONIZA CAMPOS do contato nos dois sentidos: na aba
+  "Campos do contato" da configuração, cada atributo personalizado do WhatsBot pode
+  ser ligado a um campo personalizado do contato no Trackify, com o sentido escolhido
+  por par (→, ← ou ↔). A escrita usa uma conta de serviço do Nexus, porque as rotas
+  de contato do Trackify só aceitam sessão de usuário — a via de ingestão não
+  sobrescreve identificador (e-mail, CPF) nem apaga valor. A volta é por consulta
+  periódica ao histórico de alterações do CDP, já que ele não emite webhook de
+  contato. Só contatos JÁ vinculados sincronizam: esta função nunca cria cadastro no
+  Trackify. Nasce desligada e em modo seco.
 short_description: >-
   Jornada do contato no Trackify (CDP) num modal do cabeçalho da conversa: gasto
   total, compras, falhas, cancelamentos e próxima cobrança. Leitura pura.

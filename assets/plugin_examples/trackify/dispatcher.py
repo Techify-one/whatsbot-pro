@@ -103,6 +103,27 @@ def _forget_identity(ph: str) -> None:
                      {"p": ph})
 
 
+def _hints(ph: str, email: str) -> dict:
+    """Campos conectados que são identificador, para a busca do contato.
+
+    O e-mail solto do envelope entra como reserva: ele vem da coluna legada, que
+    hoje está vazia na maioria das instalações.
+    """
+    pistas: dict = {}
+    try:
+        from db.repositories import contact_repo
+
+        from . import field_map
+        c = contact_repo.get_by_phone(ph) if ph else None
+        if c:
+            pistas = field_map.identifier_hints(c)
+    except Exception:  # noqa: BLE001 — sem pistas, sobra o telefone
+        logger.debug("trackify: falha ao montar pistas de identidade", exc_info=True)
+    if email and "@" in email:
+        pistas.setdefault(identity.SLUG_EMAIL, email)
+    return pistas
+
+
 def resolve_identity(ph: str, email: str, contact_type: str) -> dict:
     """Identificadores a enviar. Usa o valor EXATO do CDP quando o contato existe.
 
@@ -117,7 +138,8 @@ def resolve_identity(ph: str, email: str, contact_type: str) -> dict:
             out.setdefault(identity.SLUG_EMAIL, email.strip().lower())
         return out
 
-    matches = identity.resolve(phone=ph, email=email or None, contact_type=contact_type)
+    matches = identity.resolve_mapped(phone=ph, extras=_hints(ph, email),
+                                      contact_type=contact_type)
     if len(matches) == 1:
         m = matches[0]
         _store_identity(ph, m.contact_id, m.slug, m.exact_value)

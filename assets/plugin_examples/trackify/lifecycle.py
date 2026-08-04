@@ -18,7 +18,7 @@ import time
 
 import httpx
 
-from . import _config, dispatcher
+from . import _config, dispatcher, pull, push, reconcile, session, writer
 
 logger = logging.getLogger("plugins.trackify.lifecycle")
 
@@ -104,14 +104,132 @@ async def _loop(ctx) -> None:
             await asyncio.sleep(max(cool, TICK_BUSY if processed else TICK_IDLE))
 
 
+# ── Sincronização de campos do contato ───────────────────────────────────
+
+def _field_rate_per_min() -> int:
+    try:
+        v = int(_config.setting("field_sync_rate_per_min", 15))
+    except (TypeError, ValueError):
+        return 15
+    # As rotas de contato do Trackify limitam a 30/min POR IP — e esse balde é
+    # compartilhado com QUALQUER outra chamada que saia pelo mesmo IP. Metade de
+    # folga, e um teto de código que a tela não consegue estourar.
+    return max(1, min(v, 25))
+
+
+async def _field_cycle(client: httpx.AsyncClient) -> int:
+    if not _config.field_sync_ready() or session.blocked_reason():
+        return 0
+    if push.cooldown_remaining() > 0:
+        return 0
+
+    rate = _field_rate_per_min()
+    gap = 60.0 / rate
+    batch = max(1, min(rate, 5))
+
+    rows = await asyncio.to_thread(push.claim, batch, _worker_id)
+    if not rows:
+        return 0
+
+    done = 0
+    for row in rows:
+        outcome = await push.deliver_one(client, row)
+        done += 1
+        if outcome == "throttled" or push.cooldown_remaining() > 0:
+            break
+        # Só espaça quando de fato houve ida à rede: um lote inteiro de "nada a
+        # fazer" não pode consumir minutos de relógio à toa.
+        if done < len(rows) and outcome in ("sent", "conflict", "blocked", "retry"):
+            await asyncio.sleep(gap)
+    return done
+
+
+async def _field_loop(ctx) -> None:
+    async with httpx.AsyncClient(timeout=writer.PUT_TIMEOUT) as client:
+        while True:
+            processed = 0
+            try:
+                processed = await _field_cycle(client)
+            except Exception:  # noqa: BLE001 — o laço NUNCA morre (ver docstring)
+                logger.warning("trackify: ciclo de sincronização de campos falhou",
+                               exc_info=True)
+            cool = push.cooldown_remaining()
+            await asyncio.sleep(max(cool, TICK_BUSY if processed else TICK_IDLE))
+
+
+def _poll_seconds() -> float:
+    try:
+        v = float(_config.setting("field_sync_poll_seconds", 60))
+    except (TypeError, ValueError):
+        return 60.0
+    return max(15.0, min(v, 3600.0))
+
+
+async def _pull_loop(ctx) -> None:
+    """Leitura periódica do changelog do CDP.
+
+    É consulta, não webhook, porque o Trackify não emite nenhum evento de saída
+    para contato — ver a docstring de ``pull``.
+    """
+    while True:
+        espera = _poll_seconds()
+        try:
+            resumo = await asyncio.to_thread(pull.cycle)
+            if resumo.get("gravadas") or resumo.get("recusadas"):
+                logger.info("trackify: leitura do CDP — %s gravada(s), %s recusada(s)",
+                            resumo["gravadas"], resumo["recusadas"])
+            if resumo.get("truncado"):
+                # Ainda há backlog dentro da janela: volta já, em vez de esperar
+                # o intervalo inteiro para andar mais um pedaço.
+                espera = 1.0
+        except Exception:  # noqa: BLE001 — o laço NUNCA morre (ver docstring)
+            logger.warning("trackify: ciclo de leitura de campos falhou", exc_info=True)
+        await asyncio.sleep(espera)
+
+
+async def _reconcile_loop(ctx) -> None:
+    """Varredura de conferência, em passagens parciais e com teto por ciclo.
+
+    Sobe com um atraso inicial: no boot as outras duas tasks já têm o que fazer,
+    e uma varredura competindo com elas pelo mesmo orçamento de 30/min só
+    atrasaria a sincronização que o operador está olhando.
+    """
+    await asyncio.sleep(120.0)
+    while True:
+        try:
+            minutos = float(_config.setting("field_sync_reconcile_minutes", 60) or 60)
+        except (TypeError, ValueError):
+            minutos = 60.0
+        espera = max(15.0, min(minutos, 1440.0)) * 60.0
+        try:
+            resumo = await asyncio.to_thread(reconcile.cycle)
+            if resumo.get("enfileirados") or resumo.get("gravados"):
+                logger.info("trackify: conferência — %s conferido(s), %s enfileirado(s), "
+                            "%s gravado(s)", resumo["conferidos"],
+                            resumo["enfileirados"], resumo["gravados"])
+            if resumo.get("conferidos") and not resumo.get("volta"):
+                # Ainda há base para percorrer: segue no ritmo do lote em vez de
+                # esperar o intervalo inteiro a cada 100 contatos.
+                espera = min(espera, 60.0)
+        except Exception:  # noqa: BLE001 — o laço NUNCA morre (ver docstring)
+            logger.warning("trackify: ciclo de conferência falhou", exc_info=True)
+        await asyncio.sleep(espera)
+
+
 def setup(ctx) -> None:
-    """Sobe a task de entrega. Nunca derruba o boot: em harness de teste o
-    supervisor não está cabeado e ``spawn_task`` levanta (padrão do protocolos)."""
+    """Sobe as tasks. Nunca derruba o boot: em harness de teste o supervisor não
+    está cabeado e ``spawn_task`` levanta (padrão do protocolos)."""
     try:
         from runtime.supervisor import RestartPolicy
         ctx.spawn_task("outbox", lambda: _loop(ctx), policy=RestartPolicy.PERMANENT)
+        ctx.spawn_task("fieldsync", lambda: _field_loop(ctx),
+                       policy=RestartPolicy.PERMANENT)
+        ctx.spawn_task("fieldpull", lambda: _pull_loop(ctx),
+                       policy=RestartPolicy.PERMANENT)
+        ctx.spawn_task("fieldreconcile", lambda: _reconcile_loop(ctx),
+                       policy=RestartPolicy.PERMANENT)
     except Exception:  # noqa: BLE001
-        logger.debug("trackify: supervisor indisponível — espelho não iniciado",
+        logger.debug("trackify: supervisor indisponível — tasks não iniciadas",
                      exc_info=True)
 
 

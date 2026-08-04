@@ -9,7 +9,10 @@ O problema, medido em produção (plano 94, F0):
     WhatsBot ``contacts.phone``   →  majoritariamente 12 dígitos, SEM ``+``
                                      (``5513991198852`` — formato do JID do WhatsApp)
     Trackify ``whatsapp``         →  90% com ``+`` e 13 dígitos
-                                     (``+5513991198852``); só 0,05% mascarados
+                                     (``+5513991198852``); só 0,05% mascarados;
+                                     e há cadastro em forma NACIONAL
+                                     (``6492973092``), vindo de formulário ou
+                                     planilha, sem o código do país
 
 Duas responsabilidades DIFERENTES, e confundi-las quebra o CDP:
 
@@ -105,10 +108,23 @@ def lookup_candidates(phone: str | None) -> list[str]:
     if not d:
         return []
     out: list[str] = []
+
+    def add(form: str) -> None:
+        if form and form not in out:
+            out.append(form)
+
     for variant in br_phone_variants(d):
-        for form in (variant, "+" + variant):
-            if form not in out:
-                out.append(form)
+        add(variant)
+        add("+" + variant)
+        # Forma NACIONAL, sem o código do país. ``br_phone_variants`` só alterna
+        # o 9º dígito e mantém o 55 sempre — mas o CDP recebe número de
+        # formulário e de planilha, onde "6492973092" (DDD + 8 dígitos, sem o 55)
+        # é comum. Sem esta variante, esse cadastro nunca casava.
+        if variant.startswith("55") and len(variant) in (12, 13):
+            # ⚠️ SEM o "+": "+6492973092" é um número VÁLIDO da Nova Zelândia
+            # (+64), e casar com ele grudaria os dados do cliente no cadastro de
+            # outra pessoa. A forma nacional só faz sentido crua.
+            add(variant[2:])
     return out
 
 

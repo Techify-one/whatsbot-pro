@@ -191,6 +191,11 @@ _REQUIRED = [
     ("contacts", ("id", "status", "total_spent", "first_seen_at", "converted_at", "deleted_at")),
     ("contact_field_values", ("contact_id", "custom_field_id", "value")),
     ("custom_fields", ("id", "slug", "is_identifier", "identifier_priority", "deleted_at")),
+    # Lidos pela sincronização de campos: o changelog é a ÚNICA fonte que
+    # registra limpeza e autoria, e ``field_types`` traz o regex do alvo.
+    ("contact_changelog", ("id", "contact_id", "custom_field_id", "new_value",
+                           "source", "user_id", "created_at")),
+    ("field_types", ("id", "slug", "regex_pattern")),
     ("events", ("id", "contact_id", "channel_id", "event_type", "title", "value",
                 "occurred_at", "deleted_at")),
     ("event_field_values", ("event_id", "event_custom_field_id", "value")),

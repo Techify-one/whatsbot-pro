@@ -24,8 +24,29 @@ DEFAULTS: dict = {
     "rate_per_min": 40,
     "max_age_days": 7,
     "mirror_contact_types": "whatsapp",
-    # Não declarado em settings.py de propósito (segredo, ver docstring de lá).
+    # Sincronização de campos do contato (espelho de settings.Settings).
+    "field_sync_enabled": False,
+    "field_sync_dry_run": True,
+    "field_sync_pull_enabled": False,
+    "field_sync_poll_seconds": 60,
+    "field_sync_rate_per_min": 15,
+    "field_sync_reconcile_minutes": 60,
+    "service_email": "",
+    "sync_api_base": "",
+    # Não declarados em settings.py de propósito (segredo, ver docstring de lá).
     "api_key": "",
+    "service_password": "",
+    # Id do usuário da conta de serviço, capturado no login. É a chave da
+    # supressão de eco (descartamos do changelog o que foi escrito por nós), e
+    # por isso NÃO é configurado à mão: vem do corpo da resposta de login.
+    "sync_user_id": "",
+    # Motivo pelo qual a sincronização se AUTO-DESLIGOU (3 falhas seguidas).
+    # Enquanto preenchido, o worker não puxa linha da fila.
+    "sync_blocked_reason": "",
+    # Último erro de login, gravado já na PRIMEIRA falha. Separado do anterior de
+    # propósito: precisa aparecer na tela na hora, mas uma falha isolada de rede
+    # não pode parar a sincronização.
+    "sync_last_login_error": "",
     # Gerado uma vez no primeiro uso do espelho; entra no external_id para que
     # staging e produção nunca colidam no mesmo canal do Trackify.
     "install_id": "",
@@ -60,6 +81,36 @@ def timeline_page_size() -> int:
     except (TypeError, ValueError):
         return 25
     return min(max(v, 5), 100)
+
+
+def api_base() -> str:
+    """Base da API do Trackify (``.../api/v1``), com precedência explícita.
+
+    Deduzir da URL de ingestão evita pedir ao operador uma segunda URL que ele
+    já forneceu — o ``channelSlug()`` da tela já faz essa mesma dedução para
+    descobrir o canal. Sem nenhuma das duas, cai na URL pública do módulo.
+    """
+    explicit = (setting("sync_api_base") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    ing = (setting("ingestion_url") or "").strip().rstrip("/")
+    marker = "/ingestion/"
+    if marker in ing:
+        return ing[: ing.index(marker)]
+    base = nexus_base_url()
+    return f"{base}/api/v1" if base else ""
+
+
+def credential_set() -> bool:
+    """Há conta de serviço utilizável? Usado para gatear a escrita SEM tentar
+    login — a rota de login do Nexus é limitada a 5 tentativas por minuto."""
+    return bool((setting("service_email") or "").strip()
+                and (setting("service_password") or "").strip()
+                and api_base())
+
+
+def field_sync_ready() -> bool:
+    return bool(setting("field_sync_enabled", False)) and credential_set()
 
 
 def contact_link(contact_id: str) -> str:

@@ -8,7 +8,7 @@
 // precisa de uma saída útil (busca manual por e-mail/CPF), não de uma tela vazia:
 //   carregando · não configurado · sem cadastro (+busca) · ambíguo (seletor) · jornada
 import { h } from 'preact';
-import { useState, useEffect, useCallback } from 'preact/hooks';
+import { useState, useEffect, useCallback, useMemo } from 'preact/hooks';
 import htm from 'htm';
 
 const html = htm.bind(h);
@@ -86,16 +86,27 @@ function Chip({ children, tone = 'neutral', title }) {
     class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${cls}">${children}</span>`;
 }
 
+// `min-w-0` é obrigatório: item de grade nasce com `min-width:auto` (= min-content),
+// então um token sem espaço — hash de transação, URL de utm_content, blob de JSON —
+// alarga a coluna até estourar o painel. Foi exatamente o que quebrou o layout de
+// "ver detalhes". `break-words` faz o token quebrar em vez de empurrar.
 function Stat({ label, value, strong }) {
+  const v = value === null || value === undefined || value === '' ? '—' : value;
   return html`
-    <div>
-      <div class="text-[11px] text-wa-secondary">${label}</div>
-      <div class=${`text-sm ${strong ? 'font-semibold' : ''} text-wa-text`}>${value ?? '—'}</div>
+    <div class="min-w-0">
+      <div class="text-[11px] text-wa-secondary truncate" title=${label}>${label}</div>
+      <div class=${`text-sm break-words ${strong ? 'font-semibold' : ''} text-wa-text`}>${v}</div>
     </div>`;
 }
 
 function IdentityBlock({ ident }) {
   const status = STATUS_LABEL[ident.status] || ident.status;
+  // `name` sai da grade: já é o título do bloco.
+  const identificadores = (ident.identifiers || []).filter((f) => f.slug !== 'name');
+  // Antes esta lista era renderizada ANINHADA no `if (identifiers.length)`, então
+  // um contato sem nenhum identificador preenchido perdia também o cadastro
+  // inteiro. São blocos independentes.
+  const demais = (ident.fields || []).filter((f) => f.slug !== 'name');
   return html`
     <section class="border border-wa-border rounded-xl p-4 bg-wa-panel">
       <div class="flex items-start justify-between gap-3 flex-wrap">
@@ -123,14 +134,84 @@ function IdentityBlock({ ident }) {
         <${Stat} label="Eventos" value=${ident.events_total ?? '—'} />
       </div>
 
-      ${ident.identifiers && ident.identifiers.length ? html`
-        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4 pt-3 border-t border-wa-border">
-          ${ident.identifiers.map((f) => html`
-            <${Stat} key=${f.slug} label=${f.name} value=${f.value} />`)}
-          ${(ident.fields || []).filter((f) => f.slug !== 'name').map((f) => html`
-            <${Stat} key=${f.slug} label=${f.name} value=${f.value} />`)}
+      ${identificadores.length ? html`
+        <div class="mt-4 pt-3 border-t border-wa-border">
+          <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-2">Identificadores</div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            ${identificadores.map((f) => html`
+              <${Stat} key=${f.slug} label=${f.name} value=${f.value} />`)}
+          </div>
+        </div>` : null}
+
+      ${demais.length ? html`
+        <div class="mt-4 pt-3 border-t border-wa-border">
+          <div class="text-[11px] uppercase tracking-wide text-wa-secondary mb-2">Informações do contato</div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            ${demais.map((f) => html`
+              <${Stat} key=${f.slug} label=${f.name} value=${f.value} />`)}
+          </div>
         </div>` : null}
     </section>`;
+}
+
+// Produtos que o cliente possui. O Trackify não tem tabela de produto — posse é
+// derivada dos eventos, e a regra mora no backend (``journey.fetch_products``):
+// o evento mais recente de cada produto decide se ele ainda é do cliente.
+function ProductsBlock({ products }) {
+  if (!products || !products.length) return null;
+  const ativos = products.filter((p) => p.active);
+  const perdidos = products.filter((p) => !p.active);
+
+  return html`
+    <section class="mt-4">
+      <div class="flex items-baseline justify-between gap-2 flex-wrap">
+        <h4 class="text-sm font-semibold text-wa-text">Produtos do cliente (${products.length})</h4>
+        ${perdidos.length ? html`
+          <span class="text-[11px] text-wa-secondary">
+            ${ativos.length} ativo(s) · ${perdidos.length} cancelado(s)/reembolsado(s)
+          </span>` : null}
+      </div>
+      <ul class="space-y-2 mt-2">
+        ${products.map((p) => html`<${ProductRow} key=${p.key} p=${p} />`)}
+      </ul>
+    </section>`;
+}
+
+function ProductRow({ p }) {
+  return html`
+    <li class=${`border rounded-lg p-3 bg-wa-panel min-w-0 ${
+        p.active ? 'border-wa-border' : 'border-wa-border opacity-70'}`}>
+      <div class="flex items-start justify-between gap-3 flex-wrap">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-sm font-semibold text-wa-text break-words">${p.name}</span>
+            <${Chip} tone=${p.active ? 'good' : 'bad'}>
+              ${p.active ? 'Ativo' : eventLabel(p.last_event_type)}
+            <//>
+            ${p.interval ? html`<${Chip}>${p.interval}<//>` : null}
+          </div>
+          ${p.offer && p.offer !== p.name ? html`
+            <div class="text-[12px] text-wa-secondary mt-0.5 break-words">${p.offer}</div>` : null}
+        </div>
+        <div class="text-right shrink-0">
+          <div class="text-sm font-semibold text-wa-text">${p.paid_total || p.last_value || '—'}</div>
+          <div class="text-[11px] text-wa-secondary">${fmtDate(p.last_event_at, false)}</div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3 pt-2 border-t border-wa-border">
+        <${Stat} label="Adquirido em" value=${fmtDate(p.first_event_at, false)} />
+        <${Stat} label="Pagamento" value=${p.payment_method} />
+        <${Stat} label="Situação no gateway" value=${p.gateway_status} />
+        ${p.active && p.next_charge ? html`
+          <${Stat} label="Próxima cobrança"
+            value=${`${fmtDate(p.next_charge, false)}${
+              p.days_left === null || p.days_left === undefined ? '' : ` · ${daysLabel(p.days_left)}`}`} />`
+          : p.canceled_at ? html`
+            <${Stat} label="Cancelado em" value=${fmtDate(p.canceled_at, false)} />`
+          : html`<${Stat} label="Eventos" value=${p.events} />`}
+      </div>
+    </li>`;
 }
 
 function SubscriptionsBlock({ subs }) {
@@ -167,6 +248,38 @@ function SubscriptionsBlock({ subs }) {
     </section>`;
 }
 
+// Um campo do "ver detalhes". Três formatos, porque os valores do CDP não têm
+// um formato só: `wb_raw` é um JSON de centenas de caracteres, `transaction_id`
+// é um hash sem espaço e `installments` é "3". Tratar os três igual foi o que
+// fez o conteúdo escapar do painel.
+const LONG_VALUE = 60;
+
+function DetailField({ slug, value }) {
+  const text = value === null || value === undefined ? '' : String(value);
+  const json = useMemo(() => {
+    const t = text.trim();
+    if (!(t.startsWith('{') || t.startsWith('['))) return null;
+    try { return JSON.stringify(JSON.parse(t), null, 2); } catch (_) { return null; }
+  }, [text]);
+
+  if (json !== null) {
+    // JSON ganha a linha inteira e rolagem PRÓPRIA: quebrar um blob no meio de
+    // uma chave o torna ilegível, e deixá-lo crescer arrasta o painel junto.
+    return html`
+      <div class="min-w-0 sm:col-span-2">
+        <div class="text-[11px] text-wa-secondary">${FIELD_LABEL[slug] || slug}</div>
+        <pre class="text-[11px] text-wa-text bg-wa-hover rounded p-2 mt-0.5 max-h-48 overflow-auto whitespace-pre">${json}</pre>
+      </div>`;
+  }
+
+  const wide = text.length > LONG_VALUE;
+  return html`
+    <div class=${`min-w-0 ${wide ? 'sm:col-span-2' : ''}`}>
+      <div class="text-[11px] text-wa-secondary">${FIELD_LABEL[slug] || slug}</div>
+      <div class="text-sm text-wa-text break-words">${text || '—'}</div>
+    </div>`;
+}
+
 function EventRow({ ev }) {
   const [open, setOpen] = useState(false);
   const fields = ev.fields || {};
@@ -201,9 +314,8 @@ function EventRow({ ev }) {
           ${open ? 'ocultar detalhes' : `ver detalhes (${rest.length})`}
         </button>` : null}
       ${open ? html`
-        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2 pt-2 border-t border-wa-border">
-          ${rest.map((k) => html`
-            <${Stat} key=${k} label=${FIELD_LABEL[k] || k} value=${String(fields[k])} />`)}
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 mt-2 pt-2 border-t border-wa-border">
+          ${rest.map((k) => html`<${DetailField} key=${k} slug=${k} value=${fields[k]} />`)}
         </div>` : null}
     </li>`;
 }
@@ -277,6 +389,10 @@ function CandidatePicker({ candidates, onPick }) {
 
 // ── Modal ────────────────────────────────────────────────────────────────
 
+// Largura: max-w-5xl (1024px). Com o cadastro completo, os produtos e a linha do
+// tempo, 3xl (768px) espremia tudo em duas colunas e estourava com valor longo.
+// O `min-w-0` no painel é o que impede um filho de grade empurrar a largura para
+// fora da tela — sem ele, `max-w` não segura nada.
 export function JourneyModal({ api, contactId, onClose }) {
   const [state, setState] = useState({ loading: true });
   const [filter, setFilter] = useState('');
@@ -395,6 +511,7 @@ export function JourneyModal({ api, contactId, onClose }) {
       <div class="space-y-4">
         <${IdentityBlock} ident=${{ ...data.identity, events_total: (data.event_types || [])
           .reduce((a, t) => a + Number(t.total || 0), 0) }} />
+        <${ProductsBlock} products=${data.products} />
         <${SubscriptionsBlock} subs=${data.subscriptions} />
 
         <section>
@@ -436,7 +553,7 @@ export function JourneyModal({ api, contactId, onClose }) {
   return html`
     <div class="fixed inset-0 z-[70] flex items-start justify-center bg-black/50 p-4 overflow-y-auto"
       onClick=${(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div class="w-full max-w-3xl my-6 bg-wa-bg rounded-2xl shadow-2xl">
+      <div class="w-full max-w-5xl min-w-0 my-6 bg-wa-bg rounded-2xl shadow-2xl">
         <header class="flex items-center justify-between gap-3 px-5 py-4 border-b border-wa-border">
           <div class="min-w-0">
             <h2 class="text-base font-semibold text-wa-text">Jornada do cliente</h2>

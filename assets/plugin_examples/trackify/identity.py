@@ -138,6 +138,90 @@ def resolve_by_telegram(value: str | None) -> list[Match]:
     return _dedupe(_by_values(SLUG_TELEGRAM, [v])) if v else []
 
 
+# Prioridade padrão do Trackify, usada quando o catálogo do CDP não pôde ser
+# lido. Medida na F0 e igual à ordem que o ``pipeline.ts`` percorre.
+_PRIORIDADE_PADRAO = {SLUG_EMAIL: 10, SLUG_WHATSAPP: 20, SLUG_CPF: 30,
+                      SLUG_TELEGRAM: 40}
+
+
+def resolve_by_slug(slug: str, value: str | None) -> list[Match]:
+    """Resolve por QUALQUER identificador, inclusive um criado pelo cliente.
+
+    Os quatro slugs conhecidos têm normalização própria (telefone tem variante
+    brasileira, CPF circula com e sem máscara, e-mail é insensível a caixa). Um
+    identificador que o cliente criou no CDP não tem regra conhecida, então vale
+    a comparação exata com um fallback por dígitos — que é o que dá certo para
+    documento e telefone mascarados, os casos comuns.
+    """
+    slug = (slug or "").strip()
+    value = (value or "").strip()
+    if not slug or not value:
+        return []
+    if slug == SLUG_WHATSAPP:
+        return resolve_by_phone(value)
+    if slug == SLUG_EMAIL:
+        return resolve_by_email(value)
+    if slug == SLUG_CPF:
+        return resolve_by_cpf(value)
+    if slug == SLUG_TELEGRAM:
+        return resolve_by_telegram(value)
+
+    found = _by_values(slug, [value])
+    if found:
+        return _dedupe(found)
+    digits = phone_mod.digits_only(value)
+    return _dedupe(_by_digits(slug, [digits])) if digits else []
+
+
+def resolve_mapped(*, phone: str | None, extras: dict | None = None,
+                   contact_type: str = "whatsapp") -> list[Match]:
+    """Tenta o TELEFONE e todo campo conectado que seja identificador no CDP.
+
+    ``extras`` é ``{slug_no_trackify: valor_no_whatsbot}``, montado a partir dos
+    mapeamentos ativos (ver ``field_map.identifier_hints``). Assim, conectar um
+    campo na tela passa a valer também para ENCONTRAR o cadastro, e não só para
+    copiar o valor depois — que era a pergunta natural de quem configura.
+
+    A ordem é a ``identifier_priority`` do próprio Trackify, porque é a mesma que
+    a ingestão dele percorre: divergir faria a leitura casar num contato e a
+    escrita em outro. Para no primeiro identificador que achar alguém.
+    """
+    candidatos: dict[str, str] = {}
+    for slug, valor in (extras or {}).items():
+        if slug and str(valor or "").strip():
+            candidatos[slug] = str(valor).strip()
+
+    # O telefone entra sempre, mesmo sem mapeamento: é a chave do WhatsBot.
+    if contact_type == "telegram":
+        candidatos.setdefault(SLUG_TELEGRAM, (phone or "").strip())
+    elif phone:
+        candidatos.setdefault(SLUG_WHATSAPP, phone.strip())
+
+    prioridade = _prioridades()
+    ordenados = sorted(candidatos.items(),
+                       key=lambda kv: (prioridade.get(kv[0], 999), kv[0]))
+    for slug, valor in ordenados:
+        found = resolve_by_slug(slug, valor)
+        if found:
+            return found
+    return []
+
+
+def _prioridades() -> dict:
+    """``{slug: identifier_priority}`` do CDP, com o padrão medido como piso."""
+    out = dict(_PRIORIDADE_PADRAO)
+    try:
+        from . import field_map
+        catalogo = field_map.tk_fields()
+        for f in catalogo.get("fields") or []:
+            if f.get("is_identifier"):
+                pr = f.get("identifier_priority")
+                out[f["slug"]] = 999 if pr is None else int(pr)
+    except Exception:  # noqa: BLE001 — sem catálogo, o padrão serve
+        logger.debug("trackify: catálogo de identificadores indisponível", exc_info=True)
+    return out
+
+
 def resolve(*, phone: str | None = None, email: str | None = None,
             cpf: str | None = None, telegram_id: str | None = None,
             contact_type: str = "whatsapp") -> list[Match]:

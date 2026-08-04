@@ -13,7 +13,30 @@ mídia no ``raw``) a cada mensagem, para uns poucos eventos por dia.
 
 from __future__ import annotations
 
-from . import mirror
+import logging
+
+
+from . import mirror, push
+
+
+def _fan(*handlers):
+    """Entrega o mesmo evento a vários handlers, cada um isolado.
+
+    O barramento indexa por NOME do evento: dois módulos que precisam de
+    ``contact.updated`` não podem simplesmente registrar duas entradas no dict.
+    Cada handler roda no próprio ``try`` para uma falha do espelho não calar a
+    sincronização de campos, e vice-versa.
+    """
+    def _dispatch(ctx, payload):
+        for fn in handlers:
+            try:
+                fn(ctx, payload)
+            except Exception:  # noqa: BLE001
+                logger.debug("trackify: handler de %s falhou", getattr(
+                    ctx, "event_name", "?"), exc_info=True)
+    return _dispatch
+
+logger = logging.getLogger("plugins.trackify.events")
 
 EVENT_HANDLERS = {
     # Conversa (o ciclo do atendimento)
@@ -29,12 +52,14 @@ EVENT_HANDLERS = {
     # por um protocolo que fica aberto).
     "protocolos.fields_updated": mirror.on_protocolo_fields,
     # Contato
-    "contact.updated": mirror.on_contact_updated,
+    "contact.updated": _fan(mirror.on_contact_updated, push.on_contact_updated),
     "contact.tagged": mirror.on_contact_tagged,
     "contact.untagged": mirror.on_contact_untagged,
     # A IA gravando no cadastro. O core NÃO emite ``contact.updated`` nesse
     # caminho — a tool ``save_contact_info`` escreve direto no repo e só a rota
     # do painel emite. Sem este gancho, tudo que a IA descobre sobre o cliente
     # (e-mail, profissão, empresa) nunca chegava ao CDP.
-    "tool.after": mirror.on_tool_after,
+    # ``push.on_tool_after`` filtra por conta própria as tools que gravam no
+    # cadastro — o conjunto dele é SEPARADO do de ``mirror`` de propósito.
+    "tool.after": _fan(mirror.on_tool_after, push.on_tool_after),
 }

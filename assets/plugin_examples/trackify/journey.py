@@ -29,6 +29,23 @@ _SUBSCRIPTION_EVENTS = (
 )
 _SUBSCRIPTION_SCAN_LIMIT = 500
 
+# Eventos que dizem alguma coisa sobre POSSE de produto. Lista fixa, e não a
+# tabela ``channel_value_rules`` do CDP (que seria o oráculo "isto é receita?"),
+# porque aquela é POR CANAL e canal sem regra cai em "ignorar" — uma compra
+# legítima sumiria do painel em silêncio. Aqui errar para mais é inofensivo:
+# a tela é de leitura.
+_PRODUCT_EVENTS = (
+    "purchase", "authorized", "active_subscription", "charge.paid", "order.paid",
+    "subscription_canceled", "subscription_delayed",
+    "refunded", "chargeback", "charge.refunded", "order.canceled",
+)
+# O evento MAIS RECENTE do produto decide se o cliente ainda o tem.
+_PRODUCT_LOST = {"subscription_canceled", "refunded", "chargeback",
+                 "charge.refunded", "order.canceled"}
+_PRODUCT_PAID = {"purchase", "authorized", "active_subscription",
+                 "charge.paid", "order.paid"}
+_PRODUCT_SCAN_LIMIT = 500
+
 # Campo dinâmico do evento → chave do bloco de assinatura.
 _SUB_FIELD_MAP = {
     "product_name": "product",
@@ -98,12 +115,18 @@ FROM contacts c
 WHERE c.id = CAST(:cid AS uuid) AND c.deleted_at IS NULL
 """
 
+# Parte de ``custom_fields`` e não de ``contact_field_values``, de propósito: a
+# aba "Informações do Contato" do Trackify mostra TODO campo ativo, com o valor
+# em branco quando o contato não tem aquele dado. Um campo ausente da lista é
+# indistinguível de um campo vazio, e "sem CPF cadastrado" é justamente o que o
+# atendente precisa enxergar.
 _SQL_FIELDS = """
 SELECT cf.slug, cf.name, cf.is_identifier, cfv.value
-FROM contact_field_values cfv
-JOIN custom_fields cf ON cf.id = cfv.custom_field_id AND cf.deleted_at IS NULL
-WHERE cfv.contact_id = CAST(:cid AS uuid)
-ORDER BY cf.is_identifier DESC, cf.identifier_priority NULLS LAST, cf.slug
+FROM custom_fields cf
+LEFT JOIN contact_field_values cfv
+       ON cfv.custom_field_id = cf.id AND cfv.contact_id = CAST(:cid AS uuid)
+WHERE cf.deleted_at IS NULL AND cf.is_active
+ORDER BY cf.is_identifier DESC, cf.identifier_priority NULLS LAST, cf.name
 """
 
 _SQL_TAGS = """
@@ -133,13 +156,14 @@ def fetch_identity(contact_id: str) -> dict | None:
         "first_seen_at": _iso(c["first_seen_at"]),
         "converted_at": _iso(c["converted_at"]),
         "name": by_slug.get("name") or "",
+        # Sem filtrar por valor preenchido: campo em branco é informação.
         "identifiers": [
-            {"slug": f["slug"], "name": f["name"], "value": f["value"]}
-            for f in fields if f.get("is_identifier") and f.get("value")
+            {"slug": f["slug"], "name": f["name"], "value": f["value"] or ""}
+            for f in fields if f.get("is_identifier")
         ],
         "fields": [
-            {"slug": f["slug"], "name": f["name"], "value": f["value"]}
-            for f in fields if not f.get("is_identifier") and f.get("value")
+            {"slug": f["slug"], "name": f["name"], "value": f["value"] or ""}
+            for f in fields if not f.get("is_identifier")
         ],
         "tags": [{"name": t["name"], "color": t.get("color")} for t in tags],
         "link": _config.contact_link(c["id"]),
@@ -318,6 +342,120 @@ def fetch_subscriptions(contact_id: str, *, today: date | None = None) -> list[d
 
 # ── Fachada ──────────────────────────────────────────────────────────────
 
+# ── Bloco 4: produtos que o cliente possui ───────────────────────────────
+
+_SQL_PRODUCT_EVENTS = """
+SELECT e.id::text AS id, e.event_type, e.title, e.value, e.occurred_at,
+       jsonb_object_agg(ecf.slug, efv.value) FILTER (WHERE ecf.slug IS NOT NULL) AS fields
+FROM events e
+LEFT JOIN event_field_values efv ON efv.event_id = e.id
+LEFT JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
+WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
+  AND e.event_type = ANY(:types)
+GROUP BY e.id
+ORDER BY e.occurred_at DESC
+LIMIT :limit
+"""
+
+
+def fetch_products(contact_id: str, *, today: date | None = None) -> list[dict]:
+    """Bloco 4. Produtos que o contato possui (ou perdeu), agrupados.
+
+    O Trackify **não tem tabela de produto**: posse é implícita em ``events`` +
+    ``event_field_values``, e a arquitetura de lá é deliberadamente "um evento é
+    um evento", sem tratamento especial por nome. Então a regra de posse mora
+    aqui:
+
+    * a chave do produto é ``subscription_id`` → ``product_name`` → ``offer_name``
+      (a primeira que existir), porque o id da assinatura é o único estável entre
+      renovações e lançamentos antigos não o trazem;
+    * o evento MAIS RECENTE do grupo decide o estado — cancelamento, reembolso e
+      chargeback tiram a posse, o resto mantém;
+    * evento sem nome de produto NÃO vira produto. Sem essa guarda, cair no
+      ``event_type`` como chave inventaria um produto chamado "purchase".
+    """
+    today = today or date.today()
+    rows = trackify_db.run_read(_SQL_PRODUCT_EVENTS, {
+        "cid": contact_id, "types": list(_PRODUCT_EVENTS),
+        "limit": _PRODUCT_SCAN_LIMIT,
+    })
+
+    groups: dict[str, dict] = {}
+    for r in rows:                      # já vem do mais novo para o mais antigo
+        f = r.get("fields") or {}
+        nome = f.get("product_name") or f.get("offer_name")
+        if not nome:
+            continue
+        key = f.get("subscription_id") or nome
+        g = groups.setdefault(key, {
+            "key": key,
+            "name": nome,
+            "offer": f.get("offer_name"),
+            "subscription_id": f.get("subscription_id"),
+            "interval": f.get("subscription_interval"),
+            "payment_method": f.get("payment_method"),
+            "gateway_status": None,
+            "last_event_type": None,
+            "last_event_at": None,
+            "last_value": None,
+            "first_event_at": None,
+            "active": True,
+            "canceled_at": None,
+            "next_charge": None,
+            "next_charge_raw": None,
+            "days_left": None,
+            "paid_total_raw": 0.0,
+            "paid_total": None,
+            "events": 0,
+        })
+        g["events"] += 1
+
+        if g["last_event_at"] is None:
+            # O primeiro que chega é o mais recente: é ele que define o estado.
+            g["last_event_at"] = _iso(r["occurred_at"])
+            g["last_event_type"] = r["event_type"]
+            g["last_value"] = _money(r.get("value"))
+            g["gateway_status"] = f.get("status")
+            g["active"] = r["event_type"] not in _PRODUCT_LOST
+        # ...e o último a chegar é o mais antigo: quando o cliente adquiriu.
+        g["first_event_at"] = _iso(r["occurred_at"])
+
+        if r["event_type"] in _PRODUCT_PAID and r.get("value") is not None:
+            try:
+                g["paid_total_raw"] += float(r["value"])
+            except (TypeError, ValueError):
+                pass
+
+        # Eventos antigos costumam trazer o que os novos omitem.
+        for src, dst in (("offer_name", "offer"), ("subscription_interval", "interval"),
+                         ("payment_method", "payment_method"),
+                         ("subscription_id", "subscription_id")):
+            if f.get(src) and not g.get(dst):
+                g[dst] = f[src]
+
+        if g["next_charge"] is None and f.get("next_charge_date"):
+            g["next_charge_raw"] = str(f["next_charge_date"])
+            parsed = _parse_loose_date(f["next_charge_date"])
+            if parsed:
+                g["next_charge"] = parsed.isoformat()
+                g["days_left"] = (parsed - today).days
+
+        if g["canceled_at"] is None and f.get("subscription_canceled_at"):
+            parsed = _parse_loose_date(f["subscription_canceled_at"])
+            if parsed:
+                g["canceled_at"] = parsed.isoformat()
+
+    out = list(groups.values())
+    for g in out:
+        g["paid_total"] = _money(g["paid_total_raw"]) if g["paid_total_raw"] else None
+    # Ativos primeiro, e dentro de cada bloco o mais recente na frente. Dois
+    # sorts em vez de uma chave composta: o ``sort`` do Python é ESTÁVEL, então
+    # o segundo preserva a ordenação por data feita pelo primeiro.
+    out.sort(key=lambda g: g.get("last_event_at") or "", reverse=True)
+    out.sort(key=lambda g: not g["active"])
+    return out
+
+
 def build_journey(contact_id: str) -> dict:
     """Os 3 blocos de um contato JÁ resolvido no Trackify."""
     ident = fetch_identity(contact_id)
@@ -327,13 +465,15 @@ def build_journey(contact_id: str) -> dict:
         "found": True,
         "identity": ident,
         "subscriptions": fetch_subscriptions(contact_id),
+        "products": fetch_products(contact_id),
         "timeline": fetch_timeline(contact_id),
         "event_types": fetch_event_types(contact_id),
     }
 
 
 def journey_for(*, phone: str | None, email: str | None = None,
-                cpf: str | None = None, contact_type: str = "whatsapp") -> dict:
+                cpf: str | None = None, extras: dict | None = None,
+                contact_type: str = "whatsapp") -> dict:
     """Resolve a identidade e devolve a jornada.
 
     Três desfechos, todos normais e todos explícitos para a tela:
@@ -345,8 +485,15 @@ def journey_for(*, phone: str | None, email: str | None = None,
         return {"found": False, "configured": False,
                 "error": "Conexão com o Trackify não configurada."}
 
-    matches = identity.resolve(phone=phone, email=email, cpf=cpf,
-                               contact_type=contact_type)
+    # ``extras`` = campos conectados que são identificador no CDP. Os parâmetros
+    # soltos continuam valendo para quem chama sem mapeamento nenhum.
+    pistas = dict(extras or {})
+    if email:
+        pistas.setdefault(identity.SLUG_EMAIL, email)
+    if cpf:
+        pistas.setdefault(identity.SLUG_CPF, cpf)
+    matches = identity.resolve_mapped(phone=phone, extras=pistas,
+                                      contact_type=contact_type)
     if not matches:
         return {"found": False, "configured": True, "candidates": []}
 

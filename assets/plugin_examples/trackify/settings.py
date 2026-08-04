@@ -116,3 +116,73 @@ class Settings(BaseModel):
             "ali não é telefone."
         ),
     )
+
+    # ── Sincronização de campos do contato ───────────────────────────────
+    # ⚠️ A SENHA da conta de serviço não mora aqui, pelo mesmo motivo da chave
+    # de ingestão (ver o aviso no topo deste arquivo). Só o e-mail, que é
+    # identificador público.
+    field_sync_enabled: bool = Field(
+        default=False,
+        title="Sincronizar campos do contato",
+        description=(
+            "Liga a sincronização dos campos mapeados na aba 'Campos do contato'. "
+            "Exige a conta de serviço configurada. Só vale para contatos já "
+            "vinculados a um cadastro no Trackify — nunca cria contato lá."
+        ),
+    )
+    field_sync_dry_run: bool = Field(
+        default=True,
+        title="Modo seco (não grava no Trackify)",
+        description=(
+            "Calcula o que seria escrito e registra, mas NÃO envia. Deixe ligado "
+            "até conferir o resultado num contato pelo botão 'Simular'."
+        ),
+    )
+    field_sync_pull_enabled: bool = Field(
+        default=False,
+        title="Trazer alterações do Trackify",
+        description=(
+            "Liga a leitura periódica do histórico de alterações do CDP. Necessário "
+            "para as direções ← e ↔. O Trackify não tem webhook de saída, então a "
+            "volta é sempre por consulta periódica."
+        ),
+    )
+    field_sync_poll_seconds: int = Field(
+        default=60, ge=15, le=3600,
+        title="Intervalo da leitura (segundos)",
+        description="De quanto em quanto tempo procuramos alterações feitas no Trackify.",
+    )
+    field_sync_rate_per_min: int = Field(
+        default=15, ge=1, le=25,
+        title="Gravações por minuto no Trackify",
+        description=(
+            "O Trackify limita as rotas de contato a 30/min POR IP — e esse limite é "
+            "compartilhado com qualquer outra chamada que saia pelo mesmo IP. 15 "
+            "deixa metade de folga."
+        ),
+    )
+    field_sync_reconcile_minutes: int = Field(
+        default=60, ge=15, le=1440,
+        title="Varredura de conferência (minutos)",
+        description=(
+            "Passagem periódica que corrige o que evento e leitura não veem — "
+            "importação por CSV, por exemplo, não emite evento nenhum."
+        ),
+    )
+    service_email: str = Field(
+        default="",
+        title="E-mail da conta de serviço do Nexus",
+        description=(
+            "Usuário DEDICADO do Nexus com acesso ao Trackify. Precisa ser exclusivo "
+            "desta integração: se uma pessoa usar essas credenciais para entrar na "
+            "tela do Trackify, as edições dela serão ignoradas pela sincronização."
+        ),
+    )
+    sync_api_base: str = Field(
+        default="",
+        title="URL da API do Trackify (opcional)",
+        description=(
+            "Ex.: https://SEU-NEXUS/trackify/api/v1 . Em branco, é deduzida da URL "
+            "de ingestão e, na falta dela, da URL do Trackify."
+        ),
+    )

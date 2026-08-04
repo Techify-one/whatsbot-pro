@@ -22,6 +22,7 @@ import { h } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { authHeaders } from '/static/js/services/api.js';
+import FieldSync from '/plugins/trackify/static/FieldSync.js';
 
 const html = htm.bind(h);
 
@@ -36,6 +37,9 @@ const NUM_LIMITS = {
   statement_timeout_ms: [500, 30000],
   rate_per_min: [1, 60],
   max_age_days: [1, 90],
+  field_sync_poll_seconds: [15, 3600],
+  field_sync_rate_per_min: [1, 25],
+  field_sync_reconcile_minutes: [15, 1440],
 };
 
 function clampNum(key, raw) {
@@ -412,12 +416,34 @@ function Queue({ data, onRefresh, onRequeue, busy }) {
     </section>`;
 }
 
+// Três abas, com o Health SEMPRE visível acima delas: ele é a linha de status
+// do plugin e já reporta as três áreas, então esconder atrás de aba tiraria o
+// único lugar onde se vê tudo de uma vez. "Campos do contato" fica por último
+// porque depende das outras duas (precisa do DSN para listar os campos do CDP)
+// e é a única que pode mexer na identidade dos contatos lá.
+const TABS = [
+  ['conexao', 'Conexão'],
+  ['espelho', 'Espelho de eventos'],
+  ['campos', 'Campos do contato'],
+];
+
+function Tabs({ value, onChange }) {
+  return html`
+    <div class="flex gap-1 border-b border-wa-border">
+      ${TABS.map(([id, label]) => html`
+        <button class=${`px-3 py-2 text-sm -mb-px border-b-2 ${
+            value === id ? 'border-wa-teal text-wa-text' : 'border-transparent text-wa-secondary'}`}
+          onClick=${() => onChange(id)}>${label}</button>`)}
+    </div>`;
+}
+
 export default function TrackifyConfig() {
   const [health, setHealth] = useState(null);
   const [keyState, setKeyState] = useState(null);
   const [queue, setQueue] = useState(null);
   const [settings, setSettings] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState('conexao');
 
   const loadHealth = useCallback(async () => {
     setBusy(true);
@@ -480,13 +506,26 @@ export default function TrackifyConfig() {
     } finally { setBusy(false); }
   }, [loadQueue]);
 
+  // Salva UM punhado de settings reenviando o objeto COMPLETO — ver o aviso
+  // sobre o PUT destrutivo no topo do arquivo.
+  const patchSettings = useCallback(async (patch) => {
+    if (!settings) return null;
+    return saveSettings({ ...settings, ...patch });
+  }, [settings, saveSettings]);
+
   return html`
     <div class="space-y-4">
       <${Health} data=${health} onRefresh=${loadHealth} busy=${busy} />
-      <${MirrorSettings} values=${settings} onSave=${saveSettings} busy=${busy} />
-      <${KeyField} state=${keyState} slug=${channelSlug(settings && settings.ingestion_url)}
-        onSave=${saveKey} busy=${busy} />
-      <${ReadSettings} values=${settings} onSave=${saveSettings} busy=${busy} />
-      <${Queue} data=${queue} onRefresh=${loadQueue} onRequeue=${requeue} busy=${busy} />
+      <${Tabs} value=${tab} onChange=${setTab} />
+      ${tab === 'conexao' && html`
+        <${ReadSettings} values=${settings} onSave=${saveSettings} busy=${busy} />`}
+      ${tab === 'espelho' && html`
+        <${MirrorSettings} values=${settings} onSave=${saveSettings} busy=${busy} />
+        <${KeyField} state=${keyState} slug=${channelSlug(settings && settings.ingestion_url)}
+          onSave=${saveKey} busy=${busy} />
+        <${Queue} data=${queue} onRefresh=${loadQueue} onRequeue=${requeue} busy=${busy} />`}
+      ${tab === 'campos' && html`
+        <${FieldSync} req=${req} settings=${settings} onSaveSettings=${patchSettings}
+          busy=${busy} />`}
     </div>`;
 }
