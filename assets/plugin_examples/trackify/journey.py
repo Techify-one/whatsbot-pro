@@ -407,6 +407,30 @@ GROUP BY ch.slug, e.event_type
 ORDER BY 3 DESC, 1, 2
 """
 
+# O diagnóstico IRMÃO do de cima, e o mais fácil de confundir com ele. Aquele
+# pega compra que o CDP não classifica como dinheiro; este pega o contrário —
+# dinheiro classificado que não identifica O QUÊ foi comprado (nem nome nem id),
+# então não vira linha. Sem ele, o caso do ``pagarme`` mandava o operador
+# configurar o canal de checkout (que é o que o outro aviso nomeia) quando o
+# problema estava no canal de cobrança, que já tinha regra.
+_SQL_UNNAMED_PURCHASE_EVENTS = """
+SELECT ch.slug AS channel, e.event_type, count(*)::int AS events
+FROM events e
+JOIN channels ch ON ch.id = e.channel_id
+JOIN channel_value_rules vr ON vr.channel_id = e.channel_id
+                           AND vr.event_type = e.event_type
+                           AND vr.effect::text IN ('add', 'subtract')
+WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM event_field_values efv
+    JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
+    WHERE efv.event_id = e.id
+      AND ecf.slug IN ('product_name', 'offer_name', 'product_id', 'offer_id')
+      AND COALESCE(efv.value, '') <> '')
+GROUP BY ch.slug, e.event_type
+ORDER BY 3 DESC, 1, 2
+"""
+
 
 def _amount(value) -> Decimal:
     """``events.value`` → ``Decimal``. ``None`` e lixo viram ``0``."""
@@ -418,16 +442,50 @@ def _amount(value) -> Decimal:
         return Decimal(0)
 
 
-def _product_identity(fields: dict) -> tuple[str, str] | None:
-    """``(chave, nome)`` do produto, ou ``None`` quando o evento não nomeia um.
+def _identity_map(rows: list[dict]) -> dict[str, str]:
+    """``product_id``/``offer_id`` → nome, colhido dos eventos que trazem os DOIS.
+
+    Existe para não PARTIR um produto em duas linhas: no ``ticto`` parte dos
+    eventos de um mesmo produto traz o nome e parte só o id. Sem este mapa, o
+    recurso ao id (abaixo) daria uma linha "Combo de Redes" e outra
+    "prod-1234" para a mesma coisa.
+    """
+    m: dict[str, str] = {}
+    for r in rows:
+        f = r.get("fields") or {}
+        for campo_id, campo_nome in (("product_id", "product_name"),
+                                     ("offer_id", "offer_name")):
+            i, n = f.get(campo_id), f.get(campo_nome)
+            if i and n:
+                m.setdefault(str(i), n)
+    return m
+
+
+def _product_identity(fields: dict, id2name: dict | None = None) -> tuple[str, str] | None:
+    """``(chave, nome)`` do produto, ou ``None`` quando o evento não identifica um.
 
     A guarda do ``None`` é o que impede inventar um produto chamado "purchase":
-    sem nome, cair no ``event_type`` como chave viraria uma linha fantasma na
-    tela do atendente. A chave é ``subscription_id`` → ``product_name`` →
-    ``offer_name``, porque o id da assinatura é o único estável entre renovações
-    e os lançamentos antigos não o trazem.
+    sem identificação, cair no ``event_type`` como chave viraria uma linha
+    fantasma na tela do atendente. A chave é ``subscription_id`` → nome, porque
+    o id da assinatura é o único estável entre renovações e os lançamentos
+    antigos não o trazem.
+
+    O nome sai de ``product_name`` → ``offer_name`` e, se nenhum dos dois vier,
+    recorre a ``product_id`` → ``offer_id``. Esse último degrau NÃO é firula:
+    medido na produção, o canal ``pagarme`` **nunca** preenche os campos de
+    nome (1.281 ``charge.paid``, zero com nome) — ele grava ``product_id`` /
+    ``offer_id`` (``produto``, ``oferta-principal``, ``upssel``). Sem o recurso
+    ao id, uma compra paga e conferida no "Total gasto" não vira linha nenhuma.
+    O id cru só aparece na tela quando ``id2name`` não souber traduzi-lo.
     """
     nome = fields.get("product_name") or fields.get("offer_name")
+    if not nome:
+        mapa = id2name or {}
+        for campo_id in ("product_id", "offer_id"):
+            bruto = fields.get(campo_id)
+            if bruto:
+                nome = mapa.get(str(bruto)) or str(bruto)
+                break
     if not nome:
         return None
     return (fields.get("subscription_id") or nome), nome
@@ -460,6 +518,9 @@ def fetch_purchases(contact_id: str) -> dict:
 
     groups: dict[str, dict] = {}
     somas: dict[str, dict[str, Decimal]] = {}
+    # Antes de qualquer passada: quem sabe traduzir id de produto em nome são os
+    # próprios eventos do contato que trazem os dois campos.
+    id2name = _identity_map(rows)
 
     # 1ª passada — só dinheiro. É ela que CRIA o produto.
     for r in rows:                      # já vem do mais novo para o mais antigo
@@ -467,7 +528,7 @@ def fetch_purchases(contact_id: str) -> dict:
         if effect not in ("add", "subtract"):
             continue
         f = r.get("fields") or {}
-        ident = _product_identity(f)
+        ident = _product_identity(f, id2name)
         if ident is None:
             continue
         key, nome = ident
@@ -517,7 +578,7 @@ def fetch_purchases(contact_id: str) -> dict:
     # produto — ele rotula quem existe e é ignorado quando não há quem rotular.
     for r in rows:
         f = r.get("fields") or {}
-        ident = _product_identity(f)
+        ident = _product_identity(f, id2name)
         if ident is None:
             continue
         g = groups.get(ident[0])
@@ -545,11 +606,15 @@ def fetch_purchases(contact_id: str) -> dict:
     out.sort(key=lambda g: (g.get("name") or "").lower())
     out.sort(key=lambda g: g.get("last_event_at") or "", reverse=True)
 
-    unruled = trackify_db.run_read(_SQL_UNRULED_PRODUCT_EVENTS, {"cid": contact_id})
+    def _diag(sql) -> list[dict]:
+        return [{"channel": u["channel"], "event_type": u["event_type"],
+                 "events": int(u["events"] or 0)}
+                for u in trackify_db.run_read(sql, {"cid": contact_id})]
+
     return {
         "items": out,
-        "unruled": [{"channel": u["channel"], "event_type": u["event_type"],
-                     "events": int(u["events"] or 0)} for u in unruled],
+        "unruled": _diag(_SQL_UNRULED_PRODUCT_EVENTS),
+        "unnamed": _diag(_SQL_UNNAMED_PURCHASE_EVENTS),
     }
 
 
@@ -564,7 +629,7 @@ def _purchases_block(contact_id: str) -> dict:
         return fetch_purchases(contact_id)
     except Exception:  # noqa: BLE001
         logger.warning("trackify: bloco de compras indisponível", exc_info=True)
-        return {"items": [], "unruled": [], "unavailable": True}
+        return {"items": [], "unruled": [], "unnamed": [], "unavailable": True}
 
 
 def build_journey(contact_id: str) -> dict:

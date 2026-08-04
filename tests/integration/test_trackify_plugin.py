@@ -1456,10 +1456,14 @@ def _ev(tipo, quando, campos, valor=None, effect="add"):
             "channel": "ticto", "fields": campos}
 
 
-def _mock_compras(journey, monkeypatch, linhas, unruled=()):
-    """``fetch_purchases`` faz DUAS consultas — os eventos e o diagnóstico."""
+def _mock_compras(journey, monkeypatch, linhas, unruled=(), unnamed=()):
+    """``fetch_purchases`` faz TRÊS consultas — os eventos e os 2 diagnósticos."""
     def fake(sql, params=None):
-        return list(linhas) if "WITH page AS" in sql else list(unruled)
+        if "WITH page AS" in sql:
+            return list(linhas)
+        if "SELECT 1 FROM channel_value_rules" in sql:      # sem regra de valor
+            return list(unruled)
+        return list(unnamed)                                # sem nome de produto
     monkeypatch.setattr(journey.trackify_db, "run_read", fake)
 
 
@@ -1584,6 +1588,58 @@ def test_evento_sem_nome_de_produto_nao_vira_produto(journey, monkeypatch):
     assert journey.fetch_purchases("uuid-1")["items"] == []
 
 
+def test_compra_sem_nome_cai_no_id_do_produto(journey, monkeypatch):
+    """Caso REAL do canal ``pagarme``: 1.281 ``charge.paid`` na produção, ZERO
+    com ``product_name``/``offer_name`` — ele grava ``product_id``/``offer_id``.
+    Sem este degrau, uma compra paga e já somada no "Total gasto" não virava
+    linha nenhuma e a aba saía vazia sem explicação."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("charge.paid", 10, {"offer_id": "oferta-principal",
+                                "product_id": "produto", "status": "paid"}, 5),
+        _ev("charge.paid", 5, {"offer_id": "upssel", "status": "paid"}, 3),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert sorted(p["name"] for p in itens) == ["produto", "upssel"]
+
+
+def test_id_vira_nome_quando_outro_evento_do_mesmo_produto_o_traz(journey, monkeypatch):
+    """O recurso ao id não pode PARTIR um produto em duas linhas: no ``ticto``
+    parte dos eventos traz o nome e parte só o id. Quem souber traduzir são os
+    próprios eventos do contato."""
+    _mock_compras(journey, monkeypatch, [
+        _ev("purchase", 20, {"product_id": "prod-42"}, 100),
+        _ev("purchase", 10, {"product_id": "prod-42",
+                             "product_name": "Combo de Redes"}, 100),
+    ])
+    itens = journey.fetch_purchases("uuid-1")["items"]
+    assert len(itens) == 1
+    assert itens[0]["name"] == "Combo de Redes" and itens[0]["purchases"] == 2
+
+
+def test_compra_sem_nome_nem_id_e_reportada(journey, monkeypatch):
+    """O diagnóstico IRMÃO do ``unruled``, e o oposto dele: aqui é dinheiro
+    RECONHECIDO que não diz o quê foi comprado. Sem ele, o caso do ``pagarme``
+    mandava configurar o canal de checkout — que não era o problema."""
+    _mock_compras(journey, monkeypatch, [], unnamed=[
+        {"channel": "pagarme", "event_type": "charge.paid", "events": 4},
+    ])
+    out = journey.fetch_purchases("uuid-1")
+    assert out["items"] == [] and out["unruled"] == []
+    assert out["unnamed"] == [{"channel": "pagarme", "event_type": "charge.paid",
+                               "events": 4}]
+
+
+def test_os_dois_diagnosticos_sao_consultas_opostas(journey):
+    """Trocar um pelo outro aponta o operador para o canal errado."""
+    sem_regra = journey._SQL_UNRULED_PRODUCT_EVENTS
+    sem_nome = journey._SQL_UNNAMED_PURCHASE_EVENTS
+    # "sem regra": exige nome de produto e EXCLUI quem tem regra de valor.
+    assert "NOT EXISTS" in sem_regra and "SELECT 1 FROM channel_value_rules" in sem_regra
+    # "sem nome": exige regra de valor e EXCLUI quem tem qualquer identificação.
+    assert "JOIN channel_value_rules vr" in sem_nome
+    assert "'product_name', 'offer_name', 'product_id', 'offer_id'" in sem_nome
+
+
 def test_dinheiro_de_produto_soma_em_decimal(journey, monkeypatch):
     """Trava a decisão contra quem "simplificar" para ``float``: três parcelas de
     dez centavos têm que dar trinta, não R$ 0,30000000000000004."""
@@ -1617,7 +1673,8 @@ def test_produtos_indisponiveis_nao_derrubam_a_jornada(journey, monkeypatch):
     monkeypatch.setattr(journey, "fetch_timeline", lambda cid: {"events": [1]})
     monkeypatch.setattr(journey, "fetch_event_types", lambda cid: [])
     out = journey.build_journey("uuid-1")
-    assert out["purchases"] == {"items": [], "unruled": [], "unavailable": True}
+    assert out["purchases"] == {"items": [], "unruled": [], "unnamed": [],
+                                "unavailable": True}
     assert out["identity"] == {"contact_id": "uuid-1"}
     assert out["timeline"] == {"events": [1]}
 

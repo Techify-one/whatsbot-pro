@@ -165,6 +165,7 @@ function PurchasesBlock({ purchases }) {
   const bloco = purchases || {};
   const items = bloco.items || [];
   const unruled = bloco.unruled || [];
+  const unnamed = bloco.unnamed || [];
 
   if (bloco.unavailable) {
     return html`
@@ -174,23 +175,39 @@ function PurchasesBlock({ purchases }) {
       </section>`;
   }
 
-  // Canal (ou tipo de evento) sem regra de valor no CDP: a compra existe, mas o
-  // Trackify não a classifica como dinheiro. Nomear é acionável — aponta para a
-  // configuração do CDP, não para um bug do plugin.
-  const nota = unruled.length ? html`
-    <div class="text-[12px] text-wa-secondary">
-      ${unruled.reduce((a, u) => a + Number(u.events || 0), 0)} evento(s) com produto
-      vieram de ${unruled.map((u) => `${u.channel} · ${eventLabel(u.event_type)}`).join(', ')},
-      que não têm regra de valor no Trackify — compras assim não aparecem aqui.
-    </div>` : null;
+  // Dois diagnósticos IRMÃOS e opostos, fáceis de confundir. Ambos apontam para
+  // a configuração do CDP, não para um bug do plugin — e mandar o operador
+  // configurar o canal errado é pior que não avisar nada.
+  const origens = (lista) => lista
+    .map((u) => `${u.channel} · ${eventLabel(u.event_type)}`).join(', ');
+  const total = (lista) => lista.reduce((a, u) => a + Number(u.events || 0), 0);
+
+  const avisos = [];
+  if (unruled.length) {
+    // A compra existe, mas o Trackify não a classifica como dinheiro.
+    avisos.push(html`
+      <div key="unruled" class="text-[12px] text-wa-secondary">
+        ${total(unruled)} evento(s) com produto vieram de ${origens(unruled)},
+        que não têm regra de valor no Trackify — compras assim não aparecem aqui.
+      </div>`);
+  }
+  if (unnamed.length) {
+    // O oposto: é dinheiro reconhecido, mas o evento não diz O QUÊ foi comprado.
+    avisos.push(html`
+      <div key="unnamed" class="text-[12px] text-wa-secondary">
+        ${total(unnamed)} cobrança(s) de ${origens(unnamed)} entraram no total gasto,
+        mas não trazem nome nem id de produto — não dá para listá-las como linha.
+      </div>`);
+  }
 
   if (!items.length) {
     return html`
       <section class="py-8 text-center">
         <div class="text-sm text-wa-text">
-          ${unruled.length ? 'Nenhuma compra registrada.' : 'Este contato ainda não comprou nada.'}
+          ${avisos.length ? 'Nenhuma compra pôde ser listada.' : 'Este contato ainda não comprou nada.'}
         </div>
-        ${nota ? html`<div class="max-w-md mx-auto mt-2">${nota}</div>` : null}
+        ${avisos.length ? html`
+          <div class="max-w-md mx-auto mt-2 space-y-2">${avisos}</div>` : null}
       </section>`;
   }
 
@@ -200,7 +217,7 @@ function PurchasesBlock({ purchases }) {
       <ul class="space-y-2">
         ${items.map((p) => html`<${PurchaseRow} key=${p.key} p=${p} />`)}
       </ul>
-      ${nota ? html`<div class="mt-3">${nota}</div>` : null}
+      ${avisos.length ? html`<div class="mt-3 space-y-2">${avisos}</div>` : null}
     </section>`;
 }
 
