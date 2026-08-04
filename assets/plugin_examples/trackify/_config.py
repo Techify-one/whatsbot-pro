@@ -13,12 +13,10 @@ PREFIX = "plugin.trackify."
 
 # Espelho dos defaults de settings.Settings (fonte da verdade lá).
 DEFAULTS: dict = {
-    "nexus_dsn": "",
     "nexus_base_url": "",
     "cache_ttl_seconds": 60,
     "timeline_page_size": 25,
     "product_identity_fields": "product_name,offer_name,product_id,offer_id",
-    "statement_timeout_ms": 5000,
     "mirror_enabled": False,
     "mirror_dry_run": True,
     "ingestion_url": "",
@@ -32,22 +30,22 @@ DEFAULTS: dict = {
     "field_sync_poll_seconds": 60,
     "field_sync_rate_per_min": 15,
     "field_sync_reconcile_minutes": 60,
-    "service_email": "",
     "sync_api_base": "",
-    # Não declarados em settings.py de propósito (segredo, ver docstring de lá).
-    "api_key": "",
-    "service_password": "",
-    # Id do usuário da conta de serviço, capturado no login. É a chave da
-    # supressão de eco (descartamos do changelog o que foi escrito por nós), e
-    # por isso NÃO é configurado à mão: vem do corpo da resposta de login.
-    "sync_user_id": "",
-    # Motivo pelo qual a sincronização se AUTO-DESLIGOU (3 falhas seguidas).
-    # Enquanto preenchido, o worker não puxa linha da fila.
+    # Não declarada em settings.py de propósito (segredo, ver docstring de lá).
+    # É a ÚNICA credencial do plugin: vale para ler, escrever e ingerir, conforme
+    # os escopos concedidos na tela do Trackify.
+    "sync_api_key": "",
+    # Id da API key, lido do /api-keys/me. É a chave da supressão de eco:
+    # descartamos do changelog o que foi escrito pelo ator `apikey:<id>`. NÃO é
+    # configurado à mão — vem da resposta do próprio Trackify.
+    "sync_api_key_id": "",
+    # Motivo pelo qual a sincronização se AUTO-DESLIGOU. Enquanto preenchido, o
+    # worker não puxa linha da fila.
     "sync_blocked_reason": "",
-    # Último erro de login, gravado já na PRIMEIRA falha. Separado do anterior de
-    # propósito: precisa aparecer na tela na hora, mas uma falha isolada de rede
-    # não pode parar a sincronização.
-    "sync_last_login_error": "",
+    # Último erro de autenticação, gravado já na PRIMEIRA falha. Separado do
+    # anterior de propósito: precisa aparecer na tela na hora, mas uma falha
+    # isolada de rede não pode parar a sincronização.
+    "sync_last_auth_error": "",
     # Gerado uma vez no primeiro uso do espelho; entra no external_id para que
     # staging e produção nunca colidam no mesmo canal do Trackify.
     "install_id": "",
@@ -57,19 +55,15 @@ DEFAULTS: dict = {
 def setting(key: str, default=None):
     """Lê uma setting, caindo no default declarado e depois em ``default``.
 
-    NUNCA levanta: ``trackify_db.ping``/``schema_check`` prometem não levantar, e
-    ler config toca o banco do WhatsBot (que pode não estar inicializado — boot,
-    harness de teste, script standalone). Falha vira o default, não exceção.
+    NUNCA levanta: ler config toca o banco do WhatsBot, que pode não estar
+    inicializado (boot, harness de teste, script standalone), e os call sites
+    prometem não explodir. Falha vira o default, não exceção.
     """
     fallback = DEFAULTS.get(key, default)
     try:
         return config_repo.get(PREFIX + key, fallback)
     except Exception:  # noqa: BLE001
         return fallback
-
-
-def nexus_dsn() -> str:
-    return (setting("nexus_dsn") or "").strip()
 
 
 def nexus_base_url() -> str:
@@ -124,11 +118,10 @@ def api_base() -> str:
 
 
 def credential_set() -> bool:
-    """Há conta de serviço utilizável? Usado para gatear a escrita SEM tentar
-    login — a rota de login do Nexus é limitada a 5 tentativas por minuto."""
-    return bool((setting("service_email") or "").strip()
-                and (setting("service_password") or "").strip()
-                and api_base())
+    """Há API key utilizável? Gateia leitura E escrita — desde que o plugin
+    deixou de abrir conexão no Postgres do CDP, não existe mais direção que
+    funcione sem credencial."""
+    return bool((setting("sync_api_key") or "").strip() and api_base())
 
 
 def field_sync_ready() -> bool:

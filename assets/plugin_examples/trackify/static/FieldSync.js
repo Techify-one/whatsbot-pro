@@ -90,15 +90,14 @@ function Empty({ title, children }) {
     </div>`;
 }
 
-// ── Conta de serviço ─────────────────────────────────────────────────────
+// ── API key ──────────────────────────────────────────────────────────────
 
-function ServiceAccount({ state, onSave, onTest, busy }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+export function ApiKeyCard({ state, onSave, onTest, busy }) {
+  const [key, setKey] = useState('');
   const [veredito, setVeredito] = useState(null);
 
   useEffect(() => {
-    if (state) { setEmail(state.email || ''); setPassword(state.password_masked || ''); }
+    if (state) setKey(state.key_masked || '');
   }, [state]);
 
   if (!state) return html`<section class="wa-panel border border-wa-border rounded p-4 text-sm text-wa-secondary">Carregando…</section>`;
@@ -106,53 +105,51 @@ function ServiceAccount({ state, onSave, onTest, busy }) {
   return html`
     <section class="wa-panel border border-wa-border rounded p-4 space-y-3">
       <div class="flex items-center justify-between">
-        <h3 class="font-medium text-wa-text">Conta de serviço do Nexus</h3>
+        <h3 class="font-medium text-wa-text">API key do Trackify</h3>
         <${Badge} tone=${state.set ? 'info' : 'warn'}>${state.set ? 'configurada' : 'não configurada'}<//>
       </div>
       <p class="text-xs text-wa-secondary">
-        As rotas de contato do Trackify só aceitam sessão de usuário — não existe
-        chave de API para elas. Use um usuário <strong>dedicado</strong> a esta
-        integração: se uma pessoa entrar no Trackify com estas credenciais, as
-        edições dela serão ignoradas pela sincronização.
-        <br />Só é necessária para escrever no Trackify (${DIR_GLYPH.to_trackify} e
-        ${DIR_GLYPH.both}). A direção ${DIR_GLYPH.to_whatsbot} funciona sem ela.
+        Gere a chave no Trackify em <strong>Configurações → API Keys</strong>, com as
+        permissões <code>read</code>, <code>contacts:write</code> e <code>ingest</code>.
+        Ela é exibida uma única vez, na criação — o Trackify guarda só o hash.
+        <br />É a <strong>única</strong> credencial do plugin: vale para ler a jornada,
+        escrever campos (${DIR_GLYPH.to_trackify} e ${DIR_GLYPH.both}) e enviar eventos.
       </p>
       ${state.blocked_reason && html`
         <div class="text-xs text-red-500 border border-red-500/40 rounded p-2">${state.blocked_reason}</div>`}
-      ${!state.blocked_reason && state.last_login_error && html`
+      ${!state.blocked_reason && state.last_auth_error && html`
         <div class="text-xs text-amber-500 border border-amber-500/40 rounded p-2">
-          Último login falhou: ${state.last_login_error}
+          Última autenticação falhou: ${state.last_auth_error}
         </div>`}
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label class="block text-xs text-wa-secondary">E-mail
-          <input class="wa-field w-full mt-1 px-2 py-1 rounded text-sm" value=${email}
-            onInput=${(e) => setEmail(e.target.value)} placeholder="bot-whatsbot@empresa.com" />
-        </label>
-        <label class="block text-xs text-wa-secondary">Senha
-          <input type="password" class="wa-field w-full mt-1 px-2 py-1 rounded text-sm"
-            value=${password} onInput=${(e) => setPassword(e.target.value)} />
-        </label>
-      </div>
+      <label class="block text-xs text-wa-secondary">Chave
+        <input type="password" class="wa-field w-full mt-1 px-2 py-1 rounded text-sm"
+          value=${key} onInput=${(e) => setKey(e.target.value)}
+          placeholder="tk_………" />
+      </label>
       ${state.api_base && html`
         <div class="text-[11px] text-wa-secondary">API deduzida: <code>${state.api_base}</code></div>`}
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
         <button class="px-3 py-1 rounded bg-wa-teal text-white text-sm disabled:opacity-50"
           disabled=${busy} onClick=${async () => {
             setVeredito(null);
-            await onSave({ email, password });
+            await onSave({ key });
           }}>Salvar</button>
         <button class="px-3 py-1 rounded border border-wa-border text-sm disabled:opacity-50"
           disabled=${busy} onClick=${async () => {
             // Testa o que está DIGITADO, não só o que está salvo — é a diferença
             // entre conferir antes e descobrir pela fila de erro depois.
-            const r = await onTest({ email, password });
+            const r = await onTest({ key });
             setVeredito((r && r.data) || { ok: false, message: 'Falha ao testar.' });
-          }}>Testar acesso de escrita</button>
+          }}>Testar acesso</button>
         ${veredito && html`
-          <span class=${`text-xs ${veredito.ok ? 'text-wa-teal' : 'text-red-500'}`}>
-            ${veredito.message}${veredito.ok && veredito.user_id ? ` (usuário ${veredito.user_id})` : ''}
+          <span class=${`text-xs ${veredito.ok && !(veredito.missing_scopes || []).length ? 'text-wa-teal' : 'text-red-500'}`}>
+            ${veredito.message}${veredito.ok && veredito.name ? ` (${veredito.name})` : ''}
           </span>`}
       </div>
+      ${veredito && veredito.ok && (veredito.scopes || []).length ? html`
+        <div class="text-[11px] text-wa-secondary">
+          Permissões da chave: ${veredito.scopes.join(', ')}
+        </div>` : null}
     </section>`;
 }
 
@@ -211,7 +208,9 @@ function MappingRow({ row, index, vocab, fields, tkReachable, credSet, pullEnabl
             disabled=${!canEdit}
             onChange=${(e) => onChange(index, { direction: e.target.value })}>
             ${Object.keys(DIR_LABEL).map((d) => html`
-              <option value=${d} disabled=${(d !== 'to_whatsbot' && !credSet)
+              <!-- Sem chave nenhum sentido funciona: a leitura também é HTTP
+                   autenticado desde que o DSN direto ao banco do CDP acabou. -->
+              <option value=${d} disabled=${!credSet
                                             || (d !== 'to_trackify' && !pullEnabled)}>
                 ${DIR_GLYPH[d]} ${DIR_LABEL[d]}
               </option>`)}
@@ -388,7 +387,7 @@ function SyncStatus({ data, onRefresh, busy }) {
           gravado no Trackify, e a leitura de volta nem chega a rodar — ela se
           recusa a ligar sem saber quem somos, senão reimportaria as próprias
           escritas como se fossem edições de uma pessoa.
-          ${data.last_login_error ? html`<div class="mt-1">${data.last_login_error}</div>` : null}
+          ${data.last_auth_error ? html`<div class="mt-1">${data.last_auth_error}</div>` : null}
         </div>`}
 
       ${m.length > 0 && html`
@@ -488,7 +487,7 @@ export default function FieldSync({ req, settings, onSaveSettings, busy, canEdit
   const loadAll = useCallback(async () => {
     const [v, f, m, c, s] = await Promise.all([
       req('GET', '/contact-attributes'), req('GET', '/trackify-fields'),
-      req('GET', '/mappings'), req('GET', '/service-account'),
+      req('GET', '/mappings'), req('GET', '/api-key'),
       req('GET', '/field-sync/status'),
     ]);
     if (v && v.ok) setVocab(v.data);
@@ -523,12 +522,12 @@ export default function FieldSync({ req, settings, onSaveSettings, busy, canEdit
   }, [req, rows]);
 
   const saveCred = useCallback(async (body) => {
-    const r = await req('PUT', '/service-account', body);
-    if (r && r.ok) { await loadAll(); setFlash('Conta de serviço salva.'); }
+    const r = await req('PUT', '/api-key', body);
+    if (r && r.ok) { await loadAll(); setFlash('API key salva.'); }
     return r;
   }, [req, loadAll]);
 
-  const testCred = useCallback((body) => req('POST', '/service-account/test', body), [req]);
+  const testCred = useCallback((body) => req('POST', '/api-key/test', body), [req]);
 
   const s = settings || {};
   const credSet = !!(cred && cred.set);
@@ -565,7 +564,6 @@ export default function FieldSync({ req, settings, onSaveSettings, busy, canEdit
         </p>
       </section>
 
-      <${ServiceAccount} state=${cred} onSave=${saveCred} onTest=${testCred} busy=${busy} />
 
       <${MappingEditor} rows=${rows} vocab=${vocab} tk=${tk} credSet=${credSet}
         pullEnabled=${pullEnabled} errors=${errors} onChange=${change} onAdd=${add}

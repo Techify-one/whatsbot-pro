@@ -9,6 +9,13 @@ Serve as DUAS direções e é por isso que vive separado de ``journey.py``:
   política "criar sempre" um telefone em grafia diferente vira um contato
   duplicado, em silêncio, para sempre.
 
+⚠️ **A consulta migrou para ``POST /contacts/resolve``.** Antes este módulo
+carregava o SQL e o rodava direto no Postgres do CDP. O que ficou aqui é o que é
+DO WHATSBOT: gerar as grafias equivalentes de um telefone brasileiro (DDI, nono
+dígito) e de um CPF (com e sem máscara), e escolher em que ordem tentar. O
+servidor compara — por igualdade exata, com o fallback por dígitos como caminho
+frio opcional, exatamente como era antes.
+
 Ordem de tentativa = a ``identifier_priority`` do próprio Trackify (medida na F0):
 ``email`` (10) → ``whatsapp`` (20) → ``cpf`` (30) → ``telegram_id`` (40). O e-mail
 vem primeiro porque **99,5% dos contatos do CDP têm e-mail** — quando o atendente
@@ -20,8 +27,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from . import client as tk_client
 from . import phone as phone_mod
-from . import trackify_db
 
 logger = logging.getLogger("plugins.trackify.identity")
 
@@ -42,149 +49,111 @@ class Match:
     matched_by: str    # 'variant' (indexado) | 'digits' (fallback com máscara)
 
 
-# ── Consultas ────────────────────────────────────────────────────────────
+# ── Grafias equivalentes (puro, sem rede) ────────────────────────────────
 
-_SQL_BY_VALUES = """
-SELECT c.id::text AS contact_id, cfv.value AS exact_value
-FROM contact_field_values cfv
-JOIN custom_fields cf ON cf.id = cfv.custom_field_id AND cf.deleted_at IS NULL
-JOIN contacts c       ON c.id = cfv.contact_id AND c.deleted_at IS NULL
-WHERE cf.slug = :slug AND cfv.value = ANY(:cands)
-"""
+def candidates_for(slug: str, value: str | None) -> list[str]:
+    """Todas as grafias de ``value`` que devem ser tentadas para ``slug``.
 
-# Fallback tolerante a máscara. Medido na F0: só 6 de 10.910 valores de
-# ``whatsapp`` têm caractere fora de [0-9+], então isto é CAMINHO FRIO — roda
-# apenas quando a busca indexada não achou nada. Não use como caminho primário:
-# ``regexp_replace`` nos dois lados não usa ``idx_cfv_identifier_lookup``.
-_SQL_BY_DIGITS = """
-SELECT c.id::text AS contact_id, cfv.value AS exact_value
-FROM contact_field_values cfv
-JOIN custom_fields cf ON cf.id = cfv.custom_field_id AND cf.deleted_at IS NULL
-JOIN contacts c       ON c.id = cfv.contact_id AND c.deleted_at IS NULL
-WHERE cf.slug = :slug
-  AND regexp_replace(cfv.value, '[^0-9]', '', 'g') = ANY(:digits)
-"""
-
-
-def _by_values(slug: str, candidates: list[str]) -> list[Match]:
-    if not candidates:
+    É PURO de propósito: o servidor compara byte a byte, então a qualidade do
+    casamento depende inteiramente do que sai daqui — e isso precisa ser
+    testável sem rede.
+    """
+    v = (value or "").strip()
+    if not v:
         return []
-    rows = trackify_db.run_read(_SQL_BY_VALUES, {"slug": slug, "cands": candidates})
-    return [Match(r["contact_id"], slug, r["exact_value"], "variant") for r in rows]
+
+    if slug == SLUG_WHATSAPP:
+        return phone_mod.lookup_candidates(v)
+
+    if slug == SLUG_EMAIL:
+        low = v.lower()
+        if "@" not in low:
+            return []
+        # O CDP guarda a grafia que recebeu; testamos as duas formas óbvias em
+        # vez de um ILIKE, que não usaria o índice do outro lado.
+        return list(dict.fromkeys([low, v]))
+
+    if slug == SLUG_CPF:
+        digits = phone_mod.digits_only(v)
+        if len(digits) != 11:
+            return []
+        masked = f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
+        return [digits, masked]
+
+    if slug == SLUG_TELEGRAM:
+        return [v]
+
+    # Identificador criado pelo cliente: sem regra conhecida, vale o valor cru.
+    # O fallback por dígitos do servidor cobre documento/telefone mascarados.
+    return [v]
 
 
-def _by_digits(slug: str, digits: list[str]) -> list[Match]:
-    if not digits:
+# ⚠️ A ORDEM DE PRIORIDADE saiu daqui. Quem ordena os casamentos é o servidor,
+# pela `identifier_priority` do próprio CDP — a mesma que o `pipeline.ts` percorre
+# na ingestão. Manter uma segunda cópia da regra aqui é o jeito de a leitura casar
+# num contato e a escrita em outro.
+
+
+# ── Consulta (rede) ──────────────────────────────────────────────────────
+
+async def resolve_candidates(http, candidatos: dict) -> list[Match]:
+    """Resolve ``{slug: valor}`` numa chamada só, na prioridade do CDP.
+
+    Manda TODOS os identificadores de uma vez em vez de um por vez: com SQL local
+    cada tentativa custava 0,085 ms, mas agora cada uma seria uma ida à rede. O
+    servidor devolve os casamentos já ordenados por prioridade e com um contato
+    por linha, que é a mesma semântica do laço antigo — parar no primeiro
+    identificador que achar alguém.
+    """
+    payload: dict[str, list[str]] = {}
+    for slug, valor in (candidatos or {}).items():
+        cands = candidates_for(slug, valor)
+        if cands:
+            payload[slug] = cands
+    if not payload:
         return []
-    rows = trackify_db.run_read(_SQL_BY_DIGITS, {"slug": slug, "digits": digits})
-    return [Match(r["contact_id"], slug, r["exact_value"], "digits") for r in rows]
+
+    res = await tk_client.resolve(http, payload)
+    if not res.ok:
+        logger.debug("trackify: resolve recusado (%s)", res.error)
+        return []
+
+    matches = _matches_from(res.data)
+    if matches:
+        return matches
+
+    # Nada no exato: repete pedindo o fallback tolerante a máscara. Só aqui —
+    # é caminho frio dos dois lados (medido: 6 de 10.910 valores de `whatsapp`
+    # têm caractere fora de [0-9+]).
+    res = await tk_client.resolve(http, payload, digits_fallback=True)
+    return _matches_from(res.data) if res.ok else []
 
 
-def _dedupe(matches: list[Match]) -> list[Match]:
-    """Um contato só, mesmo que dois candidatos tenham casado nele."""
-    seen: set[str] = set()
+def _matches_from(data) -> list[Match]:
+    """``{matches:[...]}`` → ``[Match]``. Resposta ilegível vira lista vazia."""
+    try:
+        linhas = (data or {}).get("matches") or []
+    except Exception:  # noqa: BLE001
+        return []
     out: list[Match] = []
-    for m in matches:
-        if m.contact_id in seen:
+    for row in linhas:
+        cid = str(row.get("contactId") or "")
+        if not cid:
             continue
-        seen.add(m.contact_id)
-        out.append(m)
+        out.append(Match(cid, str(row.get("slug") or ""),
+                         str(row.get("value") or ""),
+                         str(row.get("matchedBy") or "variant")))
     return out
 
 
-# ── API pública ──────────────────────────────────────────────────────────
-
-def resolve_by_phone(value: str | None) -> list[Match]:
-    """Contatos do Trackify cujo ``whatsapp`` casa com ``value``.
-
-    Primeiro pelas variantes (indexado, 0,085 ms). Só no vazio tenta a comparação
-    por dígitos, que tolera máscara.
-    """
-    candidates = phone_mod.lookup_candidates(value)
-    if not candidates:
-        return []
-    found = _by_values(SLUG_WHATSAPP, candidates)
-    if found:
-        return _dedupe(found)
-    digits = [c for c in candidates if not c.startswith("+")]
-    return _dedupe(_by_digits(SLUG_WHATSAPP, digits))
-
-
-def resolve_by_email(value: str | None) -> list[Match]:
-    """Contatos cujo ``email`` casa (comparação insensível a caixa e espaço)."""
-    v = (value or "").strip().lower()
-    if not v or "@" not in v:
-        return []
-    # O CDP guarda a grafia que recebeu; testamos as duas formas óbvias em vez
-    # de um ILIKE (que não usaria o índice).
-    return _dedupe(_by_values(SLUG_EMAIL, [v, (value or "").strip()]))
-
-
-def resolve_by_cpf(value: str | None) -> list[Match]:
-    """Contatos cujo ``cpf`` casa. CPF circula com e sem máscara — testamos as duas."""
-    digits = phone_mod.digits_only(value)
-    if len(digits) != 11:
-        return []
-    masked = f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
-    found = _by_values(SLUG_CPF, [digits, masked])
-    if found:
-        return _dedupe(found)
-    return _dedupe(_by_digits(SLUG_CPF, [digits]))
-
-
-def resolve_by_telegram(value: str | None) -> list[Match]:
-    """Contatos cujo ``telegram_id`` casa (chat_id numérico, comparação literal)."""
-    v = (value or "").strip()
-    return _dedupe(_by_values(SLUG_TELEGRAM, [v])) if v else []
-
-
-# Prioridade padrão do Trackify, usada quando o catálogo do CDP não pôde ser
-# lido. Medida na F0 e igual à ordem que o ``pipeline.ts`` percorre.
-_PRIORIDADE_PADRAO = {SLUG_EMAIL: 10, SLUG_WHATSAPP: 20, SLUG_CPF: 30,
-                      SLUG_TELEGRAM: 40}
-
-
-def resolve_by_slug(slug: str, value: str | None) -> list[Match]:
-    """Resolve por QUALQUER identificador, inclusive um criado pelo cliente.
-
-    Os quatro slugs conhecidos têm normalização própria (telefone tem variante
-    brasileira, CPF circula com e sem máscara, e-mail é insensível a caixa). Um
-    identificador que o cliente criou no CDP não tem regra conhecida, então vale
-    a comparação exata com um fallback por dígitos — que é o que dá certo para
-    documento e telefone mascarados, os casos comuns.
-    """
-    slug = (slug or "").strip()
-    value = (value or "").strip()
-    if not slug or not value:
-        return []
-    if slug == SLUG_WHATSAPP:
-        return resolve_by_phone(value)
-    if slug == SLUG_EMAIL:
-        return resolve_by_email(value)
-    if slug == SLUG_CPF:
-        return resolve_by_cpf(value)
-    if slug == SLUG_TELEGRAM:
-        return resolve_by_telegram(value)
-
-    found = _by_values(slug, [value])
-    if found:
-        return _dedupe(found)
-    digits = phone_mod.digits_only(value)
-    return _dedupe(_by_digits(slug, [digits])) if digits else []
-
-
-def resolve_mapped(*, phone: str | None, extras: dict | None = None,
-                   contact_type: str = "whatsapp") -> list[Match]:
+async def resolve_mapped(http, *, phone: str | None, extras: dict | None = None,
+                         contact_type: str = "whatsapp") -> list[Match]:
     """Tenta o TELEFONE e todo campo conectado que seja identificador no CDP.
 
     ``extras`` é ``{slug_no_trackify: valor_no_whatsbot}``, montado a partir dos
     mapeamentos ativos (ver ``field_map.identifier_hints``). Assim, conectar um
     campo na tela passa a valer também para ENCONTRAR o cadastro, e não só para
     copiar o valor depois — que era a pergunta natural de quem configura.
-
-    A ordem é a ``identifier_priority`` do próprio Trackify, porque é a mesma que
-    a ingestão dele percorre: divergir faria a leitura casar num contato e a
-    escrita em outro. Para no primeiro identificador que achar alguém.
     """
     candidatos: dict[str, str] = {}
     for slug, valor in (extras or {}).items():
@@ -197,60 +166,40 @@ def resolve_mapped(*, phone: str | None, extras: dict | None = None,
     elif phone:
         candidatos.setdefault(SLUG_WHATSAPP, phone.strip())
 
-    prioridade = _prioridades()
-    ordenados = sorted(candidatos.items(),
-                       key=lambda kv: (prioridade.get(kv[0], 999), kv[0]))
-    for slug, valor in ordenados:
-        found = resolve_by_slug(slug, valor)
-        if found:
-            return found
-    return []
+    return await resolve_candidates(http, candidatos)
 
 
-def _prioridades() -> dict:
-    """``{slug: identifier_priority}`` do CDP, com o padrão medido como piso."""
-    out = dict(_PRIORIDADE_PADRAO)
-    try:
-        from . import field_map
-        catalogo = field_map.tk_fields()
-        for f in catalogo.get("fields") or []:
-            if f.get("is_identifier"):
-                pr = f.get("identifier_priority")
-                out[f["slug"]] = 999 if pr is None else int(pr)
-    except Exception:  # noqa: BLE001 — sem catálogo, o padrão serve
-        logger.debug("trackify: catálogo de identificadores indisponível", exc_info=True)
-    return out
-
-
-def resolve(*, phone: str | None = None, email: str | None = None,
-            cpf: str | None = None, telegram_id: str | None = None,
-            contact_type: str = "whatsapp") -> list[Match]:
+async def resolve(http, *, phone: str | None = None, email: str | None = None,
+                  cpf: str | None = None, telegram_id: str | None = None,
+                  contact_type: str = "whatsapp") -> list[Match]:
     """Resolve o contato tentando os identificadores na prioridade do Trackify.
 
-    Para no PRIMEIRO identificador que achar alguém — é a mesma semântica do
-    ``pipeline.ts``, que percorre os identificadores por prioridade e para no
-    primeiro acerto. Devolve lista porque o mesmo número pode estar em mais de
-    um contato (medido: 5 números com 2 cadastros) — quem chama decide se mostra
-    um seletor ou se desiste.
+    Devolve lista porque o mesmo número pode estar em mais de um contato (medido:
+    5 números com 2 cadastros) — quem chama decide se mostra um seletor ou se
+    desiste.
     """
+    candidatos: dict[str, str] = {}
     if email:
-        found = resolve_by_email(email)
-        if found:
-            return found
-    # Telegram não tem telefone: o "phone" do contato é o chat_id.
+        candidatos[SLUG_EMAIL] = email
     if contact_type == "telegram":
-        found = resolve_by_telegram(telegram_id or phone)
-        if found:
-            return found
+        candidatos[SLUG_TELEGRAM] = (telegram_id or phone or "")
     elif phone:
-        found = resolve_by_phone(phone)
-        if found:
-            return found
+        candidatos[SLUG_WHATSAPP] = phone
     if cpf:
-        found = resolve_by_cpf(cpf)
-        if found:
-            return found
-    return []
+        candidatos[SLUG_CPF] = cpf
+    return await resolve_candidates(http, {k: v for k, v in candidatos.items() if v})
+
+
+async def resolve_by_email(http, value: str | None) -> list[Match]:
+    return await resolve_candidates(http, {SLUG_EMAIL: value or ""})
+
+
+async def resolve_by_cpf(http, value: str | None) -> list[Match]:
+    return await resolve_candidates(http, {SLUG_CPF: value or ""})
+
+
+async def resolve_by_phone(http, value: str | None) -> list[Match]:
+    return await resolve_candidates(http, {SLUG_WHATSAPP: value or ""})
 
 
 def canonical_identity(*, phone: str | None, email: str | None = None,
@@ -258,7 +207,7 @@ def canonical_identity(*, phone: str | None, email: str | None = None,
     """Identificadores a ENVIAR quando o contato não existe no CDP (criação).
 
     Só chaves com valor — a ingestão devolve 422 se nenhum identificador
-    sobreviver, e mandar string vazia não ajuda ninguém.
+    sobreviver, e mandar string vazia não ajuda ninguém. Puro, sem rede.
     """
     out: dict[str, str] = {}
     e = (email or "").strip().lower()

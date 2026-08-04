@@ -6,12 +6,14 @@ Renderizadas pelo ``PluginSettingsForm`` e persistidas com prefixo
 Os DEFAULTS aqui são a fonte da verdade — ``_config.setting`` repete os mesmos
 defaults ao ler (o form só materializa valores quando o usuário salva).
 
-⚠️ A CHAVE de ingestão (escrita) NÃO mora aqui: ``GET /api/plugins/{id}/settings``
-devolve os valores em claro e o form genérico ignora ``format: password``. Ela é
-gravada/lida por rota própria com sentinela ``"***"`` (padrão do plugin
-``melhorias``). O DSN fica aqui seguindo o precedente do ``vendas_ia``, que já
-guarda o MESMO segredo desta forma — divergir criaria duas convenções para a
-mesma credencial.
+⚠️ **Nenhum SEGREDO mora aqui**: ``GET /api/plugins/{id}/settings`` devolve os
+valores em claro e o form genérico ignora ``format: password``. A API key do
+Trackify (``sync_api_key``) e a chave de ingestão do canal (``api_key``) são
+gravadas/lidas por rota própria com sentinela ``"***"`` — padrão do plugin
+``melhorias``.
+
+O antigo ``nexus_dsn`` saiu daqui junto com a conexão direta ao Postgres do CDP:
+o plugin fala com o Trackify exclusivamente por HTTP.
 """
 
 from __future__ import annotations
@@ -20,19 +22,11 @@ from pydantic import BaseModel, Field
 
 
 class Settings(BaseModel):
-    # ── Leitura: conexão com o Nexus (read-only) ─────────────────────────
-    nexus_dsn: str = Field(
-        default="",
-        title="DSN do Nexus (read-only)",
-        description=(
-            "String de conexão SQLAlchemy para o banco do Nexus (RBNexusDB), onde "
-            "vivem as tabelas do Trackify. É o MESMO valor usado pelo plugin Vendas IA. "
-            "O SSL é forçado (sslmode=require) e a transação é read-only no servidor. "
-            "SEM este DSN o plugin fica em no-op: a tela mostra 'não configurado'. "
-            "Nunca é logado."
-        ),
-        json_schema_extra={"format": "password"},
-    )
+    # ── Leitura ──────────────────────────────────────────────────────────
+    #
+    # Não há mais DSN: o plugin fala com o Trackify SÓ por HTTP, autenticado
+    # pela API key (que é segredo e por isso não é declarada aqui — ver a nota
+    # no fim do arquivo).
     nexus_base_url: str = Field(
         default="",
         title="URL do Trackify (para 'Abrir no Trackify')",
@@ -68,15 +62,6 @@ class Settings(BaseModel):
             "quais campos as compras não identificadas trazem. Vazio volta ao padrão."
         ),
     )
-    statement_timeout_ms: int = Field(
-        default=5000, ge=500, le=30000,
-        title="Tempo máximo de cada consulta (ms)",
-        description=(
-            "Teto aplicado pelo servidor do Nexus. Protege um banco de PRODUÇÃO "
-            "compartilhado de uma consulta ruim."
-        ),
-    )
-
     # ── Escrita (espelho para o CDP) — dormente até ser ligado ───────────
     mirror_enabled: bool = Field(
         default=False,
@@ -131,7 +116,7 @@ class Settings(BaseModel):
     )
 
     # ── Sincronização de campos do contato ───────────────────────────────
-    # ⚠️ A SENHA da conta de serviço não mora aqui, pelo mesmo motivo da chave
+    # ⚠️ A API KEY não mora aqui, pelo mesmo motivo da chave
     # de ingestão (ver o aviso no topo deste arquivo). Só o e-mail, que é
     # identificador público.
     field_sync_enabled: bool = Field(
@@ -139,7 +124,7 @@ class Settings(BaseModel):
         title="Sincronizar campos do contato",
         description=(
             "Liga a sincronização dos campos mapeados na aba 'Campos do contato'. "
-            "Exige a conta de serviço configurada. Só vale para contatos já "
+            "Exige a API key configurada. Só vale para contatos já "
             "vinculados a um cadastro no Trackify — nunca cria contato lá."
         ),
     )
@@ -180,15 +165,6 @@ class Settings(BaseModel):
         description=(
             "Passagem periódica que corrige o que evento e leitura não veem — "
             "importação por CSV, por exemplo, não emite evento nenhum."
-        ),
-    )
-    service_email: str = Field(
-        default="",
-        title="E-mail da conta de serviço do Nexus",
-        description=(
-            "Usuário DEDICADO do Nexus com acesso ao Trackify. Precisa ser exclusivo "
-            "desta integração: se uma pessoa usar essas credenciais para entrar na "
-            "tela do Trackify, as edições dela serão ignoradas pela sincronização."
         ),
     )
     sync_api_base: str = Field(

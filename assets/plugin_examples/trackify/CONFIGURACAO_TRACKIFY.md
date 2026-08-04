@@ -4,6 +4,25 @@
 > Enquanto isto não estiver pronto, deixe `Espelhar acontecimentos no Trackify` **desligado**
 > nas configurações do plugin: a fila só acumularia erro.
 
+## 0. Criar a API key (faça isto primeiro)
+
+**Configurações → API Keys → Nova API Key**, com as três permissões:
+
+| escopo | para quê |
+|---|---|
+| `read` | ler a jornada, a linha do tempo, os campos e o changelog |
+| `contacts:write` | corrigir campo do contato (`PUT /contacts/:id`) |
+| `ingest` | postar os eventos do espelho |
+
+A chave aparece **uma única vez**, na criação — o Trackify guarda só o hash dela.
+Copie e cole em **Plugins → Trackify → Configurar → Campos do contato → API key**,
+e clique em **Testar acesso**: o veredito diz o nome da chave e as permissões que
+ela carrega.
+
+Essa chave é a **única credencial do plugin**. Não existe mais conta de serviço
+(usuário e senha de gente) nem DSN de Postgres: as duas direções passam por HTTP
+autenticado por ela. Revogar a chave no Trackify para a sincronização na hora.
+
 ## 1. Criar o canal
 
 **Canais → Novo canal**
@@ -17,7 +36,10 @@ Um canal só, não vários. O limite de ingestão é **por IP**, não por canal 
 triplica a vazão), o dedup é `(channel_id, external_id)` e `channel` é a dimensão "fonte"
 do CDP — um WhatsBot é uma fonte. O tipo do acontecimento é o que `event_type` distingue.
 
-**Autenticação** — em `config` do canal:
+**Autenticação** — a rota de ingestão aceita a API key do módulo (escopo `ingest`), que
+você já configurou no passo 0. Deixe `config.auth` como `{"type": "none"}` a menos que
+outros produtores (gateways, formulários) também postem nesse canal — nesse caso mantenha
+a chave própria do canal, que continua funcionando ao lado da do módulo:
 
 ```json
 { "auth": { "type": "api_key_header",
@@ -29,9 +51,8 @@ Não use `signature`: ele valida HMAC sobre `req.rawBody`, que o bootstrap do Ne
 habilita — a assinatura sairia calculada sobre string vazia e todo POST honesto falharia.
 Não use `api_key_query`: a chave cairia em log de acesso do proxy.
 
-Guarde a mesma chave no WhatsBot em **Plugins → Trackify → Configurar → chave de ingestão**
-(ela é gravada por rota própria, mascarada — não pelo formulário de settings, que devolve
-valores em claro).
+⚠️ A chave do canal é **mascarada** na leitura da API desde a versão com API keys; a tela
+mostra "Guardada — deixe em branco para manter". Digitar algo novo substitui.
 
 ## 2. Campos de evento (Campos personalizados → Eventos)
 
@@ -108,7 +129,7 @@ o campo correspondente. Com ele, o dado chega e fica consultável mesmo antes do
 
 ## 5. Ordem de ativação (não pule)
 
-1. Canal + campos + mapeamentos criados, chave configurada nos dois lados.
+1. API key criada (passo 0) e testada; canal + campos + mapeamentos criados.
 2. No WhatsBot: `URL de ingestão` = `https://SEU-NEXUS/trackify/api/v1/ingestion/whatsbot`.
 3. Ligue **Espelhar acontecimentos** deixando **Modo seco LIGADO**. A fila enche e nada é
    postado — confira o envelope e os `external_id` em Plugins → Trackify → fila.

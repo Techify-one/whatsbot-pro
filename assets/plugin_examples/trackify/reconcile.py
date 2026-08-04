@@ -49,7 +49,7 @@ def _next_batch(after_phone: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def cycle() -> dict:
+async def cycle(http) -> dict:
     """Uma passagem parcial. Devolve um resumo para o log/telemetria."""
     resumo = {"conferidos": 0, "enfileirados": 0, "gravados": 0,
               "conflitos": 0, "volta": False}
@@ -70,18 +70,21 @@ def cycle() -> dict:
         resumo["volta"] = True
         return resumo
 
+    import asyncio
+
     from db.repositories import contact_repo
 
     definicoes = pull._definicoes()
     phones_avisar = set()
     for linha in lote:
-        c = contact_repo.get_by_phone(linha["phone"])
+        c = await asyncio.to_thread(contact_repo.get_by_phone, linha["phone"])
         if not c:
             continue
         contact_id = int(c["id"])
         resumo["conferidos"] += 1
         try:
-            skip, tk_id, decisoes, _ = push.decisions_for_contact(contact_id, maps)
+            skip, tk_id, decisoes, _ = await push.decisions_for_contact(
+                http, contact_id, maps)
         except Exception:  # noqa: BLE001 — um contato ruim não para a varredura
             logger.debug("trackify: conferência falhou para um contato", exc_info=True)
             continue

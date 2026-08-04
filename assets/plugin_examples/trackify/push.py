@@ -25,7 +25,8 @@ from sqlalchemy import text
 
 from plugins.context import make_plugin_db
 
-from . import _config, field_codec, field_map, session, sync_core, sync_state, writer
+from . import _config, field_codec, field_map, sync_core, sync_state, writer
+from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.push")
 
@@ -121,28 +122,30 @@ class Plan:
         self.decisions = decisions or []
 
 
-def decisions_for_contact(contact_id: int, maps: list) -> tuple:
+async def decisions_for_contact(http, contact_id: int, maps: list) -> tuple:
     """``(motivo_pular, tk_id, decisões, valores_do_whatsbot)`` para um contato.
 
     Compartilhado pelo push e pela varredura de conferência, de propósito: são
     os dois caminhos que precisam comparar os dois lados, e duas cópias da
     comparação divergiriam com o tempo.
     """
+    import asyncio
+
     from db.repositories import contact_repo
 
-    contact = contact_repo.get(contact_id)
+    contact = await asyncio.to_thread(contact_repo.get, contact_id)
     if not contact:
         return "contato não existe mais", "", [], {}
     if contact.get("is_group"):
         return "grupo não tem cadastro no CDP", "", [], {}
 
-    tk_id = _linked_id(str(contact.get("phone") or ""), contact)
+    tk_id = await _linked_id(http, str(contact.get("phone") or ""), contact)
     if not tk_id:
         return "contato não vinculado a um cadastro no Trackify", "", [], {}
 
-    wb_values = _wb_values(contact)
-    tk_values = _tk_values(tk_id, [m["tk_slug"] for m in maps])
-    states = sync_state.load_for_contacts([contact_id])
+    wb_values = await asyncio.to_thread(_wb_values, contact)
+    tk_values = await _tk_values(http, tk_id, [m["tk_slug"] for m in maps])
+    states = await asyncio.to_thread(sync_state.load_for_contacts, [contact_id])
 
     decisions = []
     for m in maps:
@@ -153,7 +156,7 @@ def decisions_for_contact(contact_id: int, maps: list) -> tuple:
     return "", tk_id, decisions, wb_values
 
 
-def plan_for_contact(contact_id: int) -> Plan:
+async def plan_for_contact(http, contact_id: int) -> Plan:
     """O que precisaria ser escrito no CDP para este contato convergir.
 
     Bloqueante (banco do WhatsBot + leitura do CDP). Sem vínculo de identidade
@@ -165,7 +168,7 @@ def plan_for_contact(contact_id: int) -> Plan:
     if not maps:
         return Plan(skip="nenhum mapeamento de saída ativo")
 
-    skip, tk_id, decisions, wb_values = decisions_for_contact(contact_id, maps)
+    skip, tk_id, decisions, wb_values = await decisions_for_contact(http, contact_id, maps)
     if skip:
         return Plan(skip=skip)
 
@@ -212,33 +215,29 @@ def _wb_values(contact: dict) -> dict:
     return out
 
 
-_TK_VALUES_SQL = """
-SELECT cf.slug AS slug, cfv.value AS value
-FROM contact_field_values cfv
-JOIN custom_fields cf ON cf.id = cfv.custom_field_id
-WHERE cfv.contact_id = CAST(:cid AS uuid) AND cf.slug = ANY(:slugs)
-"""
+async def _tk_values(http, trackify_contact_id: str, slugs: list) -> dict:
+    """Valores ATUAIS no CDP dos slugs mapeados.
 
-
-def _tk_values(trackify_contact_id: str, slugs: list) -> dict:
+    Slug ausente na resposta = campo sem linha EAV no CDP, ou seja VAZIO — e não
+    "desconhecido". A diferença importa: sem semear com ``""`` um campo apagado
+    lá nunca seria detectado como apagado.
+    """
     if not slugs:
         return {}
-    rows = trackify_db_run(_TK_VALUES_SQL,
-                           {"cid": trackify_contact_id, "slugs": list(slugs)})
-    # Slug ausente = campo sem linha EAV no CDP, ou seja VAZIO — e não
-    # "desconhecido". A diferença importa: sem semear com "" um campo apagado lá
-    # nunca seria detectado como apagado.
     out = {s: "" for s in slugs}
-    out.update({r["slug"]: r["value"] for r in rows})
+    res = await tk_client.get_contact(http, trackify_contact_id)
+    if not res.ok:
+        # Não dá para afirmar "vazio" quando a leitura falhou: devolver o
+        # semeado faria a decisão enxergar apagamento onde houve indisponibilidade.
+        raise RuntimeError(res.error or "não foi possível ler os valores do CDP")
+    for row in (res.data or {}).get("contactFieldValues") or []:
+        slug = ((row.get("customField") or {}).get("slug")) or ""
+        if slug in out:
+            out[slug] = row.get("value") or ""
     return out
 
 
-def trackify_db_run(sql: str, params: dict) -> list:
-    from . import trackify_db
-    return trackify_db.run_read(sql, params)
-
-
-def _linked_id(phone: str, contact: dict | None = None) -> str:
+async def _linked_id(http, phone: str, contact: dict | None = None) -> str:
     """Id do cadastro do contato no CDP.
 
     Usa o cache de identidade e, quando ele não tem nada válido, **procura na
@@ -250,35 +249,45 @@ def _linked_id(phone: str, contact: dict | None = None) -> str:
     Vínculo velho é descartado de propósito: um merge no Trackify DELETA a
     grafia do perdedor, então o cache envelheceria sem aviso.
     """
+    import asyncio
+
     if not phone:
         return ""
-    with make_plugin_db() as conn:
-        row = conn.execute(text(
-            "SELECT trackify_contact_id, resolved_at FROM plugin_trackify_identity "
-            "WHERE phone = :p"), {"p": phone}).mappings().first()
-    if row and row["trackify_contact_id"] and (
-            _now() - float(row["resolved_at"] or 0) <= IDENTITY_TTL):
-        return str(row["trackify_contact_id"])
 
-    return _resolver_agora(phone, contact)
+    def _cache() -> str:
+        with make_plugin_db() as conn:
+            row = conn.execute(text(
+                "SELECT trackify_contact_id, resolved_at FROM plugin_trackify_identity "
+                "WHERE phone = :p"), {"p": phone}).mappings().first()
+        if row and row["trackify_contact_id"] and (
+                _now() - float(row["resolved_at"] or 0) <= IDENTITY_TTL):
+            return str(row["trackify_contact_id"])
+        return ""
+
+    cached = await asyncio.to_thread(_cache)
+    if cached:
+        return cached
+    return await _resolver_agora(http, phone, contact)
 
 
-def _resolver_agora(phone: str, contact: dict | None) -> str:
+async def _resolver_agora(http, phone: str, contact: dict | None) -> str:
     """Procura o cadastro no CDP e grava o vínculo. ``""`` quando não achou.
 
     Grava SÓ com acerto único. Mais de um cadastro casando é ambiguidade real
     (medido: números com 2 cadastros) e escolher em silêncio colaria os dados de
     uma pessoa no cadastro de outra.
     """
+    import asyncio
+
     from db.repositories import contact_repo
     from . import identity
 
     try:
-        c = contact or contact_repo.get_by_phone(phone)
+        c = contact or await asyncio.to_thread(contact_repo.get_by_phone, phone)
         if not c:
             return ""
-        matches = identity.resolve_mapped(
-            phone=phone, extras=field_map.identifier_hints(c),
+        matches = await identity.resolve_mapped(
+            http, phone=phone, extras=field_map.identifier_hints(c),
             contact_type=c.get("contact_type") or "whatsapp")
         if len(matches) != 1:
             return ""
@@ -374,7 +383,15 @@ async def deliver_one(client, row: dict) -> str:
     import asyncio
 
     contact_id = int(row["contact_id"])
-    plan = await asyncio.to_thread(plan_for_contact, contact_id)
+    try:
+        plan = await plan_for_contact(client, contact_id)
+    except Exception as e:  # noqa: BLE001
+        # Leitura do CDP indisponível: NÃO conta tentativa. Tratar como falha do
+        # item esgotaria as tentativas da fila inteira numa queda de rede.
+        await asyncio.to_thread(retry_later, row["id"], int(row["attempts"]),
+                                error=f"leitura do CDP falhou: {type(e).__name__}",
+                                count_attempt=False)
+        return "read_failed"
 
     if plan.skip:
         await asyncio.to_thread(finish, row["id"], "blocked", error=plan.skip)
@@ -392,25 +409,20 @@ async def deliver_one(client, row: dict) -> str:
                                 error=f"[modo seco] enviaria: {resumo}"[:500])
         return "dry_run"
 
-    sess = await session.get(client)
-    if sess is None:
-        # Sem sessão não é falha do item: não conta tentativa.
+    if not tk_client.is_configured():
+        # Sem credencial não é falha do item: não conta tentativa.
         await asyncio.to_thread(retry_later, row["id"], int(row["attempts"]),
-                                error=session.blocked_reason() or "sem sessão",
+                                error=_config.setting("sync_blocked_reason")
+                                      or "API key do Trackify não configurada",
                                 count_attempt=False)
-        return "no_session"
+        return "no_credential"
 
-    res = await writer.put_contact(client, sess, plan.trackify_contact_id,
-                                   plan.field_values)
-    if res.verdict == writer.UNAUTHORIZED:
-        # Exatamente UMA re-tentativa com sessão nova. Nunca mais que uma: a
-        # rota de login é limitada a 5/min.
-        session.invalidate()
-        sess = await session.get(client, force=True)
-        if sess is not None:
-            res = await writer.put_contact(client, sess, plan.trackify_contact_id,
-                                           plan.field_values)
+    res = await writer.put_contact(client, plan.trackify_contact_id, plan.field_values)
 
+    # ⚠️ Não existe re-tentativa aqui. Com cookie de sessão, 401 significava
+    # "venceu" e valia um relogin; com API key significa chave inválida,
+    # revogada ou sem escopo — re-tentar seria laço contra o Nexus do cliente.
+    # O item vira `blocked` com motivo acionável, pelo caminho comum abaixo.
     return await asyncio.to_thread(_apply_result, row, plan, contact_id, res)
 
 
@@ -444,6 +456,14 @@ def _apply_result(row: dict, plan: Plan, contact_id: int, res) -> str:
         _forget_identity(contact_id)
         finish(row["id"], "blocked", error=res.error, http=res.http_status)
         return "unlinked"
+
+    if res.verdict == writer.UNAUTHORIZED:
+        # Credencial ruim é problema de CONFIGURAÇÃO, não do contato: desliga a
+        # sincronização com motivo em vez de marcar cada linha da fila com o
+        # mesmo erro e martelar a API até a fila inteira estourar tentativas.
+        _block_sync(res.error)
+        finish(row["id"], "blocked", error=res.error, http=res.http_status)
+        return "unauthorized"
 
     if res.verdict == writer.BLOCKED:
         for d in plan.decisions:
@@ -481,6 +501,21 @@ def _record_all(contact_id: int, plan: Plan, *, pushed: bool = False) -> None:
                           tk_hash=tk_hash,
                           trackify_contact_id=plan.trackify_contact_id,
                           pushed=pushed and dec.action == sync_core.PUSH)
+
+
+def _block_sync(reason: str) -> None:
+    """Desliga a sincronização com motivo legível na tela.
+
+    O gate ``lifecycle`` consulta ``sync_blocked_reason`` antes de puxar linha da
+    fila, então isto para o worker inteiro — que é o comportamento certo para um
+    erro de credencial: nenhuma linha vai passar, e insistir só produz tráfego
+    inútil contra o Nexus do cliente.
+    """
+    from db.repositories import config_repo
+    config_repo.set_many({
+        _config.PREFIX + "sync_blocked_reason": reason,
+        _config.PREFIX + "sync_last_auth_error": reason,
+    })
 
 
 def _forget_identity(contact_id: int) -> None:

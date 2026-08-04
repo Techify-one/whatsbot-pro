@@ -14,11 +14,13 @@ Armadilhas de dados MEDIDAS em produção (não descobrir na frente do cliente):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from decimal import Decimal
 
-from . import _config, identity, trackify_db
+from . import _config, identity
+from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.journey")
 
@@ -111,172 +113,160 @@ def _parse_loose_date(raw) -> date | None:
 
 # ── Bloco 1 — identidade ─────────────────────────────────────────────────
 
-_SQL_CONTACT = """
-SELECT c.id::text AS id, c.status::text AS status, c.total_spent,
-       c.first_seen_at, c.converted_at, c.created_at
-FROM contacts c
-WHERE c.id = CAST(:cid AS uuid) AND c.deleted_at IS NULL
-"""
+async def _catalog(http) -> list[dict]:
+    """Catálogo de campos ativos do CDP, em cache.
 
-# Parte de ``custom_fields`` e não de ``contact_field_values``, de propósito: a
-# aba "Informações do Contato" do Trackify mostra TODO campo ativo, com o valor
-# em branco quando o contato não tem aquele dado. Um campo ausente da lista é
-# indistinguível de um campo vazio, e "sem CPF cadastrado" é justamente o que o
-# atendente precisa enxergar.
-_SQL_FIELDS = """
-SELECT cf.slug, cf.name, cf.is_identifier, cfv.value
-FROM custom_fields cf
-LEFT JOIN contact_field_values cfv
-       ON cfv.custom_field_id = cf.id AND cfv.contact_id = CAST(:cid AS uuid)
-WHERE cf.deleted_at IS NULL AND cf.is_active
-ORDER BY cf.is_identifier DESC, cf.identifier_priority NULLS LAST, cf.name
-"""
-
-_SQL_TAGS = """
-SELECT t.name, t.color
-FROM contact_tags ct
-JOIN tags t ON t.id = ct.tag_id
-WHERE ct.contact_id = CAST(:cid AS uuid)
-ORDER BY t.name
-"""
+    Parte do CATÁLOGO e não dos valores do contato, de propósito: a aba
+    "Informações do Contato" do Trackify mostra TODO campo ativo, com o valor em
+    branco quando o contato não tem aquele dado. Um campo ausente da lista é
+    indistinguível de um campo vazio, e "sem CPF cadastrado" é justamente o que o
+    atendente precisa enxergar.
+    """
+    res = await tk_client.cached("custom-fields", lambda: tk_client.custom_fields(http))
+    if not res.ok:
+        return []
+    linhas = res.data if isinstance(res.data, list) else (res.data or {}).get("data") or []
+    ativos = [f for f in linhas if f.get("isActive") and not f.get("deletedAt")]
+    # Mesma ordem do SQL antigo: identificador primeiro, depois prioridade, nome.
+    ativos.sort(key=lambda f: (
+        not f.get("isIdentifier"),
+        f.get("identifierPriority") if f.get("identifierPriority") is not None else 10**9,
+        (f.get("name") or "").lower(),
+    ))
+    return ativos
 
 
-def fetch_identity(contact_id: str) -> dict | None:
+async def fetch_identity(http, contact_id: str) -> dict | None:
     """Bloco 1. ``None`` quando o contato não existe (ou foi soft-deletado)."""
-    rows = trackify_db.run_read(_SQL_CONTACT, {"cid": contact_id})
-    if not rows:
+    res = await tk_client.get_contact(http, contact_id)
+    if not res.ok:
         return None
-    c = rows[0]
-    fields = trackify_db.run_read(_SQL_FIELDS, {"cid": contact_id})
-    tags = trackify_db.run_read(_SQL_TAGS, {"cid": contact_id})
+    c = res.data or {}
+    if not c.get("id"):
+        return None
 
-    by_slug = {f["slug"]: f["value"] for f in fields if f.get("value")}
+    # Valores do contato, indexados por slug.
+    valores: dict[str, str] = {}
+    for row in c.get("contactFieldValues") or []:
+        slug = ((row.get("customField") or {}).get("slug")) or ""
+        if slug:
+            valores[slug] = row.get("value") or ""
+
+    catalogo = await _catalog(http)
+    campos = [
+        {"slug": f.get("slug") or "", "name": f.get("name") or "",
+         "is_identifier": bool(f.get("isIdentifier")),
+         "value": valores.get(f.get("slug") or "", "")}
+        for f in catalogo
+    ]
+
+    tags = [
+        {"name": (t.get("tag") or {}).get("name"), "color": (t.get("tag") or {}).get("color")}
+        for t in (c.get("contactTags") or [])
+    ]
+    tags = [t for t in tags if t.get("name")]
+    tags.sort(key=lambda t: (t.get("name") or ""))
+
     return {
-        "contact_id": c["id"],
-        "status": c["status"],
-        "total_spent": _money(c["total_spent"]),
-        "total_spent_raw": float(c["total_spent"] or 0),
-        "first_seen_at": _iso(c["first_seen_at"]),
-        "converted_at": _iso(c["converted_at"]),
-        "name": by_slug.get("name") or "",
+        "contact_id": str(c.get("id")),
+        "status": c.get("status"),
+        "total_spent": _money(c.get("totalSpent")),
+        "total_spent_raw": float(c.get("totalSpent") or 0),
+        "first_seen_at": _iso(c.get("firstSeenAt")),
+        "converted_at": _iso(c.get("convertedAt")),
+        "name": valores.get("name") or "",
         # Sem filtrar por valor preenchido: campo em branco é informação.
         "identifiers": [
-            {"slug": f["slug"], "name": f["name"], "value": f["value"] or ""}
-            for f in fields if f.get("is_identifier")
+            {"slug": f["slug"], "name": f["name"], "value": f["value"]}
+            for f in campos if f["is_identifier"]
         ],
         "fields": [
-            {"slug": f["slug"], "name": f["name"], "value": f["value"] or ""}
-            for f in fields if not f.get("is_identifier")
+            {"slug": f["slug"], "name": f["name"], "value": f["value"]}
+            for f in campos if not f["is_identifier"]
         ],
-        "tags": [{"name": t["name"], "color": t.get("color")} for t in tags],
-        "link": _config.contact_link(c["id"]),
+        "tags": tags,
+        "link": _config.contact_link(str(c.get("id"))),
     }
 
 
 # ── Bloco 3 — linha do tempo ─────────────────────────────────────────────
-#
-# ⚠️ O ``LIMIT`` tem que ser aplicado ANTES de juntar os campos dinâmicos.
-# A versão "natural" (agregar tudo e limitar no fim) fazia seq scan em 179.733
-# linhas de ``event_field_values`` — 24,3 ms por abertura, crescendo com a base.
-# Paginando primeiro pelo ``idx_events_contact_time``: 0,918 ms (medido na F0).
-
-_SQL_TIMELINE = """
-WITH page AS (
-  SELECT e.id, e.event_type, e.title, e.description, e.value, e.occurred_at, e.channel_id
-  FROM events e
-  WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-    AND (CAST(:event_type AS text) IS NULL OR e.event_type = :event_type)
-  ORDER BY e.occurred_at DESC
-  LIMIT :limit OFFSET :offset
-)
-SELECT p.id::text AS id, p.event_type, p.title, p.description, p.value, p.occurred_at,
-       ch.slug AS channel,
-       jsonb_object_agg(ecf.slug, efv.value) FILTER (WHERE ecf.slug IS NOT NULL) AS fields
-FROM page p
-JOIN channels ch ON ch.id = p.channel_id
-LEFT JOIN event_field_values efv ON efv.event_id = p.id
-LEFT JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-GROUP BY p.id, p.event_type, p.title, p.description, p.value, p.occurred_at, ch.slug
-ORDER BY p.occurred_at DESC
-"""
-
-_SQL_TIMELINE_COUNT = """
-SELECT count(*)::int AS total
-FROM events e
-WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-  AND (CAST(:event_type AS text) IS NULL OR e.event_type = :event_type)
-"""
-
-_SQL_EVENT_TYPES = """
-SELECT e.event_type, count(*)::int AS total
-FROM events e
-WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-GROUP BY e.event_type ORDER BY 2 DESC, 1
-"""
-
 
 def _event_row(r: dict) -> dict:
+    """Linha de evento vinda da API → forma que a tela consome."""
+    campos = {}
+    for fv in r.get("eventFieldValues") or []:
+        slug = ((fv.get("eventCustomField") or {}).get("slug")) or ""
+        if slug:
+            campos[slug] = fv.get("value")
     return {
-        "id": r["id"],
-        "event_type": r["event_type"],
-        "title": r["title"],
+        "id": str(r.get("id") or ""),
+        "event_type": r.get("eventType"),
+        "title": r.get("title"),
         "description": r.get("description"),
         "value": _money(r.get("value")),
-        "occurred_at": _iso(r["occurred_at"]),
-        "channel": r.get("channel"),
-        "fields": r.get("fields") or {},
+        "occurred_at": _iso(r.get("occurredAt")),
+        "channel": (r.get("channel") or {}).get("slug"),
+        "fields": campos,
     }
 
 
-def fetch_timeline(contact_id: str, *, limit: int | None = None, offset: int = 0,
-                   event_type: str | None = None) -> dict:
+async def fetch_timeline(http, contact_id: str, *, limit: int | None = None,
+                         offset: int = 0, event_type: str | None = None) -> dict:
     """Bloco 3, paginado. ``event_type`` filtra (o vendedor quer só compras/só falhas)."""
     lim = limit or _config.timeline_page_size()
-    params = {"cid": contact_id, "limit": lim, "offset": max(0, offset),
-              "event_type": event_type or None}
-    rows = trackify_db.run_read(_SQL_TIMELINE, params)
-    total = trackify_db.run_read(_SQL_TIMELINE_COUNT, params)
+    off = max(0, offset)
+    res = await tk_client.list_events(http, contact_id, limit=lim, offset=off,
+                                      event_type=event_type)
+    if not res.ok:
+        return {"events": [], "total": 0, "limit": lim, "offset": off}
+    body = res.data or {}
     return {
-        "events": [_event_row(r) for r in rows],
-        "total": (total[0]["total"] if total else 0),
+        "events": [_event_row(r) for r in (body.get("data") or [])],
+        "total": int(((body.get("meta") or {}).get("total")) or 0),
         "limit": lim,
-        "offset": max(0, offset),
+        "offset": off,
     }
 
 
-def fetch_event_types(contact_id: str) -> list[dict]:
+async def fetch_event_types(http, contact_id: str) -> list[dict]:
     """Tipos de evento do contato + contagem — alimenta o filtro do modal."""
-    return trackify_db.run_read(_SQL_EVENT_TYPES, {"cid": contact_id})
+    res = await tk_client.events_summary(http, contact_id)
+    if not res.ok:
+        return []
+    return [
+        {"event_type": row.get("eventType"), "total": int(row.get("total") or 0)}
+        for row in ((res.data or {}).get("byType") or [])
+    ]
 
 
 # ── Bloco 2 — assinaturas (derivado, sem consulta extra por assinatura) ──
 
-_SQL_SUBSCRIPTION_EVENTS = """
-SELECT e.id::text AS id, e.event_type, e.title, e.value, e.occurred_at,
-       jsonb_object_agg(ecf.slug, efv.value) FILTER (WHERE ecf.slug IS NOT NULL) AS fields
-FROM events e
-LEFT JOIN event_field_values efv ON efv.event_id = e.id
-LEFT JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-  AND e.event_type = ANY(:types)
-GROUP BY e.id
-ORDER BY e.occurred_at DESC
-LIMIT :limit
-"""
+def _subscription_row(r: dict) -> dict:
+    """Evento da API na forma que a derivação de assinatura espera."""
+    linha = _event_row(r)
+    return {
+        "id": linha["id"],
+        "event_type": linha["event_type"],
+        "title": linha["title"],
+        "value": r.get("value"),
+        "occurred_at": r.get("occurredAt"),
+        "fields": linha["fields"],
+    }
 
 
-def fetch_subscriptions(contact_id: str, *, today: date | None = None) -> list[dict]:
+async def fetch_subscriptions(http, contact_id: str, *, today: date | None = None) -> list[dict]:
     """Bloco 2 — agrupa os eventos de assinatura por ``subscription_id``.
 
     Sem ``subscription_id`` cai no ``product_name`` (é o que o CDP tem para os
     lançamentos antigos). "Dias restantes" sai de ``next_charge_date``, que é o
     dado que EXISTE — nunca inventamos uma data de expiração.
     """
-    rows = trackify_db.run_read(_SQL_SUBSCRIPTION_EVENTS, {
-        "cid": contact_id,
-        "types": list(_SUBSCRIPTION_EVENTS),
-        "limit": _SUBSCRIPTION_SCAN_LIMIT,
-    })
+    res = await tk_client.list_events(http, contact_id,
+                                      limit=_SUBSCRIPTION_SCAN_LIMIT, offset=0,
+                                      event_types=list(_SUBSCRIPTION_EVENTS))
+    if not res.ok:
+        return []
+    rows = [_subscription_row(r) for r in ((res.data or {}).get("data") or [])]
     if not rows:
         return []
 
@@ -350,100 +340,6 @@ def fetch_subscriptions(contact_id: str, *, today: date | None = None) -> list[d
 # ⚠️ Mesma forma CTE-primeiro do ``_SQL_TIMELINE``: pagina antes de juntar os
 # campos dinâmicos. A lição de performance já foi paga naquele SQL (24,3 ms →
 # 0,918 ms); a forma "agrega tudo e limita no fim" volta a fazer seq scan.
-_SQL_PURCHASE_EVENTS = """
-WITH page AS (
-  SELECT e.id, e.event_type, e.title, e.value, e.occurred_at, e.channel_id,
-         COALESCE(vr.effect::text, 'ignore') AS effect
-  FROM events e
-  LEFT JOIN channel_value_rules vr
-         ON vr.channel_id = e.channel_id AND vr.event_type = e.event_type
-  WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-    AND (vr.effect::text IN ('add', 'subtract')
-         OR e.event_type = ANY(:state_types))
-  ORDER BY e.occurred_at DESC
-  LIMIT :limit
-)
-SELECT p.id::text AS id, p.event_type, p.title, p.value, p.occurred_at, p.effect,
-       ch.slug AS channel,
-       jsonb_object_agg(ecf.slug, efv.value) FILTER (WHERE ecf.slug IS NOT NULL) AS fields
-FROM page p
-JOIN channels ch ON ch.id = p.channel_id
-LEFT JOIN event_field_values efv ON efv.event_id = p.id
-LEFT JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-GROUP BY p.id, p.event_type, p.title, p.value, p.occurred_at, p.effect, ch.slug
-ORDER BY p.occurred_at DESC
-"""
-# ``vr.effect::text``, nunca ``vr.effect IN (...)``: comparar o enum com um
-# literal que não existe no tipo levanta erro; o cast para texto nunca levanta.
-# ``p.effect``/``ch.slug`` precisam entrar no GROUP BY (a dependência funcional
-# da PK não cobre coluna vinda de join); ``channel_value_rules`` é única em
-# ``(channel_id, event_type)``, então o LEFT JOIN não multiplica linha.
-
-# Diagnóstico: evento que NOMEIA um produto mas cujo ``(canal, tipo)`` não tem
-# regra de valor. É o medo legítimo da regra antiga — compra de canal mal
-# configurado sumindo em silêncio. Em vez de descartar a regra nova, a gente
-# REPORTA na tela. Casa por ``(channel_id, event_type)``, não só por canal:
-# assim pega também o canal configurado onde ``purchase`` foi marcado
-# ``ignore`` por engano — o caso mais provável e o mais invisível.
-#
-# O join com ``event_field_values`` é o que torna o aviso preciso: só conta
-# evento que nomeia produto. Sem ele, um lead com 40 ``lead_email`` dispararia
-# alarme falso. Roda SEMPRE, não só quando a lista sai vazia — "tem produto do
-# canal A e perda silenciosa no canal B" é o caso que ninguém descobriria.
-_SQL_UNRULED_PRODUCT_EVENTS = """
-SELECT ch.slug AS channel, e.event_type, count(DISTINCT e.id)::int AS events
-FROM events e
-JOIN channels ch ON ch.id = e.channel_id
-JOIN event_field_values efv ON efv.event_id = e.id
-JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-                             AND ecf.slug = ANY(:id_fields)
-WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-  AND COALESCE(efv.value, '') <> ''
-  AND NOT EXISTS (
-    SELECT 1 FROM channel_value_rules vr
-    WHERE vr.channel_id = e.channel_id AND vr.event_type = e.event_type
-      AND vr.effect::text IN ('add', 'subtract'))
-GROUP BY ch.slug, e.event_type
-ORDER BY 3 DESC, 1, 2
-"""
-
-# O diagnóstico IRMÃO do de cima, e o mais fácil de confundir com ele. Aquele
-# pega compra que o CDP não classifica como dinheiro; este pega o contrário —
-# dinheiro classificado que não identifica O QUÊ foi comprado (nem nome nem id),
-# então não vira linha. Sem ele, o caso do ``pagarme`` mandava o operador
-# configurar o canal de checkout (que é o que o outro aviso nomeia) quando o
-# problema estava no canal de cobrança, que já tinha regra.
-# Devolve também ``fields`` — os campos que aqueles eventos DE FATO carregam.
-# É o que torna a lista de identificação self-service: em vez de "não deu para
-# nomear", a aba diz o que existe ali, e o operador acrescenta o slug certo na
-# configuração sem esperar release nenhuma.
-_SQL_UNNAMED_PURCHASE_EVENTS = """
-WITH sem_identidade AS (
-  SELECT e.id, ch.slug AS channel, e.event_type
-  FROM events e
-  JOIN channels ch ON ch.id = e.channel_id
-  JOIN channel_value_rules vr ON vr.channel_id = e.channel_id
-                             AND vr.event_type = e.event_type
-                             AND vr.effect::text IN ('add', 'subtract')
-  WHERE e.contact_id = CAST(:cid AS uuid) AND e.deleted_at IS NULL
-    AND NOT EXISTS (
-      SELECT 1 FROM event_field_values efv
-      JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-      WHERE efv.event_id = e.id
-        AND ecf.slug = ANY(:id_fields)
-        AND COALESCE(efv.value, '') <> '')
-)
-SELECT s.channel, s.event_type, count(DISTINCT s.id)::int AS events,
-       COALESCE(string_agg(DISTINCT ecf.slug, ', ' ORDER BY ecf.slug), '') AS fields
-FROM sem_identidade s
-LEFT JOIN event_field_values efv ON efv.event_id = s.id
-                                AND COALESCE(efv.value, '') <> ''
-LEFT JOIN event_custom_fields ecf ON ecf.id = efv.event_custom_field_id
-GROUP BY s.channel, s.event_type
-ORDER BY 3 DESC, 1, 2
-"""
-
-
 def _amount(value) -> Decimal:
     """``events.value`` → ``Decimal``. ``None`` e lixo viram ``0``."""
     if value is None:
@@ -518,7 +414,45 @@ def _product_identity(fields: dict, id2name: dict | None = None,
     return (fields.get("subscription_id") or nome), nome
 
 
-def fetch_purchases(contact_id: str) -> dict:
+def _purchase_row(r: dict) -> dict:
+    """Evento de valor vindo da API na forma que a derivação de produto espera.
+
+    A rota já devolve os campos dinâmicos achatados em ``fields`` e o canal como
+    slug, então aqui é só renomear — nenhuma regra de negócio mora nesta função.
+    """
+    return {
+        "id": str(r.get("id") or ""),
+        "event_type": r.get("eventType"),
+        "title": r.get("title"),
+        "description": None,
+        "value": r.get("value"),
+        "occurred_at": r.get("occurredAt"),
+        "effect": r.get("effect"),
+        "channel": r.get("channel"),
+        "fields": r.get("fields") or {},
+    }
+
+
+def _flat_event_row(r: dict) -> dict:
+    """``_event_row`` para uma linha JÁ achatada por ``_purchase_row``.
+
+    O histórico embutido em cada produto usa o MESMO formato da linha do tempo —
+    o modal reusa o componente de evento em vez de inventar um segundo jeito de
+    desenhar a mesma coisa.
+    """
+    return {
+        "id": r.get("id"),
+        "event_type": r.get("event_type"),
+        "title": r.get("title"),
+        "description": r.get("description"),
+        "value": _money(r.get("value")),
+        "occurred_at": _iso(r.get("occurred_at")),
+        "channel": r.get("channel"),
+        "fields": r.get("fields") or {},
+    }
+
+
+async def fetch_purchases(http, contact_id: str) -> dict:
     """Bloco 4. O que o contato COMPROU, uma linha por produto.
 
     Compra é o que a ``channel_value_rules`` do CDP diz que é: ``effect='add'``.
@@ -538,11 +472,17 @@ def fetch_purchases(contact_id: str) -> dict:
     muitas parcelas. O JSON expõe ``float(...)`` só na borda.
     """
     campos = _config.product_identity_fields()
-    rows = trackify_db.run_read(_SQL_PURCHASE_EVENTS, {
-        "cid": contact_id,
-        "state_types": list(_PRODUCT_STATE_EVENTS),
-        "limit": _PRODUCT_SCAN_LIMIT,
-    })
+    res = await tk_client.purchases(http, contact_id, limit=_PRODUCT_SCAN_LIMIT,
+                                    state_types=list(_PRODUCT_STATE_EVENTS),
+                                    identity_fields=campos)
+    if not res.ok:
+        # A rota é dependência NOVA: um Trackify anterior a ela devolve 404, e
+        # apagar a aba Jornada inteira por causa disso quebraria a promessa do
+        # módulo. Quem chama trata `unavailable`.
+        raise RuntimeError(res.error or "bloco de compras indisponível")
+    corpo = res.data or {}
+    rows = [_purchase_row(r) for r in (corpo.get("events") or [])]
+    diagnostico = corpo.get("diagnostics") or {}
 
     groups: dict[str, dict] = {}
     somas: dict[str, dict[str, Decimal]] = {}
@@ -628,7 +568,7 @@ def fetch_purchases(contact_id: str) -> dict:
             g["channel"] = r.get("channel")
         # O histórico leva TAMBÉM os eventos de estado (cancelamento, atraso):
         # é o que explica o selo que a linha já mostra.
-        g["events"].append(_event_row(r))
+        g["events"].append(_flat_event_row(r))
 
     out = list(groups.values())
     for g in out:
@@ -646,38 +586,41 @@ def fetch_purchases(contact_id: str) -> dict:
     out.sort(key=lambda g: (g.get("name") or "").lower())
     out.sort(key=lambda g: g.get("last_event_at") or "", reverse=True)
 
-    def _diag(sql) -> list[dict]:
+    def _diag(chave: str) -> list[dict]:
         out_diag = []
-        for u in trackify_db.run_read(sql, {"cid": contact_id, "id_fields": campos}):
-            item = {"channel": u["channel"], "event_type": u["event_type"],
-                    "events": int(u["events"] or 0)}
-            if "fields" in u:          # só o diagnóstico de "sem identidade"
+        for u in diagnostico.get(chave) or []:
+            item = {"channel": u.get("channel"), "event_type": u.get("eventType"),
+                    "events": int(u.get("events") or 0)}
+            # `fields` só existe no diagnóstico de "sem identidade" — e só
+            # quando o CDP tinha o que listar. Carimbar uma string vazia aqui
+            # faria a tela mostrar "campos: " sem campo nenhum.
+            if "fields" in u:
                 item["fields"] = u.get("fields") or ""
             out_diag.append(item)
         return out_diag
 
     return {
         "items": out,
-        "unruled": _diag(_SQL_UNRULED_PRODUCT_EVENTS),
-        "unnamed": _diag(_SQL_UNNAMED_PURCHASE_EVENTS),
+        "unruled": _diag("unruledProductEvents"),
+        "unnamed": _diag("unnamedPurchaseEvents"),
     }
 
 
-def _purchases_block(contact_id: str) -> dict:
-    """Fachada com guarda. A função pura continua levantando (e testável).
+async def _purchases_block(http, contact_id: str) -> dict:
+    """Fachada com guarda. A função de dentro continua levantando (e testável).
 
-    ``channel_value_rules`` é dependência NOVA: um CDP mais antigo pode não ter
-    a tabela, e sem esta guarda um ``UndefinedTable`` apagaria também a aba
-    Jornada — o docstring do módulo promete o contrário.
+    A rota ``/purchases`` é dependência NOVA: um Trackify mais antigo responde
+    404, e sem esta guarda isso apagaria também a aba Jornada — o docstring do
+    módulo promete o contrário.
     """
     try:
-        return fetch_purchases(contact_id)
+        return await fetch_purchases(http, contact_id)
     except Exception:  # noqa: BLE001
         logger.warning("trackify: bloco de compras indisponível", exc_info=True)
         return {"items": [], "unruled": [], "unnamed": [], "unavailable": True}
 
 
-def build_journey(contact_id: str) -> dict:
+async def build_journey(http, contact_id: str) -> dict:
     """Os blocos de um contato JÁ resolvido no Trackify.
 
     A chave é ``purchases`` (dict), não mais ``products`` (lista): o rename é
@@ -686,22 +629,32 @@ def build_journey(contact_id: str) -> dict:
     ``products`` com um dict dentro, ``products.filter`` explodiria e apagaria o
     modal inteiro.
     """
-    ident = fetch_identity(contact_id)
+    ident = await fetch_identity(http, contact_id)
     if ident is None:
         return {"found": False, "contact_id": contact_id}
+
+    # Os quatro blocos são independentes: buscar em paralelo troca a soma das
+    # latências pela maior delas. Com SQL local a diferença era ruído; com HTTP
+    # é a diferença entre abrir o modal em ~1 ida e volta ou em quatro.
+    subs, compras, linha, tipos = await asyncio.gather(
+        fetch_subscriptions(http, contact_id),
+        _purchases_block(http, contact_id),
+        fetch_timeline(http, contact_id),
+        fetch_event_types(http, contact_id),
+    )
     return {
         "found": True,
         "identity": ident,
-        "subscriptions": fetch_subscriptions(contact_id),
-        "purchases": _purchases_block(contact_id),
-        "timeline": fetch_timeline(contact_id),
-        "event_types": fetch_event_types(contact_id),
+        "subscriptions": subs,
+        "purchases": compras,
+        "timeline": linha,
+        "event_types": tipos,
     }
 
 
-def journey_for(*, phone: str | None, email: str | None = None,
-                cpf: str | None = None, extras: dict | None = None,
-                contact_type: str = "whatsapp") -> dict:
+async def journey_for(http, *, phone: str | None, email: str | None = None,
+                      cpf: str | None = None, extras: dict | None = None,
+                      contact_type: str = "whatsapp") -> dict:
     """Resolve a identidade e devolve a jornada.
 
     Três desfechos, todos normais e todos explícitos para a tela:
@@ -709,9 +662,9 @@ def journey_for(*, phone: str | None, email: str | None = None,
       * ``ambiguous`` — mais de um cadastro casou (medido: 5 números com 2);
       * jornada completa.
     """
-    if not trackify_db.is_configured():
+    if not tk_client.is_configured():
         return {"found": False, "configured": False,
-                "error": "Conexão com o Trackify não configurada."}
+                "error": "API key do Trackify não configurada."}
 
     # ``extras`` = campos conectados que são identificador no CDP. Os parâmetros
     # soltos continuam valendo para quem chama sem mapeamento nenhum.
@@ -720,8 +673,8 @@ def journey_for(*, phone: str | None, email: str | None = None,
         pistas.setdefault(identity.SLUG_EMAIL, email)
     if cpf:
         pistas.setdefault(identity.SLUG_CPF, cpf)
-    matches = identity.resolve_mapped(phone=phone, extras=pistas,
-                                      contact_type=contact_type)
+    matches = await identity.resolve_mapped(http, phone=phone, extras=pistas,
+                                            contact_type=contact_type)
     if not matches:
         return {"found": False, "configured": True, "candidates": []}
 
@@ -732,14 +685,17 @@ def journey_for(*, phone: str | None, email: str | None = None,
             "configured": True,
             "ambiguous": True,
             "candidates": [
-                {**(fetch_identity(m.contact_id) or {"contact_id": m.contact_id}),
-                 "matched_by": m.slug}
-                for m in matches
+                {**(ident or {"contact_id": m.contact_id}), "matched_by": m.slug}
+                for m, ident in zip(
+                    matches,
+                    await asyncio.gather(*(fetch_identity(http, m.contact_id)
+                                           for m in matches)),
+                )
             ],
         }
 
     m = matches[0]
-    data = build_journey(m.contact_id)
+    data = await build_journey(http, m.contact_id)
     data["matched_by"] = m.slug
     data["matched_value"] = m.exact_value
     data["configured"] = True

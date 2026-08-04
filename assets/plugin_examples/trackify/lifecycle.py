@@ -18,7 +18,8 @@ import time
 
 import httpx
 
-from . import _config, dispatcher, pull, push, reconcile, session, writer
+from . import _config, dispatcher, pull, push, reconcile
+from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.lifecycle")
 
@@ -106,6 +107,11 @@ async def _loop(ctx) -> None:
 
 # ── Sincronização de campos do contato ───────────────────────────────────
 
+def _blocked_reason() -> str:
+    """Motivo pelo qual a sincronização se auto-desligou (credencial ruim)."""
+    return (_config.setting("sync_blocked_reason") or "").strip()
+
+
 def _field_rate_per_min() -> int:
     try:
         v = int(_config.setting("field_sync_rate_per_min", 15))
@@ -118,7 +124,7 @@ def _field_rate_per_min() -> int:
 
 
 async def _field_cycle(client: httpx.AsyncClient) -> int:
-    if not _config.field_sync_ready() or session.blocked_reason():
+    if not _config.field_sync_ready() or _blocked_reason():
         return 0
     if push.cooldown_remaining() > 0:
         return 0
@@ -145,7 +151,7 @@ async def _field_cycle(client: httpx.AsyncClient) -> int:
 
 
 async def _field_loop(ctx) -> None:
-    async with httpx.AsyncClient(timeout=writer.PUT_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=tk_client.WRITE_TIMEOUT) as client:
         while True:
             processed = 0
             try:
@@ -171,10 +177,15 @@ async def _pull_loop(ctx) -> None:
     É consulta, não webhook, porque o Trackify não emite nenhum evento de saída
     para contato — ver a docstring de ``pull``.
     """
+    async with httpx.AsyncClient(timeout=tk_client.READ_TIMEOUT) as client:
+        await _pull_forever(client)
+
+
+async def _pull_forever(client: httpx.AsyncClient) -> None:
     while True:
         espera = _poll_seconds()
         try:
-            resumo = await asyncio.to_thread(pull.cycle)
+            resumo = await pull.cycle(client)
             if resumo.get("gravadas") or resumo.get("recusadas"):
                 logger.info("trackify: leitura do CDP — %s gravada(s), %s recusada(s)",
                             resumo["gravadas"], resumo["recusadas"])
@@ -195,6 +206,11 @@ async def _reconcile_loop(ctx) -> None:
     atrasaria a sincronização que o operador está olhando.
     """
     await asyncio.sleep(120.0)
+    async with httpx.AsyncClient(timeout=tk_client.READ_TIMEOUT) as client:
+        await _reconcile_forever(client)
+
+
+async def _reconcile_forever(client: httpx.AsyncClient) -> None:
     while True:
         try:
             minutos = float(_config.setting("field_sync_reconcile_minutes", 60) or 60)
@@ -202,7 +218,7 @@ async def _reconcile_loop(ctx) -> None:
             minutos = 60.0
         espera = max(15.0, min(minutos, 1440.0)) * 60.0
         try:
-            resumo = await asyncio.to_thread(reconcile.cycle)
+            resumo = await reconcile.cycle(client)
             if resumo.get("enfileirados") or resumo.get("gravados"):
                 logger.info("trackify: conferência — %s conferido(s), %s enfileirado(s), "
                             "%s gravado(s)", resumo["conferidos"],
@@ -216,9 +232,31 @@ async def _reconcile_loop(ctx) -> None:
         await asyncio.sleep(espera)
 
 
+def _limpar_segredos_legados() -> None:
+    """Apaga do banco a senha da conta de serviço e o DSN do CDP.
+
+    Roda uma vez por boot e é barata (dois DELETEs por chave que ainda exista).
+    Deixar a senha de um usuário real do Nexus e um DSN de Postgres de PRODUÇÃO
+    parados na tabela ``config`` depois que ninguém mais os lê é dívida de
+    segurança, não compatibilidade — não há caminho de volta que os use.
+    """
+    try:
+        from db.repositories import config_repo
+        for chave in ("service_password", "service_email", "nexus_dsn",
+                      "sync_user_id", "sync_last_login_error"):
+            plena = _config.PREFIX + chave
+            if config_repo.get(plena, None) in (None, ""):
+                continue
+            config_repo.set(plena, "")
+            logger.info("trackify: setting legada '%s' limpa (não é mais usada)", chave)
+    except Exception:  # noqa: BLE001 — limpeza nunca pode derrubar o boot
+        logger.debug("trackify: falha ao limpar settings legadas", exc_info=True)
+
+
 def setup(ctx) -> None:
     """Sobe as tasks. Nunca derruba o boot: em harness de teste o supervisor não
     está cabeado e ``spawn_task`` levanta (padrão do protocolos)."""
+    _limpar_segredos_legados()
     try:
         from runtime.supervisor import RestartPolicy
         ctx.spawn_task("outbox", lambda: _loop(ctx), policy=RestartPolicy.PERMANENT)

@@ -20,7 +20,7 @@ from sqlalchemy import text
 
 from plugins.context import make_plugin_db
 
-from . import trackify_db
+from . import client as tk_client
 from .field_codec import compat
 
 logger = logging.getLogger("plugins.trackify.field_map")
@@ -81,57 +81,46 @@ def wb_vocabulary() -> dict:
     return {"columns": columns, "attributes": attributes}
 
 
-_TK_FIELDS_SQL = """
-SELECT cf.id::text        AS id,
-       cf.slug            AS slug,
-       cf.name            AS name,
-       cf.is_identifier   AS is_identifier,
-       cf.identifier_priority AS identifier_priority,
-       COALESCE(ft.slug, '')          AS field_type,
-       COALESCE(ft.regex_pattern, '') AS regex_pattern
-FROM custom_fields cf
-LEFT JOIN field_types ft ON ft.id = cf.field_type_id
-WHERE cf.deleted_at IS NULL AND cf.is_active
-ORDER BY cf.is_identifier DESC, cf.identifier_priority NULLS LAST, cf.name
-"""
+async def tk_fields(http, refresh: bool = False) -> dict:
+    """Campos de contato ativos no CDP.
 
-# Sem o join de tipo: se ``field_types`` não existir/mudar de forma no CDP, a
-# tela ainda lista os campos (só perde a dica de tipo, que é consultiva).
-_TK_FIELDS_SQL_BARE = """
-SELECT cf.id::text      AS id,
-       cf.slug          AS slug,
-       cf.name          AS name,
-       cf.is_identifier AS is_identifier,
-       cf.identifier_priority AS identifier_priority,
-       ''               AS field_type,
-       ''               AS regex_pattern
-FROM custom_fields cf
-WHERE cf.deleted_at IS NULL AND cf.is_active
-ORDER BY cf.is_identifier DESC, cf.identifier_priority NULLS LAST, cf.name
-"""
-
-
-def tk_fields(refresh: bool = False) -> dict:
-    """Campos de contato ativos no CDP. NUNCA levanta — no máximo devolve vazio
-    com o motivo, para a tela distinguir "não configurado" de "fora do ar" de
-    "o CDP não tem campo nenhum"."""
-    if not trackify_db.is_configured():
+    NUNCA levanta — no máximo devolve vazio com o motivo, para a tela distinguir
+    "não configurado" de "fora do ar" de "o CDP não tem campo nenhum".
+    """
+    if not tk_client.is_configured():
         return {"configured": False, "reachable": False,
-                "message": "DSN do Nexus não configurado.", "fields": []}
+                "message": "API key do Trackify não configurada.", "fields": []}
 
-    def _read():
-        rows = trackify_db.run_read(_TK_FIELDS_SQL, {})
-        if not rows:
-            rows = trackify_db.run_read(_TK_FIELDS_SQL_BARE, {})
-        return [dict(r) for r in rows]
+    async def _read():
+        return await tk_client.custom_fields(http)
 
-    try:
-        rows = _read() if refresh else trackify_db.cached("field_map:cfields", _read)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("trackify: falha ao listar campos do CDP: %s", type(e).__name__)
+    if refresh:
+        tk_client.invalidate_cache()
+    res = await tk_client.cached("field_map:cfields", _read)
+    if not res.ok:
         return {"configured": True, "reachable": False,
                 "message": "Não foi possível ler os campos do Trackify.", "fields": []}
-    return {"configured": True, "reachable": True, "message": "", "fields": rows}
+
+    linhas = res.data if isinstance(res.data, list) else (res.data or {}).get("data") or []
+    ativos = [f for f in linhas if f.get("isActive") and not f.get("deletedAt")]
+    ativos.sort(key=lambda f: (
+        not f.get("isIdentifier"),
+        f.get("identifierPriority") if f.get("identifierPriority") is not None else 10**9,
+        (f.get("name") or "").lower(),
+    ))
+    campos = [
+        {
+            "id": str(f.get("id") or ""),
+            "slug": f.get("slug") or "",
+            "name": f.get("name") or "",
+            "is_identifier": bool(f.get("isIdentifier")),
+            "identifier_priority": f.get("identifierPriority"),
+            "field_type": (f.get("fieldType") or {}).get("slug") or "",
+            "regex_pattern": (f.get("fieldType") or {}).get("regexPattern") or "",
+        }
+        for f in ativos
+    ]
+    return {"configured": True, "reachable": True, "message": "", "fields": campos}
 
 
 def identifier_hints(contact: dict) -> dict:
@@ -179,7 +168,7 @@ def list_maps(enabled_only: bool = False) -> list[dict]:
 
 # ── Validação ────────────────────────────────────────────────────────────
 
-def validate(rows: list, *, credential_set: bool) -> tuple[list[dict], dict]:
+def validate(rows: list, tk: dict, *, credential_set: bool) -> tuple[list[dict], dict]:
     """Devolve ``(linhas_limpas, erros_por_índice)``.
 
     ``credential_set`` entra como parâmetro (e não é lido daqui) para esta
@@ -198,7 +187,6 @@ def validate(rows: list, *, credential_set: bool) -> tuple[list[dict], dict]:
 
     vocab = wb_vocabulary()
     attrs = {a["key"]: a for a in vocab["attributes"]}
-    tk = tk_fields()
     tk_by_slug = {f["slug"]: f for f in tk["fields"]}
     # Só dá para afirmar que um slug NÃO existe quando conseguimos ler o
     # catálogo. Com o CDP fora do ar o mapeamento é aceito e marcado.
@@ -281,7 +269,7 @@ def validate(rows: list, *, credential_set: bool) -> tuple[list[dict], dict]:
             continue
 
         if writes_tk and not credential_set:
-            err(i, "Sem conta de serviço configurada não é possível escrever no Trackify.")
+            err(i, "Sem API key configurada não é possível escrever no Trackify.")
             continue
 
         clean.append({

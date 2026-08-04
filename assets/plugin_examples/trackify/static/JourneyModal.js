@@ -175,48 +175,19 @@ function PurchasesBlock({ purchases }) {
       </section>`;
   }
 
-  // Dois diagnósticos IRMÃOS e opostos, fáceis de confundir. Ambos apontam para
-  // a configuração do CDP, não para um bug do plugin — e mandar o operador
-  // configurar o canal errado é pior que não avisar nada.
-  const origens = (lista) => lista
-    .map((u) => `${u.channel} · ${eventLabel(u.event_type)}`).join(', ');
-  const total = (lista) => lista.reduce((a, u) => a + Number(u.events || 0), 0);
-
-  const avisos = [];
-  if (unruled.length) {
-    // A compra existe, mas o Trackify não a classifica como dinheiro.
-    avisos.push(html`
-      <div key="unruled" class="text-[12px] text-wa-secondary">
-        ${total(unruled)} evento(s) com produto vieram de ${origens(unruled)},
-        que não têm regra de valor no Trackify — compras assim não aparecem aqui.
-      </div>`);
-  }
-  if (unnamed.length) {
-    // O oposto: é dinheiro reconhecido, mas o evento não diz O QUÊ foi comprado.
-    // Listar os campos que ele DE FATO traz é o que torna a lista de
-    // identificação self-service — sem isso o operador não teria como adivinhar
-    // qual slug acrescentar na configuração.
-    const vistos = [...new Set(unnamed.flatMap(
-      (u) => String(u.fields || '').split(',').map((s) => s.trim()).filter(Boolean)))];
-    avisos.push(html`
-      <div key="unnamed" class="text-[12px] text-wa-secondary">
-        ${total(unnamed)} cobrança(s) de ${origens(unnamed)} entraram no total gasto,
-        mas nenhum campo configurado identifica o produto.
-        ${vistos.length ? html`
-          Esses eventos trazem <span class="text-wa-text">${vistos.join(', ')}</span> —
-          se algum deles nomeia o produto, acrescente o slug em Plugins → Trackify →
-          Configurar → "Campos que identificam o produto".` : null}
-      </div>`);
-  }
+  // O diagnóstico DETALHADO (canal · tipo · campos que o evento traz) saiu desta
+  // tela: é configuração do CDP, não informação de atendimento, e ocupava mais
+  // espaço que a própria lista de compras. O backend continua devolvendo
+  // `unruled`/`unnamed` — aqui eles só decidem a FRASE do estado vazio, para não
+  // dizer "não comprou nada" a quem comprou e não pôde ser listado.
+  const naoListado = unruled.length > 0 || unnamed.length > 0;
 
   if (!items.length) {
     return html`
       <section class="py-8 text-center">
         <div class="text-sm text-wa-text">
-          ${avisos.length ? 'Nenhuma compra pôde ser listada.' : 'Este contato ainda não comprou nada.'}
+          ${naoListado ? 'Nenhuma compra pôde ser listada.' : 'Este contato ainda não comprou nada.'}
         </div>
-        ${avisos.length ? html`
-          <div class="max-w-md mx-auto mt-2 space-y-2">${avisos}</div>` : null}
       </section>`;
   }
 
@@ -226,7 +197,6 @@ function PurchasesBlock({ purchases }) {
       <ul class="space-y-2">
         ${items.map((p) => html`<${PurchaseRow} key=${p.key} p=${p} />`)}
       </ul>
-      ${avisos.length ? html`<div class="mt-3 space-y-2">${avisos}</div>` : null}
     </section>`;
 }
 
@@ -290,11 +260,16 @@ function PurchaseRow({ p }) {
 // existe componente de aba compartilhado em lugar nenhum do repo — duplicar 12
 // linhas é o preço certo. Corrigido o que o `config.js` deixou passar:
 // `type="button"` explícito e `key=` nos botões mapeados.
+//
+// ⚠️ NADA de `overflow-x-auto` aqui. Pela regra do CSS, um eixo diferente de
+// `visible` força o OUTRO a virar `auto` — então o strip ganhava uma barra de
+// rolagem VERTICAL de um pixel (o `-mb-px` dos botões transborda a nav). São
+// duas abas curtas: não há o que rolar na horizontal.
 const JOURNEY_TABS = [['jornada', 'Jornada'], ['produtos', 'Produtos']];
 
 function JourneyTabs({ value, onChange, count }) {
   return html`
-    <nav class="px-5 pt-3 flex gap-1 border-b border-wa-border overflow-x-auto">
+    <nav class="px-5 pt-3 flex gap-1 border-b border-wa-border">
       ${JOURNEY_TABS.map(([id, label]) => html`
         <button key=${id} type="button" onClick=${() => onChange(id)}
           class=${`px-4 py-2 text-sm -mb-px border-b-2 transition-colors whitespace-nowrap ${

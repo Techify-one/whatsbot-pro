@@ -135,23 +135,40 @@ def test_dinheiro_em_pt_br(journey):
     assert journey._money(None) is None          # events.value é nullable
 
 
+def _mock_eventos(journey, monkeypatch, linhas, total=None):
+    """Substitui ``GET /contacts/:id/events`` — a rota que serve a linha do tempo
+    e o bloco de assinaturas."""
+    tk = _load("client")
+
+    async def fake(http, contact_id, **kwargs):
+        return tk.Result(tk.OK, 200, data={
+            "data": list(linhas),
+            "meta": {"total": total if total is not None else len(linhas)},
+        })
+    monkeypatch.setattr(journey.tk_client, "list_events", fake)
+
+
 def test_assinatura_derivada_de_linha_real(journey, monkeypatch):
     """Payload copiado de um evento REAL de produção, com as duas armadilhas."""
-    linha = {
-        "id": "48c7304f", "event_type": "active_subscription",
-        "title": "Assinatura ativa", "value": Decimal("97.00"),
-        "occurred_at": datetime.datetime(2026, 4, 29, 13, 30, 16),
-        "fields": {
-            "status": "Pagamento Autorizado",
-            "product_name": "Combo de Redes",
-            "offer_name": "Combo de Redes (Multivendor)",
-            "payment_method": "Pix", "successful_charges": "1", "failed_charges": "0",
-            "next_charge_date": "25/02/2027",
-            "subscription_canceled_at": "system",
-        },
+    campos = {
+        "status": "Pagamento Autorizado",
+        "product_name": "Combo de Redes",
+        "offer_name": "Combo de Redes (Multivendor)",
+        "payment_method": "Pix", "successful_charges": "1", "failed_charges": "0",
+        "next_charge_date": "25/02/2027",
+        "subscription_canceled_at": "system",
     }
-    monkeypatch.setattr(journey.trackify_db, "run_read", lambda *a, **k: [linha])
-    subs = journey.fetch_subscriptions("x", today=datetime.date(2026, 7, 31))
+    linha = {
+        "id": "48c7304f", "eventType": "active_subscription",
+        "title": "Assinatura ativa", "value": "97.00",
+        "occurredAt": datetime.datetime(2026, 4, 29, 13, 30, 16),
+        "channel": {"slug": "ticto"},
+        "eventFieldValues": [
+            {"value": v, "eventCustomField": {"slug": k}} for k, v in campos.items()],
+    }
+    _mock_eventos(journey, monkeypatch, [linha])
+    subs = _run(journey.fetch_subscriptions(_FakeHttp(), "x",
+                                            today=datetime.date(2026, 7, 31)))
 
     assert len(subs) == 1
     s = subs[0]
@@ -178,7 +195,9 @@ def test_nenhum_parametro_e_engolido_por_cast():
     import re
     from sqlalchemy import text
 
-    for mod_name in ("journey", "identity", "dispatcher", "mirror"):
+    # `journey` e `identity` deixaram de carregar SQL quando a leitura virou
+    # HTTP; o teste segue guardando os módulos que ainda escrevem consulta.
+    for mod_name in ("dispatcher", "mirror"):
         mod = _load(mod_name)
         for attr in dir(mod):
             value = getattr(mod, attr)
@@ -198,10 +217,10 @@ def test_nenhum_parametro_e_engolido_por_cast():
             )
 
 
-def test_sem_dsn_tudo_degrada_para_vazio(journey, monkeypatch):
+def test_sem_api_key_tudo_degrada_para_vazio(journey, monkeypatch):
     """Sem configuração o plugin é no-op logado — nunca levanta, nunca 500."""
-    monkeypatch.setattr(journey.trackify_db, "is_configured", lambda: False)
-    out = journey.journey_for(phone="5564996162906")
+    monkeypatch.setattr(journey.tk_client, "is_configured", lambda: False)
+    out = _run(journey.journey_for(_FakeHttp(), phone="5564996162906"))
     assert out["found"] is False and out["configured"] is False
 
 
@@ -320,7 +339,7 @@ def test_envelope_tem_data_iso_com_fuso(plugin_app):
             "data": {"conversation_id": 7},
         }),
     }
-    body = dispatcher.build_body(row)
+    body = _run(dispatcher.build_body(_FakeHttp(), row))
     # Data EXATA: prova que segundos foram lidos como segundos. Se o envelope
     # mandasse o epoch cru, o ``new Date(número)`` do adapter leria como
     # milissegundos e carimbaria 1970 em todo evento.
@@ -338,7 +357,7 @@ def test_health_distingue_nao_configurado(plugin_app):
     assert r.status_code == 200
     d = r.json()["data"]
     assert d["configured"] is False and d["reachable"] is False
-    assert "não configurado" in d["message"].lower()
+    assert "não configurada" in d["message"].lower()
 
 
 def test_journey_recusa_contato_inexistente(plugin_app):
@@ -595,7 +614,7 @@ def test_fila_de_push_colapsa_por_contato(plugin_app):
     assert n == 1
 
 
-def test_mapeamento_recusa_escrita_sem_conta_de_servico(plugin_app):
+def test_mapeamento_recusa_escrita_sem_api_key(plugin_app):
     """Sem credencial não há como gravar no Trackify — e dizer isso na linha é o
     que evita o operador achar que salvou e nada acontecer."""
     built = plugin_app("trackify")
@@ -605,7 +624,7 @@ def test_mapeamento_recusa_escrita_sem_conta_de_servico(plugin_app):
     ]})
     assert r.status_code == 400
     erros = r.json()["data"]["row_errors"]["0"]
-    assert any("conta de serviço" in e for e in erros)
+    assert any("API key" in e for e in erros)
 
 
 def test_mapeamento_recusa_duplicata_nos_dois_lados(plugin_app):
@@ -665,24 +684,30 @@ def test_telefone_nao_e_mapeavel(plugin_app):
     assert r.status_code == 400
 
 
-def test_senha_da_conta_de_servico_nunca_volta_em_claro(plugin_app):
+def test_api_key_nunca_volta_em_claro(plugin_app):
     built = plugin_app("trackify")
-    r = built.client.put("/api/plugins/trackify/service-account",
-                         json={"email": "bot@empresa.com", "password": "s3nh4-secreta"})
+    r = built.client.put("/api/plugins/trackify/api-key", json={"key": "tk_segredo"})
     assert r.status_code == 200
 
-    r = built.client.get("/api/plugins/trackify/service-account")
+    r = built.client.get("/api/plugins/trackify/api-key")
     d = r.json()["data"]
-    assert d["email"] == "bot@empresa.com"
-    assert d["password_masked"] == "***"
-    assert "s3nh4-secreta" not in r.text
+    assert d["key_masked"] == "***"
+    assert "tk_segredo" not in r.text
 
-    # O sentinela preserva a senha em vez de apagá-la.
-    built.client.put("/api/plugins/trackify/service-account",
-                     json={"email": "bot2@empresa.com", "password": "***"})
+    # O sentinela preserva a chave em vez de apagá-la.
+    built.client.put("/api/plugins/trackify/api-key", json={"key": "***"})
     from db.repositories import config_repo
-    assert config_repo.get("plugin.trackify.service_password") == "s3nh4-secreta"
-    assert config_repo.get("plugin.trackify.service_email") == "bot2@empresa.com"
+    assert config_repo.get("plugin.trackify.sync_api_key") == "tk_segredo"
+
+    # E uma chave NOVA descarta o id da anterior: ele é o ator com que as nossas
+    # escritas aparecem no changelog, e o da chave velha não reconhece mais nada.
+    config_repo.set("plugin.trackify.sync_api_key_id", "k-antiga")
+    built.client.put("/api/plugins/trackify/api-key", json={"key": "tk_outra"})
+    assert config_repo.get("plugin.trackify.sync_api_key") == "tk_outra"
+    assert config_repo.get("plugin.trackify.sync_api_key_id") == ""
+
+    config_repo.set_many({"plugin.trackify.sync_api_key": "",
+                          "plugin.trackify.sync_api_key_id": ""})
 
 
 def test_status_do_field_sync_responde_sem_configuracao(plugin_app):
@@ -738,17 +763,56 @@ class _FakeResp:
 
 
 class _FakeClient:
+    """Client httpx-like de resposta única, para exercitar o ``client`` do plugin.
+
+    Implementa ``request`` porque é por lá que ``client._request`` passa; os
+    verbos soltos ficam para o código que ainda chama ``get``/``post`` direto.
+    """
+
     def __init__(self, resp):
         self._resp = resp
         self.calls = []
 
-    async def put(self, url, json=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "json": json, "headers": headers})
+    async def request(self, method, url, params=None, json=None, headers=None,
+                      timeout=None):
+        self.calls.append({"method": method, "url": url, "params": params,
+                           "json": json, "headers": headers})
         return self._resp
 
-    async def post(self, url, json=None, timeout=None):
-        self.calls.append({"url": url, "json": json})
-        return self._resp
+    async def get(self, url, params=None, headers=None, timeout=None):
+        return await self.request("GET", url, params=params, headers=headers,
+                                  timeout=timeout)
+
+    async def put(self, url, json=None, headers=None, timeout=None):
+        return await self.request("PUT", url, json=json, headers=headers,
+                                  timeout=timeout)
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        return await self.request("POST", url, json=json, headers=headers,
+                                  timeout=timeout)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeHttp(_FakeClient):
+    """Fake sem resposta programada.
+
+    Serve aos testes que substituem as funções do ``client`` inteiras (e portanto
+    nunca chegam à rede) mas ainda precisam passar ALGO como cliente HTTP.
+    Qualquer chamada que escape do stub estoura, em vez de devolver um 200 falso
+    que faria o teste passar por engano.
+    """
+
+    def __init__(self):
+        super().__init__(None)
+
+    async def request(self, *a, **k):
+        raise AssertionError(
+            "chamada HTTP não esperada: o teste deveria ter substituído o client")
 
 
 def _cdp_contact(**slugs):
@@ -768,30 +832,33 @@ def writer():
 
 @pytest.fixture()
 def _api_base(monkeypatch):
-    w = _load("writer")
-    monkeypatch.setattr(w._config, "api_base", lambda: "https://nexus.example/trackify/api/v1")
+    """Base + credencial configuradas, sem tocar no banco de config."""
+    c = _load("client")
+    monkeypatch.setattr(c._config, "api_base",
+                        lambda: "https://nexus.example/trackify/api/v1")
+    monkeypatch.setattr(c, "api_key", lambda: "tk_teste")
 
 
 def test_corpo_do_put_so_tem_fieldValues(writer, _api_base):
     """O ValidationPipe do Trackify é ``forbidNonWhitelisted``: qualquer chave
     a mais derruba a requisição inteira com 400."""
-    sess = _load("session").Session(cookie="trackify_session=tok", user_id="7",
-                                    obtained_at=0.0)
     client = _FakeClient(_FakeResp(200, _cdp_contact(email="a@b.com")))
-    res = _run(writer.put_contact(client, sess, "uuid-1", {"email": "a@b.com"}))
+    res = _run(writer.put_contact(client, "uuid-1", {"email": "a@b.com"}))
 
     assert res.verdict == writer.OK
     assert set(client.calls[0]["json"]) == {"fieldValues"}
-    assert client.calls[0]["headers"]["Cookie"] == "trackify_session=tok"
+    # A credencial é a API key. Cookie de sessão não existe mais: era a conta de
+    # serviço, que este trabalho inteiro serviu para aposentar.
+    assert client.calls[0]["headers"]["X-API-Key"] == "tk_teste"
+    assert "Cookie" not in client.calls[0]["headers"]
 
 
 def test_slug_ignorado_pelo_cdp_vira_erro_e_nao_sucesso(writer, _api_base):
     """Slug desativado/inexistente é pulado EM SILÊNCIO pelo Trackify e o 200
     vem igual. Sem conferir a resposta, contaríamos sucesso numa escrita que
     nunca aconteceu — a falha mais perigosa desta feature."""
-    sess = _load("session").Session("trackify_session=t", "7", 0.0)
     client = _FakeClient(_FakeResp(200, _cdp_contact(email="antigo@b.com")))
-    res = _run(writer.put_contact(client, sess, "uuid-1", {"email": "novo@b.com"}))
+    res = _run(writer.put_contact(client, "uuid-1", {"email": "novo@b.com"}))
 
     assert res.verdict == writer.BLOCKED
     assert res.dropped == ["email"]
@@ -800,14 +867,13 @@ def test_slug_ignorado_pelo_cdp_vira_erro_e_nao_sucesso(writer, _api_base):
 
 def test_limpeza_e_confirmada_pela_ausencia_da_linha(writer, _api_base):
     """Apagar no Trackify DELETA a linha EAV: sucesso é o campo sumir."""
-    sess = _load("session").Session("trackify_session=t", "7", 0.0)
     client = _FakeClient(_FakeResp(200, _cdp_contact(cpf="111")))
-    res = _run(writer.put_contact(client, sess, "uuid-1", {"email": ""}))
+    res = _run(writer.put_contact(client, "uuid-1", {"email": ""}))
     assert res.verdict == writer.OK and res.landed == {"email": ""}
 
     # A linha continuar lá significa que a limpeza NÃO aconteceu.
     client = _FakeClient(_FakeResp(200, _cdp_contact(email="ainda@aqui.com")))
-    res = _run(writer.put_contact(client, sess, "uuid-1", {"email": ""}))
+    res = _run(writer.put_contact(client, "uuid-1", {"email": ""}))
     assert res.verdict == writer.BLOCKED and res.dropped == ["email"]
 
 
@@ -815,79 +881,140 @@ def test_limpeza_e_confirmada_pela_ausencia_da_linha(writer, _api_base):
     (409, "conflict"),      # outro cadastro é dono do identificador
     (401, "unauthorized"),
     (404, "unlinked"),
-    (403, "unlinked"),
+    # 403 mudou de significado: com cookie era "este usuário não vê o contato";
+    # com chave é "a chave não tem o escopo", que é problema de configuração.
+    (403, "unauthorized"),
     (400, "blocked"),
     (422, "blocked"),
     (429, "throttled"),
     (500, "retry"),
 ])
 def test_taxonomia_de_status_do_put(writer, _api_base, status, verdict):
-    sess = _load("session").Session("trackify_session=t", "7", 0.0)
     client = _FakeClient(_FakeResp(status, {"message": "erro"}))
-    res = _run(writer.put_contact(client, sess, "uuid-1", {"email": "a@b.com"}))
+    res = _run(writer.put_contact(client, "uuid-1", {"email": "a@b.com"}))
     assert res.verdict == verdict
 
 
 def test_409_carrega_motivo_legivel(writer, _api_base):
     """É a falha ESPERADA desta feature (dois cadastros com o mesmo e-mail), não
     a excepcional — precisa chegar legível na tela."""
-    sess = _load("session").Session("trackify_session=t", "7", 0.0)
     client = _FakeClient(_FakeResp(409, {"message": "Email já cadastrado"}))
-    res = _run(writer.put_contact(client, sess, "uuid-1", {"email": "a@b.com"}))
+    res = _run(writer.put_contact(client, "uuid-1", {"email": "a@b.com"}))
     assert res.verdict == writer.CONFLICT and "Email já cadastrado" in res.error
 
 
-# ── Puros: sessão da conta de serviço ────────────────────────────────────
+# ── Puros: cliente HTTP (API key) ────────────────────────────────────────
+#
+# Substituem o antigo bloco "sessão da conta de serviço". Não há mais login,
+# cookie, backoff nem auto-bloqueio por senha errada: a credencial é uma chave
+# que o operador cola, e o que precisa de teste é a higiene dela e a tradução de
+# HTTP em veredito.
+
 
 @pytest.fixture()
-def sessao(monkeypatch):
-    s = _load("session")
-    s.reset_for_tests()
-    monkeypatch.setattr(s._config, "api_base", lambda: "https://nexus.example/trackify/api/v1")
-    return s
+def cliente(monkeypatch):
+    c = _load("client")
+    c.reset_for_tests()
+    monkeypatch.setattr(c._config, "api_base",
+                        lambda: "https://nexus.example/trackify/api/v1")
+    monkeypatch.setattr(c, "api_key", lambda: "tk_segredo")
+    return c
 
 
-def test_cookie_e_lido_do_cabecalho(sessao):
-    """O corpo do login devolve só o usuário — o token só existe no cabeçalho."""
-    class _H(dict):
-        def get_list(self, k):
-            return ["outra=x; Path=/",
-                    "trackify_session=abc123; Path=/; HttpOnly; SameSite=Lax"]
-    resp = _FakeResp(200, {"user": {"id": "7"}}, headers=_H())
-    assert sessao.cookie_from(resp) == "abc123"
-    assert sessao.user_id_from(resp) == "7"
+def test_a_chave_vai_no_cabecalho_e_nunca_na_url(cliente):
+    http = _FakeClient(_FakeResp(200, {"id": "k1", "name": "WhatsBot",
+                                       "scopes": ["read"]}))
+    res = _run(cliente.whoami(http))
+
+    assert res.ok and res.data["name"] == "WhatsBot"
+    chamada = http.calls[0]
+    assert chamada["headers"]["X-API-Key"] == "tk_segredo"
+    # Credencial em query string vaza para o log de acesso do proxy.
+    assert "tk_segredo" not in chamada["url"]
+    assert "tk_segredo" not in str(chamada["params"] or "")
 
 
-def test_login_sem_user_id_e_recusado(sessao, monkeypatch):
-    """Sem o id não há supressão de eco possível: sincronizar assim faria o
-    poller reimportar as próprias escritas como se fossem edições humanas."""
-    class _H(dict):
-        def get_list(self, k):
-            return ["trackify_session=abc; Path=/"]
-    monkeypatch.setattr(sessao._config, "setting", lambda k, d=None: {
-        "service_email": "bot@x.com", "service_password": "s3nha"}.get(k, d))
-    client = _FakeClient(_FakeResp(200, {"user": {}}, headers=_H()))
-    assert _run(sessao._login(client)) is None
+def test_a_chave_nunca_aparece_em_log(cliente, caplog):
+    class _Explode:
+        async def request(self, *a, **k):
+            raise RuntimeError("falhou em https://nexus.example?key=tk_segredo")
+
+    with caplog.at_level("DEBUG"):
+        res = _run(cliente.whoami(_Explode()))
+
+    assert res.verdict == cliente.RETRY
+    # Só o TIPO da exceção é logado: a mensagem de um erro de request pode
+    # carregar a URL, e URL com credencial embutida acontece.
+    assert "tk_segredo" not in caplog.text
+    assert "tk_segredo" not in res.error
 
 
-def test_senha_nunca_aparece_em_log(sessao, monkeypatch, caplog):
-    """Nem no log, nem no corpo do erro — a rota de login do Nexus ecoa o que
-    foi enviado, então o corpo dela nunca pode ser registrado."""
-    monkeypatch.setattr(sessao._config, "setting", lambda k, d=None: {
-        "service_email": "bot@x.com", "service_password": "s3nh4-secreta"}.get(k, d))
-    client = _FakeClient(_FakeResp(401, {"message": "senha s3nh4-secreta inválida"}))
-    with caplog.at_level("WARNING"):
-        assert _run(sessao._login(client)) is None
-    assert "s3nh4-secreta" not in caplog.text
+def test_sem_credencial_nao_ha_ida_a_rede(cliente, monkeypatch):
+    monkeypatch.setattr(cliente, "api_key", lambda: "")
+
+    class _Proibido:
+        async def request(self, *a, **k):
+            raise AssertionError("não deveria ter chamado o Trackify")
+
+    res = _run(cliente.whoami(_Proibido()))
+    assert res.verdict == cliente.BLOCKED and "não configurada" in res.error
+    assert not cliente.is_configured()
 
 
-def test_sem_credencial_nao_ha_tentativa_de_login(sessao, monkeypatch):
-    """A rota de login é limitada a 5/min: uma instalação sem conta de serviço
-    não pode bater nela a cada ciclo do worker."""
-    monkeypatch.setattr(sessao, "is_configured", lambda: False)
-    client = _FakeClient(_FakeResp(200, {}))
-    assert _run(sessao.get(client)) is None
-    assert client.calls == []
+@pytest.mark.parametrize("status,verdict", [
+    (200, "ok"), (201, "ok"), (204, "ok"),      # o NestJS escolhe o status pelo verbo
+    (401, "unauthorized"), (403, "unauthorized"),
+    (404, "unlinked"), (409, "conflict"),
+    (400, "blocked"), (422, "blocked"),
+    (429, "throttled"), (500, "retry"), (502, "retry"),
+])
+def test_taxonomia_de_status(cliente, status, verdict):
+    http = _FakeClient(_FakeResp(status, {"message": "algo"}))
+    res = _run(cliente.get_contact(http, "uuid-1"))
+    assert res.verdict == verdict
+
+
+def test_401_e_403_dao_mensagens_diferentes(cliente):
+    """Mandar o operador gerar outra chave quando o problema é escopo faz ele
+    trocar a chave e continuar quebrado."""
+    r401 = _run(cliente.get_contact(_FakeClient(_FakeResp(401, {})), "uuid-1"))
+    r403 = _run(cliente.get_contact(
+        _FakeClient(_FakeResp(403, {"message": "escopo faltando"})), "uuid-1"))
+
+    assert "revogada" in r401.error
+    assert "escopo faltando" in r403.error
+
+
+def test_cache_de_leitura_nao_guarda_erro(cliente):
+    """Cachear um erro transitório o congelaria pelo TTL inteiro."""
+    ruim = _run(cliente.cached("k", lambda: cliente.get_contact(
+        _FakeClient(_FakeResp(500, {})), "uuid-1")))
+    assert not ruim.ok
+
+    bom = _run(cliente.cached("k", lambda: cliente.get_contact(
+        _FakeClient(_FakeResp(200, {"id": "uuid-1"})), "uuid-1")))
+    assert bom.ok
+
+    # Agora sim ficou guardado: um client que estoura prova que não houve rede.
+    class _Proibido:
+        async def request(self, *a, **k):
+            raise AssertionError("deveria ter vindo do cache")
+
+    de_novo = _run(cliente.cached("k", lambda: cliente.get_contact(_Proibido(), "u")))
+    assert de_novo.data == {"id": "uuid-1"}
+
+
+def test_resolve_manda_identificadores_no_corpo(cliente):
+    """POST e não GET: identificador em query string vaza para log de proxy."""
+    http = _FakeClient(_FakeResp(200, {"matches": []}))
+    _run(cliente.resolve(http, {"whatsapp": ["5564993467452"]}))
+
+    chamada = http.calls[0]
+    assert chamada["method"] == "POST"
+    assert chamada["json"]["identifiers"] == {"whatsapp": ["5564993467452"]}
+    assert "5564993467452" not in chamada["url"]
+    # O fallback por dígitos é caminho FRIO: não vai por padrão.
+    assert "digitsFallback" not in chamada["json"]
 
 
 # ── Com app: saída de campos (push) ──────────────────────────────────────
@@ -896,8 +1023,7 @@ def _field_sync_on(**extra):
     base = {
         "plugin.trackify.field_sync_enabled": True,
         "plugin.trackify.field_sync_dry_run": True,
-        "plugin.trackify.service_email": "bot@empresa.com",
-        "plugin.trackify.service_password": "s3nha",
+        "plugin.trackify.sync_api_key": "tk_teste",
         "plugin.trackify.sync_api_base": "https://nexus.example/trackify/api/v1",
     }
     base.update(extra)
@@ -942,6 +1068,19 @@ def _mapeia(client, wb_key, tk_slug, direction="to_trackify"):
     return r.json()["data"]["rows"][0]
 
 
+def _cdp_tem(monkeypatch, push, valores: dict | None = None):
+    """Valores que o CDP devolve para os slugs mapeados.
+
+    Substitui ``_tk_values``, que antes era uma consulta SQL e hoje é
+    ``GET /contacts/:id``. ``None`` simula um contato sem nenhum dos campos.
+    """
+    async def fake(http, tk_id, slugs):
+        base = {s: "" for s in slugs}
+        base.update(valores or {})
+        return base
+    monkeypatch.setattr(push, "_tk_values", fake)
+
+
 def test_push_ignora_contato_nao_vinculado(plugin_app, monkeypatch):
     """Esta feature NUNCA cria contato no Trackify — quem faz isso é o espelho
     de eventos, com o toggle e o limite dele."""
@@ -951,7 +1090,7 @@ def test_push_ignora_contato_nao_vinculado(plugin_app, monkeypatch):
 
     from db.repositories import contact_repo
     c = contact_repo.get_or_create("5511900000001")
-    plano = push.plan_for_contact(int(c["id"]))
+    plano = _run(push.plan_for_contact(_FakeHttp(), int(c["id"])))
     assert "não vinculado" in plano.skip
     assert plano.field_values == {}
 
@@ -970,15 +1109,14 @@ def test_push_so_envia_o_que_diverge(plugin_app, monkeypatch):
     _liga_contato_ao_cdp("5511900000002", "uuid-cdp-2")
 
     # O CDP ainda não tem o CPF → tem que entrar no plano.
-    monkeypatch.setattr(push, "trackify_db_run", lambda *a, **k: [])
-    plano = push.plan_for_contact(int(c["id"]))
+    _cdp_tem(monkeypatch, push)
+    plano = _run(push.plan_for_contact(_FakeHttp(), int(c["id"])))
     assert plano.field_values == {"cpf": "11122233344"}
     assert plano.trackify_contact_id == "uuid-cdp-2"
 
     # O CDP já tem o MESMO valor → nada a enviar, nem uma chamada.
-    monkeypatch.setattr(push, "trackify_db_run",
-                        lambda *a, **k: [{"slug": "cpf", "value": "11122233344"}])
-    plano = push.plan_for_contact(int(c["id"]))
+    _cdp_tem(monkeypatch, push, {"cpf": "11122233344"})
+    plano = _run(push.plan_for_contact(_FakeHttp(), int(c["id"])))
     assert plano.field_values == {}
 
 
@@ -995,7 +1133,7 @@ def test_push_em_modo_seco_nao_chama_o_trackify(plugin_app, monkeypatch):
     c = contact_repo.get_or_create("5511900000003")
     custom_attribute_repo.set_values(contacts_tbl, int(c["id"]), {"cpf": "999"})
     _liga_contato_ao_cdp("5511900000003", "uuid-cdp-3")
-    monkeypatch.setattr(push, "trackify_db_run", lambda *a, **k: [])
+    _cdp_tem(monkeypatch, push)
 
     linha = _enfileira_e_reserva(push, int(c["id"]))
     client = _FakeClient(_FakeResp(500, {}))     # qualquer chamada seria erro
@@ -1007,8 +1145,6 @@ def test_push_grava_e_carimba_quando_o_modo_seco_sai(plugin_app, monkeypatch):
     built = plugin_app("trackify", settings_overrides=_field_sync_on(
         **{"plugin.trackify.field_sync_dry_run": False}))
     push = _load("push")
-    sess_mod = _load("session")
-    sess_mod.reset_for_tests()
     linha_map = _mapeia(built.client, "cpf", "cpf")
 
     from db.repositories import contact_repo, custom_attribute_repo
@@ -1016,12 +1152,7 @@ def test_push_grava_e_carimba_quando_o_modo_seco_sai(plugin_app, monkeypatch):
     c = contact_repo.get_or_create("5511900000004")
     custom_attribute_repo.set_values(contacts_tbl, int(c["id"]), {"cpf": "12345"})
     _liga_contato_ao_cdp("5511900000004", "uuid-cdp-4")
-    monkeypatch.setattr(push, "trackify_db_run", lambda *a, **k: [])
-
-    fake_sess = sess_mod.Session("trackify_session=t", "user-9", 1e12)
-    async def _sessao(client, force=False):
-        return fake_sess
-    monkeypatch.setattr(push.session, "get", _sessao)
+    _cdp_tem(monkeypatch, push)
 
     linha = _enfileira_e_reserva(push, int(c["id"]))
     client = _FakeClient(_FakeResp(200, _cdp_contact(cpf="12345")))
@@ -1029,7 +1160,7 @@ def test_push_grava_e_carimba_quando_o_modo_seco_sai(plugin_app, monkeypatch):
     assert client.calls[0]["json"] == {"fieldValues": {"cpf": "12345"}}
 
     # Carimbado: o próximo ciclo não reenvia.
-    plano = push.plan_for_contact(int(c["id"]))
+    plano = _run(push.plan_for_contact(_FakeHttp(), int(c["id"])))
     assert plano.field_values == {}
     from sqlalchemy import text as _t
 
@@ -1046,8 +1177,6 @@ def test_push_com_409_nao_retenta_e_marca_conflito(plugin_app, monkeypatch):
     built = plugin_app("trackify", settings_overrides=_field_sync_on(
         **{"plugin.trackify.field_sync_dry_run": False}))
     push = _load("push")
-    sess_mod = _load("session")
-    sess_mod.reset_for_tests()
     linha_map = _mapeia(built.client, "email", "email")
 
     from db.repositories import contact_repo, custom_attribute_repo
@@ -1056,11 +1185,7 @@ def test_push_com_409_nao_retenta_e_marca_conflito(plugin_app, monkeypatch):
     custom_attribute_repo.set_values(contacts_tbl, int(c["id"]),
                                      {"email": "dup@empresa.com"})
     _liga_contato_ao_cdp("5511900000005", "uuid-cdp-5")
-    monkeypatch.setattr(push, "trackify_db_run", lambda *a, **k: [])
-
-    async def _sessao(client, force=False):
-        return sess_mod.Session("trackify_session=t", "user-9", 1e12)
-    monkeypatch.setattr(push.session, "get", _sessao)
+    _cdp_tem(monkeypatch, push)
 
     linha = _enfileira_e_reserva(push, int(c["id"]))
     client = _FakeClient(_FakeResp(409, {"message": "Email já cadastrado"}))
@@ -1082,95 +1207,137 @@ def test_push_com_409_nao_retenta_e_marca_conflito(plugin_app, monkeypatch):
     assert len(d["conflicts"]) == 1
 
 
-# ── Puros: cursor fatiado do poller ──────────────────────────────────────
+# ── Puros: cursor e supressão de eco do poller ───────────────────────────
 
 @pytest.fixture(scope="module")
 def pull():
     return _load("pull")
 
 
-def _linha(ts, rid):
-    return {"created_epoch": ts, "row_id": rid}
+def test_cursor_e_relogio_saem_do_servidor(pull):
+    """O fatiamento por contato e o ``merge_chunks`` deixaram de existir.
 
-
-def test_cursor_nao_pula_pedaco_truncado(pull):
-    """O cursor é GLOBAL mas a consulta é fatiada por contato.
-
-    Se o pedaço A voltou até T=100 e o pedaço B bateu no LIMIT em T=40, avançar
-    para 100 faria tudo entre 40 e 100 do pedaço B nunca mais ser olhado — perda
-    silenciosa de alteração feita no CRM do cliente.
+    Eles só existiam porque não havia índice em ``created_at`` sozinho do lado do
+    CDP, e um "tudo que mudou desde T" global varria a tabela de auditoria. O
+    índice agora existe lá e o cursor keyset é responsabilidade do servidor —
+    junto com o relógio, que precisa ser o do BANCO e não o desta máquina.
     """
-    chunks = [
-        {"rows": [_linha(10, "a"), _linha(100, "b")], "truncated": False},
-        {"rows": [_linha(20, "c"), _linha(40, "d")], "truncated": True},
-    ]
-    linhas, cursor, truncado = pull.merge_chunks(chunks, (0.0, ""))
-    assert cursor == (40.0, "d") and truncado is True
-    # A linha de T=100 fica para o próximo ciclo, em vez de ser pulada.
-    assert [r["row_id"] for r in linhas] == ["a", "c", "d"]
+    tk = _load("client")
+    capturado = {}
+
+    async def fake(http, *, since=0.0, since_id="", limit=500, field_slugs=None):
+        capturado.update({"since": since, "since_id": since_id,
+                          "field_slugs": field_slugs})
+        return tk.Result(tk.OK, 200, data={
+            "data": [{"id": "r-2", "contactId": "c", "customFieldId": "f",
+                      "newValue": "x", "userId": "u", "createdEpoch": 120.0}],
+            "meta": {"serverEpoch": 200.0, "truncated": False,
+                     "nextSince": 120.0, "nextSinceId": "r-2"},
+        })
+
+    original = tk.changelog
+    tk.changelog = fake
+    try:
+        pagina = _run(pull.fetch_changes(_FakeHttp(), (55.0, "r-1"), ["email"]))
+    finally:
+        tk.changelog = original
+
+    assert capturado == {"since": 55.0, "since_id": "r-1", "field_slugs": ["email"]}
+    assert pagina["server_epoch"] == 200.0
+    assert pagina["next"] == (120.0, "r-2")
+    assert pagina["rows"][0]["row_id"] == "r-2"
+    # As chaves camelCase da API são traduzidas na BORDA, para `apply_row` (e os
+    # testes dele) não saberem que o transporte mudou.
+    assert pagina["rows"][0]["tk_contact_id"] == "c"
+    assert pagina["rows"][0]["field_id"] == "f"
 
 
-def test_cursor_avanca_ate_o_fim_quando_nada_truncou(pull):
-    chunks = [
-        {"rows": [_linha(10, "a"), _linha(100, "b")], "truncated": False},
-        {"rows": [_linha(20, "c")], "truncated": False},
-    ]
-    linhas, cursor, truncado = pull.merge_chunks(chunks, (0.0, ""))
-    assert cursor == (100.0, "b") and truncado is False
-    assert [r["row_id"] for r in linhas] == ["a", "c", "b"]   # ordenado por tempo
+def test_falha_de_leitura_nao_move_o_cursor(pull):
+    tk = _load("client")
+
+    async def fake(http, **k):
+        return tk.Result(tk.RETRY, 500, "fora do ar")
+
+    original = tk.changelog
+    tk.changelog = fake
+    try:
+        pagina = _run(pull.fetch_changes(_FakeHttp(), (55.0, "r-1"), []))
+    finally:
+        tk.changelog = original
+
+    assert pagina["rows"] == [] and pagina["next"] == (55.0, "r-1")
+    # Sem relógio do servidor o ciclo não tem como aplicar a margem de segurança.
+    assert pagina["server_epoch"] == 0.0
 
 
-def test_cursor_nao_anda_sem_linha_nenhuma(pull):
-    linhas, cursor, truncado = pull.merge_chunks(
-        [{"rows": [], "truncated": False}], (55.0, "z"))
-    assert (linhas, cursor, truncado) == ([], (55.0, "z"), False)
+def test_eco_e_reconhecido_pelo_ATOR_da_escrita(pull):
+    """Com API key a procedência é exata: uma linha assinada por
+    ``apikey:<nossa chave>`` só pode ter saído daqui.
 
-
-def test_changelog_nao_descarta_linha_por_autor(pull):
-    """O SQL NÃO pode filtrar por autor.
-
-    Filtrar assim engolia a edição de uma pessoa que usasse a mesma conta da
-    integração para entrar no Trackify — cenário normal, e a perda era silenciosa.
-    A supressão de eco passou a ser por VALOR (ver ``_e_nosso_eco``).
+    Com o cookie de sessão isso não era verdade — a escrita da integração e a
+    edição de uma pessoa usando as mesmas credenciais chegavam com o mesmo
+    ``user_id``, e era preciso comparar o valor para desempatar.
     """
-    sql = pull._CHANGELOG_SQL
-    assert "user_id" not in sql.split("WHERE")[1]
-    # ...mas continua escopada: `created_at` sozinho não tem índice na tabela deles.
-    assert "cl.contact_id = ANY(CAST(:ids AS uuid[]))" in sql
+    assert pull._e_nosso_eco(
+        {"user_id": "apikey:k1", "new_value": "a@b.com"}, {}, "apikey:k1") is True
+
+    # Uma PESSOA editando na tela do Trackify: outro ator, nunca é eco — mesmo
+    # que por acaso tenha escrito o mesmo valor que nós.
+    codec = _load("field_codec")
+    nosso = {"tk_hash": codec.hash_value("a@b.com")}
+    assert pull._e_nosso_eco(
+        {"user_id": "humano-2", "new_value": "outro@b.com"}, nosso, "apikey:k1") is False
 
 
-def test_eco_e_reconhecido_pelo_valor_e_nao_pelo_autor(pull):
+def test_eco_por_valor_continua_como_segunda_camada(pull):
+    """Não é redundância: pega a linha de ingestion/merge/import que carrega o
+    valor que nós mesmos acabamos de escrever — essa não tem o nosso ator."""
     codec = _load("field_codec")
     nosso = {"tk_hash": codec.hash_value("a@b.com")}
 
-    # A nossa própria escrita voltando: mesmo autor, mesmo valor.
     assert pull._e_nosso_eco(
-        {"user_id": "svc-1", "new_value": "a@b.com"}, nosso, "svc-1") is True
+        {"user_id": "", "source": "ingestion", "new_value": "a@b.com"},
+        nosso, "apikey:k1") is True
 
-    # Uma PESSOA usando a mesma conta: mesmo autor, valor DIFERENTE.
+    # Valor diferente do que enviamos: é mudança de verdade.
     assert pull._e_nosso_eco(
-        {"user_id": "svc-1", "new_value": "outro@b.com"}, nosso, "svc-1") is False
-
-    # Outro usuário: nunca é eco, mesmo que o valor coincida.
-    assert pull._e_nosso_eco(
-        {"user_id": "humano-2", "new_value": "a@b.com"}, nosso, "svc-1") is False
+        {"user_id": "", "new_value": "outro@b.com"}, nosso, "apikey:k1") is False
 
     # Sem memória do que enviamos, não dá para afirmar que é eco.
     assert pull._e_nosso_eco(
-        {"user_id": "svc-1", "new_value": "a@b.com"}, {}, "svc-1") is False
+        {"user_id": "humano", "new_value": "a@b.com"}, {}, "apikey:k1") is False
 
 
 def test_eco_nao_ressuscita_valor_antigo(pull):
-    """Por que a guarda compara com o que NÓS enviamos e não com o valor atual
+    """Por que a 2ª camada compara com o que NÓS enviamos e não com o valor atual
     do WhatsBot: entre o nosso envio e a leitura o operador pode ter mudado o
     campo de novo, e a linha antiga sobrescreveria a mudança nova."""
     codec = _load("field_codec")
     estado = {"tk_hash": codec.hash_value("enviado@x.com")}
-    linha_antiga = {"user_id": "svc-1", "new_value": "enviado@x.com"}
-    assert pull._e_nosso_eco(linha_antiga, estado, "svc-1") is True
+    linha_antiga = {"user_id": "", "new_value": "enviado@x.com"}
+    assert pull._e_nosso_eco(linha_antiga, estado, "apikey:k1") is True
 
 
 # ── Com app: volta do Trackify ───────────────────────────────────────────
+
+def _pagina(monkeypatch, pull_mod, linhas, *, truncated=False,
+            server_epoch=2_000_000_000.0):
+    """Uma página do ``GET /contact-changelog``, já normalizada.
+
+    O ``server_epoch`` é o relógio do BANCO do CDP: é dele que sai a margem de
+    segurança de 5s contra transações que commitam fora de ordem.
+    """
+    ultimo = linhas[-1] if linhas else None
+
+    async def fake(http, since, field_slugs):
+        return {
+            "rows": list(linhas),
+            "next": ((ultimo["created_epoch"], ultimo["row_id"]) if ultimo else since),
+            "truncated": truncated,
+            "server_epoch": server_epoch,
+        }
+    monkeypatch.setattr(pull_mod, "fetch_changes", fake)
+
 
 def test_pull_grava_avisa_o_painel_e_nao_emite_contact_updated(plugin_app, monkeypatch):
     """Contrato anti-laço: o refresh é o broadcast de WebSocket, NUNCA o evento
@@ -1179,7 +1346,7 @@ def test_pull_grava_avisa_o_painel_e_nao_emite_contact_updated(plugin_app, monke
     """
     built = plugin_app("trackify", settings_overrides=_field_sync_on(**{
         "plugin.trackify.field_sync_pull_enabled": True,
-        "plugin.trackify.sync_user_id": "svc-1",
+        "plugin.trackify.sync_api_key_id": "k1",
     }))
     pull_mod = _load("pull")
     _mapeia(built.client, "cpf", "cpf", direction="to_whatsbot")
@@ -1196,15 +1363,13 @@ def test_pull_grava_avisa_o_painel_e_nao_emite_contact_updated(plugin_app, monke
     with get_engine().begin() as conn:
         conn.execute(_t("UPDATE plugin_trackify_field_map SET tk_field_id = 'f-cpf'"))
 
-    # Sem DSN o ciclo sai antes de qualquer leitura (no-op por desenho).
-    monkeypatch.setattr(pull_mod.trackify_db, "is_configured", lambda: True)
-    monkeypatch.setattr(pull_mod, "cdp_now", lambda: 2_000_000_000.0)
-    monkeypatch.setattr(pull_mod, "fetch_changes", lambda *a, **k: [{
-        "rows": [{"row_id": "r1", "tk_contact_id": "uuid-cdp-10",
-                  "field_id": "f-cpf", "slug": "cpf", "new_value": "55566677788",
-                  "source": "manual", "user_id": "humano-2",
-                  "created_epoch": 1_999_999_000.0}],
-        "truncated": False}])
+    # Sem API key o ciclo sai antes de qualquer leitura (no-op por desenho).
+    monkeypatch.setattr(pull_mod.tk_client, "is_configured", lambda: True)
+    _pagina(monkeypatch, pull_mod, [
+        {"row_id": "r1", "tk_contact_id": "uuid-cdp-10",
+         "field_id": "f-cpf", "slug": "cpf", "new_value": "55566677788",
+         "source": "manual", "user_id": "humano-2",
+         "created_epoch": 1_999_999_000.0}])
 
     emitidos, avisos = [], []
     import plugins.context as pctx
@@ -1213,7 +1378,7 @@ def test_pull_grava_avisa_o_painel_e_nao_emite_contact_updated(plugin_app, monke
     from plugins import events as bus
     monkeypatch.setattr(bus, "emit", lambda ev, payload=None: emitidos.append(ev))
 
-    resumo = pull_mod.cycle()
+    resumo = _run(pull_mod.cycle(_FakeHttp()))
     assert resumo["gravadas"] == 1
 
     valores = custom_attribute_repo.get_values(contacts_tbl, int(c["id"]))
@@ -1227,15 +1392,19 @@ def test_pull_ignora_o_que_a_propria_conta_de_servico_escreveu(plugin_app, monke
     ciclo NÃO roda em vez de reimportar as próprias escritas."""
     built = plugin_app("trackify", settings_overrides=_field_sync_on(**{
         "plugin.trackify.field_sync_pull_enabled": True,
-        "plugin.trackify.sync_user_id": "",
+        "plugin.trackify.sync_api_key_id": "",
     }))
     pull_mod = _load("pull")
     _mapeia(built.client, "cpf", "cpf", direction="to_whatsbot")
 
     chamou = []
-    monkeypatch.setattr(pull_mod, "fetch_changes",
-                        lambda *a, **k: chamou.append(1) or [])
-    resumo = pull_mod.cycle()
+
+    async def _nunca(*a, **k):
+        chamou.append(1)
+        return {"rows": [], "next": (0.0, ""), "truncated": False,
+                "server_epoch": 0.0}
+    monkeypatch.setattr(pull_mod, "fetch_changes", _nunca)
+    resumo = _run(pull_mod.cycle(_FakeHttp()))
     assert resumo["lidas"] == 0 and chamou == []
 
 
@@ -1245,7 +1414,7 @@ def test_pull_recusa_valor_invalido_sem_gravar_e_marca_para_nao_repetir(
     re-tentado para sempre."""
     built = plugin_app("trackify", settings_overrides=_field_sync_on(**{
         "plugin.trackify.field_sync_pull_enabled": True,
-        "plugin.trackify.sync_user_id": "svc-1",
+        "plugin.trackify.sync_api_key_id": "k1",
     }))
     pull_mod = _load("pull")
 
@@ -1266,17 +1435,15 @@ def test_pull_recusa_valor_invalido_sem_gravar_e_marca_para_nao_repetir(
     with get_engine().begin() as conn:
         conn.execute(_t("UPDATE plugin_trackify_field_map SET tk_field_id = 'f-data'"))
 
-    # Sem DSN o ciclo sai antes de qualquer leitura (no-op por desenho).
-    monkeypatch.setattr(pull_mod.trackify_db, "is_configured", lambda: True)
-    monkeypatch.setattr(pull_mod, "cdp_now", lambda: 2_000_000_000.0)
-    monkeypatch.setattr(pull_mod, "fetch_changes", lambda *a, **k: [{
-        "rows": [{"row_id": "r9", "tk_contact_id": "uuid-cdp-11",
-                  "field_id": "f-data", "slug": "data_cdp", "new_value": "system",
-                  "source": "manual", "user_id": "humano-2",
-                  "created_epoch": 1_999_999_000.0}],
-        "truncated": False}])
+    # Sem API key o ciclo sai antes de qualquer leitura (no-op por desenho).
+    monkeypatch.setattr(pull_mod.tk_client, "is_configured", lambda: True)
+    _pagina(monkeypatch, pull_mod, [
+        {"row_id": "r9", "tk_contact_id": "uuid-cdp-11",
+         "field_id": "f-data", "slug": "data_cdp", "new_value": "system",
+         "source": "manual", "user_id": "humano-2",
+         "created_epoch": 1_999_999_000.0}])
 
-    resumo = pull_mod.cycle()
+    resumo = _run(pull_mod.cycle(_FakeHttp()))
     assert resumo["recusadas"] == 1 and resumo["gravadas"] == 0
     assert "data_teste_pull" not in custom_attribute_repo.get_values(
         contacts_tbl, int(c["id"]))
@@ -1303,7 +1470,7 @@ def test_conferencia_pega_o_que_o_csv_deixou_invisivel(plugin_app, monkeypatch):
     _liga_contato_ao_cdp("5511900000020", "uuid-cdp-20")
     # Escrita "por CSV": direto no repositório, sem passar por rota nem evento.
     custom_attribute_repo.set_values(contacts_tbl, int(c["id"]), {"cpf": "77788899900"})
-    monkeypatch.setattr(push, "trackify_db_run", lambda *a, **k: [])
+    _cdp_tem(monkeypatch, push)
 
     from sqlalchemy import text as _t
 
@@ -1313,7 +1480,7 @@ def test_conferencia_pega_o_que_o_csv_deixou_invisivel(plugin_app, monkeypatch):
     sync_state = _load("sync_state")
     sync_state.set_cursor("reconcile", 0, "", "")
 
-    resumo = reconcile.cycle()
+    resumo = _run(reconcile.cycle(_FakeHttp()))
     assert resumo["enfileirados"] >= 1
     with get_engine().connect() as conn:
         n = conn.execute(_t("SELECT COUNT(*) FROM plugin_trackify_field_outbox "
@@ -1343,10 +1510,10 @@ def test_conferencia_respeita_o_teto_de_envios(plugin_app, monkeypatch):
         c = contact_repo.get_or_create(phone)
         custom_attribute_repo.set_values(contacts_tbl, int(c["id"]), {"cpf": f"{i:011d}"})
         _liga_contato_ao_cdp(phone, f"uuid-lote-{i}")
-    monkeypatch.setattr(push, "trackify_db_run", lambda *a, **k: [])
+    _cdp_tem(monkeypatch, push)
     _load("sync_state").set_cursor("reconcile", 0, "", "")
 
-    resumo = reconcile.cycle()
+    resumo = _run(reconcile.cycle(_FakeHttp()))
     assert resumo["enfileirados"] == reconcile.MAX_PUSHES
     # E o cursor andou, para o resto entrar no ciclo seguinte em vez de sumir.
     cur = _load("sync_state").get_cursor("reconcile")
@@ -1356,7 +1523,7 @@ def test_conferencia_respeita_o_teto_de_envios(plugin_app, monkeypatch):
 def test_todas_as_rotas_novas_respondem_sem_configuracao(plugin_app):
     """Fumaça: o plugin sobe e nenhuma rota nova quebra numa instalação crua.
 
-    Sem DSN, sem credencial e sem mapeamento é o estado de TODA instalação no
+    Sem credencial e sem mapeamento é o estado de TODA instalação no
     primeiro boot — e é exatamente quando um 500 numa rota deixaria a aba em
     branco, sem explicação.
     """
@@ -1365,13 +1532,13 @@ def test_todas_as_rotas_novas_respondem_sem_configuracao(plugin_app):
                  "/api/plugins/trackify/contact-attributes",
                  "/api/plugins/trackify/trackify-fields",
                  "/api/plugins/trackify/mappings",
-                 "/api/plugins/trackify/service-account",
+                 "/api/plugins/trackify/api-key",
                  "/api/plugins/trackify/field-sync/status"):
         r = built.client.get(path)
         assert r.status_code == 200, f"{path} -> {r.status_code} {r.text[:200]}"
         assert r.json()["ok"] is True
 
-    r = built.client.post("/api/plugins/trackify/service-account/test", json={})
+    r = built.client.post("/api/plugins/trackify/api-key/test", json={})
     assert r.status_code == 200 and r.json()["data"]["ok"] is False
 
     # Simular exige contato: uma varredura da base inteira não pode rodar dentro
@@ -1399,51 +1566,77 @@ def test_tela_de_configuracao_e_servida(plugin_app):
 # ── Puros: cadastro completo e produtos na jornada ───────────────────────
 
 def test_cadastro_traz_campo_vazio_em_vez_de_omitir(journey, monkeypatch):
-    """A aba "Informações do Contato" do Trackify mostra TODO campo ativo, com o
-    valor em branco quando o contato não tem o dado. Omitir o campo torna "sem
-    CPF cadastrado" indistinguível de "não existe campo de CPF" — e é justamente
-    a ausência que o atendente precisa enxergar."""
-    import datetime as _dt
+    """A aba "Informações do Contato" mostra TODO campo ativo, com o valor em
+    branco quando o contato não tem aquele dado. Campo ausente da lista é
+    indistinguível de campo vazio, e "sem CPF cadastrado" é justamente o que o
+    atendente precisa enxergar."""
+    tk = _load("client")
 
-    contato = [{"id": "uuid-1", "status": "lead", "total_spent": Decimal("0"),
-                "first_seen_at": _dt.datetime(2026, 7, 31), "converted_at": None,
-                "created_at": _dt.datetime(2026, 7, 31)}]
-    campos = [
-        {"slug": "email", "name": "Email", "is_identifier": True,
-         "value": "leandro@exemplo.com"},
-        {"slug": "cpf", "name": "CPF", "is_identifier": True, "value": None},
-        {"slug": "name", "name": "Nome", "is_identifier": False, "value": "Leandro"},
-        {"slug": "cidade", "name": "Cidade", "is_identifier": False, "value": None},
-        {"slug": "estado", "name": "Estado", "is_identifier": False, "value": "GO"},
-    ]
+    async def _contato(http, cid):
+        return tk.Result(tk.OK, 200, data={
+            "id": "uuid-1", "status": "customer", "totalSpent": "1234.5",
+            "firstSeenAt": "2026-07-31T00:00:00", "convertedAt": None,
+            "contactFieldValues": [
+                {"value": "leandro@exemplo.com", "customField": {"slug": "email"}},
+                {"value": "Leandro", "customField": {"slug": "name"}},
+                {"value": "GO", "customField": {"slug": "estado"}},
+            ],
+            "contactTags": [{"tag": {"name": "vip", "color": "#fff"}}],
+        })
 
-    def _fake(sql, params):
-        if "FROM contacts c" in sql:
-            return contato
-        if "custom_fields cf" in sql:
-            return campos
-        return []
-    monkeypatch.setattr(journey.trackify_db, "run_read", _fake)
+    async def _catalogo(http):
+        return tk.Result(tk.OK, 200, data=[
+            {"slug": "email", "name": "Email", "isIdentifier": True, "isActive": True,
+             "identifierPriority": 10},
+            {"slug": "cpf", "name": "CPF", "isIdentifier": True, "isActive": True,
+             "identifierPriority": 30},
+            {"slug": "name", "name": "Nome", "isIdentifier": False, "isActive": True},
+            {"slug": "cidade", "name": "Cidade", "isIdentifier": False, "isActive": True},
+            {"slug": "estado", "name": "Estado", "isIdentifier": False, "isActive": True},
+            # Campo desativado não entra na tela.
+            {"slug": "morto", "name": "Morto", "isIdentifier": False, "isActive": False},
+        ])
 
-    out = journey.fetch_identity("uuid-1")
+    monkeypatch.setattr(journey.tk_client, "get_contact", _contato)
+    monkeypatch.setattr(journey.tk_client, "custom_fields", _catalogo)
+    journey.tk_client.reset_for_tests()
+
+    out = _run(journey.fetch_identity(_FakeHttp(), "uuid-1"))
     assert [f["slug"] for f in out["identifiers"]] == ["email", "cpf"]
-    assert [f["slug"] for f in out["fields"]] == ["name", "cidade", "estado"]
+    assert [f["slug"] for f in out["fields"]] == ["cidade", "estado", "name"]
     # Vazio vira string vazia (a tela mostra "—"), NUNCA some da lista.
     assert next(f for f in out["identifiers"] if f["slug"] == "cpf")["value"] == ""
     assert out["name"] == "Leandro"
+    assert out["total_spent"] == "R$ 1.234,50"
+    assert out["tags"] == [{"name": "vip", "color": "#fff"}]
 
 
-def test_cadastro_le_de_custom_fields_e_nao_dos_valores(journey):
-    """Se a consulta partisse de ``contact_field_values``, campo sem linha para
-    aquele contato jamais apareceria — que é o bug que este teste tranca."""
-    sql = journey._SQL_FIELDS
-    assert "FROM custom_fields cf" in sql
-    assert "LEFT JOIN contact_field_values" in sql
-    assert "cf.is_active" in sql
+def test_cadastro_parte_do_catalogo_e_nao_dos_valores(journey, monkeypatch):
+    """Se a lista saísse dos valores do contato, campo sem valor jamais
+    apareceria — que é o bug que este teste tranca."""
+    tk = _load("client")
+    pediu = []
+
+    async def _contato(http, cid):
+        return tk.Result(tk.OK, 200, data={"id": "uuid-1", "contactFieldValues": []})
+
+    async def _catalogo(http):
+        pediu.append(1)
+        return tk.Result(tk.OK, 200, data=[
+            {"slug": "cpf", "name": "CPF", "isIdentifier": True, "isActive": True}])
+
+    monkeypatch.setattr(journey.tk_client, "get_contact", _contato)
+    monkeypatch.setattr(journey.tk_client, "custom_fields", _catalogo)
+    journey.tk_client.reset_for_tests()
+
+    out = _run(journey.fetch_identity(_FakeHttp(), "uuid-1"))
+    assert pediu, "o catálogo de campos precisa ser consultado"
+    assert [f["slug"] for f in out["identifiers"]] == ["cpf"]
+    assert out["identifiers"][0]["value"] == ""
 
 
 def _ev(tipo, quando, campos, valor=None, effect="add"):
-    """Uma linha de ``_SQL_PURCHASE_EVENTS``.
+    """Uma linha de ``GET /contacts/:id/purchases``, no formato da API.
 
     ``effect`` é o veredito da ``channel_value_rules`` do CDP — ``add`` (compra),
     ``subtract`` (reembolso) ou ``ignore`` (só estado). É ele, e não o tipo do
@@ -1451,22 +1644,30 @@ def _ev(tipo, quando, campos, valor=None, effect="add"):
     """
     import datetime as _dt
     # ``title`` faz parte da linha porque o histórico por produto reusa o
-    # ``_event_row`` da linha do tempo — é o corpo da linha no ``EventRow``.
-    return {"id": f"e-{quando}", "event_type": tipo, "title": tipo, "effect": effect,
-            "value": Decimal(str(valor)) if valor is not None else None,
-            "occurred_at": _dt.datetime(2026, 1, quando, 12, 0),
+    # formato da linha do tempo — é o corpo da linha no ``EventRow``.
+    return {"id": f"e-{quando}", "eventType": tipo, "title": tipo, "effect": effect,
+            "value": str(valor) if valor is not None else None,
+            "occurredAt": _dt.datetime(2026, 1, quando, 12, 0),
             "channel": "ticto", "fields": campos}
 
 
 def _mock_compras(journey, monkeypatch, linhas, unruled=(), unnamed=()):
-    """``fetch_purchases`` faz TRÊS consultas — os eventos e os 2 diagnósticos."""
-    def fake(sql, params=None):
-        if "WITH page AS" in sql:
-            return list(linhas)
-        if "SELECT 1 FROM channel_value_rules" in sql:      # sem regra de valor
-            return list(unruled)
-        return list(unnamed)                                # sem nome de produto
-    monkeypatch.setattr(journey.trackify_db, "run_read", fake)
+    """Substitui a chamada a ``GET /contacts/:id/purchases``.
+
+    Uma rota só devolve os eventos e os dois diagnósticos — antes eram três
+    consultas SQL separadas.
+    """
+    tk = _load("client")
+
+    async def fake(http, contact_id, **kwargs):
+        return tk.Result(tk.OK, 200, data={
+            "events": list(linhas),
+            "diagnostics": {
+                "unruledProductEvents": list(unruled),
+                "unnamedPurchaseEvents": list(unnamed),
+            },
+        })
+    monkeypatch.setattr(journey.tk_client, "purchases", fake)
 
 
 def test_compra_e_o_que_a_regra_de_valor_diz_que_e(journey, monkeypatch):
@@ -1478,7 +1679,7 @@ def test_compra_e_o_que_a_regra_de_valor_diz_que_e(journey, monkeypatch):
                             "payment_method": "Pix"}, 197),
         _ev("webinar_assistido", 4, {"product_name": "Curso Avulso"}, effect="ignore"),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert [p["name"] for p in itens] == ["Curso Avulso"]
     assert itens[0]["purchases"] == 1
     assert itens[0]["paid_total"] == "R$ 197,00"
@@ -1492,7 +1693,7 @@ def test_reembolso_prova_que_houve_compra_e_lista_o_produto(journey, monkeypatch
         _ev("refunded", 20, {"product_name": "Comprado antes do CDP"}, 97,
             effect="subtract"),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert len(itens) == 1
     p = itens[0]
     assert p["name"] == "Comprado antes do CDP"
@@ -1508,7 +1709,7 @@ def test_produto_cancelado_continua_na_lista(journey, monkeypatch):
         _ev("active_subscription", 10, {"product_name": "Combo de Redes",
                                         "subscription_interval": "Mensal"}, 97),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert [p["name"] for p in itens] == ["Combo de Redes"]
     p = itens[0]
     assert p["last_event_type"] == "subscription_canceled"
@@ -1525,7 +1726,7 @@ def test_estado_sozinho_nao_inventa_produto(journey, monkeypatch):
         _ev("subscription_canceled", 20, {"product_name": "Fantasma"},
             effect="ignore"),
     ])
-    assert journey.fetch_purchases("uuid-1")["items"] == []
+    assert _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"] == []
 
 
 def test_total_pago_soma_add_e_desconta_subtract(journey, monkeypatch):
@@ -1533,7 +1734,7 @@ def test_total_pago_soma_add_e_desconta_subtract(journey, monkeypatch):
         _ev("refunded", 20, {"product_name": "Curso"}, 50, effect="subtract"),
         _ev("purchase", 10, {"product_name": "Curso"}, 200),
     ])
-    p = journey.fetch_purchases("uuid-1")["items"][0]
+    p = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"][0]
     assert p["paid_total"] == "R$ 150,00" and p["paid_total_raw"] == 150.0
     assert p["refunded"] == "R$ 50,00" and p["refunded_raw"] == 50.0
     assert p["purchases"] == 1
@@ -1546,7 +1747,7 @@ def test_total_pago_nunca_fica_negativo(journey, monkeypatch):
     _mock_compras(journey, monkeypatch, [
         _ev("chargeback", 20, {"product_name": "Só perda"}, 97, effect="subtract"),
     ])
-    p = journey.fetch_purchases("uuid-1")["items"][0]
+    p = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"][0]
     assert p["paid_total"] == "R$ 0,00" and p["paid_total_raw"] == 0.0
     assert p["refunded"] == "R$ 97,00"
     assert p["first_purchase_at"] is None and p["last_purchase_at"] is None
@@ -1558,7 +1759,7 @@ def test_uma_linha_por_produto_mesmo_com_varias_compras(journey, monkeypatch):
         _ev("purchase", 10, {"product_name": "Curso"}, 100),
         _ev("purchase", 5, {"product_name": "Curso"}, 100),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert len(itens) == 1
     p = itens[0]
     assert p["purchases"] == 3 and p["paid_total"] == "R$ 300,00"
@@ -1575,7 +1776,7 @@ def test_assinatura_id_agrupa_renovacoes_do_mesmo_produto(journey, monkeypatch):
         _ev("active_subscription", 10, {"product_name": "Combo de Redes",
                                         "subscription_id": "sub-7"}, 97),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert len(itens) == 1
     assert itens[0]["key"] == "sub-7" and itens[0]["purchases"] == 2
 
@@ -1587,7 +1788,7 @@ def test_evento_sem_nome_de_produto_nao_vira_produto(journey, monkeypatch):
         _ev("purchase", 5, {"transaction_id": "abc"}, 10),
         _ev("charge.paid", 6, {}, 10),
     ])
-    assert journey.fetch_purchases("uuid-1")["items"] == []
+    assert _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"] == []
 
 
 def test_compra_sem_nome_cai_no_id_do_produto(journey, monkeypatch):
@@ -1600,7 +1801,7 @@ def test_compra_sem_nome_cai_no_id_do_produto(journey, monkeypatch):
                                 "product_id": "produto", "status": "paid"}, 5),
         _ev("charge.paid", 5, {"offer_id": "upssel", "status": "paid"}, 3),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert sorted(p["name"] for p in itens) == ["produto", "upssel"]
 
 
@@ -1613,7 +1814,7 @@ def test_id_vira_nome_quando_outro_evento_do_mesmo_produto_o_traz(journey, monke
         _ev("purchase", 10, {"product_id": "prod-42",
                              "product_name": "Combo de Redes"}, 100),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert len(itens) == 1
     assert itens[0]["name"] == "Combo de Redes" and itens[0]["purchases"] == 2
 
@@ -1623,9 +1824,9 @@ def test_compra_sem_nome_nem_id_e_reportada(journey, monkeypatch):
     RECONHECIDO que não diz o quê foi comprado. Sem ele, o caso do ``pagarme``
     mandava configurar o canal de checkout — que não era o problema."""
     _mock_compras(journey, monkeypatch, [], unnamed=[
-        {"channel": "pagarme", "event_type": "charge.paid", "events": 4},
+        {"channel": "pagarme", "eventType": "charge.paid", "events": 4},
     ])
-    out = journey.fetch_purchases("uuid-1")
+    out = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))
     assert out["items"] == [] and out["unruled"] == []
     assert out["unnamed"] == [{"channel": "pagarme", "event_type": "charge.paid",
                                "events": 4}]
@@ -1640,7 +1841,7 @@ def test_cada_produto_carrega_o_proprio_historico(journey, monkeypatch):
         _ev("charge.paid", 10, {"product_name": "Combo", "status": "paid"}, 97),
         _ev("charge.paid", 5, {"product_name": "Combo", "status": "paid"}, 97),
     ])
-    p = journey.fetch_purchases("uuid-1")["items"][0]
+    p = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"][0]
     assert p["purchases"] == 2                       # o cancelamento não é compra…
     assert len(p["events"]) == 3                     # …mas ENTRA no histórico
     assert [e["event_type"] for e in p["events"]] == [
@@ -1654,14 +1855,17 @@ def test_historico_do_produto_usa_o_mesmo_formato_da_linha_do_tempo(journey, mon
     _mock_compras(journey, monkeypatch, [
         _ev("charge.paid", 10, {"product_name": "Combo", "transaction_id": "tx-1"}, 97),
     ])
-    evento = journey.fetch_purchases("uuid-1")["items"][0]["events"][0]
+    evento = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"][0]["events"][0]
+    # Os DOIS serializadores existem (a timeline recebe a linha crua da API, o
+    # histórico do produto recebe a já achatada), e é justamente por isso que a
+    # paridade precisa de teste: divergir aqui quebra a tela em silêncio.
     modelo = journey._event_row({
-        "id": "x", "event_type": "t", "title": "T", "value": None,
-        "occurred_at": None, "channel": "c", "fields": {}})
+        "id": "x", "eventType": "t", "title": "T", "value": None,
+        "occurredAt": None, "channel": {"slug": "c"}, "eventFieldValues": []})
     assert set(evento) == set(modelo)
     assert evento["value"] == "R$ 97,00" and evento["fields"]["transaction_id"] == "tx-1"
-    # `title` é o corpo da linha no EventRow — sem ele no SQL, a tela fica muda.
-    assert "p.title" in journey._SQL_PURCHASE_EVENTS
+    # `title` é o corpo da linha no EventRow — sem ele, a tela fica muda.
+    assert evento["title"] == "charge.paid"
 
 
 def test_campos_de_identificacao_saem_da_configuracao(journey, monkeypatch):
@@ -1672,7 +1876,7 @@ def test_campos_de_identificacao_saem_da_configuracao(journey, monkeypatch):
         _ev("purchase", 10, {"plan_name": "Plano Anual"}, 500),
         _ev("purchase", 5, {"product_name": "Fora da lista"}, 100),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert [p["name"] for p in itens] == ["Plano Anual"]
 
 
@@ -1687,7 +1891,7 @@ def test_slug_novo_de_id_e_traduzido_pelo_par_name(journey, monkeypatch):
         _ev("purchase", 20, {"plan_id": "p-9"}, 100),
         _ev("purchase", 10, {"plan_id": "p-9", "plan_name": "Plano Anual"}, 100),
     ])
-    itens = journey.fetch_purchases("uuid-1")["items"]
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
     assert len(itens) == 1
     assert itens[0]["name"] == "Plano Anual" and itens[0]["purchases"] == 2
 
@@ -1703,28 +1907,82 @@ def test_lista_de_campos_vazia_volta_ao_padrao(journey, monkeypatch):
     assert cfg.product_identity_fields() == ["offer_id", "product_name"]
 
 
+def _stub_blocos(monkeypatch, journey, *, identity=None, subs=None,
+                 purchases=None, timeline=None, tipos=None):
+    """Substitui os quatro blocos de ``build_journey`` por valores fixos."""
+    async def _ident(http, cid):
+        return identity if identity is not None else {"contact_id": cid}
+
+    async def _subs(http, cid, **k):
+        return subs if subs is not None else []
+
+    async def _compras(http, cid, **k):
+        return purchases if purchases is not None else {"items": [], "unruled": []}
+
+    async def _linha(http, cid, **k):
+        return timeline if timeline is not None else {"events": []}
+
+    async def _tipos(http, cid):
+        return tipos if tipos is not None else []
+
+    monkeypatch.setattr(journey, "fetch_identity", _ident)
+    monkeypatch.setattr(journey, "fetch_subscriptions", _subs)
+    monkeypatch.setattr(journey, "fetch_purchases", _compras)
+    monkeypatch.setattr(journey, "fetch_timeline", _linha)
+    monkeypatch.setattr(journey, "fetch_event_types", _tipos)
+
+
+def _config_identity_fields(journey):
+    return journey._config.product_identity_fields()
+
+
+def _campos_pedidos(journey, monkeypatch):
+    """Quais ``identityFields`` o plugin manda para a rota de compras."""
+    tk = _load("client")
+    visto = {}
+
+    async def fake(http, contact_id, **kwargs):
+        visto["campos"] = kwargs.get("identity_fields")
+        return tk.Result(tk.OK, 200, data={"events": [], "diagnostics": {}})
+    monkeypatch.setattr(journey.tk_client, "purchases", fake)
+    _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))
+    return visto["campos"]
+
+
 def test_diagnostico_diz_quais_campos_o_evento_traz(journey, monkeypatch):
     """Sem isso o operador não teria como adivinhar qual slug configurar."""
     _mock_compras(journey, monkeypatch, [], unnamed=[
-        {"channel": "pagarme", "event_type": "charge.paid", "events": 4,
+        {"channel": "pagarme", "eventType": "charge.paid", "events": 4,
          "fields": "card_brand, status, transaction_id"},
     ])
-    assert journey.fetch_purchases("uuid-1")["unnamed"][0]["fields"] == (
+    assert _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["unnamed"][0]["fields"] == (
         "card_brand, status, transaction_id")
-    # E a consulta pergunta pelos campos CONFIGURADOS, não por uma lista fixa.
-    assert ":id_fields" in journey._SQL_UNNAMED_PURCHASE_EVENTS
-    assert ":id_fields" in journey._SQL_UNRULED_PRODUCT_EVENTS
+    # E o plugin manda os campos CONFIGURADOS, não uma lista fixa — quem
+    # consulta é o Trackify, mas quem sabe o que nomeia um produto é daqui.
+    assert _campos_pedidos(journey, monkeypatch) == _config_identity_fields(journey)
 
 
-def test_os_dois_diagnosticos_sao_consultas_opostas(journey):
-    """Trocar um pelo outro aponta o operador para o canal errado."""
-    sem_regra = journey._SQL_UNRULED_PRODUCT_EVENTS
-    sem_nome = journey._SQL_UNNAMED_PURCHASE_EVENTS
-    # "sem regra": exige nome de produto e EXCLUI quem tem regra de valor.
-    assert "NOT EXISTS" in sem_regra and "SELECT 1 FROM channel_value_rules" in sem_regra
-    # "sem nome": exige regra de valor e EXCLUI quem tem qualquer identificação.
-    assert "JOIN channel_value_rules vr" in sem_nome
-    assert "ecf.slug = ANY(:id_fields)" in sem_nome
+def test_os_dois_diagnosticos_nao_se_misturam(journey, monkeypatch):
+    """Trocar um pelo outro aponta o operador para o canal errado.
+
+    O SQL dos dois vive no Trackify desde que a leitura virou HTTP; o que
+    continua sendo responsabilidade daqui é não embaralhar as duas listas na
+    tradução da resposta.
+    """
+    _mock_compras(
+        journey, monkeypatch, [],
+        unruled=[{"channel": "hotmart", "eventType": "purchase", "events": 4}],
+        unnamed=[{"channel": "pagarme", "eventType": "charge.paid", "events": 2,
+                  "fields": "transaction_id"}])
+    out = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))
+
+    assert out["unruled"] == [{"channel": "hotmart", "event_type": "purchase",
+                               "events": 4}]
+    assert out["unnamed"] == [{"channel": "pagarme", "event_type": "charge.paid",
+                               "events": 2, "fields": "transaction_id"}]
+    # `fields` é do diagnóstico de "sem identidade" e SÓ dele: é o que diz ao
+    # operador qual slug configurar.
+    assert "fields" not in out["unruled"][0]
 
 
 def test_campo_novo_de_settings_tem_interface(journey):
@@ -1737,11 +1995,8 @@ def test_campo_novo_de_settings_tem_interface(journey):
                     for n in ("config.js", "FieldSync.js"))
     # Settings que NÃO passam pelo PUT de settings — têm rota própria de propósito:
     por_rota_propria = {
-        # Vive ao lado da senha da conta de serviço, que não pode trafegar em
-        # claro pelo GET /settings: as duas vão por PUT /service-account.
-        "service_email",
         # Opcional e DEDUZIDA das outras URLs (`_config.api_base`); o valor
-        # efetivo aparece read-only no painel da conta de serviço.
+        # efetivo aparece read-only no card da API key.
         "sync_api_base",
     }
     for campo in settings.Settings.model_fields:
@@ -1759,11 +2014,28 @@ def test_modal_reusa_o_event_row_no_historico_do_produto():
     assert "<${EventRow}" in corpo
 
 
-def test_modal_aponta_a_configuracao_dos_campos():
-    """A aba tem que dizer o que fazer, não só que não deu."""
+def test_aba_de_produtos_nao_mostra_diagnostico_do_cdp():
+    """O diagnóstico detalhado é configuração do CDP, não informação de
+    atendimento — e ocupava mais espaço que a própria lista de compras. O
+    backend continua devolvendo `unruled`/`unnamed`; a TELA é que não os
+    despeja no rodapé."""
     js = (_SRC / "static" / "JourneyModal.js").read_text(encoding="utf-8")
-    assert "Campos que identificam o produto" in js
-    assert "u.fields" in js       # lista os slugs que aqueles eventos trazem
+    for frase in ("não têm regra de valor", "entraram no total gasto",
+                  "Campos que identificam o produto", "u.fields"):
+        assert frase not in js, f"o diagnóstico voltou para a aba: {frase!r}"
+    # ...mas a distinção honesta do estado vazio fica: quem comprou e não pôde
+    # ser listado não pode ler "ainda não comprou nada".
+    assert "Nenhuma compra pôde ser listada." in js
+    assert "Este contato ainda não comprou nada." in js
+
+
+def test_strip_de_abas_nao_cria_barra_de_rolagem():
+    """`overflow-x-auto` força o eixo Y a virar `auto` (regra do CSS), e o
+    `-mb-px` dos botões transbordava um pixel — o strip ganhava uma barra de
+    rolagem vertical. São duas abas curtas: não há o que rolar."""
+    js = (_SRC / "static" / "JourneyModal.js").read_text(encoding="utf-8")
+    nav = js[js.index("function JourneyTabs("):js.index("</nav>")]
+    assert "overflow" not in nav
 
 
 def test_dinheiro_de_produto_soma_em_decimal(journey, monkeypatch):
@@ -1772,7 +2044,7 @@ def test_dinheiro_de_produto_soma_em_decimal(journey, monkeypatch):
     _mock_compras(journey, monkeypatch, [
         _ev("purchase", 5 + i, {"product_name": "Centavos"}, "0.10") for i in range(3)
     ])
-    p = journey.fetch_purchases("uuid-1")["items"][0]
+    p = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"][0]
     assert p["paid_total"] == "R$ 0,30"
 
 
@@ -1780,25 +2052,22 @@ def test_canal_sem_regra_de_valor_e_reportado_em_vez_de_sumir_calado(journey, mo
     """O medo legítimo da regra antiga vira diagnóstico na tela: compra de canal
     mal configurado não some em silêncio, ela é NOMEADA."""
     _mock_compras(journey, monkeypatch, [], unruled=[
-        {"channel": "hotmart", "event_type": "purchase", "events": 4},
+        {"channel": "hotmart", "eventType": "purchase", "events": 4},
     ])
-    out = journey.fetch_purchases("uuid-1")
+    out = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))
     assert out["items"] == []
     assert out["unruled"] == [{"channel": "hotmart", "event_type": "purchase",
                                "events": 4}]
 
 
 def test_produtos_indisponiveis_nao_derrubam_a_jornada(journey, monkeypatch):
-    """``channel_value_rules`` é dependência NOVA: num CDP antigo sem a tabela, o
-    bloco de compras cai sozinho — a aba Jornada continua de pé."""
-    def explode(cid):
-        raise RuntimeError("UndefinedTable: channel_value_rules")
-    monkeypatch.setattr(journey, "fetch_identity", lambda cid: {"contact_id": cid})
-    monkeypatch.setattr(journey, "fetch_subscriptions", lambda cid: [])
+    """A rota ``/purchases`` é dependência NOVA: num Trackify antigo ela não
+    existe, e o bloco de compras cai sozinho — a aba Jornada continua de pé."""
+    async def explode(http, cid, **k):
+        raise RuntimeError("a rota /purchases não existe neste Trackify")
+    _stub_blocos(monkeypatch, journey, timeline={"events": [1]})
     monkeypatch.setattr(journey, "fetch_purchases", explode)
-    monkeypatch.setattr(journey, "fetch_timeline", lambda cid: {"events": [1]})
-    monkeypatch.setattr(journey, "fetch_event_types", lambda cid: [])
-    out = journey.build_journey("uuid-1")
+    out = _run(journey.build_journey(_FakeHttp(), "uuid-1"))
     assert out["purchases"] == {"items": [], "unruled": [], "unnamed": [],
                                 "unavailable": True}
     assert out["identity"] == {"contact_id": "uuid-1"}
@@ -1806,48 +2075,135 @@ def test_produtos_indisponiveis_nao_derrubam_a_jornada(journey, monkeypatch):
 
 
 def test_jornada_completa_carrega_as_compras(journey, monkeypatch):
-    monkeypatch.setattr(journey, "fetch_identity", lambda cid: {"contact_id": cid})
-    monkeypatch.setattr(journey, "fetch_subscriptions", lambda cid: [])
-    monkeypatch.setattr(journey, "fetch_purchases",
-                        lambda cid: {"items": [{"name": "X"}], "unruled": []})
-    monkeypatch.setattr(journey, "fetch_timeline", lambda cid: {"events": []})
-    monkeypatch.setattr(journey, "fetch_event_types", lambda cid: [])
-    out = journey.build_journey("uuid-1")
+    _stub_blocos(monkeypatch, journey,
+                 purchases={"items": [{"name": "X"}], "unruled": []})
+    out = _run(journey.build_journey(_FakeHttp(), "uuid-1"))
     assert out["purchases"]["items"] == [{"name": "X"}]
     assert "products" not in out       # o rename protege o JS velho em cache
 
 
-def test_consulta_de_compras_pergunta_a_regra_de_valor(journey):
-    """A definição de compra tem que morar no CDP, não numa lista aqui dentro."""
-    sql = journey._SQL_PURCHASE_EVENTS
-    assert "channel_value_rules" in sql
-    # Sem o FILTER, o Postgres levanta `field name must not be null`.
-    assert "FILTER (WHERE ecf.slug IS NOT NULL)" in sql
-    # A lista chumbada de tipos de compra morreu.
-    assert "'purchase'" not in sql and "'authorized'" not in sql
+def test_definicao_de_compra_mora_no_cdp_e_nao_aqui(journey, monkeypatch):
+    """A definição de compra tem que vir da regra de valor do CDP, não de uma
+    lista de tipos chumbada aqui dentro."""
+    # É o `effect` que a rota devolve — não o nome do evento — que cria produto.
+    _mock_compras(journey, monkeypatch, [
+        _ev("um_nome_qualquer", 5, {"product_name": "Curso"}, 197),
+        _ev("purchase", 4, {"product_name": "Outro"}, 99, effect="ignore"),
+    ])
+    itens = _run(journey.fetch_purchases(_FakeHttp(), "uuid-1"))["items"]
+    assert [p["name"] for p in itens] == ["Curso"]
 
 
-def test_regra_de_valor_entra_no_schema_check(journey):
-    """Um Nexus sem a tabela tem que virar mensagem acionável no /health, não um
-    500 na cara do vendedor."""
-    required = dict(journey.trackify_db._REQUIRED)
-    assert "channel_value_rules" in required
-    assert {"channel_id", "event_type", "effect"} <= set(required["channel_value_rules"])
-    # A tabela NÃO tem soft-delete (verificado no information_schema).
-    assert "deleted_at" not in required["channel_value_rules"]
+def test_bloco_de_compras_indisponivel_e_reportado_e_nao_500(journey, monkeypatch):
+    """O equivalente honesto do antigo ``schema_check``: o plugin não conhece
+    mais tabela nenhuma do CDP, então o que resta verificar é que uma rota
+    ausente (Trackify mais antigo) vira aviso e não derruba a jornada."""
+    tk = _load("client")
+
+    async def _sem_rota(http, contact_id, **k):
+        return tk.Result(tk.UNLINKED, 404, "não encontrado no Trackify")
+    monkeypatch.setattr(journey.tk_client, "purchases", _sem_rota)
+
+    out = _run(journey._purchases_block(_FakeHttp(), "uuid-1"))
+    assert out["unavailable"] is True and out["items"] == []
 
 
 def test_data_torta_do_cdp_nao_derruba_as_assinaturas(journey, monkeypatch):
     """`next_charge_date` é TEXT em dd/mm/aaaa e `subscription_canceled_at` chega
     valendo a string "system" — valores REAIS de produção."""
-    linhas = [_ev("active_subscription", 10, {
-        "product_name": "Combo", "next_charge_date": "25/02/2027",
-        "subscription_canceled_at": "system"}, 97)]
-    monkeypatch.setattr(journey.trackify_db, "run_read", lambda *a, **k: linhas)
-    s = journey.fetch_subscriptions("uuid-1", today=datetime.date(2026, 7, 31))[0]
+    campos = {"product_name": "Combo", "next_charge_date": "25/02/2027",
+              "subscription_canceled_at": "system"}
+    _mock_eventos(journey, monkeypatch, [{
+        "id": "e-10", "eventType": "active_subscription", "title": "Assinatura",
+        "value": "97", "occurredAt": datetime.datetime(2026, 1, 10, 12, 0),
+        "channel": {"slug": "ticto"},
+        "eventFieldValues": [
+            {"value": v, "eventCustomField": {"slug": k}} for k, v in campos.items()],
+    }])
+    s = _run(journey.fetch_subscriptions(_FakeHttp(), "uuid-1",
+                                         today=datetime.date(2026, 7, 31)))[0]
     assert s["next_charge"] == "2027-02-25" and s["days_left"] == 209
     assert s["next_charge_raw"] == "25/02/2027"
     assert s["canceled_at"] is None      # "system" NÃO virou data
+
+
+_SUPORTE_JS = Path(__file__).resolve().parents[1] / "support_js"
+
+
+def _node(script: str, *args) -> tuple[int, str]:
+    import subprocess
+    r = subprocess.run(["node", str(_SUPORTE_JS / script), *args],
+                       capture_output=True, text=True, timeout=120)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def test_as_telas_do_plugin_EXECUTAM():
+    """`node --check` valida sintaxe e deixou passar DOIS erros que apagaram o
+    modal de configuração na cara do operador:
+
+    * um `const` usado no efeito de montagem antes de ser declarado (temporal
+      dead zone) — o modal ficou completamente em branco;
+    * um componente referenciado sem existir.
+
+    Aqui os módulos são importados de verdade e os componentes são CHAMADOS,
+    com preact/htm dublados. Não renderiza a árvore: o objetivo é executar o
+    corpo das funções, que é onde esse tipo de erro mora.
+    """
+    static = _SRC / "static"
+    for arquivo, componentes in (("config.js", []),
+                                 ("FieldSync.js", ["default", "ApiKeyCard"])):
+        code, saida = _node("smoke_plugin_screen.mjs", str(static), arquivo, *componentes)
+        assert code == 0, f"{arquivo} não executa:\n{saida}"
+
+
+def test_nenhum_setter_fantasma_nas_telas():
+    """Setter chamado dentro de um `useEffect` não é alcançado pelo smoke (o
+    dublê não roda o efeito), mas explode na tela.
+
+    Foi assim que `setNewDsn(null)` sobreviveu à remoção do estado `newDsn` e
+    deixou a aba Conexão em branco.
+    """
+    alvos = [str(p) for p in sorted((_SRC / "static").glob("*.js"))]
+    code, saida = _node("lint_phantom_setters.mjs", *alvos)
+    assert code == 0, saida
+
+
+def test_farol_da_conexao_nao_fala_de_DSN_nem_de_tabela():
+    """O card de saúde tem que descrever o que EXISTE hoje.
+
+    Regressão real: a rota `/health` foi reescrita para reportar credencial e
+    escopos, mas os rótulos da tela continuaram dizendo "DSN do Nexus", "Banco
+    inalcançável" e "Estrutura das tabelas incompatível" — três coisas que
+    deixaram de existir. O operador via tudo vermelho, apontando para uma
+    configuração que não está mais em lugar nenhum.
+    """
+    js = (_SRC / "static" / "config.js").read_text(encoding="utf-8")
+    farol = js[js.index("function Health("):js.index("function Health(") + 2200]
+
+    for morto in ("DSN do Nexus", "Banco ${", "Estrutura das tabelas"):
+        assert morto not in farol, f"o farol ainda fala de algo que não existe: {morto!r}"
+
+    # E diz o que de fato é verificado agora.
+    for vivo in ("API key", "Permissões da chave"):
+        assert vivo in farol, f"o farol não reporta {vivo!r}"
+
+
+def test_a_api_key_fica_na_aba_de_CONEXAO():
+    """Ela é a credencial da conexão — vale para ler, escrever e ingerir.
+
+    Nasceu na aba "Campos do contato" porque substituiu a conta de serviço, que
+    só servia à sincronização de campos. Deixá-la lá esconde o ÚNICO campo que o
+    operador precisa preencher atrás de uma aba sobre outro assunto — e a aba
+    Conexão fica sem nada configurável.
+    """
+    js = (_SRC / "static" / "config.js").read_text(encoding="utf-8")
+    aba = js[js.index("tab === 'conexao'"):js.index("tab === 'espelho'")]
+    assert "ApiKeyCard" in aba
+
+    # E não pode continuar duplicada na aba de campos.
+    fs = (_SRC / "static" / "FieldSync.js").read_text(encoding="utf-8")
+    corpo = fs[fs.index("export default function FieldSync("):]
+    assert "<${ApiKeyCard}" not in corpo
 
 
 def test_modal_da_jornada_tem_duas_abas():
@@ -1888,69 +2244,85 @@ def test_modal_da_jornada_nao_deixa_valor_estourar_o_painel():
     assert "<!--" not in js
 
 
-def test_erro_de_login_distingue_senha_de_falha_do_servidor(sessao):
-    """Mandar o operador conferir a senha quando o problema é do servidor faz ele
-    trocar a senha e continuar quebrado. Um 401 é credencial; um 5xx acontece
-    DEPOIS da checagem de senha (ao criar a sessão) — são conselhos opostos."""
-    m401 = sessao.login_error_message(401)
-    m500 = sessao.login_error_message(500)
-    assert "senha" in m401.lower() and "401" in m401
-    assert "trackify_sessions" in m500 and "401" in m500   # explica como diferenciar
-    assert "5 por minuto" in sessao.login_error_message(429)
+def test_erro_de_credencial_distingue_chave_de_escopo(plugin_app):
+    """Mandar o operador gerar outra chave quando o problema é permissão faz ele
+    trocar a chave e continuar quebrado — são conselhos opostos.
+
+    Substitui o antigo teste de mensagens de LOGIN: não há mais senha para
+    conferir nem sessão para criar.
+    """
+    built = plugin_app("trackify")
+    rotas = _load("routes")
+
+    m401 = rotas._mensagem_de_erro(401)
+    m403 = rotas._mensagem_de_erro(403)
+    m404 = rotas._mensagem_de_erro(404)
+
+    assert "revogada" in m401 and "401" in m401
+    assert "escopo" in m403.lower() and "403" in m403
+    # Um Trackify anterior ao sistema de chaves responde 404 — e isso não é
+    # "chave errada", é "atualize o outro lado".
+    assert "atualize o Trackify" in m404
 
 
-def test_falha_de_login_aparece_na_primeira_tentativa(sessao, monkeypatch, plugin_app):
+def test_falha_de_autenticacao_aparece_na_primeira_tentativa(plugin_app, monkeypatch):
     """Antes, o erro só ficava visível depois de 3 falhas seguidas — e o contador
-    zera a cada restart do servidor, então na prática NUNCA aparecia: a fila
-    acumulava "sem sessão" sem nada na tela explicando o porquê."""
+    zerava a cada restart do servidor, então na prática NUNCA aparecia: a fila
+    acumulava "sem sessão" sem nada na tela explicando o porquê.
+
+    Agora a fila marca a linha e desliga a sincronização com motivo já na
+    PRIMEIRA recusa de credencial, porque uma chave inválida não melhora com
+    retentativa.
+    """
     plugin_app("trackify")
-    monkeypatch.setattr(sessao._config, "setting", lambda k, d=None: {
-        "service_email": "bot@x.com", "service_password": "s3nha"}.get(k, d))
-    client = _FakeClient(_FakeResp(500, {"message": "Internal Server Error"}))
-    assert _run(sessao._login(client)) is None
+    push = _load("push")
+    tk = _load("client")
+
+    push._block_sync(tk.Result(tk.UNAUTHORIZED, 401,
+                               "API key inválida, revogada ou expirada.").error)
 
     from db.repositories import config_repo
-    gravado = config_repo.get("plugin.trackify.sync_last_login_error", "")
-    assert gravado and "500" in gravado
-    # ...mas UMA falha não pode desligar a sincronização.
-    assert not config_repo.get("plugin.trackify.sync_blocked_reason", "")
+    motivo = config_repo.get("plugin.trackify.sync_blocked_reason", "")
+    assert motivo and "revogada" in motivo
+    assert config_repo.get("plugin.trackify.sync_last_auth_error", "") == motivo
+
+    config_repo.set_many({"plugin.trackify.sync_blocked_reason": "",
+                          "plugin.trackify.sync_last_auth_error": ""})
 
 
 @pytest.mark.parametrize("status", [200, 201, 204])
-def test_login_aceita_qualquer_2xx(sessao, monkeypatch, status):
-    """A rota é ``@Post('login')`` SEM ``@HttpCode``, e o padrão do NestJS para
-    POST é 201 — o ``@ApiResponse({status: 200})`` do controller é só Swagger e
-    mente sobre o runtime. Exigir 200 exato descartava um login BEM-SUCEDIDO
-    como se fosse recusa, com a mensagem "Login recusado (HTTP 201)"."""
-    class _H(dict):
-        def get_list(self, k):
-            return ["trackify_session=tok; Path=/"]
-    monkeypatch.setattr(sessao._config, "setting", lambda k, d=None: {
-        "service_email": "bot@x.com", "service_password": "s3nha"}.get(k, d))
-    monkeypatch.setattr(sessao, "_set_config", lambda **kw: None)
-    client = _FakeClient(_FakeResp(status, {"user": {"id": "7"}}, headers=_H()))
-    sess = _run(sessao._login(client))
-    assert sess is not None and sess.user_id == "7"
+def test_leitura_aceita_qualquer_2xx(cliente, status):
+    """O NestJS escolhe o status pelo VERBO (POST→201) e o ``@ApiResponse`` do
+    controller documenta outro — exigir 200 exato já fez uma resposta
+    BEM-SUCEDIDA ser lida como recusa."""
+    http = _FakeClient(_FakeResp(status, {"id": "uuid-1"}))
+    res = _run(cliente.get_contact(http, "uuid-1"))
+    assert res.ok and res.http_status == status
 
 
 def test_escrita_no_contato_aceita_qualquer_2xx(writer, _api_base):
-    sess = _load("session").Session("trackify_session=t", "7", 0.0)
     client = _FakeClient(_FakeResp(201, _cdp_contact(email="a@b.com")))
-    res = _run(writer.put_contact(client, sess, "uuid-1", {"email": "a@b.com"}))
+    res = _run(writer.put_contact(client, "uuid-1", {"email": "a@b.com"}))
     assert res.verdict == writer.OK
 
 
-def test_edicao_humana_com_a_conta_de_servico_compartilhada_e_aplicada(
+def test_edicao_humana_no_trackify_e_aplicada_e_a_nossa_e_ignorada(
         plugin_app, monkeypatch):
-    """Regressão do caso real: o operador estava logado na tela do Trackify com a
-    MESMA conta configurada na integração, então toda edição dele carregava o
-    ``user_id`` da conta de serviço. O filtro por autor descartava tudo em
-    silêncio — a Jornada (que lê o Trackify ao vivo) mostrava o valor novo e o
-    painel do WhatsBot ficava no antigo, sem nenhum erro em lugar nenhum.
+    """Regressão do caso real, agora resolvido na raiz.
+
+    Antes, o operador podia estar logado na tela do Trackify com a MESMA conta
+    configurada na integração, e toda edição dele carregava o ``user_id`` da
+    conta de serviço. O filtro por autor descartava tudo em silêncio — a Jornada
+    (que lê o Trackify ao vivo) mostrava o valor novo e o painel do WhatsBot
+    ficava no antigo, sem erro em lugar nenhum.
+
+    Com API key a ambiguidade DEIXA DE EXISTIR: a nossa escrita é assinada por
+    ``apikey:<id>`` e a de uma pessoa nunca é. Não há conta compartilhada
+    possível, e o desempate não depende mais de comparar valores.
     """
     built = plugin_app("trackify", settings_overrides=_field_sync_on(**{
         "plugin.trackify.field_sync_pull_enabled": True,
-        "plugin.trackify.sync_user_id": "svc-1",
+        "plugin.trackify.sync_api_key_id": "k1",
     }))
     pull_mod = _load("pull")
     _mapeia(built.client, "email", "email", direction="both")
@@ -1976,84 +2348,122 @@ def test_edicao_humana_com_a_conta_de_servico_compartilhada_e_aplicada(
                       tk_hash=codec.hash_value("antigo@x.com"),
                       trackify_contact_id="uuid-cdp-30")
 
-    monkeypatch.setattr(pull_mod.trackify_db, "is_configured", lambda: True)
-    monkeypatch.setattr(pull_mod, "cdp_now", lambda: 2_000_000_000.0)
+    monkeypatch.setattr(pull_mod.tk_client, "is_configured", lambda: True)
+    _pagina(monkeypatch, pull_mod, [
+        # 1) o nosso próprio envio voltando: ator `apikey:k1` -> eco, na hora.
+        {"row_id": "r1", "tk_contact_id": "uuid-cdp-30", "field_id": "f-mail",
+         "slug": "email", "new_value": "antigo@x.com", "source": "api",
+         "user_id": "apikey:k1", "created_epoch": 1_999_998_000.0},
+        # 2) o HUMANO editando na tela do Trackify: outro ator -> aplica.
+        {"row_id": "r2", "tk_contact_id": "uuid-cdp-30", "field_id": "f-mail",
+         "slug": "email", "new_value": "novo@x.com", "source": "manual",
+         "user_id": "usuario-humano-7", "created_epoch": 1_999_999_000.0},
+    ])
 
-    def _linhas(*a, **k):
-        return [{"rows": [
-            # 1) o nosso próprio envio voltando: mesmo autor, MESMO valor -> eco
-            {"row_id": "r1", "tk_contact_id": "uuid-cdp-30", "field_id": "f-mail",
-             "slug": "email", "new_value": "antigo@x.com", "source": "manual",
-             "user_id": "svc-1", "created_epoch": 1_999_998_000.0},
-            # 2) o HUMANO usando a mesma conta: mesmo autor, valor NOVO -> aplica
-            {"row_id": "r2", "tk_contact_id": "uuid-cdp-30", "field_id": "f-mail",
-             "slug": "email", "new_value": "novo@x.com", "source": "manual",
-             "user_id": "svc-1", "created_epoch": 1_999_999_000.0},
-        ], "truncated": False}]
-    monkeypatch.setattr(pull_mod, "fetch_changes", _linhas)
-
-    resumo = pull_mod.cycle()
+    resumo = _run(pull_mod.cycle(_FakeHttp()))
     assert resumo["ecos"] == 1                      # o nosso envio foi ignorado
     assert resumo["gravadas"] == 1                  # a edição do humano entrou
-    assert resumo["conta_compartilhada"] == 1       # e ficou registrado o porquê
     assert custom_attribute_repo.get_values(contacts_tbl, cid)["email"] == "novo@x.com"
+
+
+def test_escrita_de_OUTRA_chave_nao_e_tratada_como_eco(plugin_app, monkeypatch):
+    """Duas integrações podem escrever no mesmo CDP. A de outra chave é mudança
+    de verdade — descartá-la seria o mesmo bug de antes, com outro disfarce."""
+    pull_mod = _load("pull")
+    codec = _load("field_codec")
+    nosso = {"tk_hash": codec.hash_value("nosso@x.com")}
+
+    assert pull_mod._e_nosso_eco(
+        {"user_id": "apikey:OUTRA", "new_value": "dela@x.com"},
+        nosso, "apikey:k1") is False
 
 
 # ── Busca automática por telefone + campos conectados ────────────────────
 
-def test_resolve_por_slug_conhece_as_normalizacoes_de_cada_identificador(monkeypatch):
+def test_candidatos_conhecem_as_normalizacoes_de_cada_identificador():
     """Cada identificador circula de um jeito: telefone tem variante brasileira,
-    CPF vai com e sem máscara, e-mail é insensível a caixa."""
+    CPF vai com e sem máscara, e-mail é insensível a caixa.
+
+    Gerar as grafias é o que SOBROU deste módulo depois que a consulta virou
+    ``POST /contacts/resolve`` — o servidor compara byte a byte, então a
+    qualidade do casamento depende inteiramente do que sai daqui. Por isso a
+    função é pura e o teste não toca em rede.
+    """
     identity = _load("identity")
-    consultas = []
-    monkeypatch.setattr(identity, "_by_values",
-                        lambda slug, cands: consultas.append((slug, cands)) or [])
-    monkeypatch.setattr(identity, "_by_digits", lambda slug, d: [])
 
-    identity.resolve_by_slug("whatsapp", "556496162906")
-    identity.resolve_by_slug("cpf", "056.224.381-01")
-    identity.resolve_by_slug("email", " Joao@Empresa.COM ")
+    assert "5564996162906" in identity.candidates_for("whatsapp", "556496162906")
+    cpf = identity.candidates_for("cpf", "056.224.381-01")
+    assert "05622438101" in cpf and "056.224.381-01" in cpf
+    assert "joao@empresa.com" in identity.candidates_for("email", " Joao@Empresa.COM ")
     # Identificador criado pelo cliente: comparação exata, sem regra especial.
-    identity.resolve_by_slug("matricula", "A-1234")
-
-    por_slug = dict((s, c) for s, c in consultas)
-    assert "5564996162906" in por_slug["whatsapp"]      # variante com o 9
-    assert "05622438101" in por_slug["cpf"] and "056.224.381-01" in por_slug["cpf"]
-    assert "joao@empresa.com" in por_slug["email"]
-    assert por_slug["matricula"] == ["A-1234"]
+    assert identity.candidates_for("matricula", "A-1234") == ["A-1234"]
+    # Lixo não vira candidato.
+    assert identity.candidates_for("email", "sem-arroba") == []
+    assert identity.candidates_for("cpf", "123") == []
 
 
 def test_busca_usa_telefone_e_os_campos_conectados(monkeypatch):
     """O ponto da mudança: conectar um campo passa a valer para ENCONTRAR o
     cadastro, não só para copiar o valor depois."""
     identity = _load("identity")
-    tentados = []
+    tk = _load("client")
+    enviados = {}
 
-    def _fake(slug, value):
-        tentados.append(slug)
-        return [identity.Match("uuid-x", slug, value, "variant")] if slug == "cpf" else []
-    monkeypatch.setattr(identity, "resolve_by_slug", _fake)
-    monkeypatch.setattr(identity, "_prioridades", lambda: {
-        "email": 10, "whatsapp": 20, "cpf": 30})
+    async def fake(http, identifiers, **k):
+        enviados.update(identifiers)
+        return tk.Result(tk.OK, 200, data={"matches": [
+            {"contactId": "uuid-x", "slug": "cpf", "value": "05622438101",
+             "matchedBy": "variant"}]})
+    monkeypatch.setattr(identity.tk_client, "resolve", fake)
 
-    achou = identity.resolve_mapped(
-        phone="5564996162906",
-        extras={"email": "x@y.com", "cpf": "05622438101"})
+    achou = _run(identity.resolve_mapped(
+        _FakeHttp(), phone="5564996162906",
+        extras={"email": "x@y.com", "cpf": "05622438101"}))
 
     assert [m.slug for m in achou] == ["cpf"]
-    # Ordem = prioridade do próprio Trackify: divergir dela faria a leitura casar
-    # num contato e a escrita da ingestão em outro.
-    assert tentados == ["email", "whatsapp", "cpf"]
+    # TODOS os identificadores vão numa chamada só: com SQL local cada tentativa
+    # custava 0,085 ms, mas agora cada uma seria uma ida à rede. Quem ordena por
+    # prioridade é o servidor — manter uma segunda cópia da regra aqui faria a
+    # leitura casar num contato e a escrita da ingestão em outro.
+    assert set(enviados) == {"email", "whatsapp", "cpf"}
 
 
 def test_telefone_entra_na_busca_mesmo_sem_estar_mapeado(monkeypatch):
     identity = _load("identity")
-    tentados = []
-    monkeypatch.setattr(identity, "resolve_by_slug",
-                        lambda s, v: tentados.append((s, v)) or [])
-    monkeypatch.setattr(identity, "_prioridades", lambda: {"whatsapp": 20})
-    identity.resolve_mapped(phone="5564996162906", extras={})
-    assert tentados == [("whatsapp", "5564996162906")]
+    tk = _load("client")
+    enviados = {}
+
+    async def fake(http, identifiers, **k):
+        enviados.update(identifiers)
+        return tk.Result(tk.OK, 200, data={"matches": []})
+    monkeypatch.setattr(identity.tk_client, "resolve", fake)
+
+    _run(identity.resolve_mapped(_FakeHttp(), phone="5564996162906", extras={}))
+    assert set(enviados) == {"whatsapp"}
+    assert "5564996162906" in enviados["whatsapp"]
+
+
+def test_fallback_por_digitos_so_roda_depois_do_exato_vazio(monkeypatch):
+    """É caminho FRIO dos dois lados: a consulta tolerante a máscara não usa o
+    índice de identificador (medido: 6 de 10.910 valores de `whatsapp` têm
+    caractere fora de [0-9+])."""
+    identity = _load("identity")
+    tk = _load("client")
+    chamadas = []
+
+    async def fake(http, identifiers, *, limit=10, digits_fallback=False):
+        chamadas.append(digits_fallback)
+        if digits_fallback:
+            return tk.Result(tk.OK, 200, data={"matches": [
+                {"contactId": "uuid-mascarado", "slug": "cpf", "value": "056.224.381-01",
+                 "matchedBy": "digits"}]})
+        return tk.Result(tk.OK, 200, data={"matches": []})
+    monkeypatch.setattr(identity.tk_client, "resolve", fake)
+
+    achou = _run(identity.resolve_by_cpf(_FakeHttp(), "05622438101"))
+
+    assert chamadas == [False, True]
+    assert achou[0].matched_by == "digits"
 
 
 def test_pistas_saem_dos_mapeamentos_identificadores(plugin_app):
@@ -2103,11 +2513,12 @@ def test_sincronizacao_vincula_o_contato_sob_demanda(plugin_app, monkeypatch):
         conn.execute(_t("DELETE FROM plugin_trackify_identity WHERE phone = :p"),
                      {"p": "5511922222222"})
 
-    monkeypatch.setattr(identity, "resolve_mapped", lambda **k: [
-        identity.Match("uuid-novo", "cpf", "05622438101", "variant")])
-    monkeypatch.setattr(push, "trackify_db_run", lambda *a, **k: [])
+    async def _achou(http, **k):
+        return [identity.Match("uuid-novo", "cpf", "05622438101", "variant")]
+    monkeypatch.setattr(identity, "resolve_mapped", _achou)
+    _cdp_tem(monkeypatch, push)
 
-    plano = push.plan_for_contact(int(c["id"]))
+    plano = _run(push.plan_for_contact(_FakeHttp(), int(c["id"])))
     assert plano.trackify_contact_id == "uuid-novo"
     with get_engine().connect() as conn:
         gravado = conn.execute(_t("SELECT trackify_contact_id, matched_slug "
@@ -2126,11 +2537,12 @@ def test_vinculo_ambiguo_nunca_e_escolhido_em_silencio(plugin_app, monkeypatch):
 
     from db.repositories import contact_repo
     c = contact_repo.get_or_create("5511933333333")
-    monkeypatch.setattr(identity, "resolve_mapped", lambda **k: [
-        identity.Match("uuid-a", "cpf", "1", "variant"),
-        identity.Match("uuid-b", "cpf", "1", "variant")])
+    async def _ambiguo(http, **k):
+        return [identity.Match("uuid-a", "cpf", "1", "variant"),
+                identity.Match("uuid-b", "cpf", "1", "variant")]
+    monkeypatch.setattr(identity, "resolve_mapped", _ambiguo)
 
-    plano = push.plan_for_contact(int(c["id"]))
+    plano = _run(push.plan_for_contact(_FakeHttp(), int(c["id"])))
     assert "não vinculado" in plano.skip
 
 

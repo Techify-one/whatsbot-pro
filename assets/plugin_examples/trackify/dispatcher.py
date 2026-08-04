@@ -30,6 +30,7 @@ from sqlalchemy import text
 from plugins.context import make_plugin_db
 
 from . import _config, identity
+from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.dispatcher")
 
@@ -124,25 +125,28 @@ def _hints(ph: str, email: str) -> dict:
     return pistas
 
 
-def resolve_identity(ph: str, email: str, contact_type: str) -> dict:
+async def resolve_identity(http, ph: str, email: str, contact_type: str) -> dict:
     """Identificadores a enviar. Usa o valor EXATO do CDP quando o contato existe.
 
     Sem acerto, devolve a forma canônica E.164 — é a grafia do maior grupo já
     presente no CDP, então maximiza a chance de uma fonte futura (formulário,
     anúncio, digitação) cair na mesma linha em vez de forkar.
     """
-    hit = _cached_identity(ph)
+    import asyncio
+
+    hit = await asyncio.to_thread(_cached_identity, ph)
     if hit and hit.get("exact_value"):
         out = {hit["matched_slug"]: hit["exact_value"]}
         if email and "@" in email:
             out.setdefault(identity.SLUG_EMAIL, email.strip().lower())
         return out
 
-    matches = identity.resolve_mapped(phone=ph, extras=_hints(ph, email),
-                                      contact_type=contact_type)
+    pistas = await asyncio.to_thread(_hints, ph, email)
+    matches = await identity.resolve_mapped(http, phone=ph, extras=pistas,
+                                            contact_type=contact_type)
     if len(matches) == 1:
         m = matches[0]
-        _store_identity(ph, m.contact_id, m.slug, m.exact_value)
+        await asyncio.to_thread(_store_identity, ph, m.contact_id, m.slug, m.exact_value)
         out = {m.slug: m.exact_value}
         if email and "@" in email and m.slug != identity.SLUG_EMAIL:
             out[identity.SLUG_EMAIL] = email.strip().lower()
@@ -155,12 +159,12 @@ def resolve_identity(ph: str, email: str, contact_type: str) -> dict:
 
 # ── Envelope ─────────────────────────────────────────────────────────────
 
-def build_body(row: dict) -> dict:
+async def build_body(http, row: dict) -> dict:
     payload = json.loads(row["payload"])
     contact = payload.get("contact") or {}
     ph = contact.get("phone") or row.get("phone") or ""
-    ident = resolve_identity(ph, contact.get("email") or "",
-                             contact.get("contact_type") or "whatsapp")
+    ident = await resolve_identity(http, ph, contact.get("email") or "",
+                                   contact.get("contact_type") or "whatsapp")
     # ⚠️ ISO-8601 COM offset explícito. O adapter do Trackify faz ``new Date(v)``:
     # um número seria lido como MILISSEGUNDOS (o ts do WhatsBot é em segundos e
     # carimbaria tudo em 1970) e um ISO sem offset seria lido no fuso do servidor.
@@ -234,7 +238,7 @@ async def deliver_one(client: httpx.AsyncClient, row: dict, url: str,
     app inteiro — o WhatsBot pararia de responder enquanto a fila drena.
     """
     try:
-        body = await asyncio.to_thread(build_body, row)
+        body = await build_body(client, row)
     except Exception as e:  # noqa: BLE001 — payload corrompido não é retryável
         await asyncio.to_thread(_finish, row["id"], "blocked",
                                 last_error=f"payload inválido: {type(e).__name__}")
@@ -246,9 +250,17 @@ async def deliver_one(client: httpx.AsyncClient, row: dict, url: str,
                                 trackify_contact_id="(modo seco)")
         return "dry_run"
 
+    # A ingestão aceita a API key do Trackify (escopo `ingest`) — é a MESMA
+    # credencial da leitura e da escrita, e por isso o plugin guarda um segredo
+    # só. A chave de canal (`X-Trackify-Key`, configurada em channels.config)
+    # continua sendo enviada quando existir: instalações antigas dependem dela, e
+    # o servidor confere a do módulo primeiro e cai na do canal depois.
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-Trackify-Key"] = api_key
+    chave_modulo = tk_client.api_key()
+    if chave_modulo:
+        headers["X-API-Key"] = chave_modulo
     try:
         resp = await client.post(url, json=body, headers=headers)
     except Exception as e:  # noqa: BLE001

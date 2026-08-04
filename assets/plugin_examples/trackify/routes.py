@@ -26,8 +26,8 @@ from fastapi.responses import JSONResponse
 from db.repositories import contact_repo
 from plugins.context import audit, plugin_permission
 
-from . import (_config, dispatcher, field_map, identity, journey, push,
-               session, sync_state, trackify_db)
+from . import _config, dispatcher, field_map, identity, journey, push, sync_state
+from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.routes")
 
@@ -35,6 +35,21 @@ router = APIRouter()
 
 # Sentinela do segredo: o que a tela recebe e pode devolver sem apagar a chave.
 _MASK = "***"
+
+
+def _http():
+    """Client HTTP por request.
+
+    Um client por chamada (e não um global) porque as rotas do plugin são
+    esporádicas — o custo de abrir a conexão é irrelevante ao lado de manter um
+    pool vivo que o supervisor não sabe fechar quando o plugin é desativado.
+    """
+    import httpx
+    return httpx.AsyncClient(timeout=tk_client.READ_TIMEOUT)
+
+
+def _not_configured():
+    return _err("API key do Trackify não configurada.", 503)
 
 
 def _err(msg: str, status: int = 400, data: dict | None = None):
@@ -79,10 +94,10 @@ async def get_journey(contact_id: int):
         return {"ok": True, "data": {"found": False, "configured": True,
                                      "is_group": True, "candidates": []}}
 
-    data = await asyncio.to_thread(
-        journey.journey_for,
-        phone=scope["phone"], email=scope["email"] or None,
-        extras=scope["hints"], contact_type=scope["contact_type"])
+    async with _http() as http:
+        data = await journey.journey_for(
+            http, phone=scope["phone"], email=scope["email"] or None,
+            extras=scope["hints"], contact_type=scope["contact_type"])
     data["whatsbot"] = {"contact_id": contact_id, "name": scope["name"]}
     return {"ok": True, "data": data}
 
@@ -96,11 +111,12 @@ async def get_journey_events(trackify_contact_id: str, offset: int = 0,
     Recebe o uuid do Trackify (devolvido por ``/journey``), não o telefone — a
     resolução já foi feita e gateada na chamada anterior.
     """
-    if not trackify_db.is_configured():
-        return _err("Conexão com o Trackify não configurada.", 503)
-    data = await asyncio.to_thread(
-        journey.fetch_timeline, trackify_contact_id,
-        limit=limit, offset=offset, event_type=event_type)
+    if not tk_client.is_configured():
+        return _not_configured()
+    async with _http() as http:
+        data = await journey.fetch_timeline(
+            http, trackify_contact_id,
+            limit=limit, offset=offset, event_type=event_type)
     return {"ok": True, "data": data}
 
 
@@ -113,32 +129,33 @@ async def search_journey(email: str | None = None, cpf: str | None = None):
     """
     if not (email or cpf):
         return _err("Informe e-mail ou CPF.")
-    if not trackify_db.is_configured():
-        return _err("Conexão com o Trackify não configurada.", 503)
+    if not tk_client.is_configured():
+        return _not_configured()
 
-    def _run():
-        matches = identity.resolve_by_email(email) if email else []
+    async with _http() as http:
+        matches = await identity.resolve_by_email(http, email) if email else []
         if not matches and cpf:
-            matches = identity.resolve_by_cpf(cpf)
+            matches = await identity.resolve_by_cpf(http, cpf)
         if not matches:
-            return {"found": False, "candidates": []}
+            return {"ok": True, "data": {"found": False, "candidates": []}}
         if len(matches) > 1:
-            return {"found": False, "ambiguous": True, "candidates": [
-                {**(journey.fetch_identity(m.contact_id) or {"contact_id": m.contact_id}),
-                 "matched_by": m.slug} for m in matches]}
-        data = journey.build_journey(matches[0].contact_id)
+            candidatos = await asyncio.gather(
+                *(journey.fetch_identity(http, m.contact_id) for m in matches))
+            return {"ok": True, "data": {"found": False, "ambiguous": True, "candidates": [
+                {**(ident or {"contact_id": m.contact_id}), "matched_by": m.slug}
+                for m, ident in zip(matches, candidatos)]}}
+        data = await journey.build_journey(http, matches[0].contact_id)
         data["matched_by"] = matches[0].slug
-        return data
-
-    return {"ok": True, "data": await asyncio.to_thread(_run)}
+    return {"ok": True, "data": data}
 
 
 @router.get("/journey/by-id", dependencies=[plugin_permission("view")])
 async def get_journey_by_id(trackify_contact_id: str):
     """Jornada de um cadastro escolhido no seletor de ambiguidade."""
-    if not trackify_db.is_configured():
-        return _err("Conexão com o Trackify não configurada.", 503)
-    data = await asyncio.to_thread(journey.build_journey, trackify_contact_id)
+    if not tk_client.is_configured():
+        return _not_configured()
+    async with _http() as http:
+        data = await journey.build_journey(http, trackify_contact_id)
     return {"ok": True, "data": data}
 
 
@@ -221,7 +238,8 @@ async def contact_attributes():
 async def trackify_fields(refresh: int = 0):
     """Vocabulário do lado DIREITO. Nunca 500: distingue não-configurado de
     inalcançável de "o CDP não tem campo nenhum"."""
-    data = await asyncio.to_thread(field_map.tk_fields, bool(refresh))
+    async with _http() as http:
+        data = await field_map.tk_fields(http, bool(refresh))
     return {"ok": True, "data": data}
 
 
@@ -241,10 +259,15 @@ async def put_mappings(body: dict):
     conveniência, o gate é aqui (um chamador programático não passa por ela)."""
     rows = (body or {}).get("rows")
 
+    # O catálogo do CDP é lido FORA da thread de banco: é rede, e `validate`
+    # precisa dele para poder afirmar que um slug não existe.
+    async with _http() as http:
+        tk = await field_map.tk_fields(http)
+
     def _run():
         before = field_map.list_maps()
         clean, errors = field_map.validate(
-            rows, credential_set=_config.credential_set())
+            rows, tk, credential_set=_config.credential_set())
         if errors:
             return before, None, errors
         field_map.replace_all(clean)
@@ -261,65 +284,145 @@ async def put_mappings(body: dict):
     return {"ok": True, "data": {"rows": after}}
 
 
-@router.get("/service-account", dependencies=[plugin_permission("manage")])
-async def get_service_account():
+@router.get("/api-key", dependencies=[plugin_permission("manage")])
+async def get_api_key():
+    """Estado da credencial. NUNCA devolve a chave — só o fato de existir."""
     def _run():
         return {
             "set": _config.credential_set(),
-            "email": (_config.setting("service_email") or "").strip(),
-            "password_masked": _MASK if (_config.setting("service_password") or "") else "",
+            "key_masked": _MASK if (_config.setting("sync_api_key") or "") else "",
             "api_base": _config.api_base(),
-            "user_id": (_config.setting("sync_user_id") or ""),
+            "key_id": (_config.setting("sync_api_key_id") or ""),
             "blocked_reason": (_config.setting("sync_blocked_reason") or ""),
-            "last_login_error": (_config.setting("sync_last_login_error") or ""),
+            "last_auth_error": (_config.setting("sync_last_auth_error") or ""),
         }
     return {"ok": True, "data": await asyncio.to_thread(_run)}
 
 
-@router.put("/service-account", dependencies=[plugin_permission("manage")])
-async def put_service_account(body: dict):
-    """Grava e-mail e senha. O sentinela ``***`` preserva a senha atual, para a
-    tela poder reenviar o formulário inteiro sem apagar o segredo por descuido."""
+@router.put("/api-key", dependencies=[plugin_permission("manage")])
+async def put_api_key(body: dict):
+    """Grava a chave. O sentinela ``***`` preserva a atual, para a tela poder
+    reenviar o formulário inteiro sem apagar o segredo por descuido."""
     b = body or {}
-    email = str(b.get("email") or "").strip()
-    password = str(b.get("password") or "")
+    key = str(b.get("key") or "")
 
     def _run():
         from db.repositories import config_repo
-        updates = {_config.PREFIX + "service_email": email}
-        if password != _MASK:
-            updates[_config.PREFIX + "service_password"] = password.strip()
-            # Credencial nova invalida a identidade capturada e o bloqueio.
-            updates[_config.PREFIX + "sync_user_id"] = ""
-            updates[_config.PREFIX + "sync_blocked_reason"] = ""
+        if key == _MASK:
+            return _config.credential_set()
+        updates = {
+            _config.PREFIX + "sync_api_key": key.strip(),
+            # Credencial nova invalida a identidade capturada e o bloqueio: o id
+            # da chave anterior não serve mais para reconhecer as nossas escritas.
+            _config.PREFIX + "sync_api_key_id": "",
+            _config.PREFIX + "sync_blocked_reason": "",
+            _config.PREFIX + "sync_last_auth_error": "",
+        }
         config_repo.set_many(updates)
         return _config.credential_set()
 
     ok = await asyncio.to_thread(_run)
+    tk_client.invalidate_cache()
     # NUNCA o valor: só o fato de existir.
-    audit("trackify", "config.update", resource_id="service_account",
-          after={"email": email, "senha_definida": password != ""})
-    return {"ok": True, "data": {"set": ok, "unchanged_password": password == _MASK}}
+    audit("trackify", "config.update", resource_id="api_key",
+          after={"chave_definida": key != ""})
+    return {"ok": True, "data": {"set": ok, "unchanged_key": key == _MASK}}
 
 
-@router.post("/service-account/test", dependencies=[plugin_permission("manage")])
-async def test_service_account(body: dict | None = None):
+@router.post("/api-key/test", dependencies=[plugin_permission("manage")])
+async def test_api_key(body: dict | None = None):
     """Prova a credencial ANTES de qualquer escrita.
 
-    Aceita e-mail/senha no corpo para testar o que ainda não foi salvo — é a
-    diferença entre o operador conferir e o operador salvar torto e descobrir
-    pela fila de erro. Só faz login: nunca grava num contato real.
+    Só identifica a chave (``GET /api-keys/me``): um "teste" que gravasse num
+    contato real do CRM do cliente para provar que funciona seria pior do que
+    não ter teste nenhum.
+
+    Guarda o ``key_id`` devolvido — é o ator com que as nossas escritas aparecem
+    no changelog do CDP, e é o que torna a supressão de eco exata.
 
     Não é auditado (teste de conexão fica fora da trilha, por regra do repo).
     """
-    import httpx
-
     b = body or {}
-    async with httpx.AsyncClient() as client:
-        data = await session.probe(client,
-                                   email=str(b.get("email") or ""),
-                                   password=str(b.get("password") or ""))
-    return {"ok": True, "data": data}
+    informada = str(b.get("key") or "")
+
+    if not _config.api_base():
+        return {"ok": True, "data": {"ok": False,
+                                     "message": "URL da API do Trackify não configurada."}}
+
+    # Testa o que está DIGITADO (ainda não salvo), caindo na chave guardada
+    # quando a tela reenvia o sentinela.
+    if informada and informada != _MASK:
+        headers = {"X-API-Key": informada.strip(), "Content-Type": "application/json"}
+        async with _http() as http:
+            try:
+                resp = await http.get(f"{_config.api_base()}/api-keys/me", headers=headers)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": True, "data": {
+                    "ok": False,
+                    "message": f"Não foi possível falar com o Trackify ({type(e).__name__})."}}
+        if resp.status_code >= 300:
+            return {"ok": True, "data": {"ok": False,
+                                         "message": _mensagem_de_erro(resp.status_code)}}
+        corpo = _json_ou_vazio(resp)
+    else:
+        if not tk_client.is_configured():
+            return {"ok": True, "data": {"ok": False,
+                                         "message": "API key não configurada."}}
+        async with _http() as http:
+            res = await tk_client.whoami(http)
+        if not res.ok:
+            return {"ok": True, "data": {"ok": False, "message": res.error}}
+        corpo = res.data or {}
+
+    key_id = str(corpo.get("id") or "")
+    escopos = list(corpo.get("scopes") or [])
+    if key_id:
+        await asyncio.to_thread(_gravar_key_id, key_id)
+
+    faltando = [e for e in ("read", "contacts:write") if e not in escopos]
+    aviso = ("Faltam permissões nesta chave: " + ", ".join(faltando)) if faltando else ""
+    return {"ok": True, "data": {
+        "ok": True,
+        "message": aviso or "Chave aceita.",
+        "api_base": _config.api_base(),
+        "key_id": key_id,
+        "name": corpo.get("name") or "",
+        "scopes": escopos,
+        "missing_scopes": faltando,
+    }}
+
+
+def _gravar_key_id(key_id: str) -> None:
+    from db.repositories import config_repo
+    config_repo.set_many({_config.PREFIX + "sync_api_key_id": key_id})
+
+
+def _json_ou_vazio(resp) -> dict:
+    try:
+        return resp.json() or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _mensagem_de_erro(status: int) -> str:
+    """Traduz o status para algo acionável.
+
+    Distinguir 401 de 403 não é cosmético: mandar o operador gerar outra chave
+    quando o problema é escopo faz ele trocar a chave e continuar quebrado.
+    """
+    if status == 401:
+        return "Chave recusada pelo Trackify (401). Confira se ela não foi revogada."
+    if status == 403:
+        return ("A chave é válida mas não tem permissão (403). Conceda os escopos "
+                "'read' e 'contacts:write' em Configurações → API Keys no Trackify.")
+    if status == 404:
+        return ("O Trackify respondeu 404 para /api-keys/me. Esta versão do módulo "
+                "ainda não tem o sistema de API keys — atualize o Trackify.")
+    if status == 429:
+        return "Muitas tentativas (429). Aguarde um minuto."
+    if status >= 500:
+        return f"Erro interno do Trackify (HTTP {status})."
+    return f"Chave recusada (HTTP {status})."
 
 
 @router.get("/field-sync/status", dependencies=[plugin_permission("manage")])
@@ -358,8 +461,10 @@ async def field_sync_run(body: dict | None = None):
     if not contact_id:
         return _err("Informe o contato a simular.", 400)
 
+    async with _http() as http:
+        plano = await push.plan_for_contact(http, int(contact_id))
+
     def _run():
-        plano = push.plan_for_contact(int(contact_id))
         return {
             "contact_id": int(contact_id),
             "linked": bool(plano.trackify_contact_id),
@@ -390,19 +495,31 @@ async def health():
     Sem isto, um schema alterado no Trackify viraria uma tela vazia sem
     explicação — o erro tem que ser acionável, não um 500.
     """
-    configured = await asyncio.to_thread(trackify_db.is_configured)
-    reachable, message = (False, "DSN do Nexus não configurado.")
-    schema_ok, missing = False, []
+    configured = await asyncio.to_thread(tk_client.is_configured)
+    reachable, message = False, "API key do Trackify não configurada."
+    escopos: list = []
     if configured:
-        reachable, message = await asyncio.to_thread(trackify_db.ping)
-        if reachable:
-            schema_ok, missing = await asyncio.to_thread(trackify_db.schema_check)
+        async with _http() as http:
+            res = await tk_client.whoami(http)
+        reachable = res.ok
+        if res.ok:
+            escopos = list((res.data or {}).get("scopes") or [])
+            message = ""
+        else:
+            message = res.error
+
+    # "Schema ok" virou "a chave tem os escopos de que o plugin precisa": o
+    # equivalente honesto agora que o plugin não conhece mais tabela nenhuma do
+    # CDP. Continua distinguindo "não configurado" de "inalcançável" de
+    # "alcançável mas não vai funcionar" — que é o ponto da rota.
+    faltando = [e for e in ("read", "contacts:write") if e not in escopos] if reachable else []
     return {"ok": True, "data": {
         "configured": configured,
         "reachable": reachable,
         "message": message,
-        "schema_ok": schema_ok,
-        "schema_missing": missing,
+        "schema_ok": reachable and not faltando,
+        "schema_missing": faltando,
+        "scopes": escopos,
         "base_url_set": bool(_config.nexus_base_url()),
         "mirror_enabled": bool(_config.setting("mirror_enabled", False)),
         "field_sync_enabled": bool(_config.setting("field_sync_enabled", False)),

@@ -1,30 +1,31 @@
 """Volta: Trackify → WhatsBot (campos do contato).
 
-O Trackify **não tem webhook de saída** para contato (o catálogo de webhooks
-dele tem exatamente dois eventos, ambos de autenticação). A única forma de
-saber que alguém editou um campo lá é consultar, e a fonte certa é
-``contact_changelog``: é a única que registra LIMPEZA (``new_value`` nulo) e a
-única que diz QUEM escreveu — o que é a supressão de eco desta feature.
+O Trackify **não tem webhook de saída** para contato (o catálogo de webhooks dele
+tem exatamente dois eventos, ambos de autenticação). A única forma de saber que
+alguém editou um campo lá é consultar, e a fonte certa é ``contact_changelog``: é
+a única que registra LIMPEZA (``new_value`` nulo) e a única que diz QUEM escreveu.
 
-Três detalhes que parecem mero cuidado e não são:
+⚠️ **A consulta migrou para ``GET /contact-changelog``.** Com isso três
+complicações inteiras deixaram de existir aqui:
 
-* **A supressão de eco é por VALOR, não por autor.** A versão anterior descartava
-  no SQL toda linha escrita pelo ``user_id`` da conta de serviço. Parece exato e
-  não é: se uma pessoa usar essa mesma conta para entrar na tela do Trackify — o
-  caso normal quando alguém aponta a integração para o próprio usuário — as
-  edições DELA ficam indistinguíveis das nossas por autor, e sumiam em silêncio.
-  Agora a linha só é ignorada quando o valor bate com o que NÓS gravamos por
-  último naquele par (``state.tk_hash``). Comparar com o valor ATUAL do WhatsBot
-  não serviria: entre o nosso envio e a leitura o operador pode ter mudado o
-  campo de novo, e a linha antiga ressuscitaria o valor velho.
-* **A consulta é escopada aos contatos vinculados.** ``contact_changelog`` só
-  tem índice em ``(contact_id, created_at DESC)`` — não há índice em
-  ``created_at`` sozinho, então um "tudo que mudou desde T" global varre a
-  tabela inteira do CRM de produção.
-* **O cursor global com consulta fatiada precisa avançar para o MÍNIMO.** Ver
-  ``merge_chunks``: avançar para o máximo perde linhas em silêncio.
-* **Atraso de segurança de 5s, pelo relógio do CDP.** Uma transação aberta antes
-  da nossa leitura pode commitar depois com ``created_at`` abaixo do cursor.
+* o **fatiamento por contato** (``CHUNK``) e a regra de avançar o cursor para o
+  MÍNIMO entre os pedaços truncados — eles existiam só porque não havia índice em
+  ``created_at`` sozinho, e um "tudo que mudou desde T" global varria a tabela de
+  auditoria do CRM. O índice agora existe do lado do Trackify e o cursor keyset
+  ``(created_at, id)`` é responsabilidade do servidor;
+* o **relógio do CDP** consultado à parte — ele volta no corpo da resposta;
+* a **supressão de eco por heurística de valor.** Antes, a escrita da integração
+  chegava assinada pelo usuário da conta de serviço, indistinguível de uma pessoa
+  usando as mesmas credenciais; por isso a linha só era descartada quando o valor
+  batia com o último que gravamos. Agora a escrita por API key tem procedência
+  própria (``source='api'``, ator ``apikey:<id>``), então reconhecer a própria
+  escrita é exato. A comparação por hash **continua** como segunda camada barata:
+  ela pega o caso de uma linha de ingestion/merge/import carregando o valor que
+  nós mesmos acabamos de escrever.
+
+O atraso de segurança de 5s continua, e continua medido pelo relógio do BANCO:
+uma transação aberta antes da nossa leitura pode commitar depois com
+``created_at`` abaixo do cursor.
 """
 
 from __future__ import annotations
@@ -35,67 +36,15 @@ from sqlalchemy import text
 
 from plugins.context import make_plugin_db
 
-from . import _config, field_codec, field_map, session, sync_state, trackify_db
+from . import _config, field_codec, field_map, sync_state
+from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.pull")
 
 CURSOR = "changelog"
-CHUNK = 200          # contatos por consulta (o ANY vira BitmapOr de índice)
-PAGE = 500           # linhas de changelog por consulta
+PAGE = 500           # linhas de changelog por página
 SAFETY_LAG_S = 5.0
 
-_CHANGELOG_SQL = """
-SELECT cl.id::text                       AS row_id,
-       cl.contact_id::text               AS tk_contact_id,
-       cl.custom_field_id::text          AS field_id,
-       cf.slug                           AS slug,
-       cl.new_value                      AS new_value,
-       cl.source::text                   AS source,
-       COALESCE(cl.user_id, '')          AS user_id,
-       EXTRACT(EPOCH FROM cl.created_at) AS created_epoch
-FROM contact_changelog cl
-JOIN custom_fields cf ON cf.id = cl.custom_field_id
-WHERE cl.contact_id = ANY(CAST(:ids AS uuid[]))
-  AND cl.custom_field_id = ANY(CAST(:field_ids AS uuid[]))
-  AND cl.created_at <= to_timestamp(:high_water)
-  AND (cl.created_at > to_timestamp(:since_ts)
-       OR (cl.created_at = to_timestamp(:since_ts) AND cl.id::text > :since_id))
-ORDER BY cl.created_at, cl.id
-LIMIT :lim
-"""
-
-
-# ── Cursor fatiado (puro) ────────────────────────────────────────────────
-
-def merge_chunks(chunks: list[dict], since: tuple) -> tuple[list, tuple, bool]:
-    """Junta os pedaços e decide até onde o cursor pode avançar.
-
-    O cursor é GLOBAL mas a consulta é fatiada por contato. Avançar para o
-    máximo de todos os pedaços PERDE LINHAS: se o pedaço A voltou até T=100 e o
-    pedaço B bateu no LIMIT em T=40, tudo entre 40 e 100 do pedaço B nunca mais
-    seria olhado. A regra correta é avançar para o mínimo, entre os pedaços que
-    truncaram, da última linha devolvida por cada um.
-
-    Devolve ``(linhas_a_aplicar, novo_cursor, houve_truncagem)``.
-    """
-    def key(r):
-        return (float(r["created_epoch"]), str(r["row_id"]))
-
-    todas = [r for c in chunks for r in c["rows"]]
-    if not todas:
-        return [], since, False
-
-    truncados = [c for c in chunks if c["truncated"] and c["rows"]]
-    if truncados:
-        frontier = min(key(c["rows"][-1]) for c in truncados)
-    else:
-        frontier = max(key(r) for r in todas)
-
-    manter = sorted((r for r in todas if key(r) <= frontier), key=key)
-    return manter, frontier, bool(truncados)
-
-
-# ── Leitura ──────────────────────────────────────────────────────────────
 
 def linked_contacts() -> dict:
     """``{trackify_contact_id: (telefone, contact_id)}`` dos contatos vinculados."""
@@ -113,42 +62,66 @@ def linked_contacts() -> dict:
     return out
 
 
-def cdp_now() -> float:
-    """Relógio do CDP. Nunca o da máquina do WhatsBot: são servidores
-    diferentes e o desvio entre eles viraria buraco ou repetição no cursor."""
-    rows = trackify_db.run_read("SELECT EXTRACT(EPOCH FROM now()) AS agora", {})
-    return float(rows[0]["agora"]) if rows else 0.0
+def _normalize_row(row: dict) -> dict:
+    """Linha do ``GET /contact-changelog`` nas chaves que ``apply_row`` já usa.
+
+    Adaptar na BORDA e não espalhar ``row.get("customFieldId")`` pelo módulo é o
+    que mantém ``apply_row`` (e os testes dele) intocados pela troca de SQL por
+    HTTP.
+    """
+    return {
+        "row_id": str(row.get("id") or ""),
+        "tk_contact_id": str(row.get("contactId") or ""),
+        "field_id": str(row.get("customFieldId") or ""),
+        "slug": row.get("slug"),
+        "new_value": row.get("newValue"),
+        "source": row.get("source"),
+        "user_id": str(row.get("userId") or ""),
+        "created_epoch": float(row.get("createdEpoch") or 0.0),
+    }
 
 
-def fetch_changes(contact_ids: list, field_ids: list, since: tuple,
-                  high_water: float) -> list[dict]:
-    """Lê o changelog em pedaços de ``CHUNK`` contatos. Devolve os pedaços crus."""
-    chunks = []
-    for i in range(0, len(contact_ids), CHUNK):
-        lote = contact_ids[i:i + CHUNK]
-        rows = trackify_db.run_read(_CHANGELOG_SQL, {
-            "ids": lote, "field_ids": field_ids,
-            "high_water": high_water,
-            "since_ts": since[0], "since_id": since[1], "lim": PAGE,
-        })
-        rows = [dict(r) for r in rows]
-        chunks.append({"rows": rows, "truncated": len(rows) >= PAGE})
-    return chunks
+async def fetch_changes(http, since: tuple, field_slugs: list) -> dict:
+    """Uma página do changelog a partir do cursor. Nunca levanta.
+
+    Devolve ``{rows, next, truncated, server_epoch}``. O ``server_epoch`` é o
+    relógio do BANCO do CDP — nunca o da máquina do WhatsBot: são servidores
+    diferentes e o desvio entre eles viraria buraco ou repetição no cursor.
+    """
+    res = await tk_client.changelog(http, since=since[0], since_id=since[1],
+                                    limit=PAGE, field_slugs=field_slugs)
+    if not res.ok:
+        logger.debug("trackify: changelog indisponível (%s)", res.error)
+        return {"rows": [], "next": since, "truncated": False, "server_epoch": 0.0}
+
+    corpo = res.data or {}
+    meta = corpo.get("meta") or {}
+    return {
+        "rows": [_normalize_row(r) for r in (corpo.get("data") or [])],
+        "next": (float(meta.get("nextSince") or since[0]),
+                 str(meta.get("nextSinceId") or since[1])),
+        "truncated": bool(meta.get("truncated")),
+        "server_epoch": float(meta.get("serverEpoch") or 0.0),
+    }
 
 
 # ── Aplicação ────────────────────────────────────────────────────────────
 
-def _e_nosso_eco(row: dict, estado: dict, self_user: str) -> bool:
+def _e_nosso_eco(row: dict, estado: dict, self_actor: str) -> bool:
     """A linha é a nossa própria escrita voltando?
 
-    Duas condições, e as DUAS são necessárias: escrita pela conta de serviço E
-    com o valor exato que registramos no último envio daquele par. Só a primeira
-    condição (o filtro por autor da versão anterior) engolia a edição de um
-    humano que usasse a mesma conta para entrar no Trackify. Só a segunda seria
-    frouxa demais: um humano pode reescrever o mesmo valor.
+    Basta o ATOR bater: uma linha assinada por ``apikey:<nossa chave>`` só pode
+    ter saído daqui. Com o cookie de sessão isso não era verdade — a escrita da
+    integração e a edição de uma pessoa usando as mesmas credenciais chegavam com
+    o mesmo ``user_id``, e por isso a versão anterior precisava comparar o valor.
+
+    A comparação por valor continua como SEGUNDA camada, e não é redundante: ela
+    pega a linha de ingestion/merge/import que carrega o valor que nós mesmos
+    acabamos de escrever — essa não tem o nosso ator.
     """
-    if not self_user or str(row.get("user_id") or "") != self_user:
-        return False
+    autor = str(row.get("userId") or row.get("user_id") or "")
+    if self_actor and autor == self_actor:
+        return True
     nosso = estado.get("tk_hash")
     if not nosso:
         return False
@@ -246,23 +219,20 @@ def broadcast_refresh(phones: set) -> None:
 
 # ── Ciclo ────────────────────────────────────────────────────────────────
 
-def cycle() -> dict:
-    """Um ciclo de leitura. Bloqueante; devolve um resumo para o log/telemetria."""
+async def cycle(http) -> dict:
+    """Um ciclo de leitura. Devolve um resumo para o log/telemetria."""
     resumo = {"lidas": 0, "gravadas": 0, "recusadas": 0, "ecos": 0,
-              "conta_compartilhada": 0, "truncado": False}
+              "truncado": False}
 
     if not bool(_config.setting("field_sync_pull_enabled", False)):
         return resumo
-    if not trackify_db.is_configured():
+    if not tk_client.is_configured():
         return resumo
 
-    self_user = session.cached_user_id()
-    if not self_user:
-        # Sem o id da conta de serviço não há supressão de eco: rodar assim
-        # reimportaria as nossas próprias escritas como se fossem edições
-        # humanas. Um ciclo de espera é melhor que um laço de escrita.
-        logger.debug("trackify: pull adiado — conta de serviço ainda não autenticou")
-        return resumo
+    # Ator das NOSSAS escritas no changelog do CDP. Vazio não impede o ciclo: a
+    # supressão por valor (2ª camada) segue valendo, e o id é preenchido no
+    # primeiro "testar acesso" ou no primeiro ciclo do worker.
+    self_actor = _self_actor()
 
     maps = [m for m in field_map.list_maps(enabled_only=True)
             if m["direction"] in ("to_whatsbot", "both") and m["tk_field_id"]]
@@ -273,65 +243,66 @@ def cycle() -> dict:
     if not vinculados:
         return resumo
 
-    agora = cdp_now()
-    if not agora:
-        return resumo
-    high_water = agora - SAFETY_LAG_S
-
     cur = sync_state.get_cursor(CURSOR)
     since = (float(cur.get("cursor_ts") or 0.0), str(cur.get("cursor_id") or ""))
 
-    chunks = fetch_changes(list(vinculados.keys()),
-                           [m["tk_field_id"] for m in maps],
-                           since, high_water)
-    linhas, novo_cursor, truncado = merge_chunks(chunks, since)
+    slugs = [m["tk_slug"] for m in maps if m.get("tk_slug")]
+    pagina = await fetch_changes(http, since, slugs)
+    server_epoch = pagina["server_epoch"]
+    if not server_epoch:
+        return resumo
+
+    # Atraso de segurança: uma transação aberta antes da leitura pode commitar
+    # depois com `created_at` abaixo do cursor. Descartamos a borda e a
+    # relemos no próximo ciclo.
+    high_water = server_epoch - SAFETY_LAG_S
+    linhas = [r for r in pagina["rows"] if r["created_epoch"] <= high_water]
+    truncado = pagina["truncated"]
+
     resumo["lidas"] = len(linhas)
     resumo["truncado"] = truncado
     if not linhas:
-        # Mesmo sem nada novo o cursor avança até a marca de segurança, senão a
-        # janela consultada cresce sem parar numa base parada.
-        sync_state.set_cursor(CURSOR, high_water, "", "sem novidades")
+        # Mesmo sem nada aplicável o cursor avança até a marca de segurança,
+        # senão a janela consultada cresce sem parar numa base parada.
+        if not truncado:
+            sync_state.set_cursor(CURSOR, high_water, "", "sem novidades")
         return resumo
 
     maps_by_field = {m["tk_field_id"]: m for m in maps}
     definicoes = _definicoes()
-    # Uma consulta de estado para o lote todo — ela é a memória que distingue o
-    # nosso eco da edição de um humano que usa a MESMA conta.
+    # Uma consulta de estado para o lote todo — é a memória da 2ª camada de
+    # supressão de eco.
     estados = sync_state.load_for_contacts([cid for _, cid in vinculados.values()])
     phones = set()
-    conta_compartilhada = 0
     for row in linhas:
         try:
             desfecho, phone = apply_row(row, maps_by_field, vinculados, definicoes,
-                                        estados, self_user)
+                                        estados, self_actor)
         except Exception:  # noqa: BLE001 — uma linha ruim não pode parar o ciclo
             logger.warning("trackify: falha ao aplicar alteração do CDP", exc_info=True)
             continue
         if desfecho == "gravado":
             resumo["gravadas"] += 1
             phones.add(phone)
-            if str(row.get("user_id") or "") == self_user:
-                # Escrita da conta de serviço com valor diferente do nosso: foi
-                # uma PESSOA usando as mesmas credenciais.
-                conta_compartilhada += 1
         elif desfecho == "recusado":
             resumo["recusadas"] += 1
         elif desfecho == "eco":
             resumo["ecos"] += 1
 
-    if conta_compartilhada:
-        resumo["conta_compartilhada"] = conta_compartilhada
-        logger.warning(
-            "trackify: %d alteração(ões) no Trackify foram feitas pela CONTA DE "
-            "SERVIÇO. Use um usuário dedicado à integração — com a conta "
-            "compartilhada, distinguir a edição de uma pessoa da nossa própria "
-            "escrita depende só do valor gravado.", conta_compartilhada)
-
-    sync_state.set_cursor(CURSOR, novo_cursor[0], novo_cursor[1],
+    # O cursor avança para a última linha CONSUMIDA, não para a última recebida:
+    # o que foi cortado pelo atraso de segurança precisa ser relido.
+    ultimo = linhas[-1]
+    sync_state.set_cursor(CURSOR, ultimo["created_epoch"], ultimo["row_id"],
                           "truncado" if truncado else "")
     # Um broadcast por telefone, não por linha.
     broadcast_refresh(phones)
     return resumo
+
+
+def _self_actor() -> str:
+    """Ator com que as nossas escritas aparecem no changelog do CDP."""
+    key_id = (_config.setting("sync_api_key_id") or "").strip()
+    return f"apikey:{key_id}" if key_id else ""
 
 
 def _definicoes() -> dict:

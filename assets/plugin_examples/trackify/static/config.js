@@ -17,13 +17,13 @@
 //
 // ⚠️ O `PUT /api/plugins/trackify/settings` é DESTRUTIVO por construção: o core
 // faz `Settings(**body)` e grava `model_dump()` inteiro, então todo campo ausente
-// volta ao DEFAULT. Um PUT parcial apagaria o `nexus_dsn` e derrubaria a leitura.
+// volta ao DEFAULT. Um PUT parcial apagaria a URL de ingestão e derrubaria o espelho.
 // Por isso todo save daqui reenvia o objeto COMPLETO (`{...values, ...alterados}`).
 import { h } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { authHeaders } from '/static/js/services/api.js';
-import FieldSync from '/plugins/trackify/static/FieldSync.js';
+import FieldSync, { ApiKeyCard } from '/plugins/trackify/static/FieldSync.js';
 
 const html = htm.bind(h);
 
@@ -35,7 +35,6 @@ const MASK = '***';
 const NUM_LIMITS = {
   cache_ttl_seconds: [0, 3600],
   timeline_page_size: [5, 100],
-  statement_timeout_ms: [500, 30000],
   rate_per_min: [1, 60],
   max_age_days: [1, 90],
   field_sync_poll_seconds: [15, 3600],
@@ -93,15 +92,16 @@ function Health({ data, onRefresh, busy }) {
       </div>
       <ul class="space-y-1.5 text-[13px]">
         <li class="flex items-center gap-2 text-wa-text">
-          <${Dot} ok=${configured} /> DSN do Nexus ${configured ? 'configurado' : 'NÃO configurado'}
+          <${Dot} ok=${configured} /> API key ${configured ? 'configurada' : 'NÃO configurada'}
+          ${!configured ? html`<span class="text-wa-secondary">— cole a chave abaixo</span>` : null}
         </li>
         <li class="flex items-center gap-2 text-wa-text">
-          <${Dot} ok=${reachable} /> Banco ${reachable ? 'alcançável' : 'inalcançável'}
+          <${Dot} ok=${reachable} /> Trackify ${reachable ? 'respondendo' : 'sem resposta'}
           ${!reachable && message ? html`<span class="text-wa-secondary">— ${message}</span>` : null}
         </li>
         <li class="flex items-center gap-2 text-wa-text">
-          <${Dot} ok=${schema_ok} /> Estrutura das tabelas
-          ${schema_ok ? ' compatível' : ' incompatível'}
+          <${Dot} ok=${schema_ok} /> Permissões da chave
+          ${schema_ok ? ' suficientes' : ' insuficientes'}
           ${schema_missing && schema_missing.length
             ? html`<span class="text-wa-secondary">— falta: ${schema_missing.join(', ')}</span>` : null}
         </li>
@@ -227,9 +227,8 @@ function MirrorSettings({ values, onSave, busy }) {
  *  no estado (para o reenvio completo) mas nunca é RENDERIZADO — só substituível. */
 function ReadSettings({ values, onSave, busy }) {
   const [v, setV] = useState(null);
-  const [newDsn, setNewDsn] = useState(null);   // null = manter o atual
   const [msg, setMsg] = useState('');
-  useEffect(() => { setV(values ? { ...values } : null); setNewDsn(null); }, [values]);
+  useEffect(() => { setV(values ? { ...values } : null); }, [values]);
   if (!v) return null;
 
   const set = (k) => (val) => { setV({ ...v, [k]: val }); setMsg(''); };
@@ -239,11 +238,9 @@ function ReadSettings({ values, onSave, busy }) {
     setMsg('');
     const r = await onSave({
       ...values,
-      nexus_dsn: newDsn === null ? values.nexus_dsn : newDsn.trim(),
       nexus_base_url: String(v.nexus_base_url || '').trim(),
       cache_ttl_seconds: clampNum('cache_ttl_seconds', v.cache_ttl_seconds),
       timeline_page_size: clampNum('timeline_page_size', v.timeline_page_size),
-      statement_timeout_ms: clampNum('statement_timeout_ms', v.statement_timeout_ms),
       product_identity_fields: String(v.product_identity_fields || '').trim(),
     });
     setMsg(r && r.ok ? 'Salvo.' : `Não foi possível salvar${r && r.error ? `: ${r.error}` : '.'}`);
@@ -252,33 +249,12 @@ function ReadSettings({ values, onSave, busy }) {
   return html`
     <section class="border border-wa-border rounded-xl p-4 bg-wa-panel">
       <h3 class="text-sm font-semibold text-wa-text mb-3">Leitura do Trackify (jornada do contato)</h3>
+      <p class="text-xs text-wa-secondary mb-3">
+        A credencial é a <strong>API key</strong>, configurada na aba
+        “Campos do contato”. Não há mais conexão direta ao banco do Nexus: tudo
+        passa pelas rotas do Trackify.
+      </p>
       <form onSubmit=${save} class="space-y-3">
-        <${Field} label="DSN do Nexus (somente leitura)"
-          hint="Conexão com o banco onde vivem as tabelas do Trackify. Nunca é exibido nem registrado em log.">
-          ${newDsn === null
-            ? html`
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="text-[13px] text-wa-secondary">
-                  ${values.nexus_dsn ? '•••••••• (configurado)' : 'não configurado'}
-                </span>
-                <button type="button" onClick=${() => setNewDsn('')}
-                  class="px-2 py-1 rounded-md text-[11px] bg-wa-hover text-wa-text hover:bg-wa-border transition-colors">
-                  ${values.nexus_dsn ? 'Substituir' : 'Definir'}
-                </button>
-              </div>`
-            : html`
-              <div class="flex flex-wrap items-center gap-2">
-                <input type="password" autocomplete="new-password"
-                  class="wa-field px-2.5 py-1.5 text-sm rounded-md flex-1 min-w-[240px]"
-                  placeholder="postgresql+psycopg://usuario:senha@host:5432/banco"
-                  value=${newDsn} onInput=${(e) => setNewDsn(e.target.value)} />
-                <button type="button" onClick=${() => setNewDsn(null)}
-                  class="px-2 py-1 rounded-md text-[11px] bg-wa-hover text-wa-text hover:bg-wa-border transition-colors">
-                  Cancelar
-                </button>
-              </div>`}
-        <//>
-
         <${Field} label="URL do Trackify (botão “Abrir no Trackify”)"
           hint="Base pública do módulo, sem barra no fim. Vazio esconde o botão.">
           <input type="text" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
@@ -286,7 +262,7 @@ function ReadSettings({ values, onSave, busy }) {
             value=${v.nexus_base_url || ''} onInput=${(e) => set('nexus_base_url')(e.target.value)} />
         <//>
 
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <${Field} label="Cache da jornada (s)" hint="0 desliga.">
             <input type="number" min="0" max="3600" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
               value=${v.cache_ttl_seconds} onInput=${(e) => set('cache_ttl_seconds')(e.target.value)} />
@@ -294,10 +270,6 @@ function ReadSettings({ values, onSave, busy }) {
           <${Field} label="Eventos por página">
             <input type="number" min="5" max="100" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
               value=${v.timeline_page_size} onInput=${(e) => set('timeline_page_size')(e.target.value)} />
-          <//>
-          <${Field} label="Tempo máx. da consulta (ms)">
-            <input type="number" min="500" max="30000" class="wa-field px-2.5 py-1.5 text-sm rounded-md w-full"
-              value=${v.statement_timeout_ms} onInput=${(e) => set('statement_timeout_ms')(e.target.value)} />
           <//>
         </div>
 
@@ -456,6 +428,7 @@ export default function TrackifyConfig() {
   const [keyState, setKeyState] = useState(null);
   const [queue, setQueue] = useState(null);
   const [settings, setSettings] = useState(null);
+  const [cred, setCred] = useState(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState('conexao');
 
@@ -487,9 +460,35 @@ export default function TrackifyConfig() {
     if (r && r.ok && r.data) setSettings(r.data.values || null);
   }, []);
 
+  // A API key é a credencial da CONEXÃO (vale para ler, escrever e ingerir),
+  // então mora na aba Conexão — não na de mapeamento de campos, onde ficou por
+  // engano quando substituiu a conta de serviço.
+  const loadCred = useCallback(async () => {
+    const r = await req('GET', '/api-key');
+    if (r && r.ok) setCred(r.data || null);
+  }, []);
+
+  const saveCred = useCallback(async (body) => {
+    setBusy(true);
+    try {
+      const r = await req('PUT', '/api-key', body);
+      if (r && r.ok) { await loadCred(); await loadHealth(); }
+      return r;
+    } finally { setBusy(false); }
+  }, [loadCred, loadHealth]);
+
+  const testCred = useCallback(async (body) => {
+    setBusy(true);
+    try {
+      const r = await req('POST', '/api-key/test', body);
+      await loadHealth();
+      return r;
+    } finally { setBusy(false); }
+  }, [loadHealth]);
+
   useEffect(() => {
-    loadHealth(); loadKey(); loadQueue(); loadSettings();
-  }, [loadHealth, loadKey, loadQueue, loadSettings]);
+    loadHealth(); loadKey(); loadQueue(); loadSettings(); loadCred();
+  }, [loadHealth, loadKey, loadQueue, loadSettings, loadCred]);
 
   const saveSettings = useCallback(async (full) => {
     setBusy(true);
@@ -532,6 +531,7 @@ export default function TrackifyConfig() {
       <${Health} data=${health} onRefresh=${loadHealth} busy=${busy} />
       <${Tabs} value=${tab} onChange=${setTab} />
       ${tab === 'conexao' && html`
+        <${ApiKeyCard} state=${cred} onSave=${saveCred} onTest=${testCred} busy=${busy} />
         <${ReadSettings} values=${settings} onSave=${saveSettings} busy=${busy} />`}
       ${tab === 'espelho' && html`
         <${MirrorSettings} values=${settings} onSave=${saveSettings} busy=${busy} />
