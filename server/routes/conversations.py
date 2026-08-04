@@ -26,7 +26,7 @@ from db.filters.translate import FilterContext
 from plugins.events import emit_with_filter
 from server.authz import permission_denied, has_permission, current_user, visible_inbox_ids
 from server.helpers import _ok, _err
-from server.pagination import CAP_MSGS, PAGE_MSGS, clamp_limit
+from server.pagination import CAP_MSGS, PAGE_MSGS, clamp_limit, clamp_offset
 
 logger = logging.getLogger(__name__)
 
@@ -324,7 +324,10 @@ def register_routes(app, deps):
     async def conversation_messages(conv_id: int, request: Request,
                                     mark_read: bool = True,
                                     limit: int = PAGE_MSGS,
-                                    before_id: int | None = None):
+                                    before_id: int | None = None,
+                                    after_id: int | None = None,
+                                    around_id: int | None = None,
+                                    at_ts: float | None = None):
         """Messages of ONE conversation (conversa-cêntrico, plano 11 D1).
 
         Substitui GET /api/contacts/{phone} para o chat: escopa o thread a um único
@@ -333,25 +336,50 @@ def register_routes(app, deps):
 
         Paginação keyset (plano 50 F3): devolve a PÁGINA mais recente (as ``limit``
         últimas, capado em ``CAP_MSGS``). ``before_id`` (id da 1ª msg da página atual)
-        traz as ``limit`` anteriores — o "carregar anteriores" do scroll-up. ``has_more``
-        avisa se ainda há msgs mais antigas. Ordem sempre cronológica (oldest→newest).
+        traz as ``limit`` anteriores — o "carregar anteriores" do scroll-up. Ordem
+        sempre cronológica (oldest→newest).
+
+        Janela ANCORADA (plano 99 F0c) — a paginação deixou de ser só para trás:
+
+        * ``after_id`` — as ``limit`` SEGUINTES (rolar para baixo numa janela que não
+          termina na última mensagem);
+        * ``around_id`` — a janela CENTRADA nessa mensagem ("pular para cá");
+        * ``at_ts`` — epoch (fuso do NAVEGADOR, ver ``first_id_on_or_after``): resolve
+          a 1ª mensagem com ``ts >=`` e devolve a janela em torno dela, numa ida só.
+
+        As quatro âncoras são mutuamente exclusivas (400 se combinadas). A resposta
+        ganhou ``has_more_older``/``has_more_newer`` (``has_more`` continua existindo
+        como alias do primeiro, para cliente antigo), ``anchor_id`` (a mensagem em que
+        a janela aterrissou, ``null`` quando não deu para ancorar) e ``marked_read``.
+
+        ⚠️ Abrir ANCORADO nunca marca a conversa como lida (P6): pular para janeiro
+        não pode zerar o badge das mensagens de hoje que o operador não viu.
         """
         denied = permission_denied(request, "conversation.read")
         if denied:
             return denied
+        anchors = [p for p in (before_id, after_id, around_id, at_ts) if p is not None]
+        if len(anchors) > 1:
+            return _err("Use apenas uma âncora: before_id, after_id, around_id ou at_ts.",
+                        status=400)
+        # Uma janela ancorada é uma VISITA ao passado, não a abertura da conversa.
+        if after_id is not None or around_id is not None or at_ts is not None:
+            mark_read = False
         page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
         vis = visible_inbox_ids(request)
         can_read_contact = has_permission(request, "contact.read")
         _u = current_user(request)
         _uid = _u.get("id") if _u else None
 
+        _EMPTY = (None, None, [], [], {}, None)
+
         def _load():
             conv = conversation_repo.get_with_channel(conv_id, _uid)
             if conv is None:
-                return None, None, [], [], False, None
+                return _EMPTY
             # Inbox membership scoping: hide (as 404) before any mark-read side effect.
             if vis is not None and conv.get("inbox_id") not in vis:
-                return None, None, [], [], False, None
+                return _EMPTY
             phone = conv.get("contact_phone") or ""
             if can_read_contact:
                 contact = contact_repo.get_full_contact(phone) if phone else None
@@ -379,13 +407,12 @@ def register_routes(app, deps):
                     conv["has_user_mention"] = False
                 except Exception:
                     logger.exception("Falha ao marcar menções lidas na conversa %s", conv_id)
-            # Keyset (plano 50 F3): over-fetch por 1 p/ detectar has_more sem 2ª query.
-            # A msg extra é a mais ANTIGA da janela (lista cronológica) → dropa índice 0.
-            msgs = message_repo.get_by_conversation(
-                conv_id, limit=page_limit + 1, before_id=before_id)
-            has_more = len(msgs) > page_limit
-            if has_more:
-                msgs = msgs[1:]
+            # Keyset (plano 50 F3 + plano 99 F0c): over-fetch por 1 p/ detectar
+            # "há mais" sem 2ª query. A regra de QUAL janela ler vive em
+            # `_message_window`, compartilhada com a view por contato.
+            msgs, window = message_repo.read_window(
+                page_limit, before_id=before_id, after_id=after_id,
+                around_id=around_id, at_ts=at_ts, conversation_id=conv_id)
             # Citação cujo alvo caiu fora desta página (plano 75 F10): resolve em lote
             # aqui, depois do corte do over-fetch (a msg extra não conta como "presente").
             _hydrate_quoted(msgs, conv_id)
@@ -404,9 +431,9 @@ def register_routes(app, deps):
             # com paginação só veria a página recente e poderia "fechar" errado). Risco
             # apontado no plano; mesmo precedente de contacts.py.
             last_in = message_repo.last_inbound_ts(conversation_id=conv_id)
-            return conv, contact, msgs, ids, has_more, last_in
+            return conv, contact, msgs, ids, window, last_in
 
-        conv, contact, msgs, msg_ids, has_more, last_inbound_ts = await asyncio.to_thread(_load)
+        conv, contact, msgs, msg_ids, window, last_inbound_ts = await asyncio.to_thread(_load)
         if conv is None:
             return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
@@ -420,7 +447,13 @@ def register_routes(app, deps):
             "conversation": conv,
             "contact": contact,
             "messages": msgs,
-            "has_more": has_more,
+            # `has_more` é ALIAS de `has_more_older` (compat com o cliente antigo e
+            # com `threadData.prependOlder`); os dois sentidos vêm ao lado.
+            "has_more": window["has_more_older"],
+            "has_more_older": window["has_more_older"],
+            "has_more_newer": window["has_more_newer"],
+            "anchor_id": window["anchor_id"],
+            "marked_read": bool(mark_read),
             "channel_id": channel_id,
             "avatar_v": avatar_version(settings, phone) if can_read_contact else None,
             "templates_supported": outbound.supports(channel_id, "templates"),
@@ -434,6 +467,37 @@ def register_routes(app, deps):
                 video_transcode_available=video_transcode.available(),
                 audio_transcode_available=audio_transcode.available()),
         })
+
+    @app.get("/api/atendimentos/{conv_id}/messages/search")
+    async def conversation_message_search(conv_id: int, request: Request,
+                                          q: str = "", limit: int = PAGE_MSGS,
+                                          offset: int = 0):
+        """Busca de texto DENTRO de uma conversa (plano 99 F1) — o "pesquisar
+        mensagens" do WhatsApp.
+
+        Distinta da busca global da sidebar, que é ``DISTINCT ON (contact_id)`` e
+        devolve **um** hit por contato (e continua intocada — D1). Aqui vem a LISTA
+        de ocorrências desta thread, mais recente primeiro, com trecho destacável.
+
+        Mesmo gate da leitura das mensagens (``conversation.read``) + o mesmo escopo
+        de caixa de entrada — uma busca não pode ser a porta lateral para ler uma
+        conversa que o operador não pode abrir. ``q`` curto devolve lista vazia com
+        200 (não é erro do operador digitar duas letras).
+        """
+        denied = permission_denied(request, "conversation.read")
+        if denied:
+            return denied
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
+        page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
+        page_offset = clamp_offset(offset)
+        from db.search import message_search
+        data = await asyncio.to_thread(
+            message_search.search_in_conversation,
+            q=q or "", conversation_id=conv_id,
+            limit=page_limit, offset=page_offset)
+        return _ok(data)
 
     @app.post("/api/atendimentos/{conv_id}/status")
     async def set_status(conv_id: int, body: dict, request: Request):

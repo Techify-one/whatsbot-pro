@@ -17,6 +17,8 @@ import { Slot } from '../../plugins/Slot.js';
 // lugar da última mensagem enquanto houver texto não enviado naquela conversa.
 import { getDraft } from '../../services/drafts.js';
 import { useDrafts } from '../../hooks/useDrafts.js';
+// Selo IA/IA OFF: o veredito EFETIVO (gate do servidor espelhado), não a coluna crua.
+import { aiEffectivelyOn } from '../../services/conversationRows.js';
 
 const html = htm.bind(h);
 
@@ -708,8 +710,11 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                           // sem este guard cairia no ramo verde, porque `conv_ai_active` vem
                           // NULL do banco e `_shape_contact_row` defaulta para true.
                           ? null
-                          : (!autoReply || c.conv_ai_active === 0 || c.conv_ai_active === false)
-                            ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle" title=${!autoReply ? 'IA desligada pelo interruptor global' : null}>IA OFF</span>`
+                          // plano 96 D4: o selo passou a espelhar o GATE (inclui "tem dono
+                          // humano"), não só `conv_ai_active` — 14 conversas apareciam verdes
+                          // estando mudas. Dois estados só (P3: nada de "IA pausada").
+                          : !aiEffectivelyOn(c, { autoReply })
+                            ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle" title=${!autoReply ? 'IA desligada pelo interruptor global' : (c.assignee_user_id != null ? 'A conversa está com um atendente' : null)}>IA OFF</span>`
                             : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }
                       </span>

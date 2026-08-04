@@ -1,0 +1,60 @@
+{
+  "assign": {
+    "conversation": {
+      "active_agent_key": null,
+      "ai_active": 0,
+      "assignee_user_id": "<USER>",
+      "status": "open"
+    },
+    "events": {
+      "counts": {
+        "conversation.assigned": 1
+      },
+      "sequence": [
+        "conversation.assigned"
+      ],
+      "set": [
+        "conversation.assigned"
+      ]
+    },
+    "notices": [
+      {
+        "content": "🧑‍💼 Operador atribuiu a conversa para Atendente A2b.",
+        "role": "conversation_event"
+      },
+      {
+        "content": "✅ Operador resolveu a conversa.",
+        "role": "conversation_event"
+      }
+    ]
+  },
+  "close": {
+    "conversation": {
+      "active_agent_key": null,
+      "ai_active": 0,
+      "assignee_user_id": null,
+      "status": "closed"
+    },
+    "events": {
+      "counts": {
+        "conversation.status_changed": 1
+      },
+      "sequence": [
+        "conversation.status_changed"
+      ],
+      "set": [
+        "conversation.status_changed"
+      ]
+    }
+  },
+  "final_notices": [
+    {
+      "content": "🧑‍💼 Operador atribuiu a conversa para Atendente A2b.",
+      "role": "conversation_event"
+    },
+    {
+      "content": "✅ Operador resolveu a conversa.",
+      "role": "conversation_event"
+    }
+  ]
+}

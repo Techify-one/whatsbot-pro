@@ -71,6 +71,9 @@ class PluginManifest:
     # checks it against FRONTEND_API_VERSION at load time (informational on the server).
     frontend_extends: str = ""
     frontend_api_version: str = "*"
+    # Version range for ``api.services``. Legacy manifests predate this field and
+    # therefore target the compatibility surface 1.x by default.
+    plugin_services_version: str = "1.0"
     raw: dict = dataclasses.field(default_factory=dict)
 
     def to_public_dict(self) -> dict:
@@ -91,6 +94,7 @@ class PluginManifest:
             "rbac": self.rbac,
             "frontend_extends": self.frontend_extends,
             "frontend_api_version": self.frontend_api_version,
+            "plugin_services_version": self.plugin_services_version,
         }
 
     def short_blurb(self, max_len: int = 180) -> str:
@@ -207,6 +211,7 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
     # Frontend extension module (optional). Normalized to a string; empty = none.
     frontend_extends = str(data.get("frontend_extends") or "")
     frontend_api_version = str(data.get("frontend_api_version") or "*")
+    plugin_services_version = str(data.get("plugin_services_version") or "1.0")
 
     return PluginManifest(
         id=pid,
@@ -226,6 +231,7 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
         rbac=rbac,
         frontend_extends=frontend_extends,
         frontend_api_version=frontend_api_version,
+        plugin_services_version=plugin_services_version,
         raw=data,
     )
 

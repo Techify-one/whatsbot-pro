@@ -3,6 +3,8 @@
  * Escapes HTML first to prevent XSS, then applies formatting.
  */
 
+import { linkifyToTokens } from '../services/messageEntities.js';
+
 function escapeHtml(str) {
   return str
     .replace(/&/g, '&amp;')
@@ -37,13 +39,19 @@ export function formatWhatsApp(text, mentionNames = []) {
   // Strikethrough
   s = s.replace(/~([^~\n]+?)~/g, '<s>$1</s>');
 
-  // Links (URLs) — after escaping, so &amp; in query strings is fine
-  s = s.replace(/(https?:\/\/[^\s<]+)/g,
-    '<a href="$1" target="_blank" rel="noopener noreferrer" style="color:#53bdeb;text-decoration:underline;word-break:break-all">$1</a>');
-
-  // Phone numbers with @ (e.g. 5511999999999@s.whatsapp.net) — styled as link but not clickable
-  s = s.replace(/(\d{7,15})@([\w.]+)/g,
-    '<span style="color:#53bdeb;text-decoration:underline;cursor:default">$1@$2</span>');
+  // Entidades (URL, e-mail, telefone, JID) — plano 97 · F2. As duas regras que
+  // moravam aqui (URL → âncora; `\d+@\w+` → span de JID) viraram uma chamada ao
+  // módulo puro `services/messageEntities.js`, que também detecta e-mail e
+  // telefone e carimba `data-entity`/`data-value` para o menu de contexto ler.
+  // Roda DEPOIS do escape (invariante de segurança) e na MESMA posição de antes:
+  // depois do tachado, antes das menções.
+  //
+  // A linkificação devolve TOKENS opacos, não HTML: assim a regra de menção
+  // abaixo não consegue casar dentro de um `href` (um grupo com um membro
+  // chamado "Empresa" corromperia `mailto:contato@empresa.com`). O `restore()`
+  // reidrata as âncoras no fim, quando nenhuma outra regra roda mais.
+  const linkified = linkifyToTokens(s);
+  s = linkified.text;
 
   // @mentions: known group member names + the mention-all keywords (@todos, …).
   // Names are escaped the same way the text was, then regex-escaped, so they
@@ -60,7 +68,8 @@ export function formatWhatsApp(text, mentionNames = []) {
   const mentionRe = new RegExp('@(' + alts.join('|') + ')', 'gi');
   s = s.replace(mentionRe, '<span style="color:#53bdeb;font-weight:600">@$1</span>');
 
-  return s;
+  // Reidrata as âncoras/spans de entidade — última coisa do pipeline.
+  return linkified.restore(s);
 }
 
 /**

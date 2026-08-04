@@ -217,6 +217,22 @@ html.dark .wa-chat-pattern {
   animation: wa-msg-flash 3s ease-out;
 }
 
+/* Termo buscado destacado DENTRO da bolha (plano 99 F2·4).
+   O `<mark>` do navegador vem com amarelo puro + preto fixos, ilegíveis sobre a
+   bolha verde do tema escuro — daí a cor própria. Âmbar translúcido funciona
+   sobre as três superfícies em que a bolha pode estar (entrada, saída e nota
+   privada) nos DOIS temas, e a cor do texto é herdada da bolha em vez de
+   fixada, então o contraste do tema continua valendo. */
+mark.wa-search-hit {
+  background-color: rgba(245, 158, 11, 0.42);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+html.dark mark.wa-search-hit {
+  background-color: rgba(251, 191, 36, 0.38);
+}
+
 /* ── Dark-mode fallback for raw Tailwind color utilities ──────────────────
    Core components use the themed wa-* palette, but plugin screens — including
    ones we don't control and ones added in the future — may use raw utilities

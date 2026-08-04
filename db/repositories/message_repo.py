@@ -6,7 +6,7 @@ import json
 import time
 
 from sqlalchemy import (and_, case as sa_case, delete as sa_delete, insert as sa_insert,
-                        select, update as sa_update)
+                        or_, select, update as sa_update)
 
 from db.engine import get_engine
 from db.repositories._mapping import coerce_json
@@ -94,50 +94,111 @@ def find_execution_for_message(msg_row: dict) -> dict | None:
 
 
 def get_all(contact_id: int, *, limit: int | None = None,
-            before_id: int | None = None) -> list[dict]:
+            before_id: int | None = None, after_id: int | None = None) -> list[dict]:
     """Return messages for a contact ordered by timestamp (oldest→newest).
 
     ``limit`` (plano 50): keyset pagination for the chat panel. When set, fetch the
     newest ``limit`` rows (``ts DESC, id DESC``) — optionally only those *older* than
-    ``before_id`` (``id < before_id``) — and return them chronological. ``limit=None``
+    the compound cursor ``(ts, id)`` identified by ``before_id`` — and return them chronological. ``limit=None``
     ⇒ the historical path (all rows, ``ORDER BY ts``), byte-for-byte identical, for
     internal callers that need the whole thread.
+
+    ``after_id`` (plano 99 F0b) é o irmão de ``before_id``, para FRENTE: as ``limit``
+    mensagens **imediatamente seguintes** a ``after_id`` (pela ordem ``ts, id``, lidas em
+    ``ts ASC``). Existe porque a janela do painel deixou de terminar sempre na última
+    mensagem — ancorada no passado, rolar para BAIXO precisa pedir as próximas. Passar
+    os dois é erro do chamador (a rota valida antes); aqui ``after_id`` vence.
     """
     cond = messages.c.contact_id == contact_id
-    if before_id is not None:
-        cond = cond & (messages.c.id < before_id)
-    return _select_messages(cond, limit)
+    return _keyset(cond, limit, before_id, after_id)
 
 
 def get_by_conversation(conversation_id: int, *, limit: int | None = None,
-                        before_id: int | None = None) -> list[dict]:
+                        before_id: int | None = None,
+                        after_id: int | None = None) -> list[dict]:
     """Return messages for ONE conversation ordered by ts (plano 11 D1).
 
     Conversa-cêntrico: filtra por ``conversation_id`` (uma thread por canal),
     ao contrário de :func:`get_all` que casa por ``contact_id`` e funde todos os
     canais do mesmo número. Usa ``idx_msg_conversation_ts`` (db/tables.py).
 
-    ``limit``/``before_id`` (plano 50): keyset como em :func:`get_all` — página das
-    ``limit`` mais recentes (+ ``id < before_id`` p/ "carregar anteriores"), devolvida
-    cronológica. ``limit=None`` ⇒ thread inteira (byte-idêntico ao caminho legado).
+    ``limit``/``before_id``/``after_id`` (plano 50 + plano 99): keyset como em
+    :func:`get_all` — página das ``limit`` mais recentes, cursor composto ``(ts, id)``
+    antes/depois da mensagem indicada p/ "carregar anteriores/seguintes". Sempre
+    devolvida cronológica. ``limit=None`` ⇒ thread inteira (byte-idêntico ao legado).
     """
     cond = messages.c.conversation_id == conversation_id
+    return _keyset(cond, limit, before_id, after_id)
+
+
+def _keyset(cond, limit: int | None, before_id: int | None,
+            after_id: int | None) -> list[dict]:
+    """Aplica o cursor keyset e escolhe a DIREÇÃO da leitura.
+
+    ``after_id`` lê para FRENTE (``ts ASC, id ASC``, as N seguintes); qualquer outro
+    caso lê para trás (``ts DESC, id DESC``, as N mais recentes). O id recebido pela
+    API identifica a mensagem, mas o cursor efetivo é o par ``(ts, id)`` — ids podem
+    chegar fora da ordem cronológica (importação, retry e backfill).
+    """
+    if after_id is not None:
+        cursor = _cursor_key(cond, after_id)
+        if cursor is None:
+            return []
+        cursor_ts, cursor_id = cursor
+        after = or_(
+            messages.c.ts > cursor_ts,
+            and_(messages.c.ts == cursor_ts, messages.c.id > cursor_id),
+        )
+        return _select_messages(cond & after, limit, forward=True)
     if before_id is not None:
-        cond = cond & (messages.c.id < before_id)
+        cursor = _cursor_key(cond, before_id)
+        if cursor is None:
+            return []
+        cursor_ts, cursor_id = cursor
+        before = or_(
+            messages.c.ts < cursor_ts,
+            and_(messages.c.ts == cursor_ts, messages.c.id < cursor_id),
+        )
+        cond = cond & before
     return _select_messages(cond, limit)
 
 
-def _select_messages(cond, limit: int | None) -> list[dict]:
+def _cursor_key(cond, cursor_id: int) -> tuple[float, int] | None:
+    """Resolve um id escopado à thread para o cursor cronológico ``(ts, id)``."""
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(messages.c.ts, messages.c.id)
+            .where(cond & (messages.c.id == cursor_id))
+            .limit(1)
+        ).first()
+    if row is None:
+        return None
+    return row.ts, row.id
+
+
+def _select_messages(cond, limit: int | None, *, forward: bool = False) -> list[dict]:
     """Shared SELECT for the chat panel readers (:func:`get_all`/:func:`get_by_conversation`).
 
     ``limit=None`` ⇒ all rows ``ORDER BY ts`` (legacy, chronological). ``limit`` set ⇒
     the newest ``limit`` rows via ``ts DESC, id DESC`` (id desempata ts empatado —
     keyset estável, plano 50 Riscos), revertidas para cronológico (oldest→newest).
+
+    ``forward=True`` (plano 99) inverte a ordenação para ``ts ASC, id ASC`` e devolve
+    as ``limit`` PRIMEIRAS linhas que casam — o que "carregar seguintes" precisa. A
+    saída continua **sempre cronológica**, então nenhum chamador precisa saber a
+    direção que foi usada.
     """
     with get_engine().connect() as conn:
         if limit is None:
             rows = conn.execute(
                 select(messages).where(cond).order_by(messages.c.ts)
+            ).mappings().all()
+            return [_row_to_dict(r) for r in rows]
+        if forward:
+            rows = conn.execute(
+                select(messages).where(cond)
+                .order_by(messages.c.ts, messages.c.id)
+                .limit(limit)
             ).mappings().all()
             return [_row_to_dict(r) for r in rows]
         rows = conn.execute(
@@ -146,6 +207,176 @@ def _select_messages(cond, limit: int | None) -> list[dict]:
             .limit(limit)
         ).mappings().all()
     return [_row_to_dict(r) for r in reversed(rows)]
+
+
+def _thread_cond(*, conversation_id: int | None, contact_id: int | None):
+    """O predicado de pertencimento da thread — conversa (preferida) ou contato.
+
+    Espelha a dupla :func:`get_by_conversation` / :func:`get_all`: a view
+    conversa-cêntrica escopa a UM canal, a legada funde os canais do mesmo número.
+    """
+    if conversation_id is not None:
+        return messages.c.conversation_id == conversation_id
+    if contact_id is not None:
+        return messages.c.contact_id == contact_id
+    raise ValueError("informe conversation_id ou contact_id")
+
+
+def window_around(*, around_id: int, limit: int,
+                  conversation_id: int | None = None,
+                  contact_id: int | None = None) -> dict:
+    """Janela ANCORADA: ``limit`` mensagens **centradas** em ``around_id`` (plano 99).
+
+    O bloqueador que este plano removeu: a paginação da thread só sabia andar para
+    trás (``before_id``), então "pular para esta mensagem" não tinha como funcionar —
+    o painel só podia cascatear ``loadOlder`` de 50 em 50 e desistia em silêncio.
+
+    Divide o orçamento ao meio usando o cursor composto ``(ts, id)``: a metade
+    "antiga" INCLUI a âncora e a metade "nova" começa imediatamente depois dela.
+    Cada lado faz o over-fetch de +1 do plano 50 para saber se ainda há mais naquele
+    sentido, inclusive quando ids foram inseridos fora da ordem cronológica.
+
+    Devolve ``{messages, has_more_older, has_more_newer, anchor_id}``, sempre
+    cronológico. Âncora que não pertence à thread (mensagem apagada, id de outra
+    conversa, deep-link velho) NÃO é erro: degrada para a página mais recente com
+    ``anchor_id=None``, e quem chamou decide o que dizer ao operador.
+    """
+    base = _thread_cond(conversation_id=conversation_id, contact_id=contact_id)
+    older_take = (limit + 1) // 2          # inclui a âncora
+    newer_take = limit - older_take
+    with get_engine().connect() as conn:
+        anchor_row = conn.execute(
+            select(messages.c.ts, messages.c.id)
+            .where(base & (messages.c.id == around_id))
+            .limit(1)
+        ).first()
+        if anchor_row is None:
+            page = _select_messages(base, limit + 1)
+            has_older = len(page) > limit
+            return {
+                "messages": page[1:] if has_older else page,
+                "has_more_older": has_older,
+                "has_more_newer": False,
+                "anchor_id": None,
+            }
+        anchor_ts, anchor_pk = anchor_row.ts, anchor_row.id
+        through_anchor = or_(
+            messages.c.ts < anchor_ts,
+            and_(messages.c.ts == anchor_ts, messages.c.id <= anchor_pk),
+        )
+        after_anchor = or_(
+            messages.c.ts > anchor_ts,
+            and_(messages.c.ts == anchor_ts, messages.c.id > anchor_pk),
+        )
+        older_rows = conn.execute(
+            select(messages).where(base & through_anchor)
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
+            .limit(older_take + 1)
+        ).mappings().all()
+        newer_rows = conn.execute(
+            select(messages).where(base & after_anchor)
+            .order_by(messages.c.ts, messages.c.id)
+            .limit(newer_take + 1)
+        ).mappings().all()
+    # READ COMMITTED permite que a âncora seja apagada entre o lookup e o SELECT
+    # do lado antigo. Nunca declare anchor_id se a linha não veio de fato.
+    if not any(r["id"] == around_id for r in older_rows):
+        page = _select_messages(base, limit + 1)
+        has_older = len(page) > limit
+        return {
+            "messages": page[1:] if has_older else page,
+            "has_more_older": has_older,
+            "has_more_newer": False,
+            "anchor_id": None,
+        }
+    has_older = len(older_rows) > older_take
+    has_newer = len(newer_rows) > newer_take
+    older = list(reversed(older_rows[:older_take]))
+    newer = list(newer_rows[:newer_take])
+    return {
+        "messages": [_row_to_dict(r) for r in older + newer],
+        "has_more_older": has_older,
+        "has_more_newer": has_newer,
+        "anchor_id": around_id,
+    }
+
+
+def read_window(page_limit: int, *, before_id: int | None = None,
+                after_id: int | None = None, around_id: int | None = None,
+                at_ts: float | None = None,
+                conversation_id: int | None = None,
+                contact_id: int | None = None) -> tuple[list[dict], dict]:
+    """QUAL janela do histórico ler — a regra única das duas views de thread.
+
+    Mora no repo (e não numa rota) porque as DUAS rotas de thread precisam dela —
+    ``/api/atendimentos/{id}/messages`` e o ramo por contato de
+    ``/api/contacts/{phone}`` — e um import cruzado entre módulos de rota só para
+    compartilhar isto seria pior do que a duplicação que ele evita.
+
+    Devolve ``(mensagens, {has_more_older, has_more_newer, anchor_id})``, sempre
+    cronológico. As âncoras já chegam validadas como mutuamente exclusivas pela
+    rota; aqui a precedência só desempata chamadas internas.
+
+    Sem âncora, ou com ``before_id``, o caminho é **byte-idêntico** ao de sempre
+    (over-fetch de +1 e descarte do índice 0 — a msg extra é a mais ANTIGA da
+    janela cronológica). ``has_more_newer`` é derivado, não medido: quem paginou
+    para trás tem, por definição, mensagens mais recentes fora da janela.
+
+    ``at_ts`` que não encontra nenhuma mensagem depois da data (dia futuro, thread
+    que acabou antes) NÃO devolve tela vazia: cai na página mais recente com
+    ``anchor_id=None``, e o painel avisa que não havia nada naquela data.
+    """
+    scope = dict(conversation_id=conversation_id, contact_id=contact_id)
+    reader = get_by_conversation if conversation_id is not None else get_all
+    key = conversation_id if conversation_id is not None else contact_id
+
+    anchor = around_id
+    if anchor is None and at_ts is not None:
+        anchor = first_id_on_or_after(at_ts, **scope)
+
+    if anchor is not None:
+        win = window_around(around_id=anchor, limit=page_limit, **scope)
+        return win["messages"], {k: win[k] for k in
+                                 ("has_more_older", "has_more_newer", "anchor_id")}
+
+    if after_id is not None:
+        page = reader(key, limit=page_limit + 1, after_id=after_id)
+        has_newer = len(page) > page_limit
+        return (page[:page_limit] if has_newer else page), {
+            # Viemos de uma janela que já continha esta mensagem, então há mais
+            # antigas por construção — o cliente preserva o próprio valor.
+            "has_more_older": True, "has_more_newer": has_newer, "anchor_id": None}
+
+    page = reader(key, limit=page_limit + 1, before_id=before_id)
+    has_older = len(page) > page_limit
+    return (page[1:] if has_older else page), {
+        "has_more_older": has_older,
+        "has_more_newer": before_id is not None,
+        "anchor_id": None,
+    }
+
+
+def first_id_on_or_after(ts: float, *, conversation_id: int | None = None,
+                         contact_id: int | None = None) -> int | None:
+    """PK da primeira mensagem cronológica com ``ts >= ts`` na thread (plano 99 F3).
+
+    É o "ir para data": o cliente converte o DIA escolhido em epoch **no fuso do
+    NAVEGADOR** (``new Date(ano, mês, dia).getTime()/1000``) e o servidor só compara
+    epoch — ele nunca interpreta "dia". Isso mantém a coerência com o separador de
+    data do chat (``formatDateSeparator``), que também resolve no fuso do navegador,
+    e evita que um operador em outro fuso aterrisse no dia errado.
+
+    Dia sem mensagem nenhuma ⇒ devolve a **próxima** mensagem existente (é o que o
+    WhatsApp faz: aterrissa no dia seguinte com conteúdo). Sem nada depois da data
+    ⇒ ``None``. Usa ``idx_msg_conversation_ts``.
+    """
+    cond = _thread_cond(conversation_id=conversation_id, contact_id=contact_id)
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(messages.c.id).where(cond & (messages.c.ts >= ts))
+            .order_by(messages.c.ts, messages.c.id).limit(1)
+        ).first()
+    return row[0] if row else None
 
 
 def _fetch_limit(limit: int, exclude) -> int:

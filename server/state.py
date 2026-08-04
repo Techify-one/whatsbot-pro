@@ -125,8 +125,21 @@ class MessagingState:
         # Typing-aware orchestrator state, keyed by (channel_id, phone):
         # {"active": bool, "media": "text"|"audio", "last_ts": float}.
         self.typing_state: dict[tuple, dict] = {}
+        # Plano 96 I7 — o ATENDENTE digitando também segura a IA (D3: segurar, não
+        # cancelar — ele pode desistir do texto). Mesma chave e formato do dict do
+        # cliente acima, escrito pela rota de presença do painel. Prazo de
+        # obsolescência menor (15s): o painel reemite ``start`` a cada 10s, então a
+        # ausência de heartbeat é sinal confiável de aba fechada.
+        self.operator_typing_state: dict[tuple, dict] = {}
         # Active orchestrator task per (channel_id, phone) (typing-aware flow).
         self.processing_tasks: dict[tuple, asyncio.Task] = {}
+        # Monotonic abort generation per (channel_id, phone) (plano 96).  A panel
+        # takeover cannot always ``task.cancel()`` safely: once the orchestrator has
+        # popped its batch, cancellation could lose an inbound message that has not
+        # been persisted yet.  In that phase ``abort_ai_cycle`` increments this
+        # generation instead.  The running cycle carries the generation it started
+        # with and every wire-send guard rejects it after a mismatch.
+        self.ai_abort_epochs: dict[tuple, int] = {}
         # Per-channel AI serialization lock (plano 21 — modo sequencial): quando o
         # canal tem ``ai_sequential`` ligado, a IA processa um contato por vez nesse
         # canal (evita bloqueios da Meta por enviar a vários clientes em paralelo).
@@ -206,8 +219,16 @@ class AppState:
         return self.messaging.typing_state
 
     @property
+    def operator_typing_state(self) -> dict:
+        return self.messaging.operator_typing_state
+
+    @property
     def processing_tasks(self) -> dict:
         return self.messaging.processing_tasks
+
+    @property
+    def ai_abort_epochs(self) -> dict:
+        return self.messaging.ai_abort_epochs
 
     @property
     def channel_ai_locks(self) -> dict:

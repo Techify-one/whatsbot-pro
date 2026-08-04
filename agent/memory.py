@@ -767,11 +767,19 @@ class ContactMemory:
         AI can fill it via set_custom_attribute. Conversation-scoped attributes
         are read from the contact's currently-open conversation; if there is no
         open conversation, the section is omitted.
+
+        The four ways out with an empty list each log at DEBUG (plano 91·I8): the
+        symptom "the AI didn't know which attributes exist" is otherwise silent,
+        and telling them apart (no definitions × no open conversation in THIS
+        inbox × nothing to list × raised) is what makes it diagnosable.
         """
         try:
             from db.repositories import custom_attribute_repo as _ca_repo
             defs = _ca_repo.list_definitions(applies_to)
             if not defs or not self.id:
+                logger.debug(
+                    "custom_attr_lines(%s): sem linhas — %s", applies_to,
+                    "nenhuma definição cadastrada" if not defs else "contato sem id")
                 return []
             if applies_to == "conversation":
                 from db.tables import conversations as _entity_tbl
@@ -779,6 +787,9 @@ class ContactMemory:
                 # (self.inbox_id), não a mais recente de qualquer canal do contato.
                 conv = conversation_repo.get_open_for_contact_inbox(self.id, self.inbox_id)
                 if not conv:
+                    logger.debug(
+                        "custom_attr_lines(conversation): sem linhas — contato %s não tem "
+                        "conversa aberta no inbox %s", self.id, self.inbox_id)
                     return []
                 entity_id = conv["id"]
                 label = (
@@ -805,9 +816,13 @@ class ContactMemory:
                 cur_str = f" = {cur}" if cur not in (None, "") else ""
                 lines.append(f"- {key}{hint}{cur_str}")
             if not lines:
+                logger.debug("custom_attr_lines(%s): sem linhas — %d definições, "
+                             "nenhuma renderizada", applies_to, len(defs))
                 return []
             return [label, *lines]
         except Exception:
+            logger.debug("custom_attr_lines(%s): sem linhas — exceção", applies_to,
+                         exc_info=True)
             return []
 
     def get_tags_summary(self) -> str:

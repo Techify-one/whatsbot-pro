@@ -181,6 +181,58 @@ class MessagingService:
     def _channel_ai_enabled(self, channel_id: str) -> bool:
         return self.ctx.channel_ai_enabled(channel_id)
 
+    def ai_may_speak(self, contact, channel_id: str) -> bool:
+        """Veredito ÚNICO de "a IA pode falar nesta conversa AGORA" (plano 96 I1).
+
+        Junta as três camadas do plano 21 numa pergunta só: interruptor global
+        (``auto_reply``) + master do canal (``ai_enabled``), ambos via
+        ``_channel_ai_enabled``, e o gate por-conversa (``_conversation_ai_active``:
+        ``ai_active`` + dono humano).
+
+        Existe para poder ser consultado DE NOVO na hora do envio: até o plano 96 o
+        veredito era lido uma vez, antes do LLM, e entre ele e o envio cabiam o LLM
+        agêntico, até 30s esperando o cliente parar de digitar e ~2s por parte do
+        split — janela em que atribuir/desligar não tinha efeito nenhum.
+
+        ``_conversation_ai_active`` continua exportado no módulo (o webhook e a
+        suíte importam esse nome); este método apenas o compõe.
+        """
+        return self._channel_ai_enabled(channel_id) and _conversation_ai_active(contact)
+
+    def _ai_may_speak_now(self, channel_id: str, phone: str) -> bool:
+        """``ai_may_speak`` resolvendo o contato do zero (1 SELECT por consulta).
+
+        Usado pelos guards do caminho de envio, onde o ``contact`` do início do
+        ciclo já pode estar defasado. Fail-open igual ao gate: erro de leitura
+        NUNCA cala uma conversa saudável (§5 — falso negativo é pior que o bug)."""
+        try:
+            contact = self.agent_handler._get_contact(phone, channel_id=channel_id)
+            if contact is None:
+                return True
+            return self.ai_may_speak(contact, channel_id)
+        except Exception:
+            logger.exception("[Guard] falha ao reconsultar o gate de %s", phone)
+            return True
+
+    def _abort_epoch(self, channel_id: str, phone: str) -> int:
+        """Current panel-abort generation for one channel-scoped conversation."""
+        epochs = getattr(self.state, "ai_abort_epochs", None)
+        if epochs is None:  # compatibility with old state doubles
+            return 0
+        return int(epochs.get((channel_id, phone), 0) or 0)
+
+    def _cycle_may_continue(self, channel_id: str, phone: str,
+                            abort_epoch: int | None) -> bool:
+        """Whether this specific AI cycle may still put text on the wire.
+
+        The database gate covers assignment/IA-OFF.  The generation closes the
+        other takeover path: an operator SEND does not permanently disable the AI,
+        but it must invalidate the reply that was already being prepared.
+        """
+        if abort_epoch is not None and self._abort_epoch(channel_id, phone) != abort_epoch:
+            return False
+        return self._ai_may_speak_now(channel_id, phone)
+
     # ── error bubble ──────────────────────────────────────────────────────────
 
     async def error_bubble(self, phone: str, content: str) -> None:
@@ -319,7 +371,8 @@ class MessagingService:
     # ── Reply Splitting & Sending ─────────────────────────────────────────────
 
     async def send_reply(self, channel_id: str, phone: str, reply: str, *,
-                         agent_key: str | None = None):
+                         agent_key: str | None = None,
+                         abort_epoch: int | None = None) -> bool:
         """Send reply (possibly split into multiple parts) and broadcast.
 
         Channel-aware (plano 11): every leg goes through ``OutboundRouter`` so the
@@ -332,6 +385,12 @@ class MessagingService:
         settings = self.settings
         agent_handler = self.agent_handler
 
+        # Direct/legacy callers do not carry an orchestrator snapshot. Capture one
+        # here so an abort that arrives during filters or the humanised delay still
+        # invalidates this send.
+        if abort_epoch is None:
+            abort_epoch = self._abort_epoch(channel_id, phone)
+
         caps = outbound.capabilities(channel_id)
         is_group_target = caps.groups and "@g.us" in phone
 
@@ -339,7 +398,7 @@ class MessagingService:
         reply = await apply_filter("filter.reply.raw", reply, {"phone": phone})
         if reply is None:
             logger.info("[Batch] reply for %s aborted by filter.reply.raw", phone)
-            return
+            return False
 
         # Nome exibível do agente (resolvido 1× por resposta) para "IA - <NOME>".
         agent_name = await asyncio.to_thread(agent_repo.display_name_for, agent_key)
@@ -356,7 +415,7 @@ class MessagingService:
         parts = await apply_filter("filter.reply.parts", parts, {"phone": phone})
         if parts is None or not parts:
             logger.info("[Batch] reply for %s aborted by filter.reply.parts", phone)
-            return
+            return False
 
         # Initial response delay (simulates typing)
         delay_min = settings.get("response_delay_min", 1.0)
@@ -403,6 +462,19 @@ class MessagingService:
             if _wired is not None:
                 send_text = _wired
 
+            # Plano 96 — reconsulta no ÚLTIMO ponto antes de CADA wire send,
+            # inclusive a primeira parte.  O guard antigo só cobria i>0 e rodava
+            # antes dos filtros: assumir durante o delay inicial (1–3s) ou num
+            # filtro assíncrono ainda deixava a primeira parte escapar.  A geração
+            # também invalida o ciclo quando a ação foi um envio manual (que não
+            # muda o gate persistido da conversa).
+            if not await asyncio.to_thread(
+                    self._cycle_may_continue, channel_id, phone, abort_epoch):
+                logger.info("[Guard] resposta de %s/%s interrompida na parte %d/%d — "
+                            "gate fechado ou ciclo invalidado pelo operador",
+                            channel_id, phone, i + 1, len(parts))
+                break
+
             # Track for echo-back filtering (key on the wire text we actually send)
             sent_key = f"{channel_id}:{phone}:{send_text[:120]}"
             state.recently_sent[sent_key] = time.time()
@@ -422,7 +494,9 @@ class MessagingService:
                     "phone": phone,
                     "message": {"role": "error", "content": f"Falha ao enviar: {err}", "ts": time.time()},
                 })
-                return
+                # Preserve/persist any earlier parts that did reach the wire. The
+                # boolean result below is delivery-based, not all-or-nothing.
+                break
             await atrack_step("channel_send", {
                 "channel_id": channel_id, "phone": phone,
                 "part": i + 1, "total_parts": len(parts)})
@@ -451,6 +525,13 @@ class MessagingService:
                 "ts": time.time(),
             })
 
+        if not sent_parts:
+            # A guard/filter stopped the reply before anything reached the wire.
+            # Do not count or track a fictitious zero-part response; the boolean is
+            # also what prevents the caller from emitting ``ai_takeover``.
+            await asyncio.to_thread(outbound.send_presence, channel_id, phone, "paused")
+            return False
+
         # Save each part as a separate message to preserve split across page refresh
         # plano 51 (01 F1): estampa a execução do turno em cada parte — o contextvar
         # é lido AQUI (contexto async do ciclo) e passado por valor ao to_thread.
@@ -471,11 +552,14 @@ class MessagingService:
 
         await asyncio.to_thread(outbound.send_presence, channel_id, phone, "paused")
         state.msg_count += 1
-        full_reply = "\n".join(parts)
+        # O que foi REALMENTE entregue — não a lista pretendida. Diverge quando um
+        # ``filter.reply.part`` pula uma parte ou quando o guard do plano 96 corta o
+        # split no meio; a execução não pode registrar mensagem que não saiu.
+        full_reply = "\n".join(p for p, _ in sent_parts)
         await atrack_step("response_sent", {
             "phone": phone,
             "channel_id": channel_id,
-            "parts": len(parts),
+            "parts": len(sent_parts),
             "reply_preview": full_reply[:200],
         })
         # Nexus plan: denormalize the final AI reply for the "Msg da IA" search.
@@ -490,6 +574,7 @@ class MessagingService:
             "bot_phone": state.bot_phone,
             "bot_name": state.bot_name,
         })
+        return bool(sent_parts)
 
     async def broadcast_tool_calls(self, phone: str, tool_calls: list[dict],
                                    contact_info: dict | None = None,
@@ -727,34 +812,74 @@ class MessagingService:
         check below is a fallback for cases where `paused` never arrives (dropped
         connection, app killed, etc.) — set generously so genuine long typing isn't cut.
         Keyed by (channel_id, phone); channels without presence simply never set it.
+
+        Plano 96 I7 — espera enquanto o CLIENTE **ou** o ATENDENTE estiver digitando.
+        O painel reemite ``start`` a cada 10s, então a presença do operador expira em
+        15s (contra os 25s do cliente, que não tem heartbeat); o teto de ``max_wait``
+        vale para os dois e cobre a aba fechada sem ``stop``.
         """
         state = self.state
         key = (channel_id, phone)
         start = time.time()
         while True:
+            waiting_for = None
             ts = state.typing_state.get(key)
-            if not ts or not ts.get("active"):
-                return
-            # No event for 25s → assume paused (defensive)
-            if time.time() - ts.get("last_ts", 0) > 25:
-                logger.info("[Orchestrator] %s typing event stale, assuming paused", phone)
-                state.typing_state[key] = {**ts, "active": False}
+            if ts and ts.get("active"):
+                if time.time() - ts.get("last_ts", 0) > 25:
+                    logger.info("[Orchestrator] %s typing event stale, assuming paused", phone)
+                    state.typing_state[key] = {**ts, "active": False}
+                else:
+                    waiting_for = "contato"
+            # ``getattr`` defensivo: um estado antigo/stub sem o dict novo não pode
+            # derrubar TODO o caminho de resposta com AttributeError.
+            op_state = getattr(state, "operator_typing_state", None)
+            op = op_state.get(key) if op_state is not None else None
+            if waiting_for is None and op and op.get("active"):
+                if time.time() - op.get("last_ts", 0) > 15:
+                    logger.info("[Orchestrator] %s presença do operador obsoleta, "
+                                "assumindo parado", phone)
+                    op_state[key] = {**op, "active": False}
+                else:
+                    waiting_for = "operador"
+            if waiting_for is None:
                 return
             if time.time() - start > max_wait:
-                logger.warning("[Orchestrator] %s typing wait timeout %.1fs", phone, max_wait)
-                state.typing_state[key] = {**ts, "active": False}
+                logger.warning("[Orchestrator] %s typing wait timeout %.1fs (%s)",
+                               phone, max_wait, waiting_for)
+                if ts:
+                    state.typing_state[key] = {**ts, "active": False}
+                if op and op_state is not None:
+                    op_state[key] = {**op, "active": False}
                 return
             await asyncio.sleep(0.3)
 
     async def _send_with_typing_guard(self, channel_id: str, phone: str, reply: str, *,
-                                      agent_key: str | None = None):
-        """Wait for contact to stop typing, mark sending=True, then send (uncancellable phase)."""
+                                      agent_key: str | None = None,
+                                      abort_epoch: int | None = None) -> bool:
+        """Wait for typing to stop and send, returning whether any part was delivered.
+
+        Plano 96 I3 — ÚLTIMO ponto reversível: entre o gate (lido antes do LLM) e
+        esta linha cabem o LLM agêntico, até 30s de espera de digitação e o delay
+        humanizado. O veredito é reconsultado DEPOIS da espera e ANTES de ligar
+        ``state.sending``. A task deixa de ser cancelável a partir daí, mas a geração
+        de aborto e o gate são rechecados antes de cada parte, inclusive a primeira.
+        """
         state = self.state
         key = (channel_id, phone)
+        if abort_epoch is None:
+            abort_epoch = self._abort_epoch(channel_id, phone)
         await self._wait_typing_paused(channel_id, phone)
+        if not await asyncio.to_thread(
+                self._cycle_may_continue, channel_id, phone, abort_epoch):
+            logger.info("[Guard] resposta da IA descartada para %s/%s — "
+                        "gate fechado ou ciclo invalidado pelo operador",
+                        channel_id, phone)
+            return False
         state.sending[key] = True
         try:
-            await self.send_reply(channel_id, phone, reply, agent_key=agent_key)
+            return await self.send_reply(
+                channel_id, phone, reply, agent_key=agent_key,
+                abort_epoch=abort_epoch)
         finally:
             state.sending[key] = False
 
@@ -807,9 +932,16 @@ class MessagingService:
                 # orchestrator's tail re-checks pending and spawns a follow-up cycle.
                 return
             existing.cancel()
-        state.processing_tasks[key] = asyncio.create_task(self._orchestrate(channel_id, phone))
+        # Capture BEFORE create_task: an operator action can run after scheduling but
+        # before the coroutine gets its first timeslice.  Capturing inside
+        # ``_orchestrate`` would let that already-scheduled cycle adopt the newer
+        # generation and speak after the takeover.
+        abort_epoch = self._abort_epoch(channel_id, phone)
+        state.processing_tasks[key] = asyncio.create_task(
+            self._orchestrate(channel_id, phone, abort_epoch=abort_epoch))
 
-    async def _run_one_cycle(self, channel_id: str, phone: str, items: list[dict]):
+    async def _run_one_cycle(self, channel_id: str, phone: str, items: list[dict], *,
+                             abort_epoch: int | None = None):
         """One processing cycle: text batch (single LLM call) + each media item separately.
 
         Cancellable via task.cancel() up until the SEND phase, which is guarded by
@@ -819,6 +951,8 @@ class MessagingService:
         ws_manager = self.ws_manager
         outbound = self.outbound
         settings = self.settings
+        if abort_epoch is None:
+            abort_epoch = self._abort_epoch(channel_id, phone)
 
         exec_id = await astart_execution(phone, "webhook")
         try:
@@ -880,7 +1014,7 @@ class MessagingService:
             # the AI-reply gate at the text/media branches below. Without the per-conversation
             # check, an IA-OFF conversation would still clear the unread badge and send a
             # bogus "read"/blue-tick to the client on channels that support it.
-            if self._channel_ai_enabled(channel_id) and _conversation_ai_active(contact):
+            if self.ai_may_speak(contact, channel_id):
                 msg_ids = await asyncio.to_thread(contact.mark_user_messages_as_read)
                 if msg_ids:
                     for mid in msg_ids:
@@ -923,8 +1057,8 @@ class MessagingService:
                         "source": "batch_text",
                         "ts": time.time(),
                     })
-                    if self._channel_ai_enabled(channel_id) \
-                            and _conversation_ai_active(contact):
+                    if (self.ai_may_speak(contact, channel_id)
+                            and self._abort_epoch(channel_id, phone) == abort_epoch):
                         if not agent_handler.api_key:
                             notice = "[WhatsBot] API key não configurada."
                             contact.add_message("system_notice", notice)
@@ -952,8 +1086,14 @@ class MessagingService:
                                             "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
                                         })
                                     else:
-                                        await self._send_with_typing_guard(channel_id, phone, result.reply, agent_key=result.agent_key)
-                                        await self.maybe_emit_ai_takeover(phone, channel_id)
+                                        sent = await self._send_with_typing_guard(
+                                            channel_id, phone, result.reply,
+                                            agent_key=result.agent_key,
+                                            abort_epoch=abort_epoch)
+                                        if (sent and await asyncio.to_thread(
+                                                self._cycle_may_continue,
+                                                channel_id, phone, abort_epoch)):
+                                            await self.maybe_emit_ai_takeover(phone, channel_id)
                                 elif not result.aborted:
                                     # A5 (plano 31 F4): reply vazio calava sem rastro —
                                     # loga e grava um card painel-only pro operador ver.
@@ -1098,8 +1238,8 @@ class MessagingService:
                             },
                         })
 
-                if not self._channel_ai_enabled(channel_id) \
-                        or not _conversation_ai_active(contact):
+                if (not self.ai_may_speak(contact, channel_id)
+                        or self._abort_epoch(channel_id, phone) != abort_epoch):
                     continue
 
                 if not agent_handler.api_key:
@@ -1142,8 +1282,14 @@ class MessagingService:
                                 "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
                             })
                         else:
-                            await self._send_with_typing_guard(channel_id, phone, result.reply, agent_key=result.agent_key)
-                            await self.maybe_emit_ai_takeover(phone, channel_id)
+                            sent = await self._send_with_typing_guard(
+                                channel_id, phone, result.reply,
+                                agent_key=result.agent_key,
+                                abort_epoch=abort_epoch)
+                            if (sent and await asyncio.to_thread(
+                                    self._cycle_may_continue,
+                                    channel_id, phone, abort_epoch)):
+                                await self.maybe_emit_ai_takeover(phone, channel_id)
                     elif not result.aborted:
                         # A5 (plano 31 F4): mesmo tratamento do caminho texto
                         # (aborted intencional não gera card).
@@ -1189,7 +1335,8 @@ class MessagingService:
         except Exception:
             pass
 
-    async def _orchestrate(self, channel_id: str, phone: str):
+    async def _orchestrate(self, channel_id: str, phone: str, *,
+                           abort_epoch: int | None = None):
         """Typing-aware batch orchestrator: wait → batch_delay → wait → cycle.
 
         Phases (each cancellable except the final SEND inside _run_one_cycle):
@@ -1205,6 +1352,12 @@ class MessagingService:
         state = self.state
         settings = self.settings
         key = (channel_id, phone)
+        # Snapshot at orchestrator start, before any typing/batch/sequential wait.
+        # A human action increments the generation even when task.cancel() would be
+        # unsafe; this task can persist its popped inbound batch, but can no longer
+        # put an obsolete AI reply on the wire.
+        if abort_epoch is None:
+            abort_epoch = self._abort_epoch(channel_id, phone)
         try:
             batch_delay = ai_settings.value(
                 channel_id, "message_batch_delay",
@@ -1243,14 +1396,18 @@ class MessagingService:
                         channel_id, "ai_sequential_delay", 2.0) or 0)
                     if delay > 0:
                         await asyncio.sleep(delay)
-                    await self._run_one_cycle(channel_id, phone, items)
+                    await self._run_one_cycle(
+                        channel_id, phone, items, abort_epoch=abort_epoch)
             else:
-                await self._run_one_cycle(channel_id, phone, items)
+                await self._run_one_cycle(
+                    channel_id, phone, items, abort_epoch=abort_epoch)
 
             # If new messages arrived during the SEND phase (when cancellation is blocked),
             # spawn another orchestrator so they get processed.
             if state.pending_messages.get(key):
-                state.processing_tasks[key] = asyncio.create_task(self._orchestrate(channel_id, phone))
+                next_epoch = self._abort_epoch(channel_id, phone)
+                state.processing_tasks[key] = asyncio.create_task(
+                    self._orchestrate(channel_id, phone, abort_epoch=next_epoch))
         except asyncio.CancelledError:
             return
         finally:
@@ -1264,6 +1421,78 @@ class MessagingService:
                 state.processing_tasks.pop(key, None)
 
 
+def abort_ai_cycle(deps, channel_id: str, phone: str) -> bool:
+    """Interrompe o ciclo de IA em voo para ``(channel_id, phone)`` (plano 96 I4).
+
+    O seam que o PAINEL usa: até o plano 96 o único ``task.cancel()`` do pipeline
+    era o do webhook (mensagem nova do cliente) — atribuir, desligar a IA ou
+    enviar uma mensagem não tinham alavanca nenhuma sobre o ciclo.
+
+    ⚠️ NUNCA cancela durante a fase de envio (``state.sending``): cancelar ali
+    rasgaria um split no meio (partes 1–2 entregues, a 3 não). Quem interrompe
+    dentro do envio é o guard entre partes de :meth:`MessagingService.send_reply`,
+    que para num limite limpo. Também respeita ``state.processing`` pelo mesmo
+    motivo do webhook (a janela pop→persist descartaria a mensagem do cliente).
+
+    Best-effort: nunca levanta. Devolve ``True`` se cancelou de fato.
+    """
+    try:
+        state = getattr(deps, "state", None)
+        if state is None:
+            return False
+        key = (channel_id, phone)
+        # Always invalidate the generation first.  This is the durable seam for
+        # ``processing=True``/``sending=True``: those phases are intentionally not
+        # task-cancelled, but every pending wire-send carries the older snapshot
+        # and will be rejected.
+        epochs = getattr(state, "ai_abort_epochs", None)
+        if epochs is not None:
+            epochs[key] = int(epochs.get(key, 0) or 0) + 1
+        task = state.processing_tasks.get(key)
+        if task is None or task.done():
+            return False
+        if state.sending.get(key) or state.processing.get(key):
+            logger.info("[Abort] ciclo de %s/%s invalidado em fase não-cancelável — "
+                        "a geração do guard decide", channel_id, phone)
+            return False
+        task.cancel()
+        logger.info("[Abort] ciclo da IA cancelado para %s/%s", channel_id, phone)
+        return True
+    except Exception:
+        logger.debug("[Abort] falha ao cancelar o ciclo de %s/%s", channel_id, phone)
+        return False
+
+
+def abort_ai_cycle_for_conversation(deps, conv: dict) -> bool:
+    """:func:`abort_ai_cycle` resolvendo ``(channel_id, phone)`` a partir da conversa.
+
+    É a porta usada pelo ``conversation_service`` (atribuir / desligar a IA), que
+    conhece a conversa mas não o par que chaveia o pipeline. Best-effort."""
+    try:
+        if not conv:
+            return False
+        contact = contact_repo.get(conv.get("contact_id"))
+        if not contact:
+            return False
+        # A conversa crua não carrega o canal (a coluna vive no inbox) — o pipeline é
+        # chaveado por (channel_id, phone), então resolvemos pela conversa ESPECÍFICA.
+        # Usar ``channel_id_for_contact`` direto escolheria a conversa mais recente e
+        # poderia cancelar a IA do canal errado quando o mesmo contato existe em mais
+        # de uma inbox.
+        enriched = None
+        if not conv.get("channel_id") and conv.get("id") is not None:
+            enriched = conversation_repo.get_with_channel(conv["id"])
+        channel_id = (conv.get("channel_id")
+                      or (enriched or {}).get("channel_id")
+                      or conversation_repo.channel_id_for_contact(conv.get("contact_id"))
+                      or "default")
+        return abort_ai_cycle(deps, channel_id, contact["phone"])
+    except Exception:
+        logger.debug("[Abort] falha ao resolver o ciclo da conversa %s",
+                     (conv or {}).get("id"))
+        return False
+
+
 def _conversation_ai_active(contact) -> bool:
     """Per-conversation AI gate (plano 01 Fase 2, fatia 2 · plano 29 A5).
 
@@ -1273,7 +1502,16 @@ def _conversation_ai_active(contact) -> bool:
 
     Plano 29 A5 — gate de humano desacoplado do flag: mesmo com ``ai_active``
     dessincronizado em 1, a IA NÃO responde quando a conversa aberta tem um humano
-    atribuído (``assignee_user_id``) sem agente de IA vinculado.
+    atribuído (``assignee_user_id``).
+
+    Plano 96 D2 — o humano no comando cala a IA INDEPENDENTE de
+    ``active_agent_key``. A condição anterior ("...sem agente de IA vinculado")
+    era cara ou coroa na prática: nenhum inbox define ``default_agent_key``, então
+    o único escritor de ``active_agent_key`` é a tool ``transferir_agente``. A
+    conversa ficava muda se e somente se a IA não tivesse roteado no turno
+    anterior — foi assim que uma conversa com dono humano voltou a falar sozinha
+    (§2.4 do plano). D5: sem ``assignee_user_id``, nada muda — "IA ativa sem
+    subagente atribuído" continua válida.
 
     Plano 37 (Cluster D / P1-a): a trava de transferência é 100% POR-CONVERSA. A
     ``transfer_to_human`` já grava ``ai_active=0`` (+ assignee) na conversa do canal;
@@ -1287,8 +1525,7 @@ def _conversation_ai_active(contact) -> bool:
         if conv:
             if not conv["ai_active"]:
                 return False
-            if conv.get("assignee_user_id") is not None \
-                    and not conv.get("active_agent_key"):
+            if conv.get("assignee_user_id") is not None:
                 return False  # humano no comando — flag dessincronizado não fala mais alto
         return True
     except Exception:

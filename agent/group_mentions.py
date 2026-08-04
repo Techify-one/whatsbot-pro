@@ -64,8 +64,15 @@ _NUM_RE = re.compile(r"@(\d{5,})")
 
 
 def init(client) -> None:
-    """Wire the GOWA client (called once from create_app)."""
-    global _client
+    """Wire the GOWA client and discard device-scoped caches on replacement."""
+    global _client, _store_cache, _bot_phone, _bot_name
+    if client is not _client:
+        _members_cache.clear()
+        _store_cache = None
+        _pushname_cache.clear()
+        _pushname_attempted.clear()
+        _bot_phone = ""
+        _bot_name = ""
     _client = client
 
 

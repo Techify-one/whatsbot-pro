@@ -5,7 +5,10 @@ import { sendMessage, sendImage, sendAudio, sendDocument, sendVideo } from '../.
 import { BackArrowIcon, DefaultAvatar, GroupAvatar, InfoIcon } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
-import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon } from './MessageContextMenu.js';
+import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon,
+         MailIcon, PhoneIcon, OpenExternalIcon, copyToClipboard } from './MessageContextMenu.js';
+import { entityFromElement, entityActions } from '../../services/messageEntities.js';
+import { notify } from '../../services/notify.js';
 import { ConversationHeaderActions } from './ConversationHeaderActions.js';
 import { TemplatePickerHost } from './TemplatePickerHost.js';
 import { Slot } from '../../plugins/Slot.js';
@@ -16,7 +19,10 @@ import { MessageBubble } from './MessageBubble.js';
 import { MessageEditDialog } from './MessageEditDialog.js';
 import { SystemMessageCard, isSystemCardRole } from './SystemMessageCard.js';
 import { Composer } from './Composer.js';
-import { useReverseInfiniteScroll } from '../../hooks/useInfiniteScroll.js';
+import { useReverseInfiniteScroll, useScrollSentinel } from '../../hooks/useInfiniteScroll.js';
+import { ConversationSearchBar } from './ConversationSearchBar.js';
+import { planJump, isRendered } from '../../services/threadJump.js';
+import { highlightHtml } from '../../services/searchHighlight.js';
 import { useComposer } from './hooks/useComposer.js';
 import { useAudioRecorder } from './hooks/useAudioRecorder.js';
 import { useMediaUpload } from './hooks/useMediaUpload.js';
@@ -24,10 +30,13 @@ import { useDropZone } from './hooks/useDropZone.js';
 import { DropOverlay } from './DropOverlay.js';
 import { useTokenAutocomplete } from './hooks/useTokenAutocomplete.js';
 import { useMessageActions, myReaction, selectionKey } from './hooks/useMessageActions.js';
+import { useChatDayHeader } from './hooks/useChatDayHeader.js';
+import { PILL_TRAVEL } from '../../services/chatDayHeader.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
 import { senderColor, quotedMediaText, cardStateKey, isCollapsibleRole } from '../../services/messageView.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { transitionAfterOutput } from '../../services/outputTransition.js';
 
 const html = htm.bind(h);
 
@@ -39,6 +48,65 @@ const SelectManyIcon = () => html`
   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
     <path d="M3 5h2V3c-1.1 0-2 .9-2 2zm0 8h2v-2H3v2zm4 8h2v-2H7v2zM3 9h2V7H3v2zm10-6h-2v2h2V3zm6 0v2h2c0-1.1-.9-2-2-2zM5 21v-2H3c0 1.1.9 2 2 2zm-2-4h2v-2H3v2zM9 3H7v2h2V3zm2 18h2v-2h-2v2zm8-8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2zm0-12h2V7h-2v2zm0 8h2v-2h-2v2zm-4 4h2v-2h-2v2zm0-16h2V3h-2v2zM7 17h10V7H7v10zm2-8h6v6H9V9z"/>
   </svg>`;
+
+// ── Ações de ENTIDADE no menu da mensagem (plano 97 · F3) ────────
+//
+// O módulo puro `services/messageEntities.js` decide O QUE dá para fazer com o
+// link / e-mail / telefone sob o cursor; aqui só resolvemos a chave do ícone e
+// executamos (abrir / copiar). Sem entidade sob o cursor, nada disso aparece e o
+// menu fica byte-idêntico ao de sempre.
+const ENTITY_ICONS = { open: OpenExternalIcon, copy: CopyIcon, mail: MailIcon, phone: PhoneIcon };
+const COPY_TOASTS = {
+  'copy-url': 'Link copiado.',
+  'copy-email': 'E-mail copiado.',
+  'copy-phone': 'Número copiado.',
+  'copy-jid': 'Número copiado.',
+};
+
+// `mailto:` / `tel:` são entregues ao handler do sistema pela navegação normal —
+// abrir aba para eles deixaria uma janela em branco. Só http(s) vira aba nova.
+function openEntityHref(href) {
+  if (/^https?:/i.test(href)) window.open(href, '_blank', 'noopener,noreferrer');
+  else window.location.href = href;
+}
+
+function entityMenuItems(entity) {
+  return entityActions(entity).map((a) => ({
+    label: a.label,
+    icon: ENTITY_ICONS[a.icon] || LinkIcon,
+    onClick: () => {
+      if (a.href) { openEntityHref(a.href); return; }
+      copyToClipboard(a.copy);
+      notify(COPY_TOASTS[a.id] || 'Copiado.', { kind: 'success' });
+    },
+  }));
+}
+
+// A entidade sob o cursor. `e.target` pode ser um nó de texto (sem `closest`) ou
+// um `<svg>` da setinha de hover — os dois degradam para "nenhuma entidade".
+function entityUnderCursor(e) {
+  try {
+    const t = e && e.target;
+    if (!t) return null;
+    const el = typeof t.closest === 'function'
+      ? t.closest('[data-entity]')
+      : (t.parentElement ? t.parentElement.closest('[data-entity]') : null);
+    return entityFromElement(el);
+  } catch (_) { return null; }
+}
+
+// Texto selecionado DENTRO da bolha em que o menu abriu. Precisa ser lido no
+// momento da abertura (o clique fora fecha o menu e desfaz a seleção).
+const SELECTION_CAP = 5000;
+function selectionInside(e) {
+  try {
+    const sel = window.getSelection ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed) return '';
+    const container = e && e.currentTarget;
+    if (container && container.contains && sel.anchorNode && !container.contains(sel.anchorNode)) return '';
+    return String(sel.toString() || '').trim().slice(0, SELECTION_CAP);
+  } catch (_) { return ''; }
+}
 
 // Três pontinhos pulsando — a assinatura visual de "digitando" (Chatwoot/WhatsApp).
 // O atraso escalonado é inline porque o valor não existe como classe do Tailwind.
@@ -60,7 +128,12 @@ const TypingDots = () => html`
 // stay here; everything composer-related lives in the hooks/components.
 
 export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact,
-  channelProvider = null, channelName = null, showChannel = false, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, operatorTyping = null, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null }) {
+  channelProvider = null, channelName = null, showChannel = false, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, operatorTyping = null, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null,
+  // Plano 99 — janela ancorada + os caminhos de salto. Todos opcionais: sem eles
+  // (sandbox, chamador antigo) o painel se comporta exatamente como antes.
+  loadNewer = null, loadingNewer = false, hasMoreNewer = false, jumping = false,
+  onJumpToMessage = null, onJumpToDate = null, onBackToBottom = null,
+  newWhileAnchored = 0 }) {
   // P48 hides (sandbox is always allowed — no RBAC identity there).
   const canReadContact = sandbox || hasPermission(currentUser, 'contact.read');
   const canReadConv = sandbox || hasPermission(currentUser, 'conversation.read');
@@ -83,6 +156,62 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   const { sentinelRef: topSentinelRef, justPrependedRef } = useReverseInfiniteScroll({
     scrollRef: chatRef, items: messages, hasMore, loadOlder, loadingOlder,
   });
+
+  // Sentinela de BAIXO (plano 99 F0d·3) — "carregar seguintes" numa janela
+  // ancorada no passado. É um `useScrollSentinel` SEPARADO de propósito: o hook
+  // de cima carrega uma âncora de scroll e a restaura num `useLayoutEffect`
+  // (código delicado, mexer nele quebraria o scroll-up); aqui não é preciso nada
+  // disso, porque anexar conteúdo ABAIXO da viewport não desloca o que já está
+  // em tela. Só existe enquanto `has_more_newer` — na conversa normal, que
+  // termina na última mensagem, nem é montado.
+  const bottomSentinelRef = useRef(null);
+  const canLoadNewer = !!(hasMoreNewer && loadNewer);
+  useScrollSentinel(
+    bottomSentinelRef,
+    () => { if (canLoadNewer && !loadingNewer) loadNewer(); },
+    canLoadNewer, chatRef, '0px 0px 120px 0px');
+
+  // ── Modo busca (plano 99 F2) ───────────────────────────────────────
+  // Aberto pela lupa do header, ele SUBSTITUI a barra do header (o header já
+  // está cheio). O termo mora aqui porque duas peças o consomem: a barra (que
+  // procura) e o render das bolhas (que destaca).
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  // Sem atendimento não há o que pesquisar — a busca é POR CONVERSA (P1), e o
+  // sandbox não tem linha na sidebar nem endpoint de busca.
+  const canSearchThread = !sandbox && conversationId != null && !!onJumpToMessage;
+  const closeSearch = useCallback(() => { setSearchOpen(false); setSearchTerm(''); }, []);
+  // "Ir para data" (plano 99 F4·3). O servidor aterrissa na primeira mensagem com
+  // `ts >=` o dia pedido — então um dia SEM conversa leva ao próximo dia com
+  // conteúdo, que é o comportamento do WhatsApp. O que não pode acontecer é isso
+  // ser silencioso: sem aviso, escolher um domingo vazio e cair na terça parece
+  // que o calendário ignorou o clique.
+  const handlePickDate = useCallback((ts) => {
+    if (!onJumpToDate) return;
+    Promise.resolve(onJumpToDate(ts)).then((r) => {
+      if (!r) return;
+      if (!r.ok) {
+        notify('Não foi possível ir para essa data.', { kind: 'error' });
+        return;
+      }
+      if (r.anchorId == null) {
+        notify('Nenhuma mensagem nessa data ou depois dela.', { kind: 'info' });
+        return;
+      }
+      if (r.anchorTs != null && !isSameDay(ts, r.anchorTs)) {
+        notify(`Sem mensagens nesse dia — abrimos em ${formatDateSeparator(r.anchorTs)}.`,
+               { kind: 'info' });
+      }
+    });
+  }, [onJumpToDate]);
+  // Trocar de conversa fecha a busca — o termo pertencia à thread anterior.
+  useEffect(() => { setSearchOpen(false); setSearchTerm(''); }, [conversationId, phone]);
+
+  // Pílula de data fixa (plano 98): qual dia está no topo da área de mensagens.
+  // O separador inline já existe, mas rola para fora da viewport — numa conversa
+  // de centenas de mensagens o operador perdia a referência temporal. A medição
+  // roda sobre os separadores (O(nº de dias)) e a decisão é do módulo puro.
+  const chatDay = useChatDayHeader({ scrollRef: chatRef, items: messages });
 
   // Header subtitle (line under the name): raw phone by default, but a plugin may
   // rewrite it via `filter.contact.headerSubtitle` — e.g. the website widget maps
@@ -138,6 +267,29 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     openTemplatePicker,
   });
 
+  // Plano 99 — toda saída confirmada com a janela no passado volta ao fim.
+  // O ACK do POST vem ANTES do GET da ponta recente; dispará-los em paralelo
+  // deixava o GET vencer a gravação e a mensagem recém-enviada sumir até o WS/F5.
+  // Uma promise compartilhada coalesce confirmações simultâneas (lote/template/
+  // texto) em UMA transição autoritativa.
+  const hasMoreNewerRef = useRef(hasMoreNewer);
+  hasMoreNewerRef.current = hasMoreNewer;
+  const outputTransitionRef = useRef(null);
+  const finishSuccessfulOutput = useCallback((sent) => transitionAfterOutput(
+    sent, hasMoreNewerRef.current, onBackToBottom, outputTransitionRef,
+  ), [onBackToBottom]);
+
+  const composerSend = composer.handleSend;
+  const composerRetry = composer.handleRetry;
+  const handleSendGuarded = useCallback(async (e) =>
+    finishSuccessfulOutput(await composerSend(e)),
+  [composerSend, finishSuccessfulOutput]);
+  const handleRetryGuarded = useCallback(async (localId, text) =>
+    finishSuccessfulOutput(await composerRetry(localId, text)),
+  [composerRetry, finishSuccessfulOutput]);
+  const composerUi = { ...composer, handleSend: handleSendGuarded,
+                       handleRetry: handleRetryGuarded };
+
   const autocomplete = useTokenAutocomplete({
     phone, sandbox, contact, groupParticipantsChanged, mode: composer.mode,
     input: composer.input, setInput: composer.setInput, inputRef: composer.inputRef,
@@ -149,6 +301,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     mode: composer.mode, aiReadPrivate: composer.aiReadPrivate,
     aiReplyInChat: composer.aiReadPrivate ? composer.aiReplyInChat : true,
     setContactData, updateMsgByLocalId, openTemplatePicker, mediaLimits,
+    onSent: () => finishSuccessfulOutput(true),
   });
 
   const audio = useAudioRecorder({
@@ -214,8 +367,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // off to the [expandedCards] effect below (which re-focuses once the open card
   // is committed). null on a manual toggle ⇒ that effect no-ops (no scroll, G2).
   const focusAfterExpandRef = useRef(null);
+  // Plano 99 F0e — para QUAL alvo já pedimos a janela ancorada. É o que impede o
+  // laço: se a janela voltou e o alvo continua ausente (mensagem apagada, id de
+  // outra conversa), pedir de novo daria o mesmo resultado para sempre.
+  const requestedJumpRef = useRef(null);
   useEffect(() => {
     pendingScrollRef.current = scrollToMsg != null ? String(scrollToMsg) : null;
+    if (scrollToMsg == null) requestedJumpRef.current = null;
   }, [scrollToMsg, phone]);
 
   // Scroll a message into view and flash it briefly. Returns false if the message
@@ -233,6 +391,21 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     setTimeout(() => el.classList.remove('wa-msg-highlight'), 3000);
     return true;
   }
+
+  // Ir para uma mensagem — o ponto de entrada de QUEM CLICA (hoje, a citação de
+  // uma resposta). Foca se estiver na janela; se não, pede a janela ancorada nela
+  // (plano 99 F0e·4) em vez de desistir. É o mesmo mecanismo do salto vindo da
+  // busca global, do deep-link e da busca dentro da conversa — quatro caminhos,
+  // um comportamento.
+  const goToMessage = useCallback((mid, opts = {}) => {
+    if (focusMessage(mid, opts)) return true;
+    if (!onJumpToMessage) return false;
+    pendingScrollRef.current = String(mid);
+    requestedJumpRef.current = String(mid);
+    onJumpToMessage(mid);
+    return true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onJumpToMessage]);
 
   // ── Collapsible cards (plano 63) ───────────────────────────────
   // transcription/tool_call render minimized by default as a 1-line chip. The
@@ -259,12 +432,16 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
 
   useEffect(() => {
     // Prepend de "carregar anteriores" (F4): a posição visual já foi RESTAURADA pelo
-    // useReverseInfiniteScroll (useLayoutEffect, antes do paint). Aqui só não rolamos
-    // pro fim nessa atualização (senão a viewport saltaria).
-    if (justPrependedRef.current) {
-      justPrependedRef.current = false;
-      return;
-    }
+    // useReverseInfiniteScroll (useLayoutEffect, antes do paint) — não rolamos pro
+    // fim nessa atualização (senão a viewport saltaria).
+    //
+    // ⚠️ plano 99 F0e·2: antes esta flag dava `return` e engolia TAMBÉM a tentativa
+    // de foco. Era o segundo tempo do salto silencioso: a atualização em que o alvo
+    // finalmente chegava era justamente uma atualização de prepend, então o foco
+    // nunca era tentado. A flag agora suprime só o auto-scroll para o fim, que é a
+    // única coisa que ela tem a ver.
+    const wasPrepend = justPrependedRef.current;
+    if (wasPrepend) justPrependedRef.current = false;
     const target = pendingScrollRef.current;
     if (target != null) {
       // Plano 63 (F5): a search hit / deep-link may land on a collapsed
@@ -281,16 +458,45 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
         focusAfterExpandRef.current = target;
         setExpandedCards((prev) => new Set(prev).add(wantKey));
       }
-      if (focusMessage(target)) {
+      // Plano 99 F0e·1 — o alvo fora da janela deixou de ser beco sem saída. A
+      // decisão ("focar / pedir a janela ancorada / desistir avisando") vive no
+      // módulo puro `services/threadJump.js`; aqui só se executa.
+      const plan = planJump({
+        target,
+        rendered: isRendered(messages, target),
+        requested: requestedJumpRef.current === target,
+        inFlight: jumping,
+      });
+      if (plan.action === 'focus' && focusMessage(target)) {
         pendingScrollRef.current = null;
+        requestedJumpRef.current = null;
         if (onScrolledToMsg) onScrolledToMsg();
+      } else if (plan.action === 'fetch' && onJumpToMessage) {
+        // Pede a janela CENTRADA no alvo em vez de esperar a cascata de
+        // "carregar anteriores" — que, se o alvo estivesse na última página,
+        // nunca chegava (era o bug de produção da §2.4 do plano).
+        requestedJumpRef.current = target;
+        onJumpToMessage(target);
+      } else if (plan.action === 'give_up') {
+        // Mensagem apagada, id de outra conversa, permalink velho. Avisar é o
+        // mínimo — o comportamento antigo era ficar mudo para sempre.
+        pendingScrollRef.current = null;
+        requestedJumpRef.current = null;
+        if (onScrolledToMsg) onScrolledToMsg();
+        notify('Não foi possível localizar essa mensagem nesta conversa.', { kind: 'error' });
       }
-      // Either handled, or the target isn't rendered yet — in both cases don't
-      // fall through to the bottom-scroll (wait for the next messages update).
+      // Tratado, pedido ou aguardando — em nenhum caso caímos no scroll pro fim.
       return;
     }
+    // plano 99 F0d·6: com a janela ANCORADA no passado, rolar pro fim jogaria o
+    // operador para o fim de uma janela que não é o fim da conversa — e desfaria
+    // o salto que ele acabou de pedir.
+    if (wasPrepend || hasMoreNewer) return;
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [messages]);
+    // `jumping` entra nas deps para que a virada "em voo → chegou" reavalie o
+    // plano por si só. Sem isso, uma janela ancorada que voltasse SEM mudar a
+    // lista de mensagens deixaria o pedido pendurado para sempre.
+  }, [messages, jumping]);
 
   // Plano 63 F5: re-focus a deep-linked card once it has EXPANDED. On expand the
   // collapsed chip (a component) is replaced by the expanded card (a plain div),
@@ -322,7 +528,21 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     const names = (contact && contact.is_group)
       ? autocomplete.members.map(m => m.name).filter(Boolean)
       : [];
-    return formatWhatsApp(text, names);
+    let out = formatWhatsApp(text, names);
+    // Plano 99 F2·4 — o flash amarelo diz em QUAL mensagem se aterrissou; isto
+    // diz ONDE dentro dela, que é o que resolve numa mensagem longa. Só entra
+    // com o modo busca aberto: sem termo, `highlightHtml` devolve a MESMA
+    // string e o render do chat fica byte-idêntico ao de sempre.
+    if (searchOpen && searchTerm) out = highlightHtml(out, searchTerm);
+    // Em modo de seleção em lote o clique tem UM significado só: marcar a
+    // mensagem. Sem isto, clicar numa âncora marcaria a mensagem E abriria uma
+    // aba (a navegação é o default do <a>, que o onClick do container não
+    // cancela). Já valia para URL antes do plano 97; com e-mail e telefone
+    // linkificados, ficaria fácil de esbarrar. `pointer-events:none` entra no
+    // COMEÇO do style para não depender da ordem dos atributos.
+    return actions.selectionMode
+      ? out.replace(/(<a\b[^>]*\bstyle=")/g, '$1pointer-events:none;')
+      : out;
   }
 
   // Locate a quoted message by its provider msg_id (plano 75 F10).
@@ -370,7 +590,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     if (autocomplete.handleMenuKeyDown(e)) return;
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !e.repeat) {
       e.preventDefault();
-      composer.handleSend(e);
+      handleSendGuarded(e);
     }
   }
 
@@ -399,8 +619,19 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // Plugins append their own items via the `filter.message.contextMenu.items`
   // seam (e.g. the "melhorias" plugin adds "Gerar melhoria"). Kept as a builder so
   // the filter runs on the CURRENT message each time the menu opens.
-  function buildBaseItems(message, isFromMe) {
+  function buildBaseItems(message, isFromMe, ctx = {}) {
+    // Bloco CONTEXTUAL (plano 97): só existe quando o botão direito caiu em cima
+    // de uma entidade ou havia texto selecionado. Vem ANTES dos itens da
+    // mensagem, separado por uma divisória.
+    const entityItems = entityMenuItems(ctx.entity || null);
+    const selectionText = ctx.selectionText || '';
     return [
+      ...(entityItems.length ? [...entityItems, { separator: true }] : []),
+      ...(selectionText ? [
+        { label: 'Copiar seleção', icon: CopyIcon,
+          onClick: () => { copyToClipboard(selectionText); notify('Seleção copiada.', { kind: 'success' }); } },
+        { separator: true },
+      ] : []),
       ...((canReply && !message.revoked && composer.mode !== 'private'
            && message.role !== 'private_note') ? [
         { label: 'Responder', icon: ReplyIcon,
@@ -440,7 +671,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     e.stopPropagation();
     const x = e.clientX || (e.currentTarget && e.currentTarget.getBoundingClientRect().left) || 0;
     const y = e.clientY || (e.currentTarget && e.currentTarget.getBoundingClientRect().bottom) || 0;
-    const base = buildBaseItems(message, isFromMe);
+    // Contexto do CLIQUE (plano 97 · F3) — lido AGORA, síncrono: depois do
+    // `await` abaixo o evento nativo já perdeu o `currentTarget`, e o clique que
+    // fecha o menu desfaria a seleção. Pela setinha de hover, o alvo é o botão
+    // (fora de qualquer entidade) → menu idêntico ao de sempre.
+    const entity = entityUnderCursor(e);
+    const selectionText = selectionInside(e);
+    const base = buildBaseItems(message, isFromMe, { entity, selectionText });
     let items = base;
     try {
       const out = await applyFilter('filter.message.contextMenu.items', base,
@@ -459,7 +696,21 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       onDragLeave=${drop.dropHandlers.onDragLeave}
       onDrop=${drop.dropHandlers.onDrop}
     >
-      <!-- Header -->
+      <!-- Header. Em modo busca (plano 99 F2·1) ele dá lugar à barra de busca em
+           vez de espremer mais um controle: o header tem largura fixa e já
+           carrega nome, selo de canal, etiquetas e duas fileiras de ações. Os
+           pontos de extensão de plugin ficam ABAIXO daqui e não são afetados. -->
+      ${searchOpen ? html`
+        <${ConversationSearchBar}
+          conversationId=${conversationId}
+          term=${searchTerm}
+          onTermChange=${setSearchTerm}
+          onJump=${(id) => onJumpToMessage && onJumpToMessage(id)}
+          onPickDate=${handlePickDate}
+          onBackToBottom=${onBackToBottom}
+          onClose=${closeSearch}
+          refTs=${messages && messages.length ? messages[messages.length - 1].ts : null}
+        />` : html`
       <div class="h-[59px] flex items-center pl-4 pr-[56px] bg-wa-panel border-b border-wa-border shrink-0">
         <button onClick=${onBack} class="lg:hidden text-wa-icon hover:text-wa-text mr-2 shrink-0">
           <${BackArrowIcon} />
@@ -498,6 +749,21 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           }
         </div>
 
+        <!-- Pesquisar nesta conversa (plano 99 F2). Escondido sem atendimento
+             (a busca é POR conversa) e no sandbox. -->
+        ${canSearchThread ? html`
+          <button
+            type="button"
+            onClick=${() => setSearchOpen(true)}
+            class="shrink-0 ml-1 text-wa-icon hover:text-wa-text p-[6px] rounded-full hover:bg-wa-hover transition-colors"
+            title="Pesquisar nesta conversa"
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+              <path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+            </svg>
+          </button>
+        ` : null}
+
         <!-- Conversation actions (FF3): resolver / atribuir / transferir / IA. -->
         <${ConversationHeaderActions} phone=${phone} conversationId=${conversationId} sandbox=${sandbox} onOpenConversationInfo=${onOpenConversationInfo} onOpenContactInfo=${onAvatarClick} contactInfo=${info} />
 
@@ -512,11 +778,36 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
             <${InfoIcon} />
           </button>
         ` : null}
-      </div>
+      </div>`}
 
       <!-- Plugin extension point: banner abaixo do header / acima das mensagens
            (faixa "atendimento atual" — SLA, aviso, etc.). Empty by default. -->
       <${Slot} name="chat.header.banner" ctx=${{ conv: { conversationId, phone, channelId }, conversationId, phone, channelId, contact }} />
+
+      <!-- Pílula de data FIXA (plano 98) — o dia do trecho que está no topo, sempre
+           visível, sem precisar rolar atrás do separador inline.
+           Mesmo padrão do balão "Fulano está digitando" logo abaixo: container de
+           altura ZERO + filho absoluto → flutua sobre as mensagens sem empurrar a
+           rolagem. Fica DEPOIS do slot chat.header.banner e antes do container de
+           rolagem, então uma faixa injetada por plugin a empurra junto em vez de
+           cobri-la. A caixa de recorte (h-48px + overflow-hidden) apara a pílula
+           enquanto ela desliza para fora no "empurrão" do separador do dia seguinte —
+           sem ela, a pílula invadiria o header.
+           Cala enquanto o "Carregando anteriores…" está em tela: os dois ocupam o
+           MESMO ponto (centro, topo) e a pílula cobriria o indicador por completo —
+           e ali, no topo do histórico, o dia é o que menos importa. -->
+      ${chatDay.label && !loadingOlder ? html`
+        <div class="relative h-0 z-10 pointer-events-none">
+          <div class="absolute top-0 left-0 right-0 h-[48px] overflow-hidden">
+            <div
+              class="absolute top-[8px] left-1/2 bg-wa-bg text-wa-secondary text-[12px] font-medium uppercase
+                     tracking-wide rounded-[7.5px] px-[12px] py-[5px] shadow-md whitespace-nowrap
+                     transition-opacity duration-150"
+              style=${`transform: translate(-50%, ${chatDay.offsetY.toFixed(1)}px); opacity: ${
+                Math.max(0, 1 + chatDay.offsetY / PILL_TRAVEL).toFixed(3)};`}
+            >${chatDay.label}</div>
+          </div>
+        </div>` : null}
 
       <!-- Chat area with doodle pattern -->
       <div ref=${chatRef} class="flex-1 min-h-0 overflow-y-auto overscroll-contain wa-scrollbar wa-chat-pattern py-2 px-[4%] lg:px-[7%]">
@@ -536,8 +827,10 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
               const isFirst = i === 0 || messages[i - 1].role !== m.role;
               const prevTs = i > 0 ? messages[i - 1].ts : null;
               const showDateSep = m.ts && (!prevTs || !isSameDay(prevTs, m.ts));
+              // `data-day` (plano 98 F2a): torna o separador localizável pela medição da
+              // pílula flutuante de data. Só um atributo — layout inalterado.
               const dateSeparator = showDateSep
-                ? html`<div key=${`sep-${m.ts}-${i}`} class="flex justify-center my-[12px]">
+                ? html`<div key=${`sep-${m.ts}-${i}`} data-day=${formatDateSeparator(m.ts)} class="flex justify-center my-[12px]">
                     <span class="bg-wa-bg/90 text-wa-secondary text-[12px] font-medium uppercase tracking-wide rounded-[7.5px] px-[12px] py-[5px] shadow-sm">
                       ${formatDateSeparator(m.ts)}
                     </span>
@@ -567,15 +860,54 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
               return [dateSeparator, html`<${MessageBubble}
                 key=${m._localId || i} message=${m} index=${i} isFirst=${isFirst}
                 isGroup=${isGroup} sandbox=${sandbox} displayName=${displayName} fmt=${fmt}
-                findQuoted=${findQuoted} quotedInfo=${quotedInfo} focusMessage=${focusMessage}
-                openMsgMenu=${openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composer.handleRetry : null}
+                findQuoted=${findQuoted} quotedInfo=${quotedInfo} focusMessage=${goToMessage}
+                canJumpOutsideWindow=${!!onJumpToMessage}
+                openMsgMenu=${openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composerUi.handleRetry : null}
                 showAgentName=${showAgentName}
                 selectionMode=${actions.selectionMode}
                 selected=${actions.selectionMode && actions.selection.has(selectionKey(m))}
                 onToggleSelect=${actions.toggleSelect} />`];
             })
         }
+        <!-- Sentinela de BAIXO (plano 99 F0d): só existe quando a janela está
+             ancorada no passado — dispara "carregar seguintes" ao rolar até aqui.
+             Na conversa normal (que termina na última mensagem) nem é montado, e
+             a área de mensagens fica byte-idêntica à de antes. -->
+        ${hasMoreNewer ? html`
+          <div ref=${bottomSentinelRef} class="flex justify-center py-2 min-h-[8px]">
+            ${loadingNewer
+              ? html`<span class="bg-wa-bg/80 text-wa-secondary rounded-lg px-3 py-1.5 text-[12px] shadow-sm">Carregando seguintes…</span>`
+              : null}
+          </div>` : null}
       </div>
+
+      <!-- "Voltar ao fim" (plano 99 F0d·5) — só com a janela ANCORADA. Mesmo
+           padrão visual do chip de digitação logo abaixo: container de altura
+           zero + filho absoluto, para flutuar sobre o fim da conversa sem
+           empurrar a rolagem nem o compositor.
+           O contador (P5) importa: enquanto o operador lê o passado, a mensagem
+           nova NÃO é anexada (criaria um buraco no histórico), então sem este
+           número ele não teria como saber que a conversa andou. -->
+      ${hasMoreNewer && onBackToBottom ? html`
+        <div class="relative h-0 z-20">
+          <div class="absolute bottom-[8px] right-[16px]">
+            <button
+              type="button"
+              onClick=${onBackToBottom}
+              title="Voltar para o fim da conversa"
+              class="flex items-center gap-1.5 bg-wa-panel border border-wa-border text-wa-text
+                     rounded-full shadow-md pl-3 pr-2 py-[6px] text-[13px] hover:bg-wa-hover transition-colors"
+            >
+              <span>Voltar ao fim</span>
+              ${newWhileAnchored > 0 ? html`
+                <span class="bg-wa-teal text-white text-[11px] font-semibold rounded-full px-[6px] py-[1px] leading-[15px]">
+                  ${newWhileAnchored} ${newWhileAnchored === 1 ? 'nova' : 'novas'}
+                </span>` : null}
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <path d="M7.41 8.59L12 13.17l4.58-4.58L18 10l-6 6-6-6z"/></svg>
+            </button>
+          </div>
+        </div>` : null}
 
       <!-- Balão flutuante "Fulano está digitando" (multi-operador, estilo Chatwoot).
            Só aparece com OUTRO atendente digitando nesta conversa — o estado já vem
@@ -622,7 +954,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       ${canReply ? html`
       <${Composer}
         sandbox=${sandbox} canSend=${canSend} templatesSupported=${templatesSupported} sessionClosed=${sessionClosed}
-        composer=${composer} autocomplete=${autocomplete} media=${media} audio=${audio}
+        composer=${composerUi} autocomplete=${autocomplete} media=${media} audio=${audio}
         quotedInfo=${quotedInfo} openTemplatePicker=${openTemplatePicker} handleKeyDown=${handleKeyDown} currentUser=${currentUser} />
       ` : html`
       <div class="px-[4%] lg:px-[7%] py-3 bg-wa-panel border-t border-wa-border shrink-0 text-center text-wa-secondary text-[13px]">
@@ -636,7 +968,10 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           channelId=${channelId}
           phone=${phone}
           onClose=${() => setShowTemplatePicker(false)}
-          onSent=${() => setShowTemplatePicker(false)}
+          onSent=${() => {
+            setShowTemplatePicker(false);
+            return finishSuccessfulOutput(true);
+          }}
         />
       ` : ''}
       ${actions.msgMenu ? html`

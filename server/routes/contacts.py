@@ -90,6 +90,19 @@ def _is_sandbox_contact(phone: str) -> bool:
     return bool(config_repo.get(f"{SANDBOX_CONTACT_PREFIX}{phone}"))
 
 
+def _apply_window(data: dict, window: dict) -> None:
+    """Copia o veredito da janela (plano 99) para o payload da thread.
+
+    ``has_more`` continua sendo o ALIAS de ``has_more_older`` — cliente antigo e
+    ``threadData.prependOlder`` leem esse nome, e mantê-lo é o que deixa a
+    transição para a janela bidirecional ser aditiva.
+    """
+    data["has_more"] = window["has_more_older"]
+    data["has_more_older"] = window["has_more_older"]
+    data["has_more_newer"] = window["has_more_newer"]
+    data["anchor_id"] = window["anchor_id"]
+
+
 def _format_attr_cell(value) -> str:
     """Render a custom-attribute value as a flat CSV cell.
 
@@ -319,6 +332,34 @@ def register_routes(app, deps):
             return None
         status = 413 if verdict.reason == media_limits.TOO_BIG else 415
         return _err(verdict.message, status=status, data={"reason": verdict.reason})
+
+    def _private_ai_conversation_open(channel_id: str, phone: str) -> bool:
+        """A conversa aceita que a IA fale com o cliente? (plano 96 I9)
+
+        Só a camada POR-CONVERSA do gate (`ai_active` + dono humano) — ver a nota
+        no call site sobre por que o master global não entra aqui. Fail-open igual
+        ao gate: erro de leitura nunca cala uma conversa saudável."""
+        try:
+            from app.services.messaging_service import _conversation_ai_active
+            contact = agent_handler._get_contact(phone, channel_id=channel_id)
+            return True if contact is None else _conversation_ai_active(contact)
+        except Exception:
+            logger.exception("[PrivateAI] falha ao reconsultar o gate de %s", phone)
+            return True
+
+    def _operator_took_over(channel_id: str, phone: str) -> None:
+        """O atendente ENVIOU — interrompe o ciclo da IA em voo (plano 96 I8).
+
+        Enviar é decisão inequívoca (ao contrário de digitar, que só segura): o
+        humano assumiu a fala e uma resposta da IA chegando 20s depois duplicaria
+        o atendimento. Best-effort e não-destrutivo — ``abort_ai_cycle`` se recusa
+        a cancelar durante a fase de envio, para não rasgar um split no meio."""
+        try:
+            from app.services.messaging_service import abort_ai_cycle
+            abort_ai_cycle(deps, channel_id, phone)
+        except Exception:
+            logger.debug("[Send] falha ao abortar o ciclo da IA de %s/%s",
+                         channel_id, phone)
 
     async def _send_read_receipts(phone: str, msg_ids: list[str], channel_id: str = "default"):
         """Send read receipts via the conversation's channel (best-effort, plano 38 F3).
@@ -698,7 +739,10 @@ def register_routes(app, deps):
     @app.get("/api/contacts/{phone}")
     async def get_contact(phone: str, request: Request, mark_read: bool = True,
                           channel_id: str = "", limit: int = PAGE_MSGS,
-                          before_id: int | None = None):
+                          before_id: int | None = None,
+                          after_id: int | None = None,
+                          around_id: int | None = None,
+                          at_ts: float | None = None):
         """Return full contact data including conversation history.
 
         Quando ``channel_id`` é informado (multicanal — abrir uma conversa NOVA pela
@@ -711,10 +755,21 @@ def register_routes(app, deps):
         Paginação keyset (plano 50 F3): ``limit`` (cap ``CAP_MSGS``) + ``before_id``
         — mesma semântica de ``/api/atendimentos/{id}/messages``; devolve a página mais
         recente e ``has_more``. Vale para os dois ramos (multicanal e legado all-channels).
+
+        Janela ANCORADA (plano 99 F0c): ``after_id`` / ``around_id`` / ``at_ts``, com a
+        MESMA semântica da view conversa-cêntrica (a regra é uma só, em
+        ``message_repo.read_window``) — mutuamente exclusivos com ``before_id``, e
+        nenhum deles marca a conversa como lida.
         """
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
+        anchors = [p for p in (before_id, after_id, around_id, at_ts) if p is not None]
+        if len(anchors) > 1:
+            return _err("Use apenas uma âncora: before_id, after_id, around_id ou at_ts.",
+                        status=400)
+        if after_id is not None or around_id is not None or at_ts is not None:
+            mark_read = False
         page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
         vis = visible_inbox_ids(request)
         channel = (channel_id or "").strip()
@@ -763,13 +818,16 @@ def register_routes(app, deps):
                 data["channel_id"] = channel
                 data["conversation_id"] = scoped_conv["id"] if scoped_conv else None
                 if scoped_conv:
-                    _page = message_repo.get_by_conversation(
-                        scoped_conv["id"], limit=page_limit + 1, before_id=before_id)
-                    data["has_more"] = len(_page) > page_limit
-                    data["messages"] = _page[1:] if data["has_more"] else _page
+                    _page, _win = message_repo.read_window(
+                        page_limit, before_id=before_id, after_id=after_id,
+                        around_id=around_id, at_ts=at_ts,
+                        conversation_id=scoped_conv["id"])
+                    data["messages"] = _page
+                    _apply_window(data, _win)
                 else:
                     data["messages"] = []
-                    data["has_more"] = False
+                    _apply_window(data, {"has_more_older": False,
+                                         "has_more_newer": False, "anchor_id": None})
                 # Compositor hints (Frente C / plano 21): mesmo SEM conversa ainda, o
                 # canal escolhido define se aceita template e se a janela de texto livre
                 # está aberta. Sem isso, abrir um canal Cloud (windowed) sem conversa não
@@ -791,10 +849,12 @@ def register_routes(app, deps):
                     video_transcode_available=video_transcode.available(),
                     audio_transcode_available=audio_transcode.available())
             else:
-                _page = message_repo.get_all(
-                    contact_id, limit=page_limit + 1, before_id=before_id)
-                data["has_more"] = len(_page) > page_limit
-                data["messages"] = _page[1:] if data["has_more"] else _page
+                _page, _win = message_repo.read_window(
+                    page_limit, before_id=before_id, after_id=after_id,
+                    around_id=around_id, at_ts=at_ts, contact_id=contact_id)
+                data["messages"] = _page
+                _apply_window(data, _win)
+            data["marked_read"] = bool(mark_read)
             # Load usage for the full response
             data["usage"] = []
             return data, msg_ids
@@ -960,6 +1020,7 @@ def register_routes(app, deps):
             return denied_inbox
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
+        _operator_took_over(channel_id, phone)
         # Wire target = the JID the conversation actually receives from (fixes the BR
         # 9th-digit ghost-send). `phone` stays the contact key for save/broadcast.
         wire_phone = await asyncio.to_thread(
@@ -1213,7 +1274,7 @@ def register_routes(app, deps):
         return _ok({"message": "Reação registrada.", "reactions": reactions})
 
     async def _run_private_ai(phone: str, text: str, reply_in_chat: bool = True,
-                              conversation_id=None):
+                              conversation_id=None, abort_epoch: int | None = None):
         """Process a private message via the LLM.
 
         Triggered by the operator's "IA lê" toggle on the private-message panel.
@@ -1228,7 +1289,39 @@ def register_routes(app, deps):
         # privada iniciada num canal não-default (ex.: Telegram) misfila pro
         # WhatsApp 'default'.
         run_channel = _channel_for(phone, conversation_id)
+        # Private-AI tasks are fire-and-forget and do not live in processing_tasks.
+        # The same abort generation still scopes them: a manual send/assignment that
+        # happens while their LLM is running invalidates this specific reply without
+        # permanently disabling the AI for the next customer turn.
+        private_abort_epoch = (messaging._abort_epoch(run_channel, phone)
+                               if abort_epoch is None else abort_epoch)
         run_wire = await asyncio.to_thread(_wire_target, phone, conversation_id)
+
+        async def _may_reply_in_chat_now() -> bool:
+            if messaging._abort_epoch(run_channel, phone) != private_abort_epoch:
+                return False
+            return await asyncio.to_thread(
+                _private_ai_conversation_open, run_channel, phone)
+
+        async def _blocked_notice() -> None:
+            aviso = ("⚠️ A resposta da IA ao cliente foi interrompida porque um "
+                     "atendente assumiu a conversa. Desmarque \"responder no chat\" "
+                     "para receber a resposta como nota privada, ou devolva a "
+                     "conversa à IA.")
+            try:
+                def _save_aviso():
+                    c = agent_handler._get_contact(phone, channel_id=run_channel)
+                    return c.add_message("system_notice", aviso)
+                saved = await asyncio.to_thread(_save_aviso)
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone, "channel_id": run_channel,
+                    "message": saved or {"role": "system_notice", "content": aviso,
+                                         "ts": time.time()},
+                })
+            except Exception:
+                logger.exception("[PrivateAI] falha ao gravar o card de bloqueio de %s",
+                                 phone)
+
         try:
             result = await agent_handler.aprocess_message(
                 phone, text,
@@ -1254,6 +1347,27 @@ def register_routes(app, deps):
                                phone, e)
 
         if not reply_text:
+            return
+
+        # Plano 96 I9/P1 — a IA da nota privada era o ÚNICO caminho de saída sem
+        # gate nenhum (3 dos 22 incidentes medidos): com "IA lê" + "responder no
+        # chat" ligados, ela mandava ao cliente mesmo numa conversa já assumida por
+        # um humano. Pior: o toggle só se reseta ao TROCAR de conversa, então quem
+        # o liga para instruir a IA segue com ele ligado nas notas seguintes.
+        # Gate só no caminho que FALA com o cliente — ``reply_in_chat=False`` vira
+        # nota privada e nunca sai do painel, então não é gateado.
+        #
+        # ⚠️ Aqui é o gate POR-CONVERSA (`_conversation_ai_active`), não o veredito
+        # composto `ai_may_speak`: o master global `auto_reply` (default OFF numa
+        # instalação nova) e o `ai_enabled` do canal governam a IA responder SOZINHA
+        # a um inbound. Esta resposta foi PEDIDA por um humano — barrá-la pelo
+        # interruptor de automação apagaria o recurso inteiro em instalação com a
+        # automação desligada, que não é o problema que o plano 96 ataca (D1: o que
+        # cala é o HUMANO no comando daquela conversa).
+        if reply_in_chat and not await _may_reply_in_chat_now():
+            logger.info("[PrivateAI] resposta não enviada a %s — a conversa está "
+                        "com um atendente humano", phone)
+            await _blocked_notice()
             return
 
         # The LLM may return a JSON array of strings when split_messages is on.
@@ -1315,6 +1429,14 @@ def register_routes(app, deps):
             )
             if _wired is not None:
                 wire_text = _wired
+            # Same last-moment rule as the normal AI pipeline. The initial check
+            # above is not enough: plugins and a multi-part response create another
+            # window in which the operator can take over.
+            if not await _may_reply_in_chat_now():
+                logger.info("[PrivateAI] split de %s/%s interrompido na parte %d/%d",
+                            run_channel, phone, i + 1, len(parts))
+                await _blocked_notice()
+                return
             state.recently_sent[f"{channel_id}:{run_wire}:{wire_text[:120]}"] = time.time()
             send_failed = False
             send_error = ""
@@ -1502,8 +1624,11 @@ def register_routes(app, deps):
             {"phone": phone, "channel_id": note_channel, "message": note_msg})
 
         if ai_read:
-            asyncio.create_task(_run_private_ai(phone, text, reply_in_chat=ai_reply,
-                                                conversation_id=body.get("conversation_id")))
+            private_epoch = messaging._abort_epoch(note_channel, phone)
+            asyncio.create_task(_run_private_ai(
+                phone, text, reply_in_chat=ai_reply,
+                conversation_id=body.get("conversation_id"),
+                abort_epoch=private_epoch))
 
         logger.info("[Private] Saved private note for %s (ai_read=%s, ai_reply=%s): %s",
                     phone, ai_read, ai_reply, text[:80])
@@ -1653,9 +1778,11 @@ def register_routes(app, deps):
         # context (db_content), so the turn acts on it exactly like a typed note.
         if ai_read_b:
             if ai_text:
+                private_epoch = messaging._abort_epoch(resolved_channel, phone)
                 asyncio.create_task(_run_private_ai(
                     phone, ai_text, reply_in_chat=ai_reply_b,
-                    conversation_id=conversation_id or None))
+                    conversation_id=conversation_id or None,
+                    abort_epoch=private_epoch))
             else:
                 await _emit_send_error(
                     ws_manager, phone,
@@ -1802,6 +1929,7 @@ def register_routes(app, deps):
             return denied_inbox
 
         channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
+        _operator_took_over(channel_id, phone)
         wire_phone = await asyncio.to_thread(
             _wire_target, phone, body.get("conversation_id"))
         block = await asyncio.to_thread(
@@ -1861,6 +1989,7 @@ def register_routes(app, deps):
         # Sandbox/test contact — keep the image local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
+        _operator_took_over(channel_id, phone)
         wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
@@ -1915,6 +2044,7 @@ def register_routes(app, deps):
         # Sandbox/test contact — keep the audio local, never hit GOWA.
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
+        _operator_took_over(channel_id, phone)
         wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
@@ -2006,6 +2136,7 @@ def register_routes(app, deps):
             return denied_inbox
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
+        _operator_took_over(channel_id, phone)
         wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
@@ -2076,6 +2207,7 @@ def register_routes(app, deps):
             return denied_inbox
         is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
         channel_id = _channel_for(phone, conversation_id, channel_id)
+        _operator_took_over(channel_id, phone)
         wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
         # 24h window gate BEFORE writing the file (no orphan on a blocked send);
         # sandbox stays local so it is never gated (mirrors /send text).
@@ -2177,6 +2309,14 @@ def register_routes(app, deps):
                 "user_name": _u.get("name") or _u.get("email") or "Atendente",
                 "active": action == "start",
             })
+        # Plano 96 I7 (D3): o atendente digitando SEGURA a resposta da IA, como a
+        # digitação do cliente já fazia — o pior cenário é os dois responderem por
+        # cima um do outro. Segurar, não cancelar: ele pode desistir do texto.
+        # Escrito ANTES de ir ao provedor (mesma ordem do broadcast acima: canal
+        # offline ou sem capability de presence não pode calar o efeito interno) e
+        # sem exigir identidade de usuário — o pipeline não precisa saber QUEM digita.
+        state.operator_typing_state[(channel_id, phone)] = {
+            "active": action == "start", "last_ts": time.time()}
         await asyncio.to_thread(outbound.send_presence, channel_id, phone, action)
         return _ok({"status": "ok"})
 

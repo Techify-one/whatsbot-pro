@@ -10,7 +10,11 @@ import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { PluginModalHost } from '../../plugins/ModalHost.js';
 import { Slot } from '../../plugins/Slot.js';
-import { buildPluginApi, isFrontendApiCompatible } from '../../plugins/api.js';
+import {
+  buildPluginApi,
+  isFrontendApiCompatible,
+  isPluginServicesCompatible,
+} from '../../plugins/api.js';
 import { reset as resetRegistry, subscribe as subscribeRegistry, inventory as registryInventory, getRouteOverride } from '../../plugins/registry.js';
 import { SetupWizard } from '../SetupWizard.js';
 import { LowBalanceModal } from '../LowBalanceModal.js';
@@ -59,11 +63,15 @@ async function loadPluginExtensions(plugins) {
       console.warn(`[plugins] ${p.id}: frontend_api_version "${p.frontend_api_version}" incompatible — skipping extends`);
       continue;
     }
+    if (!isPluginServicesCompatible(p.plugin_services_version)) {
+      console.warn(`[plugins] ${p.id}: plugin_services_version "${p.plugin_services_version}" incompatible — skipping extends`);
+      continue;
+    }
     try {
       const mod = await import(p.frontend_extends);
       const register = mod && (mod.default || mod.register);
       if (typeof register === 'function') {
-        await register(buildPluginApi(p.id));
+        await register(buildPluginApi(p.id, p.plugin_services_version));
       } else {
         console.warn(`[plugins] ${p.id}: extends module has no default export (register fn)`);
       }
@@ -85,10 +93,9 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // overrides) so route-override resolution and <Slot>s re-render once the async
   // extends modules register (they load after first paint).
   const [extVersion, setExtVersion] = useState(0);
-  // True once the plugin frontend-extension modules have finished loading (or the
-  // manifest fetch failed). Gates the `attendances → contacts` fallback in
-  // ScreenRouter so a hard reload doesn't bounce to the home page during the async
-  // window before a route-override (e.g. protocolos) has registered.
+  // True once frontend extension modules have finished loading (or the manifest
+  // request failed). It prevents an override-only route from rendering its
+  // fallback during the asynchronous registration window.
   const [extensionsLoaded, setExtensionsLoaded] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);  // self-service password modal (plano 47)
   const [tab, setTabState] = useState(() => tabFromPath([]));
@@ -138,7 +145,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
     fetch('/api/plugins/manifest', { headers: authHeaders() })
       .then(r => r.json())
       .then(res => {
-        if (!res || !res.ok) { setExtensionsLoaded(true); return; }  // no plugins → fallback applies
+        if (!res || !res.ok) { setExtensionsLoaded(true); return; }
         const plugins = res.data.plugins || [];
         const screens = plugins.flatMap(p =>
           (p.screens || [])
@@ -147,13 +154,11 @@ export function App({ onLogout, hasPassword, currentUser }) {
         );
         setPluginScreens(screens);
         // Load plugin frontend-extension modules (filters / UI slots / route overrides).
-        // Only after they register (or fail) do we let ScreenRouter treat a missing
-        // route-override as "plugin disabled" (see extensionsLoaded gating).
         loadPluginExtensions(plugins).finally(() => setExtensionsLoaded(true));
         // Re-evaluate tab now that we know about plugin paths.
         setTabState(tabFromPath(screens));
       })
-      .catch(() => { setExtensionsLoaded(true); /* fetch failed → fallback applies */ });
+      .catch(() => { setExtensionsLoaded(true); /* plugin extensions are optional */ });
   }, []);
 
   // Re-render when the extension registry mutates (extends modules register after

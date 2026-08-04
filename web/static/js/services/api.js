@@ -91,13 +91,6 @@ export async function getRuntimeSubprocesses() {
   return request('GET', '/api/runtime/subprocesses');
 }
 
-// GOWA disconnect-alert settings (bundled plugin). Read-only here: used by the
-// channel edit form to seed the per-channel on/off toggle from the plugin's legacy
-// global `enabled` value when the channel hasn't set its own yet.
-export async function getGowaAlertSettings() {
-  return request('GET', '/api/plugins/gowa/alert-settings');
-}
-
 export async function getStatus() {
   return request('GET', '/api/status');
 }
@@ -221,10 +214,27 @@ export async function getContact(phone, markRead = true, channelId = null, opts 
   const params = [];
   if (!markRead) params.push('mark_read=false');
   if (channelId) params.push(`channel_id=${encodeURIComponent(channelId)}`);
-  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
-  if (opts.beforeId != null) params.push(`before_id=${encodeURIComponent(opts.beforeId)}`);
+  params.push(...windowParams(opts));
   const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}${qs}`);
+}
+
+// Âncoras da janela da thread (plano 99). São MUTUAMENTE EXCLUSIVAS no servidor
+// (400 se combinadas), então este helper existe para que os dois endpoints de
+// thread montem a query exatamente do mesmo jeito:
+//   beforeId → as anteriores (scroll-up, o caminho de sempre)
+//   afterId  → as seguintes (scroll-down numa janela ancorada no passado)
+//   aroundId → a janela CENTRADA nessa mensagem ("pular para cá")
+//   atTs     → epoch no fuso do NAVEGADOR; o servidor resolve o 1º id com ts >=
+//              e já devolve a janela em torno dele, numa ida só.
+function windowParams(opts = {}) {
+  const p = [];
+  if (opts.limit != null) p.push(`limit=${encodeURIComponent(opts.limit)}`);
+  if (opts.beforeId != null) p.push(`before_id=${encodeURIComponent(opts.beforeId)}`);
+  if (opts.afterId != null) p.push(`after_id=${encodeURIComponent(opts.afterId)}`);
+  if (opts.aroundId != null) p.push(`around_id=${encodeURIComponent(opts.aroundId)}`);
+  if (opts.atTs != null) p.push(`at_ts=${encodeURIComponent(opts.atTs)}`);
+  return p;
 }
 
 // Atendimento-cêntrico (plano 11 D1): carrega a thread de Um atendimento (um canal),
@@ -234,10 +244,22 @@ export async function getContact(phone, markRead = true, channelId = null, opts 
 export async function getConversationMessages(convId, markRead = true, opts = {}) {
   const params = [];
   if (!markRead) params.push('mark_read=false');
-  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
-  if (opts.beforeId != null) params.push(`before_id=${encodeURIComponent(opts.beforeId)}`);
+  params.push(...windowParams(opts));
   const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/atendimentos/${convId}/messages${qs}`);
+}
+
+// Busca de texto DENTRO de uma conversa (plano 99 F1) — o "pesquisar mensagens"
+// do WhatsApp. Distinta da busca global da sidebar (que devolve UM hit por
+// contato): aqui vem a lista de ocorrências desta thread, mais recente primeiro.
+// Retorna {matches: [{id, ts, role, snippet}], total}. Termo com menos de 3
+// caracteres devolve lista vazia com 200 — não é erro.
+export async function searchInConversation(convId, q, opts = {}) {
+  const params = [`q=${encodeURIComponent(q || '')}`];
+  if (opts.limit != null) params.push(`limit=${encodeURIComponent(opts.limit)}`);
+  if (opts.offset != null) params.push(`offset=${encodeURIComponent(opts.offset)}`);
+  return request('GET', `/api/atendimentos/${convId}/messages/search?${params.join('&')}`,
+                 undefined, { signal: opts.signal || null });
 }
 
 export async function deleteContact(phone) {
@@ -635,12 +657,6 @@ export async function deleteConversationLabel(id) {
 // Labels currently attached to ONE conversation: {conversation_id, labels:[...]}.
 export async function getConversationLabelsFor(convId) {
   return request('GET', `/api/atendimentos/${convId}/labels`);
-}
-
-// plano 50 F13 — etiquetas de VÁRIAS conversas numa request: {labels_by_conv:{id:[...]}}.
-// Substitui o fan-out de 1 GET por atendimento no modo etiqueta do Kanban.
-export async function getConversationLabelsBatch(ids) {
-  return request('POST', '/api/atendimentos/labels-batch', { ids });
 }
 
 // Replace a conversation's labels (snapshot of names).

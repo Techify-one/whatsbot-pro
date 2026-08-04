@@ -154,7 +154,7 @@ function DateFilter({ from, to, active, onManual, onPreset, onClear }) {
 }
 
 // ── Agrupamento do Kanban (uniforme: columns / columnIdOf / onDrop / confirmText) ──
-// Espelha o padrão de web/static/js/components/attendances/grouping.js. `onDrop` ausente
+// Agrupamento local do plugin. `onDrop` ausente
 // = modo SÓ-LEITURA (data): cards não arrastáveis. `confirmText` descreve EXATAMENTE a
 // ação para o popup de confirmação (ver applyDrop).
 function _startOfDayEpoch(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return Math.floor(x.getTime() / 1000); }

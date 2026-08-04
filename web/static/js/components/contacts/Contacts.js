@@ -40,7 +40,7 @@ const html = htm.bind(h);
 // together (in dependency order so every closure captures stable references) and
 // renders — it adds NO new behavior.
 //
-// ROUTE-OVERRIDE BOUNDARY (Q5, preserved): the `atendimentos` plugin claims the
+// ROUTE-OVERRIDE BOUNDARY (Q5, preserved): the `protocolos` plugin claims the
 // 'attendances' route via registry.overrideRoute, which is EXCLUSIVE/REPLACE
 // semantics (NOT compose) — it swaps the WHOLE rendered component for that tab.
 // This decomposition is purely INTERNAL to <Contacts/>: its export name + props
@@ -120,8 +120,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     loadingDetail,
     detailError, retryDetail,      // plano 85 A3
     loadingOlder, loadOlder,
+    // plano 99 — janela ancorada (rolar para os dois lados) + os caminhos de salto
+    loadingNewer, loadNewer, jumping,
+    jumpToMessage, jumpToDate, backToBottom,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
+    anchoredWindowRef,
     openInfoAfterSelect,
     pendingWsMessages,
     isOpenRow, selectContact, reloadOpenThread,
@@ -292,6 +296,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     setContactData, setSelected, setSelectedConvId,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     pendingWsMessages, isOpenRow, selected, contactData,
+    anchoredWindowRef,
     setGlobalTags,
     pageVisibleRef,
     reloadOpenThread,
@@ -520,6 +525,14 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 loadOlder=${loadOlder}
                 loadingOlder=${loadingOlder}
                 hasMore=${contactData && contactData.has_more}
+                loadNewer=${loadNewer}
+                loadingNewer=${loadingNewer}
+                hasMoreNewer=${!!(contactData && !detailStale && contactData.has_more_newer)}
+                jumping=${jumping}
+                onJumpToMessage=${jumpToMessage}
+                onJumpToDate=${jumpToDate}
+                onBackToBottom=${backToBottom}
+                newWhileAnchored=${(contactData && contactData._newWhileAnchored) || 0}
                 droppedFiles=${droppedFiles}
                 onDroppedFilesConsumed=${() => setDroppedFiles(null)}
               />`

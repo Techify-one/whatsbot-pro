@@ -1,7 +1,7 @@
 """Clean, reusable test doubles for the characterization suite (Plano 23 · A2/A2b kit).
 
 These are PURPOSE-BUILT public fakes — NOT a mechanical copy of the script-coupled
-``_Fake*`` classes at the top of ``tests/test_endpoints.py`` (those are entangled
+``_Fake*`` classes in ``tests/core/legacy/legacy_endpoints.py`` (those are entangled
 with module-level state and will be converged later in the full A1 split). Keep
 them small, documented, and dependency-free so any pytest function can import
 them:

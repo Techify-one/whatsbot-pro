@@ -42,3 +42,6 @@ PLANO_setup_wizard.md
 docs-planos/QA-motor-agentes.md
 docs-planos/checklist-testar-tool-dependencias.md
 docs-planos/QA-consolidado.md
+
+# Migração de histórico Chatwoot (dumps + CSVs de PRODUÇÃO — nunca versionar)
+plano-importacao-historico-chatwoot/
