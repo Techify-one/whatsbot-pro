@@ -1,4 +1,4 @@
-# Retorno Automático (Configurações) — plugin `retornos`
+# Retorno Automático — plugin `retornos`
 
 Follow-up automático por **configuração de regras**, porte do módulo Retornos do Nexus
 ([plano 76](../../../docs-planos/76-plano-plugin-retornos-automaticos-reguas.md)).

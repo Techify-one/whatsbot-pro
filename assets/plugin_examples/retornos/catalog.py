@@ -88,7 +88,7 @@ CAMPOS: tuple[dict, ...] = (
      "tipo": "multi-select", "options": "conv_labels"},
     {"id": "contato.tags", "label": "Etiquetas do contato", "grupo": "chatwoot",
      "tipo": "multi-select", "options": "contact_tags"},
-    {"id": "chatwoot.criado_em", "label": "Atendimento criado em", "grupo": "chatwoot",
+    {"id": "chatwoot.criado_em", "label": "Conversa criada em", "grupo": "chatwoot",
      "tipo": "date"},
     {"id": "chatwoot.ultima_atividade", "label": "Última atividade", "grupo": "chatwoot",
      "tipo": "date"},

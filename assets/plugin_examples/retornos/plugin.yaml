@@ -1,5 +1,5 @@
 id: retornos
-name: Retorno Automático (Configurações)
+name: Retorno Automático
 version: 1.16.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
@@ -68,7 +68,7 @@ screens:
 permissions:
   - db.write
 rbac:
-  group: Retorno Automático (Configurações)
+  group: Retorno Automático
   permissions:
     - { key: view,    label: "Ver configurações e o monitor de agendamentos" }
     - { key: edit,    label: "Criar/editar/excluir configurações, retornos e mensagens" }
