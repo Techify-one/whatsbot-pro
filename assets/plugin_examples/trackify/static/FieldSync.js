@@ -6,7 +6,7 @@
 //
 //   1. só contato JÁ VINCULADO sincroniza — esta feature nunca cria cadastro no
 //      Trackify (quem faz isso é o espelho de eventos, com o toggle dele);
-//   2. a direção ← funciona SEM conta de serviço (usa a leitura read-only), então
+//   2. TODA direção precisa da API key (não há mais leitura read-only por DSN), então
 //      a feature inteira não está bloqueada por uma senha que o operador pode não
 //      ter em mãos;
 //   3. escrever num campo IDENTIFICADOR re-chaveia a identidade do contato no
@@ -381,12 +381,17 @@ function SyncStatus({ data, onRefresh, busy }) {
           <div class="text-wa-text">${st.total || 0}</div></div>
       </div>
 
-      ${(data.enabled || data.pull_enabled) && !data.logged_in && html`
+      ${data.blocked_reason && html`
         <div class="text-xs text-red-500 border border-red-500/40 rounded p-2">
-          <strong>A conta de serviço nunca autenticou.</strong> Sem isso nada é
-          gravado no Trackify, e a leitura de volta nem chega a rodar — ela se
-          recusa a ligar sem saber quem somos, senão reimportaria as próprias
-          escritas como se fossem edições de uma pessoa.
+          <strong>Sincronização parada.</strong> ${data.blocked_reason}
+        </div>`}
+
+      ${!data.blocked_reason && (data.enabled || data.pull_enabled) && !data.actor_known && html`
+        <div class="text-xs text-amber-500 border border-amber-500/40 rounded p-2">
+          <strong>Ainda não sabemos o id desta API key.</strong> A sincronização
+          funciona, mas para reconhecer as próprias escritas ela está comparando
+          valores em vez de olhar quem escreveu. O id é lido sozinho no próximo
+          ciclo de leitura — ou na hora, clicando em “Testar acesso”.
           ${data.last_auth_error ? html`<div class="mt-1">${data.last_auth_error}</div>` : null}
         </div>`}
 

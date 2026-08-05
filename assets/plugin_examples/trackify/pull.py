@@ -229,10 +229,10 @@ async def cycle(http) -> dict:
     if not tk_client.is_configured():
         return resumo
 
-    # Ator das NOSSAS escritas no changelog do CDP. Vazio não impede o ciclo: a
-    # supressão por valor (2ª camada) segue valendo, e o id é preenchido no
-    # primeiro "testar acesso" ou no primeiro ciclo do worker.
-    self_actor = _self_actor()
+    # Ator das NOSSAS escritas no changelog do CDP. Vazio não impede o ciclo — a
+    # supressão por valor (2ª camada) segue valendo —, mas deixa a 1ª camada
+    # inativa, então vale uma chamada para aprendê-lo.
+    self_actor = await _garantir_ator(http)
 
     maps = [m for m in field_map.list_maps(enabled_only=True)
             if m["direction"] in ("to_whatsbot", "both") and m["tk_field_id"]]
@@ -303,6 +303,38 @@ def _self_actor() -> str:
     """Ator com que as nossas escritas aparecem no changelog do CDP."""
     key_id = (_config.setting("sync_api_key_id") or "").strip()
     return f"apikey:{key_id}" if key_id else ""
+
+
+async def _garantir_ator(http) -> str:
+    """Descobre e persiste o id da API key quando ainda não o conhecemos.
+
+    Sem isto, o id só era gravado por quem clicasse em "Testar acesso" na tela —
+    quem colasse a chave e salvasse ficava para sempre sem a 1ª camada de
+    supressão de eco, e com um aviso na tela que nunca sumia.
+
+    Custa UMA chamada, e só enquanto o id é desconhecido. Falha não interrompe o
+    ciclo: sem o ator a leitura continua funcionando pela comparação de valor.
+    """
+    import asyncio
+
+    atual = _self_actor()
+    if atual:
+        return atual
+
+    res = await tk_client.whoami(http)
+    if not res.ok:
+        return ""
+    key_id = str((res.data or {}).get("id") or "")
+    if not key_id:
+        return ""
+
+    def _gravar():
+        from db.repositories import config_repo
+        config_repo.set_many({_config.PREFIX + "sync_api_key_id": key_id})
+
+    await asyncio.to_thread(_gravar)
+    logger.info("trackify: id da API key aprendido (%s)", key_id)
+    return f"apikey:{key_id}"
 
 
 def _definicoes() -> dict:

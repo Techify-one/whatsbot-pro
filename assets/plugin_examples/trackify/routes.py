@@ -435,8 +435,11 @@ async def field_sync_status():
             "pull_enabled": bool(_config.setting("field_sync_pull_enabled", False)),
             "credential_set": _config.credential_set(),
             "blocked_reason": (_config.setting("sync_blocked_reason") or ""),
-            "last_login_error": (_config.setting("sync_last_login_error") or ""),
-            "logged_in": bool((_config.setting("sync_user_id") or "").strip()),
+            "last_auth_error": (_config.setting("sync_last_auth_error") or ""),
+            # Já sabemos com que ATOR as nossas escritas aparecem no changelog do
+            # CDP? Sem isso a sincronização funciona, só que a supressão de eco
+            # cai na 2ª camada (comparação por valor) — degradado, não parado.
+            "actor_known": bool((_config.setting("sync_api_key_id") or "").strip()),
             "cursor_ts": cur.get("cursor_ts") or 0.0,
             "cursor_note": cur.get("note") or "",
             "state": sync_state.counters(),

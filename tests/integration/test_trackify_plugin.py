@@ -2168,6 +2168,85 @@ def test_nenhum_setter_fantasma_nas_telas():
     assert code == 0, saida
 
 
+def test_status_nao_reporta_setting_que_nao_existe_mais():
+    """Regressão real: `/field-sync/status` continuou devolvendo `logged_in`
+    lido de `sync_user_id` — setting que foi REMOVIDA e que a limpeza de boot
+    ainda apaga. O campo era eternamente falso, e a tela mostrava para sempre um
+    alarme vermelho dizendo que "a conta de serviço nunca autenticou".
+
+    Um campo de status que lê uma chave morta é pior que campo nenhum: ele
+    afirma com confiança algo que não pode ser verdade.
+    """
+    fonte = (_SRC / "routes.py").read_text(encoding="utf-8")
+    mortas = ("sync_user_id", "sync_last_login_error", "service_password", "service_email")
+    for chave in mortas:
+        assert chave not in fonte, f"routes.py ainda lê a setting morta {chave!r}"
+
+    # E as settings citadas na rota de status precisam existir de verdade.
+    from importlib import import_module
+    cfg = _load("_config")
+    bloco = fonte[fonte.index("async def field_sync_status"):]
+    bloco = bloco[:bloco.index("@router.post")]
+    import re
+    for chave in set(re.findall(r'_config\.setting\("(\w+)"', bloco)):
+        assert chave in cfg.DEFAULTS, f"status lê '{chave}', que não está em _config.DEFAULTS"
+
+
+def test_a_tela_so_le_campos_que_a_rota_de_status_devolve():
+    """O elo que quebrou: a rota parou de mandar `logged_in` e a tela continuou
+    lendo `data.logged_in` — que em JavaScript é `undefined`, ou seja, falso, e
+    o alarme ficou aceso para sempre sem ninguém errar visivelmente."""
+    import re
+    fonte = (_SRC / "routes.py").read_text(encoding="utf-8")
+    bloco = fonte[fonte.index("async def field_sync_status"):]
+    bloco = bloco[:bloco.index("@router.post")]
+    devolvidos = set(re.findall(r'"(\w+)":', bloco))
+
+    js = (_SRC / "static" / "FieldSync.js").read_text(encoding="utf-8")
+    corpo = js[js.index("function SyncStatus("):js.index("function Simular(")]
+    lidos = set(re.findall(r"\bdata\.(\w+)", corpo))
+
+    faltando = lidos - devolvidos
+    assert not faltando, (
+        f"a tela lê campos que /field-sync/status não devolve: {sorted(faltando)}")
+
+
+def test_o_poller_aprende_o_id_da_chave_sozinho(monkeypatch):
+    """Antes, o id só era gravado por quem clicasse em "Testar acesso": quem
+    colasse a chave e salvasse ficava sem a 1ª camada de supressão de eco, com um
+    aviso na tela que nunca sumia."""
+    pull_mod = _load("pull")
+    tk = _load("client")
+    gravado = {}
+
+    async def _whoami(http):
+        return tk.Result(tk.OK, 200, data={"id": "k-descoberta", "scopes": ["read"]})
+    monkeypatch.setattr(pull_mod.tk_client, "whoami", _whoami)
+    monkeypatch.setattr(pull_mod._config, "setting", lambda k, d=None: "")
+
+    import db.repositories.config_repo as cr
+    monkeypatch.setattr(cr, "set_many", lambda pares: gravado.update(pares))
+
+    ator = _run(pull_mod._garantir_ator(_FakeHttp()))
+
+    assert ator == "apikey:k-descoberta"
+    assert gravado == {"plugin.trackify.sync_api_key_id": "k-descoberta"}
+
+
+def test_falha_ao_aprender_o_id_nao_para_a_leitura(monkeypatch):
+    """Sem o ator a leitura continua válida pela comparação de valor — travar o
+    ciclo por causa disso seria trocar um degradado por um parado."""
+    pull_mod = _load("pull")
+    tk = _load("client")
+
+    async def _fora_do_ar(http):
+        return tk.Result(tk.RETRY, 500, "fora do ar")
+    monkeypatch.setattr(pull_mod.tk_client, "whoami", _fora_do_ar)
+    monkeypatch.setattr(pull_mod._config, "setting", lambda k, d=None: "")
+
+    assert _run(pull_mod._garantir_ator(_FakeHttp())) == ""
+
+
 def test_farol_da_conexao_nao_fala_de_DSN_nem_de_tabela():
     """O card de saúde tem que descrever o que EXISTE hoje.
 
