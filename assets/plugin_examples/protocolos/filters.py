@@ -25,9 +25,15 @@ de nova mensagem (a mensagem continua salva e visível — só o aviso é suprim
 decide se o atendente humano é desvinculado ao FECHAR a conversa. Com o setting
 ``resolve_keep_assignee`` ligado devolve ``False`` (o atendente continua na conversa
 resolvida); desligado (default) devolve o valor recebido e o core limpa como sempre.
+
+``filter.retornos.campos`` / ``filter.retornos.contexto``: seams publicados pelo PLUGIN
+`retornos` (não pelo core — o bus loga um WARNING informativo ao registrá-los, é
+esperado). Contribuem os campos do Protocolos ao construtor de regras dele; ver
+``retornos_fields.py``. Sem o `retornos` instalado ninguém aplica os filtros e eles
+simplesmente nunca rodam.
 """
 
-from . import logic
+from . import logic, retornos_fields
 
 FILTERS = {
     "filter.conversation.before_status": logic.before_status,
@@ -35,4 +41,6 @@ FILTERS = {
     "filter.conversation.clear_assignee_on_close": logic.clear_assignee_on_close,
     "filter.llm.messages": logic.suppress_ai_on_ignored,
     "filter.message.notify": logic.notify_on_ignored,
+    "filter.retornos.campos": retornos_fields.campos,
+    "filter.retornos.contexto": retornos_fields.contexto,
 }

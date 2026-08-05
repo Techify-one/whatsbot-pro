@@ -1,6 +1,6 @@
 # Plano 76 — Plugin `retornos`: follow-up automático por régua de regras (porte do nexus-retorno)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-07-23 · **Escopo:** grande (1 plugin, 6 workstreams: motor de regras · dispatcher · ações/IA · eventos/lifecycle · UI builder · UI monitor)
+> **Status:** ✅ EXECUTADO (2026-07-30 — F0 a F12; ver o “Status de execução” de cada fase) · **Data:** 2026-07-23 · **Escopo:** grande (1 plugin, 6 workstreams: motor de regras · dispatcher · ações/IA · eventos/lifecycle · UI builder · UI monitor)
 > **Origem:** pedido do usuário — replicar no WhatsBot o módulo **Retornos** do Nexus (`/opt/nexus/nexus-retorno`), que faz follow-up automático de conversas do Chatwoot com um **construtor visual de regras aninhadas** (grupos E/OU), sequência de retornos, mensagens/notas/mídia e ativação de IA por nota privada `@Bia`. **Método:** leitura do código real dos dois sistemas (`arquivo:linha` verificado), consulta ao banco de produção do Nexus (`RBNexusDB` via vault — 6.529 disparos reais, 2.586 controles) e workflow de 10 sub-agentes de investigação. A parte visual deve ficar **parecida com a do Nexus** para outras pessoas configurarem/editarem réguas.
 > Diferença fundamental já resolvida: no Chatwoot a IA era um agente **externo** que escutava a nota `@Bia`; no WhatsBot **IA e atendimento são o mesmo processo** (motor AGNO), então o passo "aciona IA" chama o AGNO **direto** (`agent_handler.aprocess_message`, caminho `_run_private_ai` já existente).
 >
@@ -275,11 +275,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** copiar a pasta para `storages/plugins/retornos/`, reiniciar, o card aparece em `/plugins` sem `load_error`, e `\dt plugin_retornos_*` no Postgres mostra as 5 tabelas.
 
 #### Status de execução — Fase F0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `assets/plugin_examples/retornos/` criado (P1 = recomendação: versionado NESTE repo) com `plugin.yaml`, `__init__.py`, `migrations/001_initial.sql` (as 5 tabelas do §7) e `settings.py`. Cópia instalada em `storages/plugins/retornos/` (aparece em /plugins como inativa até o operador ativar).
+- **Como foi feito / decisões:** **Desvio consciente:** UMA screen `config:false` (`/retornos`, título “Retorno Automático”) com abas internas Réguas|Monitor, em vez de 2 entradas no menu — pedido do usuário. Nome do plugin = “Retorno Automático (Réguas)” para não colidir com o card do plugin antigo. RBAC: grupo com `view`/`edit`/`monitor`; a screen exige `view`. Migration com prefixo em toda tabela/índice e SEM `;` em comentário.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_plugin_carrega_sem_erro_e_cria_tabelas` (plugin sem `load_error` + as 5 tabelas em `information_schema`), `test_screen_do_plugin_aparece_no_manifest`, `test_rbac_do_plugin_aparece_no_catalogo`.
 
 ---
 
@@ -293,11 +293,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** `venv/bin/python -m pytest tests/test_retornos_rules.py -q` verde.
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `rules.py` (avaliador recursivo + 17 operadores + `proximo_instante`), `catalog.py` (campos/operadores/grupos, ids do Nexus preservados) e `schedule.py` (expediente por régua).
+- **Como foi feito / decisões:** Semântica confirmada e travada: o `conector` de um item diz como ele se junta ao item ANTERIOR (o 1º da lista não tem conector) — grupos são parênteses e recursam. `between` em hora com wrap-around (D7). Campo desconhecido ⇒ **false**. Árvore vazia ⇒ **true**. P4 resolvido: `atendimentos.priority` EXISTE (entrou como `chatwoot.prioridade`); “Times” não existe no WhatsBot ⇒ `chatwoot.time_id` **omitido**. Campos WhatsBot novos: `wb.canal`, `wb.contact_type`, `wb.agente_ia`, `wb.ia_ativa`, `wb.grupo`, `contato.tags` e `modulo.minutos_desde_ultimo_contato`. Expediente virou **opcional** (`business_enabled`) e atravessa a meia-noite.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `venv/bin/python -m pytest tests/test_retornos_rules.py -q` → **18 passed** (inclui a régua real “Principal - API Meta” com grupo-dentro-de-grupo e o `between 16:00..07:30` sem o workaround de grupo OU).
 
 ---
 
@@ -310,8 +310,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** `node --test static/rules.test.js` verde e batendo com o Python nos mesmos casos.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `static/rules.js` (espelho 1:1 de `rules.py`, mais `contarRegras` para o resumo da UI) e `static/rules.test.js`.
+- **Como foi feito / decisões:** Porte 1:1 com os MESMOS vetores do Python. Módulo puro (sem preact/HTM), então a armadilha da crase em comentário não se aplica aqui — os componentes de F8/F9 têm o aviso no topo do arquivo.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `node --test assets/plugin_examples/retornos/static/rules.test.js` → **15 pass, 0 fail**, batendo com o Python caso a caso.
 
 ---
 
@@ -323,8 +326,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** teste de round-trip (criar régua+passos+mensagens, ler de volta) verde no banco de teste; `evalctx` monta o dict de uma conversa real e `rules.avaliar` roda sobre ele.
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `repo.py` (CRUD das 5 tabelas + `claim_due` com lock atômico + `stats` no servidor + log com `prune_logs`) e `evalctx.py` (resolve cada campo do §5.3 a partir dos repos do core).
+- **Como foi feito / decisões:** Árvores gravadas como TEXT+JSON (`_encode_arvore`/`_decode`) — sem cast de dialeto. `upsert_controle` usa `ON CONFLICT (conversation_id)` (P3: uma régua por conversa). `evalctx.load_target` re-deriva conversa+canal frescos (canal autoritativo).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** CRUD round-trip + export/import/duplicar/excluir sem órfãos (`test_crud_regua_passo_mensagem_e_export_import`); `test_lock_atomico_e_recovery` (2º claim não repega o travado, lock velho é recuperado); `test_preview_avalia_contra_conversa_real`.
 
 ---
 
@@ -337,8 +343,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** com um controle semeado (`next_at=now`) e filtro que bate, o ciclo dispara e agenda o próximo; com filtro que não bate, **reagenda o mesmo** e após o teto **expira** (verificado em teste + `plugin_retornos_log`).
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `dispatcher.py`: recovery de locks → `claim_due` → grace window → avaliar → disparar/reagendar/expirar → agendar o próximo passo (ou `completed`), com rotação A/B (`pick_mensagens`).
+- **Como foi feito / decisões:** **Adição ao plano:** coluna `passos.delay_min` (“esperar X min”), porque sem ela um passo só conseguiria esperar via regra temporal — `next_at = max(delay, proximo_instante)`. `process_controle` devolve uma LISTA de desfechos (um disparo que encerra a régua conta `dispatched` **e** `completed` no sumário). Expediente fechado apenas DEFERE (não gasta tentativa). Passo sem mensagem = porteiro puro (avalia e segue).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_ciclo_dispara_nota_privada_e_conclui`, `test_filtro_falso_reagenda_o_mesmo_passo_e_depois_expira` (D5: não avança de passo, expira e não escreve nota), `test_disparo_so_conta_quando_a_mensagem_sai` (D6), `test_grace_window_cancela_retorno_atrasado`, `test_rotacao_ab_alterna_a_mensagem_testando` (A,B,A,B).
 
 ---
 
@@ -354,8 +363,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** cada tipo entrega no destino certo; dentro da janela `ia_responde_agora` gera e envia; fora da janela vira nota privada; falha de um envio não derruba os outros.
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `actions.py`: `text`/mídia via `outbound_router` + save da bolha; `private_note` via `ContactMemory.add_message(reopen=False)` + broadcast; `ia_responde_agora` via `aprocess_message` + envio das partes (split honrado por canal).
+- **Como foi feito / decisões:** Gate D3 antes de qualquer coisa que vá ao cliente: `session_open == False` ⇒ nota privada de aviso (conta como disparo, com `substituida=True` no log). Gates da IA (P5, decisão do usuário): **não** re-checa `auto_reply` global, mas checa `ai_active` da conversa, humano sem agente e a tag `transferido_atendente` — bloqueado ⇒ nota privada explicando. Coroutines vão ao loop principal por `_run_on_loop`. Placeholders: `{cliente}`, `{primeiro_nome}`, `{disparos}`, `{proximo_disparo}`, `{passo}`.
+- **Problemas / pendências:** Mídia por URL/arquivo local resolvida em `_media_target`; upload da UI grava em `statics/outbox/` (endpoint `/upload` do plugin) — lembrar do Persistent Storage no Coolify.
+- **Verificação:** `test_ciclo_envia_texto_ao_cliente_pelo_canal`, `test_fora_da_janela_de_24h_vira_nota_privada`, `test_ia_responde_agora_bloqueada_vira_nota_privada`, `test_ia_responde_agora_envia_a_resposta_do_agente`.
 
 ---
 
@@ -369,8 +381,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** enviar msg de cliente numa conversa que casa a régua cria um controle; responder de novo reseta; resolver/atribuir a humano cancela (conforme flags); `retornos:scheduler` aparece em `GET /api/runtime/tasks`.
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `events.py` (entrada/reset/cancelamento), `lifecycle.py` (`spawn_task('scheduler')` + aposentadoria do plugin antigo) e `settings.py` (grace, pausa entre mensagens, teto por ciclo, master).
+- **Como foi feito / decisões:** Nomes reais dos eventos confirmados no core: `message.saved`, `conversation.status_changed`, `conversation.archived`, `conversation.assigned`, `conversation.ai_toggled`, `contact.ai_toggled`, `app.startup`. O plugin **não** assina `message.sent` (evita laço). `on_reply` lido de verdade (D8) e cada cancelamento respeita o toggle da régua.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_mensagem_do_cliente_cria_controle_pela_regua_de_entrada` (respeita `delay_min` e a ordem/`posicao` das réguas), `test_on_reply_reset_e_cancel`, `test_cancelamentos_por_evento` (inclui o caso “toggle desligado ⇒ NÃO cancela”).
 
 ---
 
@@ -385,8 +400,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** `curl` em cada rota retorna `{ok,data}`; `/metadata` traz as listas reais da instância.
 
 #### Status de execução — Fase F7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `routes.py`: CRUD de réguas/passos/mensagens (+ reorder, duplicate, export, import), `/metadata`, `/upload`, `/preview` e o `monitor` (controles, stats, logs, reset, cancel).
+- **Como foi feito / decisões:** Rotas fixas declaradas ANTES das dinâmicas (`/reguas/reorder`, `/reguas/import`). Gates `plugin_permission('view'|'edit'|'monitor')`. `audit()` nas mutações (régua/passo/controle). `/preview` devolve o contexto COMPLETO (com as chaves `__*`) para a UI reavaliar localmente com `rules.js` a cada edição, sem round-trip.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_metadata_traz_campos_operadores_e_opcoes`, `test_rotas_fixas_nao_colidem_com_id`, `test_monitor_lista_reset_e_cancel`, `test_preview_avalia_contra_conversa_real`.
 
 ---
 
@@ -401,8 +419,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** montar a árvore da régua real "Principal - API Meta" (grupo-dentro-de-grupo) na UI, exportar, e o JSON bater com o do banco do Nexus; preview coerente com o backend.
 
 #### Status de execução — Fase F8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `static/RegraBuilder.js`: `RegrasList` recursivo → `CondicaoRow` | `GrupoBlock` (borda tracejada), botão E/OU a partir da 2ª linha, `+ Condição` / `+ Grupo`, `✕` para remover, `ValorInput` por tipo (text/number/date/time/enum/select/multi-select/between).
+- **Como foi feito / decisões:** `between` mostra dois campos e o aviso “↩ vira o dia” quando min>max (D7 visível). Campo em `<optgroup>` por grupo (Atendimento/Virtual/Régua). Preview: badge “passaria agora / não passaria agora” calculado LOCALMENTE por `rules.js` sobre o contexto real trazido de `/preview`. Profundidade de grupo limitada a 5 níveis na UI (o motor não limita).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `node --check` nos 3 módulos (parse ESM) + paridade do motor por `rules.test.js`; a árvore com grupo-dentro-de-grupo é montável e o JSON exportado casa com a forma do Nexus (§5.1).
 
 ---
 
@@ -415,8 +436,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** criar do zero uma régua com 4 passos (como a de produção), salvar, recarregar e reabrir intacta; legível no modo escuro.
 
 #### Status de execução — Fase F9
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `static/retornos.js`: lista de réguas (ativar/desativar, editar, duplicar, excluir com confirmação, reordenar, importar/exportar JSON) + editor completo (geral, cancelamentos, fuso, expediente, gate de entrada, accordion de passos com mensagens e upload).
+- **Como foi feito / decisões:** **Desvio consciente:** reordenação por botões ↑/↓ (chamando o mesmo endpoint `reorder`) em vez de DnD HTML5 — funciona em toque e é à prova de acessibilidade. Cada entidade tem “Salvar” próprio (badge “alterações não salvas”), evitando diff global. Cores só `wa-*`/`.wa-field`.
+- **Problemas / pendências:** `static/extends.js` (o botão “Retornos” no header da conversa, marcado **opcional** no §4) NÃO foi implementado — o Monitor cobre a mesma informação. Fica como próximo incremento se o operador quiser ver/parar a régua de dentro da conversa.
+- **Verificação:** `node --check` (ESM) + o CRUD que a tela consome está coberto pelos testes de F7.
 
 ---
 
@@ -428,8 +452,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** um disparo/skip aparece no monitor sem reload; reset/cancelar refletem no banco.
 
 #### Status de execução — Fase F10
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** Aba **Monitor** dentro da mesma tela: cards de contagem (em andamento/concluídos/cancelados/expirados/disparos), filtro por status, tabela com próximo disparo (relativo + absoluto), tentativas, erro, ações Reiniciar/Cancelar e lista dos últimos eventos.
+- **Como foi feito / decisões:** Contagem vem de `/monitor/stats` (**servidor**), nunca da página carregada. Atualização ao vivo por `wsBus.subscribe` nos eventos `retornos_tick` e `retornos_changed` (sem `setInterval`).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_monitor_lista_reset_e_cancel` (lista com nome da régua/passo, stats, reset zera disparos, cancel muda status, 404 em id inexistente).
 
 ---
 
@@ -441,8 +468,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** com `retornos` ativo, `retorno_automatico` está `enabled=0`; nenhuma nota duplicada numa conversa de teste.
 
 #### Status de execução — Fase F11
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** `lifecycle._retire_legacy_plugin()` desativa o `retorno_automatico` no `setup()` do plugin (idempotente, respeita o setting `disable_retorno_automatico`, nunca reativa, audita como ator `system`). `agendamento_retorno` fica intacto.
+- **Como foi feito / decisões:** Decisão do usuário: **sem seed** de régua-espelho — as réguas são montadas na UI.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_ativacao_desativa_o_retorno_automatico` (desativa e é idempotente).
 
 ---
 
@@ -455,8 +485,11 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 - **Pronto quando:** `venv/bin/python -m pytest tests/ -q` verde no Postgres de teste; `node --test` verde nos módulos puros; `.zip` importa e o plugin sobe sem `load_error`.
 
 #### Status de execução — Fase F12
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_ · **Como foi feito:** _(preencher)_ · **Problemas:** _(preencher)_ · **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-07-30)
+- **O que foi feito:** Suítes `tests/test_retornos_rules.py` (motor puro) e `tests/test_retornos_plugin.py` (app real com o plugin: migrations, API, eventos, ciclo, monitor, RBAC, manifest), `README.md` do plugin e seção no CLAUDE.md.
+- **Como foi feito / decisões:** O harness `build_test_app_with_plugin('retornos')` aplica as migrations reais no Postgres de teste; deps/runtime de canal são injetados à mão (o lifespan do harness é no-op) com um `FakeOutbound` que permite forçar falha de envio e janela fechada.
+- **Problemas / pendências:** O `.zip` distribuível não foi gerado (o repo só versiona zip de plugin de CANAL): exportar por `GET /api/plugins/retornos/export` ou publicar em `whatsbot-pro-plugins` quando o usuário quiser.
+- **Verificação:** `pytest tests/test_retornos_rules.py tests/test_retornos_plugin.py -q` → **40 passed**; `node --test .../rules.test.js` → 15 pass.
 
 ---
 
@@ -482,18 +515,31 @@ WAVE 4  F11(migração retorno_automatico + seed) · F12(testes e2e + zip + docs
 ## 10. Perguntas em aberto
 
 **P1 — Onde versionar o plugin?**
+✅ **DECIDIDO (2026-07-30, adotada a recomendação):** o plugin vive em
+`assets/plugin_examples/retornos/` deste repo (testado junto do core) e a cópia instalada em
+`storages/plugins/retornos/`. Não é auto-instalado (`BUNDLED_AUTO_INSTALL` continua só com `gowa`).
+Texto original da recomendação:
 ⏸️ **RECOMENDADO (a decidir):** `assets/plugin_examples/retornos/` **deste** repo (como `protocolos`/`melhorias`), com `.zip` gerado dali — a complexidade (motor + scheduler + 2 telas) justifica review e testes junto do core. Alternativa (a): só no `whatsbot-pro-plugins` (padrão dos plugins não-core, sem histórico/review). O plano assume a recomendação; mudar só troca o caminho-base.
 
 **P2 — Roteamento: `filtros_entrada` explícito na régua vs. filtros do 1º passo (cópia do Nexus)?**
-✅ **DECIDIDO (2026-07-23, embutido no §7/D-implícito):** campo **`filtros_entrada` explícito** na régua (gate de entrada separado do passo 1). Corrige a maior confusão do Nexus (config sem filtro `chatwoot.*` no R1 virava catch-all acidental) sem custo extra. Se você preferir a cópia fiel (R1 = gate), é trocar o gate em F6/F9.
+🔄 **REVERTIDO (2026-07-30) — não existe mais gate de entrada.** O campo `filtros_entrada` foi **removido** da UI, da API, do motor e da tabela (migration `002_drop_filtros_entrada.sql`, plugin `1.1.0`): era um segundo lugar para dizer a mesma coisa que as condições do passo. **Entrada agora:** a primeira régua **ativa** por `posicao` (respeitando `apply_to_groups`) assume a conversa; **quem filtra são as regras de cada passo**, avaliadas na hora do disparo com dados frescos. Consequência aceita: uma condição que não bate **reagenda o passo** (`tentativas_passo+1` até `max_tentativas`/`deadline_min` ⇒ `expired`) em vez de deixar outra régua capturar a conversa — o roteamento entre réguas passa a ser só `posicao` + `ativo`.
+~~✅ DECIDIDO (2026-07-23): campo `filtros_entrada` explícito na régua (gate separado do passo 1), para corrigir a confusão do Nexus (config sem filtro `chatwoot.*` no R1 virava catch-all acidental).~~
 
 **P3 — Uma régua por conversa (como o Nexus) ou várias simultâneas?**
 ✅ **DECIDIDO:** **uma** por conversa (`conversation_id UNIQUE` no controle), igual ao Nexus. Várias simultâneas é muito mais complexo e não há demanda.
 
 **P4 — `chatwoot.time_id` (Times) e `atendimentos.priority` existem no WhatsBot?**
+✅ **CONFIRMADO em F1 (2026-07-30):** `atendimentos.priority` EXISTE (`db/tables.py`) e entrou no
+catálogo como `chatwoot.prioridade`; "Times" NÃO existe como conceito editável, então
+`chatwoot.time_id` foi **omitido** (import que o referencie ⇒ condição false, sem quebrar).
+Texto original:
 ⏸️ **A CONFIRMAR em F1** (grep em `db/tables.py`). Se "Times" não existir, **omitir** do catálogo (import que o referencie ⇒ condição false, não quebra). `priority` provavelmente existe (`db/filters/registry.py` tem a dim `priority`).
 
 **P5 — `ia_responde_agora` deve respeitar o interruptor GLOBAL `auto_reply`?**
+✅ **DECIDIDO pelo usuário (2026-07-30):** **NÃO** respeita o global — a régua ativa É a intenção de
+responder. Os gates POR CONVERSA são sempre checados com dados frescos (IA da conversa desligada,
+humano assumiu sem agente, tag `transferido_atendente`) e, bloqueado, o passo vira nota privada.
+Texto original da recomendação:
 ⏸️ **RECOMENDADO:** **não** re-checar `auto_reply` (a régua ativa **é** a intenção de responder), mas **checar sempre** os gates por-conversa (humano assumiu / tag `transferido_atendente`) com dados frescos no disparo. É o subconjunto do `list_candidates` do `retorno_automatico`. Confirmar com o usuário se quiser que o botão global também silencie as réguas.
 
 ---

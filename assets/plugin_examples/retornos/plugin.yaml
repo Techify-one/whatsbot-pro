@@ -1,0 +1,76 @@
+id: retornos
+name: Retorno Automático (Configurações)
+version: 1.16.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: >-
+  Follow-up automático por CONFIGURAÇÃO DE REGRAS (porte do módulo Retornos do Nexus — plano 76).
+  Cada configuração é uma SEQUÊNCIA DE RETORNOS; cada retorno tem a própria árvore de regras
+  (E/OU com aninhamento arbitrário) e uma ou mais mensagens
+  (texto, nota privada, imagem/áudio/vídeo/documento ou "a IA responde agora"). Um verificador
+  supervisionado roda a cada minuto, avalia a árvore do retorno com dados FRESCOS e dispara —
+  ou REAGENDA o mesmo retorno (nunca avança fingindo progresso) até esgotar o teto global
+  de reavaliações/prazo (settings do plugin).
+  A mensagem do cliente reinicia ou encerra a configuração (escolha por configuração), e resolver /
+  atribuir a um humano / desligar a IA cancelam conforme os toggles da configuração. Fora da janela
+  de 24h da Meta o retorno vira uma NOTA PRIVADA de aviso ao atendente, em vez de falhar.
+  Substitui a função de follow-up automático do plugin `retorno_automatico` e convive com o
+  `agendamento_retorno` (manual).
+  A 1.16.0 torna EDITÁVEL o aviso de janela fechada: a nota privada escrita quando a última
+  mensagem do cliente já passou das 24 horas virou a setting "Aviso quando a janela de 24h já
+  passou" (modal Configurar), com os placeholders {cliente}, {primeiro_nome}, {retorno} e
+  {disparos}. Em branco, o retorno é pulado sem nota nenhuma.
+  A 1.15.0 deixa REORGANIZAR as condições arrastando: cada condição e cada grupo ganharam uma
+  alça (⠿) que reordena no mesmo nível, tira de um grupo, joga para dentro de outro e move o
+  grupo inteiro com o conteúdo. O conector E/OU acompanha o item movido e quem fica em 1º na
+  lista vira o "se"; soltar um grupo dentro de si mesmo ou estourar o limite de aninhamento
+  é recusado (a faixa nem acende). Arraste de mouse — em tela de toque nada muda.
+  A 1.14.0 tira a opção "Desativar o plugin antigo «Retorno Automático (IA)» na ativação":
+  este plugin não mexe mais em outro plugin. Se os dois ficarem ativos a conversa recebe nota
+  duplicada — desativar o antigo passou a ser decisão do operador, em Gerenciar Plugins.
+  A 1.10.0 move o log do verificador para uma aba própria «Eventos» (antes era o bloco
+  "Últimos eventos" espremido no fim do Monitor): a lista rola dentro do quadro, tem filtro
+  por tipo de evento e por conversa, e é paginada NO SERVIDOR (o total vem do banco).
+  A 1.9.0 tira do formulário de cada retorno os campos "Esperar (min)", "Máx. tentativas" e
+  "Prazo do retorno" (migration 007): quando disparar é decisão das CONDIÇÕES, e o teto de
+  segurança do ciclo virou setting GLOBAL do plugin, igual para todos os retornos.
+  A 1.8.0 deixa CONFERIR o anexo já enviado: o nome do arquivo (e o botão "Ver arquivo")
+  abrem um modal com a imagem, o player de áudio/vídeo ou o leitor de PDF — antes só dava
+  para saber qual arquivo estava ali disparando o retorno para um cliente.
+  A 1.7.1 troca a lista nativa dos operadores de LISTA ("é um de" / "não é nenhum de" /
+  "tem alguma de" / "tem todas de") por chips clicáveis: marcar vários (ex.: vários dias da
+  semana) passa a ser um clique em cada, sem Ctrl/Cmd+clique.
+  A 1.6.0 acrescenta a PAUSA ENTRE AS MENSAGENS por retorno (em segundos, no bloco "Mensagens
+  deste retorno"): em branco herda a pausa global do plugin. E passa a exigir que o ANEXO case
+  com o TIPO da mensagem (imagem só imagem, áudio só áudio, vídeo só vídeo — documento aceita
+  qualquer formato), checado ao escolher o arquivo, no upload e ao salvar a mensagem.
+  A 1.4.0 abre o construtor de regras a OUTROS PLUGINS: quem estiver ativo pode contribuir os
+  próprios campos (ex.: Protocolos → status, atendente e os campos configuráveis) pelos seams
+  `filter.retornos.campos` (catálogo) e `filter.retornos.contexto` (valores), que aparecem no
+  select sob "Configurações (outros plugins)". Plugin desativado some do select sozinho.
+short_description: >-
+  Configurações de follow-up automático com construtor de regras aninhadas (E/OU), sequência de
+  retornos, mensagens/notas/mídia e "a IA responde agora".
+author: WhatsBot
+entry:
+  routes: routes        # REST: /api/plugins/retornos/...
+  lifecycle: lifecycle  # setup(ctx): tarefa supervisionada "scheduler" (ciclo por minuto)
+  events: events        # message.saved (criar/reset/cancel) + conversation.*/contact.ai_toggled
+  settings: settings    # grace, delay entre mensagens, teto de controles por ciclo
+migrations: migrations
+screens:
+  # UMA entrada no menu da engrenagem, com abas internas (Configurações | Monitor | Eventos).
+  - id: retornos
+    title: Retorno Automático
+    path: /retornos
+    config: false
+    component: /plugins/retornos/static/retornos.js
+    requires: view
+permissions:
+  - db.write
+rbac:
+  group: Retorno Automático (Configurações)
+  permissions:
+    - { key: view,    label: "Ver configurações e o monitor de agendamentos" }
+    - { key: edit,    label: "Criar/editar/excluir configurações, retornos e mensagens" }
+    - { key: monitor, label: "Operar o monitor (reiniciar/cancelar agendamentos em andamento)" }
+dependencies: []

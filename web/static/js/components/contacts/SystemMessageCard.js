@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import htm from 'htm';
 import { formatBubbleTime } from './utils.js';
-import { isSystemCardRole, isCollapsibleRole, collapsedPreview, SYSTEM_CARD_VARIANTS } from '../../services/messageView.js';
+import { isSystemCardRole, isCollapsibleCard, collapsedPreview, SYSTEM_CARD_VARIANTS } from '../../services/messageView.js';
 import { parseCta } from '../../services/systemCta.js';
 import { AudioPlayer } from './AudioPlayer.js';
 import { MediaContent } from './MediaContent.js';
@@ -28,20 +28,23 @@ const html = htm.bind(h);
 export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, showAgentName = true, collapsed = false, onToggleCollapse = null }) {
   const role = m.role;
 
-  // Plano 63 — collapsed-by-default chip for transcription/tool_call. This card
-  // is CONTROLLED (stateless): the container owns the expansion state (G1). The
-  // gate is `isCollapsibleRole`, NEVER `isSystemCardRole` — so even if the
-  // container passed `collapsed=true` for another role, nothing minimizes (D1).
-  if (collapsed && isCollapsibleRole(role)) {
+  // Plano 63 — collapsed-by-default chip for transcription/tool_call, e a nota
+  // privada LONGA (nota curta de humano nunca recolhe). This card is CONTROLLED
+  // (stateless): the container owns the expansion state (G1). The gate é
+  // `isCollapsibleCard`, NEVER `isSystemCardRole` — so even if the container
+  // passed `collapsed=true` for another role, nothing minimizes (D1).
+  if (collapsed && isCollapsibleCard(role, m.content)) {
     return html`<${CollapsedCardChip} message=${m} variant=${SYSTEM_CARD_VARIANTS[role]}
       onToggle=${onToggleCollapse} showAgentName=${showAgentName} />`;
   }
 
   // Header click/keyboard to collapse an EXPANDED collapsible card. Inert (no
-  // affordance) unless the container passed `onToggleCollapse` — quem não passar
-  // nada mantém o card exatamente como antes (plano 63 F3 item 4).
+  // affordance) unless the container passed `onToggleCollapse` E o card ser de
+  // fato recolhível — quem não passar nada mantém o card exatamente como antes
+  // (plano 63 F3 item 4), e uma nota curta não ganha seta que não faz nada.
+  const canCollapse = !!onToggleCollapse && isCollapsibleCard(role, m.content);
   const headerToggleKeyDown = (e) => {
-    if (onToggleCollapse && (e.key === 'Enter' || e.key === ' ')) {
+    if (canCollapse && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
       onToggleCollapse();
     }
@@ -65,9 +68,19 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
               <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
             </svg>
           </button>
-          <span class="flex items-center gap-[5px] text-[10.5px] font-semibold mb-[3px] tracking-wide uppercase" style="color:#c4b5fd;">
+          <!-- A seta de recolher fica INLINE (sem ml-auto): o canto superior
+               direito já é do botão de opções da mensagem. -->
+          <span class="flex items-center gap-[5px] text-[10.5px] font-semibold mb-[3px] tracking-wide uppercase${canCollapse ? ' cursor-pointer' : ''}"
+                style="color:#c4b5fd;"
+                role=${canCollapse ? 'button' : null}
+                tabIndex=${canCollapse ? '0' : null}
+                aria-expanded=${canCollapse ? 'true' : null}
+                title=${canCollapse ? 'Recolher' : null}
+                onClick=${canCollapse ? onToggleCollapse : null}
+                onKeyDown=${canCollapse ? headerToggleKeyDown : null}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
             Mensagem privada${m.sent_by_name ? html`<span class="normal-case font-normal opacity-90"> · por ${m.sent_by_name}</span>` : ''}
+            ${canCollapse ? html`<span class="opacity-70" aria-hidden="true">▾</span>` : ''}
           </span>
           ${(m.media_type === 'audio' && m.media_path) ? html`
             <div class="min-w-[220px] max-w-[280px] my-[2px]">
@@ -89,15 +102,15 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
       <div data-mid=${m._id} class="flex justify-center mt-[4px]">
         <div class="max-w-[75%] rounded-[7.5px] px-[10px] pt-[5px] pb-[6px] text-[12.5px] leading-[17px] whitespace-pre-wrap relative"
              style="background: #2d1b4e; color: #d4bfff; border: 1px solid #4a2d7a;">
-          <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80${onToggleCollapse ? ' cursor-pointer' : ''}"
-                role=${onToggleCollapse ? 'button' : null}
-                tabIndex=${onToggleCollapse ? '0' : null}
-                aria-expanded=${onToggleCollapse ? 'true' : null}
-                onClick=${onToggleCollapse || null}
-                onKeyDown=${onToggleCollapse ? headerToggleKeyDown : null}>
+          <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80${canCollapse ? ' cursor-pointer' : ''}"
+                role=${canCollapse ? 'button' : null}
+                tabIndex=${canCollapse ? '0' : null}
+                aria-expanded=${canCollapse ? 'true' : null}
+                onClick=${canCollapse ? onToggleCollapse : null}
+                onKeyDown=${canCollapse ? headerToggleKeyDown : null}>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>
             Transcrição privada
-            ${onToggleCollapse ? html`<span class="ml-auto pl-2 opacity-70" aria-hidden="true">▾</span>` : ''}
+            ${canCollapse ? html`<span class="ml-auto pl-2 opacity-70" aria-hidden="true">▾</span>` : ''}
           </span>
           <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
           <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
@@ -131,15 +144,15 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
       <div data-mid=${m._id} class="flex justify-center mt-[4px]">
         <div class="max-w-[75%] rounded-[7.5px] px-[10px] pt-[5px] pb-[6px] text-[12.5px] leading-[17px] whitespace-pre-wrap relative"
              style="background: #2d1b0e; color: #fbbf24; border: 1px solid #78350f;">
-          <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80${onToggleCollapse ? ' cursor-pointer' : ''}"
-                role=${onToggleCollapse ? 'button' : null}
-                tabIndex=${onToggleCollapse ? '0' : null}
-                aria-expanded=${onToggleCollapse ? 'true' : null}
-                onClick=${onToggleCollapse || null}
-                onKeyDown=${onToggleCollapse ? headerToggleKeyDown : null}>
+          <span class="flex items-center gap-1 text-[10px] font-semibold mb-[2px] opacity-80${canCollapse ? ' cursor-pointer' : ''}"
+                role=${canCollapse ? 'button' : null}
+                tabIndex=${canCollapse ? '0' : null}
+                aria-expanded=${canCollapse ? 'true' : null}
+                onClick=${canCollapse ? onToggleCollapse : null}
+                onKeyDown=${canCollapse ? headerToggleKeyDown : null}>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
             ${(showAgentName && m.agent_name) ? `Ferramenta IA - ${m.agent_name}` : 'Ferramenta IA'}
-            ${onToggleCollapse ? html`<span class="ml-auto pl-2 opacity-70" aria-hidden="true">▾</span>` : ''}
+            ${canCollapse ? html`<span class="ml-auto pl-2 opacity-70" aria-hidden="true">▾</span>` : ''}
           </span>
           <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
           <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">

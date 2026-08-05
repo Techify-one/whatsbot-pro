@@ -1,6 +1,6 @@
 id: protocolos
 name: Protocolos
-version: 1.24.1
+version: 1.25.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Camada de protocolos sobre os atendimentos (estilo Chatwoot personalizado). MANTÉM o
@@ -49,6 +49,12 @@ description: >-
   formulário e o filtro "Vínculo do atendente". O mecanismo continua idêntico — atribuir a
   conversa segue carimbando, e o agrupamento e o filtro "Atendente" seguem achando quem só
   tem o vínculo provisório.
+  A 1.25.0 leva os campos do protocolo ao construtor de regras do plugin Retorno Automático
+  (Configurações): com os dois ativos, o select de condições ganha a seção "Configurações
+  (outros plugins)" com os grupos Protocolos e Protocolos · Atendimento — status, atendente
+  efetivo, aberto por, tempo desde a abertura/fechamento, dia de fechamento,
+  nº de atendimentos, nota da avaliação E todos os campos configuráveis dos dois escopos.
+  O protocolo avaliado é o ABERTO do contato e, na falta dele, o último FECHADO.
   Permissões: ver, editar/resolver/configurar, criar visualizações e gerenciar visualizações
   de equipe. Desative e a tela volta ao padrão — os dados ficam nas tabelas do plugin e no
   custom_attributes do core.

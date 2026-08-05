@@ -34,7 +34,7 @@ import { useChatDayHeader } from './hooks/useChatDayHeader.js';
 import { PILL_TRAVEL } from '../../services/chatDayHeader.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
-import { senderColor, quotedMediaText, cardStateKey, isCollapsibleRole } from '../../services/messageView.js';
+import { senderColor, quotedMediaText, cardStateKey, isCollapsibleCard } from '../../services/messageView.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { transitionAfterOutput } from '../../services/outputTransition.js';
 
@@ -454,7 +454,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       // expand, so this immediate highlight wouldn't survive).
       const wantKey = `id:${target}`;
       const tMsg = (messages || []).find((mm) => mm._id != null && String(mm._id) === target);
-      if (tMsg && isCollapsibleRole(tMsg.role) && !expandedCards.has(wantKey)) {
+      if (tMsg && isCollapsibleCard(tMsg.role, tMsg.content) && !expandedCards.has(wantKey)) {
         focusAfterExpandRef.current = target;
         setExpandedCards((prev) => new Set(prev).add(wantKey));
       }
@@ -847,10 +847,11 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 // not-yet-saved private_note.
                 const stateKey = cardStateKey(m, i);
                 const cardKey = m._localId || stateKey;
-                // Plano 63 F4: transcription/tool_call are collapsed unless the
+                // Plano 63 F4: transcription/tool_call (e nota privada LONGA,
+                // ex.: a instrução que o `retornos` registra) are collapsed unless the
                 // user expanded THIS card. Derived in render (no effect) so there's
                 // no flash/jump on open (G5); the card is controlled (G1).
-                const collapsed = isCollapsibleRole(m.role) && !expandedCards.has(stateKey);
+                const collapsed = isCollapsibleCard(m.role, m.content) && !expandedCards.has(stateKey);
                 return [dateSeparator, html`<${SystemMessageCard}
                   key=${cardKey} message=${m} index=${i} fmt=${fmt} openMsgMenu=${openMsgMenu}
                   showAgentName=${showAgentName}
