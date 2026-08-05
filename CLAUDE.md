@@ -166,7 +166,18 @@ Mensagens recebidas no WhatsApp são entregues em tempo real via webhook do GOWA
 
 O tipo de um chat do WhatsApp é definido pelo **sufixo do JID** (depois do `@`), não pelo número — o prefixo `120363…` é compartilhado por grupo, canal e comunidade. [channels/jid.py](channels/jid.py) (`classify_jid`) mapeia o sufixo para um tipo lógico: `person` (`@s.whatsapp.net`), `person_lid` (`@lid`), `group` (`@g.us`), `newsletter` (Canal, `@newsletter`), `broadcast` (Status/transmissão, `@broadcast`), `bot` (`@bot`), `unknown`.
 
-No webhook GOWA ([server/routes/webhook.py](server/routes/webhook.py)), logo após resolver o `chat_jid`, a mensagem é classificada e **descartada antes de materializar qualquer contato** se o tipo não estiver na lista permitida — corrige o bug em que tudo que não era `@g.us` caía no ramo "pessoa" (um post de Canal virava "contato fantasma"). A lista permitida vem de `config.allowed_jid_types` do canal GOWA (lida do canal `default`, que é single-channel no inbound; cache de 30s, invalidado ao editar a config do canal). **Default**: `person`, `person_lid`, `group` (descarta canal/status/bot). Tipos `unknown` nunca são bloqueados (preserva comportamento legado). A UI fica na criação/edição do canal GOWA em [web/static/js/components/ChannelsManager.js](web/static/js/components/ChannelsManager.js) (`JidTypePicker`) — o usuário escolhe pelos rótulos amigáveis, sem ver o JID. Vale **apenas para canais GOWA**.
+No webhook GOWA ([server/routes/webhook.py](server/routes/webhook.py)), logo após resolver o `chat_jid`, a mensagem é classificada e **descartada antes de materializar qualquer contato** se o tipo não estiver na lista permitida — corrige o bug em que tudo que não era `@g.us` caía no ramo "pessoa" (um post de Canal virava "contato fantasma"). A lista permitida vem de `config.allowed_jid_types` do canal GOWA (lida do canal `default`, que é single-channel no inbound; cache de 30s, invalidado ao editar a config do canal). Tipos `unknown` nunca são bloqueados (preserva comportamento legado).
+
+⚠️ **São DOIS defaults diferentes, em arquivos diferentes** (plano 103) — não "conserte" um achando que é o outro:
+
+| | Default de **CRIAÇÃO** | Fallback de **RUNTIME** |
+|---|---|---|
+| Constante | `GOWA_DEFAULT_JID_TYPES` — [channels/providers/gowa_channel.py:63](channels/providers/gowa_channel.py#L63) | `DEFAULT_ALLOWED_JID_TYPES` — [channels/jid.py:38](channels/jid.py#L38) |
+| Valor | `person` + `person_lid` (**sem `group`**) | `person` + `person_lid` + `group` |
+| Quando vale | semeia o formulário de um canal **novo** (via `config_fields[].default` do descriptor) | quando o canal **não tem** a chave salva (ou salvou lixo) |
+| Alcance | só canal criado dali pra frente | **todo canal legado** sem a chave |
+
+Canal GOWA novo nasce, portanto, **sem grupo marcado**: um número de atendimento individual materializava todo grupo de que participa (foram 118 contatos no incidente do plano 102). A opção continua visível e a um clique. Mexer no fallback de runtime seria **retroativo** — calaria grupos em canais antigos. A UI fica na criação/edição do canal GOWA em [web/static/js/components/ChannelsManager.js](web/static/js/components/ChannelsManager.js) (`JidTypePicker`) — o usuário escolhe pelos rótulos amigáveis, sem ver o JID. Vale **apenas para canais GOWA**.
 
 ## Contrato de identidade de conta / dedup de canais (plano 32)
 

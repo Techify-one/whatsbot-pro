@@ -27,8 +27,14 @@ UNKNOWN = "unknown"          # anything else / no suffix
 # previous "person-like" behaviour instead of being silently dropped.
 ALL_JID_TYPES = [PERSON, PERSON_LID, GROUP, NEWSLETTER, BROADCAST, BOT]
 
-# Default: surface people and groups; drop channels/status/bots (fixes the
-# phantom-contact bug where every non-@g.us JID fell into the "person" branch).
+# RUNTIME fallback: applies to a channel with NO saved ``config.allowed_jid_types``
+# (or an unusable one). Surfaces people and groups; drops channels/status/bots
+# (fixes the phantom-contact bug where every non-@g.us JID fell into the "person"
+# branch).
+# ⚠️ NOT the create-time form default. A NEW channel is seeded from
+# ``channels.providers.gowa_channel.GOWA_DEFAULT_JID_TYPES``, which has no
+# ``group``. Dropping ``GROUP`` *here* would be RETROACTIVE: it would silence
+# groups on every legacy channel that never saved the key (plano 103 D2).
 DEFAULT_ALLOWED_JID_TYPES = [PERSON, PERSON_LID, GROUP]
 
 # PT-BR labels for the configuration UI / API.

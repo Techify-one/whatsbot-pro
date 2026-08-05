@@ -52,7 +52,15 @@ GOWA_JID_TYPES = [
     {"value": "bot", "label": "Bot (Meta AI etc.)",
      "hint": "Conversas com bots como o Meta AI."},
 ]
-GOWA_DEFAULT_JID_TYPES = ["person", "person_lid", "group"]
+# CREATE-time default: seeds the form of a NEW channel (descriptor →
+# ``initialConfigValues``). ``group`` starts UNCHECKED — a number created for
+# one-to-one support was materializing every group it belongs to as a
+# conversation (118 phantom contacts, plano 102/103). The option stays visible
+# and one click away.
+# ⚠️ NOT ``channels.jid.DEFAULT_ALLOWED_JID_TYPES``, the RUNTIME fallback for a
+# channel with no saved key: changing THAT one is retroactive (it would silence
+# groups on legacy channels).
+GOWA_DEFAULT_JID_TYPES = ["person", "person_lid"]
 
 
 class GOWAChannel(Channel):
@@ -120,7 +128,9 @@ class GOWAChannel(Channel):
                  "default": list(GOWA_DEFAULT_JID_TYPES),
                  "help": "Escolha quais tipos de conversa deste número viram "
                          "conversa. Os tipos desmarcados são ignorados (não "
-                         "aparecem no painel)."},
+                         "aparecem no painel). Atenção: marcar \"Grupo / "
+                         "Comunidade\" faz TODO grupo de que este número "
+                         "participa virar conversa no painel."},
                 {"key": "disconnect_alert_enabled",
                  "label": "Avisar no Telegram se este número cair",
                  "type": "bool", "default": True,

@@ -199,7 +199,9 @@ def test_classify_newsletter_discarded(build_app):
     """classify_jid → newsletter (@newsletter): DISCARDED on the live path.
 
     PARITY (plano 23 Fase F2): the CLAUDE.md-documented ``allowed_jid_types``
-    discard (default = person/person_lid/group) now runs on the generic
+    discard (runtime fallback for a channel with no saved key =
+    person/person_lid/group — ``channels.jid.DEFAULT_ALLOWED_JID_TYPES``, NOT the
+    create-time descriptor default, which drops ``group``) now runs on the generic
     ``/api/webhook/gowa/{channel_id}`` path too — in ``ingest_event`` BEFORE any
     contact is materialized. A newsletter (``@newsletter``) post is therefore
     dropped: no contact row, no persisted message, no bus events. This was
