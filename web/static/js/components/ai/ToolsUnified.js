@@ -22,6 +22,7 @@ import {
   getToolHistory,
   rollbackTool,
 } from '../../services/api.js';
+import { subscribe as subscribeWs } from '../../services/wsBus.js';
 import { useDeepLink } from '../../hooks/useDeepLink.js';
 import { useUrlState } from '../../hooks/useUrlState.js';
 import { readParams, writeParams, bool, str } from '../../services/urlState.js';
@@ -109,17 +110,12 @@ export default function ToolsUnified({ initialEntity }) {
 
   useEffect(() => { load(); }, []);
 
-  useEffect(() => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${location.host}/ws`);
-    ws.onmessage = (msg) => {
-      try {
-        const ev = JSON.parse(msg.data);
-        if (ev.event === 'tools_changed') load();
-      } catch {}
-    };
-    return () => ws.close();
-  }, []);
+  // Live refresh via the SHARED, AUTHENTICATED bus (plano 107 · F5). This used to open a
+  // raw `new WebSocket('/ws')`, which carries no `?token=` — the gate closes it with 4401
+  // as soon as ≥1 user exists (plano 48 F0). Silently: no onerror/onclose handler, so the
+  // screen simply stopped refreshing and nothing said so. This is the ONLY client-side
+  // consumer of `tools_changed` (server/routes/tools.py).
+  useEffect(() => subscribeWs({ tools_changed: () => load() }), []);
 
   // Merge both sources by name: registered order first, then code-only rows.
   const rows = useMemo(() => {
