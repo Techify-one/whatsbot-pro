@@ -6,9 +6,16 @@ segue funcionando.
 
 ``protocolos.*`` não está em ``KNOWN_EVENTS`` (o catálogo é o vocabulário do
 core), então o carregador loga um WARNING informativo por nome. É documentado
-como informativo-e-nunca-bloqueante — aceito de propósito. NÃO usar ``"*"`` só
-para fugir do warning: isso entregaria todo ``message.received`` (com base64 de
-mídia no ``raw``) a cada mensagem, para uns poucos eventos por dia.
+como informativo-e-nunca-bloqueante — aceito de propósito. NÃO usar ``"*"``: isso
+entregaria TODO evento do sistema a este plugin, incluindo o ``raw`` com base64
+de mídia de cada mensagem, para uns poucos eventos por dia.
+
+``message.received`` **é** assinado, por exceção justificada: o consentimento
+por clique em botão precisa do ``media_extras``, que só existe no evento (o core
+não persiste esse campo na tabela de mensagens). O custo é pago no primeiro
+guard de ``consent.on_message_received``, que compara ``media_type`` em memória e
+sai antes de qualquer ida ao banco — ver o teste
+``test_mensagem_de_texto_nao_toca_o_banco``.
 """
 
 from __future__ import annotations
@@ -16,7 +23,7 @@ from __future__ import annotations
 import logging
 
 
-from . import mirror, push
+from . import consent, mirror, push
 
 
 def _fan(*handlers):
@@ -62,4 +69,8 @@ EVENT_HANDLERS = {
     # ``push.on_tool_after`` filtra por conta própria as tools que gravam no
     # cadastro — o conjunto dele é SEPARADO do de ``mirror`` de propósito.
     "tool.after": _fan(mirror.on_tool_after, push.on_tool_after),
+    # Consentimento de marketing por clique em botão de template. Só reage a
+    # mensagem interativa vinda de canal de WhatsApp oficial — todo o resto sai
+    # na primeira comparação, sem tocar no banco.
+    "message.received": consent.on_message_received,
 }

@@ -24,6 +24,7 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { authHeaders } from '/static/js/services/api.js';
 import FieldSync, { ApiKeyCard } from '/plugins/trackify/static/FieldSync.js';
+import Consent from '/plugins/trackify/static/Consent.js';
 
 const html = htm.bind(h);
 
@@ -402,15 +403,18 @@ function Queue({ data, onRefresh, onRequeue, busy }) {
     </section>`;
 }
 
-// Três abas, com o Health SEMPRE visível acima delas: ele é a linha de status
-// do plugin e já reporta as três áreas, então esconder atrás de aba tiraria o
-// único lugar onde se vê tudo de uma vez. "Campos do contato" fica por último
-// porque depende das outras duas (precisa do DSN para listar os campos do CDP)
-// e é a única que pode mexer na identidade dos contatos lá.
+// Abas, com o Health SEMPRE visível acima delas: ele é a linha de status do
+// plugin e já reporta as áreas, então esconder atrás de aba tiraria o único
+// lugar onde se vê tudo de uma vez. "Campos do contato" vem depois das duas
+// primeiras porque depende delas (precisa da credencial para listar os campos
+// do CDP) e é a única que pode mexer na identidade dos contatos lá.
+// "Descadastro por botão" fica por último porque escreve num campo só, e
+// depende da mesma credencial.
 const TABS = [
   ['conexao', 'Conexão'],
   ['espelho', 'Espelho de eventos'],
   ['campos', 'Campos do contato'],
+  ['consent', 'Descadastro por botão'],
 ];
 
 function Tabs({ value, onChange }) {
@@ -540,6 +544,9 @@ export default function TrackifyConfig() {
         <${Queue} data=${queue} onRefresh=${loadQueue} onRequeue=${requeue} busy=${busy} />`}
       ${tab === 'campos' && html`
         <${FieldSync} req=${req} settings=${settings} onSaveSettings=${patchSettings}
+          busy=${busy} />`}
+      ${tab === 'consent' && html`
+        <${Consent} req=${req} settings=${settings} onSaveSettings=${patchSettings}
           busy=${busy} />`}
     </div>`;
 }

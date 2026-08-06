@@ -18,7 +18,7 @@ import time
 
 import httpx
 
-from . import _config, dispatcher, pull, push, reconcile
+from . import _config, consent, dispatcher, pull, push, reconcile
 from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.lifecycle")
@@ -26,6 +26,7 @@ logger = logging.getLogger("plugins.trackify.lifecycle")
 TICK_BUSY = 1.0     # com fila
 TICK_IDLE = 5.0     # sem fila
 PRUNE_EVERY = 3600.0
+CONSENT_PRUNE_EVERY = 86400.0
 
 _worker_id = f"{os.getpid()}"
 
@@ -163,6 +164,64 @@ async def _field_loop(ctx) -> None:
             await asyncio.sleep(max(cool, TICK_BUSY if processed else TICK_IDLE))
 
 
+# ── Consentimento de marketing ───────────────────────────────────────────
+
+def _consent_rate_per_min() -> int:
+    try:
+        v = int(_config.setting("consent_rate_per_min", 10))
+    except (TypeError, ValueError):
+        return 10
+    return max(1, min(v, 25))
+
+
+async def _consent_cycle(client: httpx.AsyncClient) -> int:
+    if not _config.consent_ready() or _blocked_reason():
+        return 0
+    # ⚠️ O relógio de cooldown é COMPARTILHADO com o ``push`` de propósito: as
+    # duas features batem em PUT /contacts/{id}, que é o MESMO balde de 30/min
+    # por IP. Um 429 num worker tem de calar o outro, senão os dois brigam pela
+    # mesma janela e nenhum anda.
+    if push.cooldown_remaining() > 0:
+        return 0
+
+    rate = _consent_rate_per_min()
+    gap = 60.0 / rate
+    batch = max(1, min(rate, 5))
+
+    rows = await asyncio.to_thread(consent.claim, batch, _worker_id)
+    if not rows:
+        return 0
+
+    done = 0
+    for row in rows:
+        outcome = await consent.deliver_one(client, row)
+        done += 1
+        if outcome == "throttled" or push.cooldown_remaining() > 0:
+            break
+        # Só espaça quando de fato houve ida à rede.
+        if done < len(rows) and outcome in ("sent", "blocked", "retry", "unlinked"):
+            await asyncio.sleep(gap)
+    return done
+
+
+async def _consent_loop(ctx) -> None:
+    last_prune = 0.0
+    async with httpx.AsyncClient(timeout=tk_client.WRITE_TIMEOUT) as client:
+        while True:
+            processed = 0
+            try:
+                processed = await _consent_cycle(client)
+
+                agora = time.time()
+                if agora - last_prune > CONSENT_PRUNE_EVERY:
+                    last_prune = agora
+                    await asyncio.to_thread(consent.prune_seen, 30)
+            except Exception:  # noqa: BLE001 — o laço NUNCA morre (ver docstring)
+                logger.warning("trackify: ciclo de consentimento falhou", exc_info=True)
+            cool = push.cooldown_remaining()
+            await asyncio.sleep(max(cool, TICK_BUSY if processed else TICK_IDLE))
+
+
 def _poll_seconds() -> float:
     try:
         v = float(_config.setting("field_sync_poll_seconds", 60))
@@ -265,6 +324,8 @@ def setup(ctx) -> None:
         ctx.spawn_task("fieldpull", lambda: _pull_loop(ctx),
                        policy=RestartPolicy.PERMANENT)
         ctx.spawn_task("fieldreconcile", lambda: _reconcile_loop(ctx),
+                       policy=RestartPolicy.PERMANENT)
+        ctx.spawn_task("consent", lambda: _consent_loop(ctx),
                        policy=RestartPolicy.PERMANENT)
     except Exception:  # noqa: BLE001
         logger.debug("trackify: supervisor indisponível — tasks não iniciadas",

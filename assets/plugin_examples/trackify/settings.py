@@ -175,3 +175,62 @@ class Settings(BaseModel):
             "de ingestão e, na falta dela, da URL do Trackify."
         ),
     )
+
+    # ── Consentimento de marketing por clique em botão ───────────────────
+    # Só ESCALARES aqui. A lista de canais permitidos e o mapa de botões moram
+    # em tabela (ver migrations/003_consent.sql): o PUT de settings do core é
+    # destrutivo, e um array aqui seria zerado por qualquer save de outra aba.
+    consent_enabled: bool = Field(
+        default=False,
+        title="Registrar descadastro por clique em botão",
+        description=(
+            "Quando o contato toca um botão de template num canal de WhatsApp "
+            "oficial, grava o resultado no campo de descadastro do cadastro dele "
+            "no Trackify. Só vale para canais marcados na aba, e só para contatos "
+            "já vinculados a um cadastro lá — nunca cria contato no CDP."
+        ),
+    )
+    consent_dry_run: bool = Field(
+        default=True,
+        title="Modo seco (não grava no Trackify)",
+        description=(
+            "Captura o clique e registra o que gravaria, mas NÃO envia. Deixe "
+            "ligado até conferir, na lista de botões vistos, que o texto que "
+            "chega da Meta é o que você espera."
+        ),
+    )
+    consent_field_slug: str = Field(
+        default="optout_marketing",
+        title="Campo de descadastro no Trackify",
+        description=(
+            "Slug do campo personalizado de contato. Tem de ser EXATAMENTE o "
+            "mesmo configurado no módulo Campanhas (chave trackify_campo_optout) "
+            "— apontar para slugs diferentes não quebra nada e faz o disparo "
+            "continuar indo para quem pediu para sair."
+        ),
+    )
+    consent_optout_value: str = Field(
+        default="sim",
+        title="Valor gravado ao descadastrar",
+        description=(
+            "O Campanhas trata vazio, 'nao', 'não', 'n', 'no', 'false' e '0' como "
+            "quem CONTINUA recebendo — qualquer outro valor bloqueia. Use 'sim', "
+            "'true' ou a data do descadastro."
+        ),
+    )
+    consent_optin_value: str = Field(
+        default="",
+        title="Valor gravado ao voltar a receber",
+        description=(
+            "Vazio APAGA o campo no Trackify, que é o estado mais limpo e o único "
+            "que libera o contato sob qualquer leitura do contrato."
+        ),
+    )
+    consent_rate_per_min: int = Field(
+        default=10, ge=1, le=25,
+        title="Gravações de consentimento por minuto",
+        description=(
+            "Divide com a sincronização de campos o mesmo balde de 30/min por IP "
+            "das rotas de contato do Trackify. Mantenha a soma dos dois com folga."
+        ),
+    )

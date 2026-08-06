@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from db.repositories import contact_repo
 from plugins.context import audit, plugin_permission
 
-from . import _config, dispatcher, field_map, identity, journey, push, sync_state
+from . import _config, consent, dispatcher, field_map, identity, journey, push, sync_state
 from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.routes")
@@ -243,6 +243,21 @@ async def trackify_fields(refresh: int = 0):
     return {"ok": True, "data": data}
 
 
+def _reserved_slugs() -> dict:
+    """Campos do CDP que já têm outro dono dentro deste plugin.
+
+    O campo de descadastro é escrito pela aba de consentimento. Mapeá-lo também
+    aqui ligaria o ``pull``, que traria o valor antigo do CDP de volta e poderia
+    **desfazer** um descadastro sem ninguém pedir.
+    """
+    if not bool(_config.setting("consent_enabled", False)):
+        return {}
+    slug = _config.consent_field_slug()
+    return {slug: ("Este campo é o do descadastro e já é mantido pela aba "
+                   "'Descadastro por botão'. Mapeá-lo aqui faria a leitura do "
+                   "Trackify desfazer um descadastro.")} if slug else {}
+
+
 @router.get("/mappings", dependencies=[plugin_permission("manage")])
 async def get_mappings():
     rows = await asyncio.to_thread(field_map.list_maps)
@@ -267,7 +282,8 @@ async def put_mappings(body: dict):
     def _run():
         before = field_map.list_maps()
         clean, errors = field_map.validate(
-            rows, tk, credential_set=_config.credential_set())
+            rows, tk, credential_set=_config.credential_set(),
+            reserved_slugs=_reserved_slugs())
         if errors:
             return before, None, errors
         field_map.replace_all(clean)
@@ -528,3 +544,200 @@ async def health():
         "field_sync_enabled": bool(_config.setting("field_sync_enabled", False)),
         "field_sync_credential_set": await asyncio.to_thread(_config.credential_set),
     }}
+
+
+# ── Consentimento de marketing por clique em botão ───────────────────────
+
+@router.get("/consent/status", dependencies=[plugin_permission("manage")])
+async def consent_status():
+    """Tudo que a aba precisa numa chamada só, inclusive o veredito ao vivo do
+    campo no CDP (existe? está ativo? qual o tipo?)."""
+    async with _http() as http:
+        return {"ok": True, "data": await consent.status(http)}
+
+
+@router.put("/consent/channels", dependencies=[plugin_permission("manage")])
+async def put_consent_channels(body: dict):
+    """Allow-list de canais. Fail-closed: lista vazia desliga a captura.
+
+    Revalida contra o provider no servidor — a tela é conveniência, o gate é
+    aqui, e um chamador programático não passa por ela.
+    """
+    pedidos = (body or {}).get("channel_ids") or []
+
+    def _run():
+        antes = [r["channel_id"] for r in consent.list_channels()]
+        oficiais = {c["channel_id"] for c in consent.official_channels()}
+        aceitos = consent.replace_channels(pedidos, official_ids=oficiais)
+        recusados = [str(c) for c in pedidos if str(c) not in aceitos]
+        return antes, aceitos, recusados
+
+    antes, aceitos, recusados = await asyncio.to_thread(_run)
+    audit("trackify", "consent.channels", before=antes, after=aceitos)
+    return {"ok": True, "data": {"channel_ids": aceitos, "rejected": recusados}}
+
+
+@router.get("/consent/rules", dependencies=[plugin_permission("manage")])
+async def get_consent_rules():
+    def _run():
+        return {
+            "rows": consent.list_rules(),
+            "channels": consent.official_channels(),
+            "max_rows": consent.MAX_RULES,
+        }
+    return {"ok": True, "data": await asyncio.to_thread(_run)}
+
+
+@router.put("/consent/rules", dependencies=[plugin_permission("manage")])
+async def put_consent_rules(body: dict):
+    """Troca o conjunto inteiro de regras, com erros POR LINHA."""
+    rows = (body or {}).get("rows")
+
+    def _run():
+        antes = consent.list_rules()
+        oficiais = {c["channel_id"] for c in consent.official_channels()}
+        clean, errors = consent.validate_rules(rows, official_ids=oficiais)
+        if errors:
+            return antes, None, errors
+        consent.replace_rules(clean)
+        return antes, consent.list_rules(), {}
+
+    antes, depois, errors = await asyncio.to_thread(_run)
+    if errors:
+        return _err("Corrija as regras destacadas.", 400, {"row_errors": errors})
+    # Só a configuração entra na trilha — nunca um valor de contato.
+    _campos = ("channel_id", "match_value", "meaning", "enabled")
+    audit("trackify", "consent.rules",
+          before=[{k: r[k] for k in _campos} for r in antes],
+          after=[{k: r[k] for k in _campos} for r in depois])
+    return {"ok": True, "data": {"rows": depois}}
+
+
+@router.get("/consent/seen", dependencies=[plugin_permission("manage")])
+async def get_consent_seen(limit: int = 50):
+    """Botões que chegaram e ainda não viraram regra.
+
+    É o caminho de descoberta: como o template é criado do lado do Campanhas, o
+    operador não tem como saber de antemão qual string a Meta devolve no clique.
+    """
+    return {"ok": True, "data": {
+        "rows": await asyncio.to_thread(consent.list_seen, limit)}}
+
+
+@router.get("/consent/templates", dependencies=[plugin_permission("manage")])
+async def get_consent_templates(channel_id: str = ""):
+    """Templates da conta Meta com botões de resposta rápida.
+
+    Servido pelo próprio plugin (e não pela rota do core
+    ``GET /api/channels/{id}/templates``) porque aquela é gateada por
+    ``conversation.reply`` — permissão diferente de ``plugin.trackify.manage``.
+    Um operador criado só para configurar integrações levaria 403 numa tela que
+    tem direito de usar.
+
+    Degrada com mensagem em vez de 500 quando o registry não está cabeado
+    (harness de teste) ou o canal não sabe listar template.
+    """
+    if not channel_id:
+        return _err("Escolha um canal.", 400)
+
+    def _oficial():
+        return consent.is_official(channel_id)
+
+    if not await asyncio.to_thread(_oficial):
+        return _err("Este canal não é de WhatsApp oficial.", 400)
+
+    # ⚠️ `list_templates` é SÍNCRONA e vive no `outbound_router`, não no canal
+    # direto: é lá que moram o gate de capability e o cache de 300s. Chamar o
+    # objeto do registry e dar `await` no retorno rendia um TypeError silencioso
+    # ("object list can't be used in 'await' expression") que a tela mostrava
+    # como "não foi possível listar".
+    try:
+        from plugins.context import get_deps
+        router = getattr(get_deps(), "outbound_router", None)
+        if router is None:
+            raise RuntimeError("roteador de saída não cabeado")
+        if not router.supports(channel_id, "templates"):
+            return {"ok": True, "data": {
+                "supported": False, "templates": [],
+                "message": "Este canal não trabalha com templates."}}
+        brutos = await asyncio.to_thread(router.list_templates, channel_id)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("trackify: listagem de templates indisponível", exc_info=True)
+        return {"ok": True, "data": {
+            "supported": False, "templates": [],
+            "message": f"Não foi possível listar os templates ({type(e).__name__})."}}
+
+    com_botoes = _templates_com_botoes(brutos)
+    # `outbound_router.list_templates` engole erro e devolve `[]`, então "nenhum
+    # template" e "a conta não respondeu" chegam iguais aqui. Distinguir importa:
+    # os consertos são diferentes.
+    if not brutos:
+        return {"ok": True, "data": {
+            "supported": True, "templates": [],
+            "message": "A conta Meta deste canal não devolveu nenhum template. "
+                       "Confira o WABA ID e o token do canal."}}
+    if not com_botoes:
+        return {"ok": True, "data": {
+            "supported": True, "templates": [],
+            "message": f"{len(brutos)} template(s) na conta, mas nenhum é MARKETING "
+                       "com botão de resposta rápida."}}
+    return {"ok": True, "data": {"supported": True, "templates": com_botoes}}
+
+
+def _templates_com_botoes(brutos) -> list[dict]:
+    """Só templates MARKETING que tenham botão de resposta rápida.
+
+    Os outros nem aparecem para seleção: o clique não diz de qual template veio,
+    então a criação da regra é o único ponto onde a categoria pode ser exigida.
+    Botões de URL/telefone ficam de fora — não produzem mensagem de volta.
+
+    ⚠️ O canal normaliza o template antes de entregar e **minúscula o `type` do
+    componente** (``BUTTONS`` → ``buttons``), mas deixa `category` e o `type` do
+    botão como a Meta mandou. Por isso a varredura procura a CHAVE ``buttons`` em
+    vez de comparar o tipo do componente — assim funciona com a forma normalizada
+    e com a forma crua da Graph API.
+    """
+    out: list[dict] = []
+    for t in brutos or []:
+        if not isinstance(t, dict):
+            continue
+        if str(t.get("category") or "").upper() != "MARKETING":
+            continue
+        botoes: list[dict] = []
+        for comp in t.get("components") or []:
+            if not isinstance(comp, dict):
+                continue
+            for b in comp.get("buttons") or []:
+                if not isinstance(b, dict):
+                    continue
+                if str(b.get("type") or "").upper() != "QUICK_REPLY":
+                    continue
+                rotulo = str(b.get("text") or "").strip()
+                if not rotulo:
+                    continue
+                botoes.append({"text": rotulo,
+                               "payload": str(b.get("payload") or "").strip()})
+        if botoes:
+            out.append({
+                "name": t.get("name") or "",
+                "language": t.get("language") or "",
+                "status": t.get("status") or "",
+                "category": str(t.get("category") or "").upper(),
+                "buttons": botoes,
+            })
+    return out
+
+
+@router.get("/consent/queue", dependencies=[plugin_permission("manage")])
+async def get_consent_queue(status: str = "", limit: int = 50):
+    def _run():
+        return {"stats": consent.stats(),
+                "rows": consent.list_queue(status, limit)}
+    return {"ok": True, "data": await asyncio.to_thread(_run)}
+
+
+@router.post("/consent/queue/retry", dependencies=[plugin_permission("manage")])
+async def retry_consent_queue():
+    n = await asyncio.to_thread(consent.retry_failed)
+    audit("trackify", "consent.queue_retry", after={"reenfileirados": n})
+    return {"ok": True, "data": {"requeued": n}}

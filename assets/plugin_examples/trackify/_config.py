@@ -31,6 +31,13 @@ DEFAULTS: dict = {
     "field_sync_rate_per_min": 15,
     "field_sync_reconcile_minutes": 60,
     "sync_api_base": "",
+    # Consentimento de marketing por clique em botão (espelho de settings.Settings).
+    "consent_enabled": False,
+    "consent_dry_run": True,
+    "consent_field_slug": "optout_marketing",
+    "consent_optout_value": "sim",
+    "consent_optin_value": "",
+    "consent_rate_per_min": 10,
     # Não declarada em settings.py de propósito (segredo, ver docstring de lá).
     # É a ÚNICA credencial do plugin: vale para ler, escrever e ingerir, conforme
     # os escopos concedidos na tela do Trackify.
@@ -126,6 +133,38 @@ def credential_set() -> bool:
 
 def field_sync_ready() -> bool:
     return bool(setting("field_sync_enabled", False)) and credential_set()
+
+
+# ── Consentimento de marketing ───────────────────────────────────────────
+
+def consent_field_slug() -> str:
+    """Slug do campo de descadastro no CDP.
+
+    Tem de ser o MESMO que o módulo Campanhas lê (chave de configuração
+    ``trackify_campo_optout`` lá, cujo padrão é ``optout_marketing``). Os dois
+    lados apontando para slugs diferentes é a falha silenciosa mais provável
+    desta integração: nada quebra, o valor é gravado, e o disparo continua.
+    """
+    return (setting("consent_field_slug") or "").strip() or "optout_marketing"
+
+
+def consent_optout_value() -> str:
+    """Valor gravado quando o contato pede para NÃO receber mais."""
+    return str(setting("consent_optout_value", "sim") or "")
+
+
+def consent_optin_value() -> str:
+    """Valor gravado quando o contato quer continuar recebendo.
+
+    ``""`` APAGA a linha do campo no CDP, que é o único valor liberador sob
+    qualquer leitura do contrato do Campanhas.
+    """
+    return str(setting("consent_optin_value", "") or "")
+
+
+def consent_ready() -> bool:
+    """Ligado E com credencial. Gateia o enfileiramento e a entrega."""
+    return bool(setting("consent_enabled", False)) and credential_set()
 
 
 def contact_link(contact_id: str) -> str:

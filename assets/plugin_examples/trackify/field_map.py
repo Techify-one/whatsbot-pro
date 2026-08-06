@@ -168,11 +168,17 @@ def list_maps(enabled_only: bool = False) -> list[dict]:
 
 # ── Validação ────────────────────────────────────────────────────────────
 
-def validate(rows: list, tk: dict, *, credential_set: bool) -> tuple[list[dict], dict]:
+def validate(rows: list, tk: dict, *, credential_set: bool,
+             reserved_slugs: dict | None = None) -> tuple[list[dict], dict]:
     """Devolve ``(linhas_limpas, erros_por_índice)``.
 
     ``credential_set`` entra como parâmetro (e não é lido daqui) para esta
     função continuar testável sem tocar em config.
+
+    ``reserved_slugs`` é ``{slug: motivo}`` — campos do CDP que já têm outro dono
+    dentro deste plugin. Hoje o único é o campo de descadastro: se ele também
+    fosse mapeado aqui, o ``pull`` traria o valor do CDP de volta e poderia
+    **desfazer** um descadastro. É uma guarda cruzada, não estética.
     """
     errors: dict[str, list[str]] = {}
     clean: list[dict] = []
@@ -256,6 +262,11 @@ def validate(rows: list, tk: dict, *, credential_set: bool) -> tuple[list[dict],
             err(i, f"Este campo do Trackify já está mapeado na linha {dup + 1}.")
             continue
         seen_right[tk_slug] = i
+
+        motivo = (reserved_slugs or {}).get(tk_slug)
+        if motivo:
+            err(i, motivo)
+            continue
 
         # ── Lado direito ─────────────────────────────────────────────────
         field = tk_by_slug.get(tk_slug)

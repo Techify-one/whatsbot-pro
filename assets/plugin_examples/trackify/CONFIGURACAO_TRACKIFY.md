@@ -139,3 +139,90 @@ o campo correspondente. Com ele, o dado chega e fica consultável mesmo antes do
 
 O passo 4 é o que pega erro de mapeamento: um `422` põe a linha em `blocked` com o motivo,
 e o botão **Reprocessar** devolve tudo à fila depois que você consertar o JSONata.
+
+---
+
+## 6. Descadastro de marketing por clique em botão (aba "Descadastro por botão")
+
+Quando o contato toca um botão de um template de marketing num canal de **WhatsApp
+oficial**, o plugin grava o resultado num campo do cadastro dele no Trackify. É esse
+campo que o módulo **Campanhas de Marketing** lê para montar a lista de disparo — ou
+seja, depois desta mudança o CDP é o **único elo** entre os dois sistemas.
+
+### 6.1 O contrato do campo (leia antes de escolher os valores)
+
+O Campanhas aplica o gate em SQL como
+`campo IS NULL OR lower(btrim(campo)) IN (...)`:
+
+| Valor no campo | Efeito no disparo |
+|---|---|
+| vazio · `nao` · `não` · `n` · `no` · `false` · `0` · campo ausente | **entra** na lista |
+| qualquer outro valor (`sim`, `true`, `1`, uma data ISO, texto livre) | **fica de fora** |
+
+Por isso o padrão do plugin é gravar **`sim`** ao descadastrar e **vazio** ao voltar a
+receber (vazio APAGA a linha do campo no CDP, que é o estado mais limpo). A tela recusa
+uma combinação incoerente — escolher `0` como "descadastrado" produziria uma
+configuração que parece funcionar e não bloqueia ninguém.
+
+### 6.2 O slug tem de ser o mesmo nos dois lados
+
+- No **plugin**: campo *"Campo de descadastro no Trackify"*.
+- No **Campanhas**: chave de configuração `trackify_campo_optout`
+  (aba Configurações → Trackify), cujo padrão é `optout_marketing`.
+
+Apontar para slugs diferentes **não quebra nada**: o valor é gravado, a fila fica verde,
+e o disparo continua indo para quem pediu para sair. É a falha silenciosa mais provável
+desta integração — confira os dois antes de tirar o modo seco.
+
+O campo tem de existir e estar **ativo** no Trackify (Campos personalizados → Contatos).
+Slug desativado ou inexistente é **ignorado em silêncio** pelo PUT, que devolve 200 —
+o plugin confere a resposta campo a campo e põe o item em `blocked` com o motivo, em vez
+de contar sucesso numa escrita que nunca aconteceu.
+
+### 6.3 Só canal de WhatsApp oficial
+
+A feature só opera em canais com provider `whatsapp_cloud`. GOWA, Telegram e teste
+**nunca** participam — nem sequer registram o clique. Além do gate de provider, a
+allow-list da aba é **fail-closed**: sem canal marcado, nada é gravado.
+
+> **Limitação conhecida desta fase:** um contato que responde "SAIR" ou clica em botão
+> num canal não-oficial deixa de ser descadastrado automaticamente. Nesses casos, marque
+> o campo à mão na ficha do contato no Trackify.
+
+### 6.4 Como descobrir o texto do botão
+
+O casamento é pelo **texto ou payload do botão**, não pelo nome do template: o objeto
+que a Meta manda no clique não carrega nome de template nem índice de botão.
+
+Como o template normalmente é criado do lado do Campanhas e a Meta **ecoa o próprio
+rótulo** quando não há payload explícito, há duas formas de preencher sem adivinhar:
+
+- **Importar dos templates** — lista os templates `MARKETING` da conta Meta do canal que
+  têm botão de resposta rápida (os de utilidade e autenticação não aparecem).
+- **Botões vistos recentemente** — todo clique reconhecido que ainda não casou regra é
+  registrado com contador e data, mesmo em modo seco e mesmo com a captura desligada.
+  Um clique em "Usar como regra" preenche a linha com a string exata.
+
+### 6.5 Ordem de ativação
+
+1. Confirme que o número que dispara a campanha está conectado como canal
+   `whatsapp_cloud` **neste** WhatsBot e que o *Webhook URL* do app Meta aponta para
+   `https://SEU-WHATSBOT/api/webhook/whatsapp_cloud/{channel_id}`.
+   A Meta aceita **um** webhook por app: enquanto ele apontar para outro lugar, nenhum
+   clique chega aqui.
+2. Confira o slug nos dois lados (6.2) e os valores (6.1).
+3. Marque os canais e ligue **Registrar descadastro por clique em botão** deixando o
+   **modo seco LIGADO**.
+4. Dispare um template com botão para um número de teste e clique. O botão aparece em
+   *"Botões vistos recentemente"* — vire regra a partir dali.
+5. Clique de novo e confira, na **Fila de gravação**, o item concluído com
+   `[modo seco] gravaria …`.
+6. Desligue o modo seco, repita o clique e confira o campo na ficha do contato no
+   Trackify. Depois confirme no Campanhas que esse contato **não aparece mais** ao montar
+   uma lista.
+
+### 6.6 Não mapeie o mesmo campo na aba "Campos do contato"
+
+Se o slug do descadastro também for mapeado lá, a leitura periódica do Trackify pode
+**desfazer** um descadastro trazendo o valor antigo de volta. As duas abas se recusam a
+reivindicar o mesmo campo — a mensagem aponta a outra.
