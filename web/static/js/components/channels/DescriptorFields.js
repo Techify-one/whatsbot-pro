@@ -7,7 +7,7 @@
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
-import { randomToken } from './constants.js';
+import { randomToken, secretInputProps } from './constants.js';
 
 const html = htm.bind(h);
 
@@ -70,17 +70,51 @@ function FieldLabel({ field, required }) {
   </label>`;
 }
 
+// Eye / eye-off icon for the secret reveal toggle (plano 104 · F2).
+function EyeIcon({ off }) {
+  return html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+    stroke-linejoin="round" aria-hidden="true">
+    <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
+    <circle cx="12" cy="12" r="3" />
+    ${off ? html`<line x1="3" y1="21" x2="21" y2="3" />` : null}
+  </svg>`;
+}
+
 // Render a single credential field. In edit mode a blank value means "keep
 // current", so nothing is marked required and secrets show a "(manter)" hint.
-function CredentialField({ field, value, onChange, editMode, busy }) {
+// Secrets (plano 104): the input carries the anti-autofill attribute pack and a
+// show/hide toggle, and may show a descriptor-driven format error (F3).
+function CredentialField({ field, value, onChange, editMode, busy, error }) {
   const type = field.type || 'text';
   const required = !!field.required && !editMode;
+  // Nunca persistido nem herdado: cada abertura do formulário começa oculto.
+  const [revealed, setRevealed] = useState(false);
   const placeholder = editMode
     ? `${field.label || field.key} (manter)`
     : (field.placeholder || '');
   const set = (v) => onChange(field.key, v);
   let input;
-  if (type === 'token_suggest') {
+  if (type === 'secret') {
+    // ⚠️ `secretInputProps` é o que impede o gerenciador de senha de injetar a
+    // senha do painel aqui — não remover achando que é resquício (plano 104).
+    input = html`
+      <div class="flex gap-2">
+        <input class="wa-field flex-1 px-3 py-2 rounded-md text-[14px]"
+          ...${secretInputProps(field.key)}
+          type=${revealed ? 'text' : 'password'}
+          placeholder=${placeholder} value=${value || ''} disabled=${busy}
+          onInput=${(e) => set(e.target.value)} />
+        <button type="button"
+          class="px-3 py-2 rounded-md text-wa-secondary border border-wa-border hover:bg-wa-hover transition-colors shrink-0"
+          aria-label=${revealed ? 'Ocultar valor' : 'Mostrar valor'}
+          title=${revealed ? 'Ocultar valor' : 'Mostrar valor'}
+          aria-pressed=${revealed ? 'true' : 'false'}
+          onClick=${() => setRevealed((v) => !v)}>
+          <${EyeIcon} off=${revealed} />
+        </button>
+      </div>`;
+  } else if (type === 'token_suggest') {
     input = html`
       <div class="flex gap-2">
         <input class="wa-field flex-1 px-3 py-2 rounded-md text-[14px]" type="text"
@@ -91,15 +125,15 @@ function CredentialField({ field, value, onChange, editMode, busy }) {
           onClick=${() => set(randomToken())}>Sugerir</button>
       </div>`;
   } else {
-    const inputType = type === 'secret' ? 'password' : 'text';
     input = html`<input class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-      type=${inputType} placeholder=${placeholder} value=${value || ''} disabled=${busy}
+      type="text" placeholder=${placeholder} value=${value || ''} disabled=${busy}
       onInput=${(e) => set(e.target.value)} />`;
   }
   return html`
     <div>
       <${FieldLabel} field=${field} required=${required} />
       ${input}
+      ${error ? html`<div class="text-[12px] text-red-500 mt-1">${error}</div>` : null}
       ${field.help ? html`<div class="text-[12px] text-wa-secondary mt-1">${field.help}</div>` : null}
     </div>`;
 }
@@ -150,12 +184,13 @@ function ConfigField({ field, value, onChange, busy }) {
 }
 
 // Render all credential fields of a descriptor. values = {key: string}.
-export function CredentialFields({ fields, values, onChange, editMode, busy }) {
+// ``errors`` (opcional) = {key: mensagem} de validateCredentials (plano 104 F3).
+export function CredentialFields({ fields, values, onChange, editMode, busy, errors }) {
   const list = fields || [];
   if (!list.length) return null;
   return html`${list.map((field) => html`<${CredentialField} key=${field.key}
     field=${field} value=${(values || {})[field.key]} onChange=${onChange}
-    editMode=${editMode} busy=${busy} />`)}`;
+    editMode=${editMode} busy=${busy} error=${(errors || {})[field.key]} />`)}`;
 }
 
 // Render all config fields of a descriptor. In edit mode, `generated` fields are

@@ -113,6 +113,105 @@ export function buildEmbedSnippet(baseUrl, widgetToken, template) {
     .split('{token}').join(widgetToken || '');
 }
 
+// ── Anti-autofill de campo secreto de canal (plano 104 · F1) ────────────────
+//
+// Todo campo `type: "secret"` do descriptor vira <input type="password">. O
+// navegador (e 1Password/LastPass/Bitwarden/Dashlane) preenche por HEURÍSTICA
+// qualquer campo de senha solto na página do domínio — não é preciso haver um
+// <form>. Resultado medido em produção: a senha do painel entrava no "Proxy de
+// saída" do canal GOWA, o operador salvava sem olhar e o número parava (proxy
+// sintaticamente válido chega a derrubar a sessão e exigir QR novo).
+//
+// ⚠️ NÃO trocar `new-password` por `off`: o Chrome IGNORA `autocomplete="off"`
+// em campo de senha desde 2014; `new-password` é o valor que significa "não
+// preencha com a senha salva". Os `data-*` são os opt-outs dos gerenciadores
+// externos, que ignoram o `autocomplete`.
+
+// Palavras que reativam a heurística do gerenciador se aparecerem no `name`.
+// A chave do campo pode contê-las (bot_token, app_secret, page_access_token),
+// então o nome NÃO é a chave crua — ver `secretInputProps`.
+export const SECRET_NAME_FORBIDDEN = /(password|senha|token|secret|segredo|pwd|passwd|chave|login|user)/i;
+
+// FNV-1a 32-bit em base36 — sufixo estável e não-semântico por chave de campo,
+// para dois campos secretos do mesmo formulário nunca colidirem de nome. PURA.
+function fieldHash(key) {
+  let h = 0x811c9dc5;
+  const s = String(key || '');
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(36);
+}
+
+/**
+ * Pacote de atributos que diz ao navegador e aos gerenciadores de senha que
+ * este campo NÃO é a senha de login do site. PURA — travada por node --test.
+ * @param {string} fieldKey chave do credential_field (ex.: 'proxy_url')
+ */
+export function secretInputProps(fieldKey) {
+  const slug = String(fieldKey || '')
+    .toLowerCase()
+    .replace(SECRET_NAME_FORBIDDEN, ' ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return {
+    // Estável (mesma chave ⇒ mesmo nome) e sem palavra-gatilho.
+    name: `ch-${slug || 'f'}-${fieldHash(fieldKey)}`,
+    autocomplete: 'new-password',
+    'data-lpignore': 'true',    // LastPass
+    'data-1p-ignore': '',       // 1Password
+    'data-bwignore': 'true',    // Bitwarden
+    'data-form-type': 'other',  // Dashlane
+    // Strings, não booleans: o Preact REMOVE o atributo quando o valor é
+    // `false`, e o campo revelado (F2) vira type=text de verdade.
+    spellcheck: 'false',
+    autocapitalize: 'off',
+    autocorrect: 'off',
+  };
+}
+
+// ── Validação de formato de credencial (plano 104 · F3) ─────────────────────
+//
+// Genérica e dirigida pelo DESCRIPTOR (P1 opção (a)): o provider declara
+// `credential_fields[].pattern` (regex) + `pattern_error` (mensagem PT-BR) e o
+// core só AVALIA — nenhum `if provider ==` aqui nem no backend. Provider que
+// não declara `pattern` se comporta exatamente como antes.
+//
+// Contrato (espelhado por app/services/channel_service.credential_format_errors):
+//   * a regex é ancorada (casamento INTEIRO do valor) e avaliada SEM diferenciar
+//     maiúsculas de minúsculas;
+//   * valor vazio nunca é inválido (credencial opcional; e na edição vazio
+//     significa "manter a atual");
+//   * o placeholder mascarado (••••) nunca é validado (não é valor novo);
+//   * regex quebrada ⇒ campo passa (fail-open — um provider mal declarado não
+//     pode travar o formulário).
+
+export function credentialPatternError(field, rawValue) {
+  const pattern = field && field.pattern;
+  if (!pattern) return '';
+  const v = (rawValue == null ? '' : String(rawValue)).trim();
+  if (!v || v.startsWith('••••')) return '';
+  let re;
+  try { re = new RegExp(`^(?:${pattern})$`, 'i'); } catch (e) { return ''; }
+  if (re.test(v)) return '';
+  return field.pattern_error
+    || `Valor inválido para "${field.label || field.key}".`;
+}
+
+/**
+ * Erros de formato dos valores SUBMETIDOS. PURA.
+ * @returns {Object} {credentialKey: mensagem} — vazio quando tudo passa.
+ */
+export function validateCredentials(descriptor, credValues) {
+  const out = {};
+  for (const field of (descriptor && descriptor.credential_fields) || []) {
+    const msg = credentialPatternError(field, (credValues || {})[field.key]);
+    if (msg) out[field.key] = msg;
+  }
+  return out;
+}
+
 // Random URL-safe token, used for the "sugerir" verify-token button and for
 // generated config fields (e.g. GOWA device id).
 export function randomToken(len = 32) {

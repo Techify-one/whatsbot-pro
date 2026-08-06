@@ -62,6 +62,28 @@ GOWA_JID_TYPES = [
 # groups on legacy channels).
 GOWA_DEFAULT_JID_TYPES = ["person", "person_lid"]
 
+# Formato aceito no campo "Proxy de saída" (plano 104 F3). É a MESMA regra que o
+# ``validate_proxy_url`` do plugin GOWA já aplica depois do save (esquema
+# socks5/http/https + host não vazio), declarada aqui para o core recusar ANTES
+# de gravar — um valor autopreenchido pelo gerenciador de senha do navegador
+# nunca chega ao banco. O core só AVALIA: a regex é ancorada (casamento inteiro)
+# e aplicada sem diferenciar maiúsculas/minúsculas, tanto no cliente
+# (``validateCredentials``) quanto no servidor (``credential_format_errors``).
+# Aceita usuário:senha com ``@`` no meio (o host é o que vem depois do ÚLTIMO
+# ``@``, como no urlsplit) e IPv6 entre colchetes.
+PROXY_URL_PATTERN = (
+    r"(?:socks5|http|https)://"      # esquemas que o whatsmeow entende
+    r"(?:[^\s/]+@)?"                 # usuário:senha (opcional; pode conter @)
+    r"(?:\[[0-9A-Fa-f:.]+\]|[^\s/@:]+)"  # host: IPv6 entre [] ou ip/hostname
+    r"(?::[0-9]+)?"                  # porta (opcional)
+    r"(?:/\S*)?"                     # caminho residual (opcional)
+)
+PROXY_URL_PATTERN_ERROR = (
+    "Proxy de saída inválido: use socks5://, http:// ou https:// seguido do "
+    "endereço (ex.: socks5://usuario:senha@1.2.3.4:1080). Se você não preencheu "
+    "este campo, provavelmente o navegador o preencheu sozinho — limpe-o e salve."
+)
+
 
 class GOWAChannel(Channel):
     provider = "gowa"
@@ -112,6 +134,10 @@ class GOWAChannel(Channel):
                 "type": "secret",
                 "required": False,
                 "placeholder": "socks5://usuario:senha@ip:porta",
+                # Plano 104 F3: recusado no save (form + rota) quando não tem
+                # cara de proxy — o autofill do navegador não vira proxy quebrado.
+                "pattern": PROXY_URL_PATTERN,
+                "pattern_error": PROXY_URL_PATTERN_ERROR,
                 "help": "IP FIXO e dedicado deste número (socks5:// ou http(s)://). "
                         "Use 1 IP exclusivo por número — nunca proxy rotativo. "
                         "Salvar/alterar o proxy reinicia a sessão deste número — "
