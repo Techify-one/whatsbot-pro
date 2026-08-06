@@ -19,6 +19,7 @@ import { getDraft } from '../../services/drafts.js';
 import { useDrafts } from '../../hooks/useDrafts.js';
 // Selo IA/IA OFF: o veredito EFETIVO (gate do servidor espelhado), não a coluna crua.
 import { aiEffectivelyOn } from '../../services/conversationRows.js';
+import { shouldOpenInNewTab } from '../../services/spaLink.js';
 
 const html = htm.bind(h);
 
@@ -642,7 +643,26 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
             : contacts.map(c => html`
                 <div
                   key=${rowKeyFor(c)}
-                  onClick=${() => selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id)}
+                  onClick=${(e) => {
+                    // Plano 106 · F5 (C1): a linha não pode virar <a> (é zona de drop
+                    // de arquivo, tem menu de contexto próprio e modo seleção). Nova
+                    // guia só quando há atendimento — linha sem conversa não tem URL —
+                    // e NUNCA em modo seleção, onde o clique alterna a seleção em massa.
+                    if (!selectionMode && c.conversation_id != null && shouldOpenInNewTab(e)) {
+                      window.open(`/conversations/${c.conversation_id}`, '_blank', 'noopener');
+                      return;
+                    }
+                    return selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id);
+                  }}
+                  onAuxClick=${(e) => {
+                    if (selectionMode || c.conversation_id == null || !shouldOpenInNewTab(e)) return;
+                    e.preventDefault();
+                    window.open(`/conversations/${c.conversation_id}`, '_blank', 'noopener');
+                  }}
+                  onMouseDown=${(e) => {
+                    // mata o auto-scroll do Chrome só onde o clique do meio faz algo
+                    if (e.button === 1 && !selectionMode && c.conversation_id != null) e.preventDefault();
+                  }}
                   onDragEnter=${dropEnabled ? (e) => { if (dragHasFiles(e)) { e.preventDefault(); setDragOverKey(rowKeyFor(c)); } } : null}
                   onDragOver=${dropEnabled ? (e) => {
                     if (!dragHasFiles(e)) return;

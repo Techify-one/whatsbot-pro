@@ -24,6 +24,7 @@ import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import { authHeaders, getUnreadCount } from '../../services/api.js';
 import { shouldNotifyNewMessage } from '../../services/conversationRows.js';
+import { isModifiedClick, spaLinkTarget } from '../../services/spaLink.js';
 import * as soundEngine from '../../utils/soundEngine.js';
 import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
 import { GearMenu } from './GearMenu.js';
@@ -197,6 +198,61 @@ export function App({ onLogout, hasPassword, currentUser }) {
     return () => {
       window.removeEventListener('dragover', swallow);
       window.removeEventListener('drop', swallow);
+    };
+  }, []);
+
+  // Plano 106 · F2 — interceptor delegado de links internos. Qualquer <a href="/…">
+  // do painel — do core OU de um plugin, SEM o plugin fazer nada — passa a navegar
+  // por SPA no clique simples e a ser entregue ao navegador no clique modificado
+  // (Ctrl/⌘ = nova guia, Shift = nova janela, Alt = baixar). É o que remove a
+  // necessidade de repetir o guard do GearMenu em cada ponto de navegação.
+  //
+  // É um listener de BUBBLING no document, então roda DEPOIS dos onClick dos
+  // componentes: quem já chamou preventDefault (ex.: copyDeepLink) continua
+  // vencendo. Quem decide se a âncora é nossa é o predicado puro spaLinkTarget —
+  // link externo, target, download, mailto:/tel: e data-no-spa saem intactos.
+  useEffect(() => {
+    // Base = a URL COMPLETA (não só o origin): além de comparar o host, resolve
+    // corretamente um href relativo que uma tela de plugin venha a usar.
+    function targetFor(el) {
+      const a = el && el.closest ? el.closest('a[href]') : null;
+      if (!a) return null;
+      return spaLinkTarget({
+        href: a.getAttribute('href'),
+        target: a.getAttribute('target'),
+        // hasAttribute, NÃO a.download: a propriedade devolve '' tanto para
+        // ausente quanto para `<a download>` sem valor, e não distingue os dois.
+        download: a.hasAttribute('download'),
+        dataset: a.dataset,
+      }, window.location.href);
+    }
+
+    function onClick(e) {
+      if (isModifiedClick(e) || e.defaultPrevented) return;
+      const target = targetFor(e.target);
+      if (!target) return;
+      e.preventDefault();
+      const here = window.location.pathname + window.location.search + window.location.hash;
+      // Um clique = um passo no "voltar": não empilha quando já estamos no destino
+      // (o call site pode ter empurrado a URL antes de o evento borbulhar até aqui).
+      if (here !== target.path) history.pushState(null, '', target.path);
+      // pushState não dispara popstate; é este par que todo call site já usa e que
+      // o efeito de rota abaixo escuta.
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+
+    // Clique do meio: o Chrome inicia o auto-scroll no mousedown. Cancelar só ele
+    // (button === 1) sobre link interno deixa o navegador abrir a guia no auxclick.
+    function onMouseDown(e) {
+      if (e.button !== 1 || e.defaultPrevented) return;
+      if (targetFor(e.target)) e.preventDefault();
+    }
+
+    document.addEventListener('click', onClick);
+    document.addEventListener('mousedown', onMouseDown);
+    return () => {
+      document.removeEventListener('click', onClick);
+      document.removeEventListener('mousedown', onMouseDown);
     };
   }, []);
 
