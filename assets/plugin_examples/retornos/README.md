@@ -1,7 +1,7 @@
 # Retorno Automático — plugin `retornos`
 
 Follow-up automático por **configuração de regras**, porte do módulo Retornos do Nexus
-([plano 76](../../../docs-planos/76-plano-plugin-retornos-automaticos-reguas.md)).
+(plano 76 — o arquivo saiu de `docs-planos/` depois de executado; está no histórico do git).
 
 Substitui a função de follow-up automático do plugin antigo `retorno_automatico` (que é
 **desativado** na ativação deste, para não duplicar nota) e convive com o
