@@ -144,12 +144,20 @@ e o botão **Reprocessar** devolve tudo à fila depois que você consertar o JSO
 
 ## 6. Descadastro de marketing por clique em botão (aba "Descadastro por botão")
 
-Quando o contato toca um botão de um template de marketing num canal de **WhatsApp
-oficial**, o plugin grava o resultado num campo do cadastro dele no Trackify. É esse
-campo que o módulo **Campanhas de Marketing** lê para montar a lista de disparo — ou
-seja, depois desta mudança o CDP é o **único elo** entre os dois sistemas.
+Quando o contato toca o **botão de descadastro** de um template num canal de **WhatsApp
+oficial**, o plugin grava um valor num campo do cadastro dele no Trackify. É esse campo
+que o módulo **Campanhas de Marketing** lê para montar a lista de disparo — ou seja, o
+CDP é o **único elo** entre os dois sistemas.
 
-### 6.1 O contrato do campo (leia antes de escolher os valores)
+O reconhecimento é por **código**. O Campanhas põe um código livre em cada botão do
+template e **não sabe o que ele significa** — quem define a função é esta aba. Hoje há uma
+função: *Descadastro de marketing*. Qualquer clique cujo *payload* seja igual a **um dos
+códigos** listados nela significa "não quero mais receber disparos".
+
+Código que não está em ação nenhuma é **ignorado em silêncio** — esse é o caso comum, já
+que a maioria dos botões de um template não fala com este plugin.
+
+### 6.1 O contrato do campo (leia antes de escolher o valor)
 
 O Campanhas aplica o gate em SQL como
 `campo IS NULL OR lower(btrim(campo)) IN (...)`:
@@ -159,49 +167,71 @@ O Campanhas aplica o gate em SQL como
 | vazio · `nao` · `não` · `n` · `no` · `false` · `0` · campo ausente | **entra** na lista |
 | qualquer outro valor (`sim`, `true`, `1`, uma data ISO, texto livre) | **fica de fora** |
 
-Por isso o padrão do plugin é gravar **`sim`** ao descadastrar e **vazio** ao voltar a
-receber (vazio APAGA a linha do campo no CDP, que é o estado mais limpo). A tela recusa
-uma combinação incoerente — escolher `0` como "descadastrado" produziria uma
-configuração que parece funcionar e não bloqueia ninguém.
+Por isso o padrão do plugin é gravar **`sim`** ao descadastrar. A tela recusa um valor
+incoerente — escolher `0` como "descadastrado" produziria uma configuração que parece
+funcionar e não bloqueia ninguém.
 
-### 6.2 O slug tem de ser o mesmo nos dois lados
+> Não existe mais "voltar a receber" por botão. Reinscrever é ação de operador: apague
+> o valor do campo na ficha do contato no Trackify.
 
-- No **plugin**: campo *"Campo de descadastro no Trackify"*.
-- No **Campanhas**: chave de configuração `trackify_campo_optout`
-  (aba Configurações → Trackify), cujo padrão é `optout_marketing`.
+### 6.2 O que tem de bater nos dois lados
 
-Apontar para slugs diferentes **não quebra nada**: o valor é gravado, a fila fica verde,
-e o disparo continua indo para quem pediu para sair. É a falha silenciosa mais provável
-desta integração — confira os dois antes de tirar o modo seco.
+| O quê | No plugin (aba "Descadastro por botão") | No Campanhas |
+|---|---|---|
+| Campo no CDP | *Campo de descadastro no Trackify*, na linha da ação | `trackify_campo_optout` (Configurações → Trackify) |
+| Valor gravado | *Valor ao descadastrar*, na linha da ação | `trackify_valor_optout` (Configurações → Trackify) |
+
+Campo e valor são pareados **1-para-1** e divergir neles **não quebra nada**: nenhum erro
+aparece e o disparo continua indo para quem pediu para sair. É a falha silenciosa mais
+provável desta integração — confira os dois antes de tirar o modo seco.
+
+O **código** já não é uma chave única do outro lado. No Campanhas, cada botão de cada
+template da Meta tem o seu, digitado no próprio template. A regra é:
+
+> Todo código que o Campanhas puser num **botão de descadastro** tem de estar na lista de
+> *Códigos que significam descadastro* desta aba.
+
+Vários códigos, **separados por vírgula**:
+
+```
+PARAR_PROMOS, PARAR_PROMOS_2
+```
+
+Ao trocar o código de um template, **acrescente o novo sem remover o antigo**: campanhas
+já disparadas continuam recebendo cliques por dias, e apagar o antigo faria esses cliques
+pararem de descadastrar em silêncio.
 
 O campo tem de existir e estar **ativo** no Trackify (Campos personalizados → Contatos).
 Slug desativado ou inexistente é **ignorado em silêncio** pelo PUT, que devolve 200 —
-o plugin confere a resposta campo a campo e põe o item em `blocked` com o motivo, em vez
-de contar sucesso numa escrita que nunca aconteceu.
+o plugin confere a resposta campo a campo e registra o motivo, em vez de contar sucesso
+numa escrita que nunca aconteceu.
 
 ### 6.3 Só canal de WhatsApp oficial
 
-A feature só opera em canais com provider `whatsapp_cloud`. GOWA, Telegram e teste
-**nunca** participam — nem sequer registram o clique. Além do gate de provider, a
-allow-list da aba é **fail-closed**: sem canal marcado, nada é gravado.
+A feature só opera em canais com provider `whatsapp_cloud`, e vale para **todos** eles.
+GOWA, Telegram e teste **nunca** participam.
 
-> **Limitação conhecida desta fase:** um contato que responde "SAIR" ou clica em botão
-> num canal não-oficial deixa de ser descadastrado automaticamente. Nesses casos, marque
-> o campo à mão na ficha do contato no Trackify.
+> **Limitação conhecida:** um contato que responde "SAIR" por texto, ou clica num botão
+> de canal não-oficial, não é descadastrado automaticamente. Nesses casos, marque o campo
+> à mão na ficha do contato no Trackify.
 
-### 6.4 Como descobrir o texto do botão
+### 6.4 De onde vem o código
 
-O casamento é pelo **texto ou payload do botão**, não pelo nome do template: o objeto
-que a Meta manda no clique não carrega nome de template nem índice de botão.
+Quem coloca o código no botão é o **Campanhas**, no momento do disparo: ao montar o
+template da campanha, cada botão de resposta rápida recebe um código, e ele sai como o
+*payload* daquele botão.
 
-Como o template normalmente é criado do lado do Campanhas e a Meta **ecoa o próprio
-rótulo** quando não há payload explícito, há duas formas de preencher sem adivinhar:
+Por isso não é preciso descobrir qual string a Meta devolve — é você quem a define. Vale
+o contrário também: um template antigo, enviado sem payload explícito, faz a Meta ecoar o
+**rótulo** do botão, que nunca coincide com o código. Ele simplesmente não descadastra
+ninguém.
 
-- **Importar dos templates** — lista os templates `MARKETING` da conta Meta do canal que
-  têm botão de resposta rápida (os de utilidade e autenticação não aparecem).
-- **Botões vistos recentemente** — todo clique reconhecido que ainda não casou regra é
-  registrado com contador e data, mesmo em modo seco e mesmo com a captura desligada.
-  Um clique em "Usar como regra" preenche a linha com a string exata.
+Escolha códigos curtos e sem espaço (`PARAR_PROMOS`, `OPTOUT_MKT`). Maiúscula/minúscula
+e acento **não importam** na comparação; emoji e pontuação, sim.
+
+> **Um código só pode pertencer a uma ação.** Se o mesmo código aparecer em duas, ele
+> deixa de valer para as duas — a aba mostra o conflito em vermelho. Os demais códigos das
+> duas ações continuam funcionando normalmente.
 
 ### 6.5 Ordem de ativação
 
@@ -210,19 +240,40 @@ rótulo** quando não há payload explícito, há duas formas de preencher sem a
    `https://SEU-WHATSBOT/api/webhook/whatsapp_cloud/{channel_id}`.
    A Meta aceita **um** webhook por app: enquanto ele apontar para outro lugar, nenhum
    clique chega aqui.
-2. Confira o slug nos dois lados (6.2) e os valores (6.1).
-3. Marque os canais e ligue **Registrar descadastro por clique em botão** deixando o
-   **modo seco LIGADO**.
-4. Dispare um template com botão para um número de teste e clique. O botão aparece em
-   *"Botões vistos recentemente"* — vire regra a partir dali.
-5. Clique de novo e confira, na **Fila de gravação**, o item concluído com
-   `[modo seco] gravaria …`.
+2. Confira a lista de códigos, o par campo/valor (6.2) e o contrato do valor (6.1). Os
+   códigos que a aba reconheceu aparecem como etiquetas abaixo do campo — se um que você
+   digitou não estiver lá, ele está em conflito com outra ação.
+3. Ligue **Registrar ações de clique em botão** deixando o **modo seco LIGADO**.
+4. No Campanhas, dispare para um número de teste um template cujo botão de descadastro
+   leve um dos códigos da lista, e clique nele.
+5. Confira na ficha do contato no Trackify que **nada** foi gravado (modo seco) — e no
+   próprio painel, que o clique não caiu na lista de erros da aba.
 6. Desligue o modo seco, repita o clique e confira o campo na ficha do contato no
-   Trackify. Depois confirme no Campanhas que esse contato **não aparece mais** ao montar
-   uma lista.
+   Trackify. Depois confirme no Campanhas que esse contato passa a ser **filtrado por
+   padrão** ao montar uma lista.
 
 ### 6.6 Não mapeie o mesmo campo na aba "Campos do contato"
 
-Se o slug do descadastro também for mapeado lá, a leitura periódica do Trackify pode
-**desfazer** um descadastro trazendo o valor antigo de volta. As duas abas se recusam a
-reivindicar o mesmo campo — a mensagem aponta a outra.
+Se o campo escrito por uma ação também for mapeado lá, a leitura periódica do Trackify
+pode **desfazer** o que ela gravou, trazendo o valor antigo de volta. As duas abas se
+recusam a reivindicar o mesmo campo — a mensagem aponta a outra.
+
+### 6.7 Um clique pode se perder (e como ver)
+
+A gravação acontece **na hora do clique**, com poucas tentativas internas. Não há fila:
+se o Trackify estiver fora do ar por vários minutos, ou o servidor reiniciar no meio da
+entrega, aquele pedido **não é tentado de novo**.
+
+O que falhou aparece na linha da própria ação, em *"Cliques que não chegaram ao
+Trackify"*, com o motivo e a data — marque esses contatos à mão no CDP. A causa mais
+comum não é queda de rede, e sim **contato sem cadastro vinculado** no Trackify.
+
+### 6.8 Funções novas
+
+Cada função é uma **ação** declarada no código do plugin (`actions.py`), e a aba desenha
+uma linha por ação registrada: seu nome, seus códigos e os campos que ela grava. Hoje só
+existe *Descadastro de marketing*.
+
+Para o operador isso significa que uma função nova aparece sozinha na aba depois de uma
+atualização do plugin, com o seu próprio campo de códigos — não há nada a cadastrar aqui,
+e os códigos de uma ação **nunca** disparam outra.

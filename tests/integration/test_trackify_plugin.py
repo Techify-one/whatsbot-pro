@@ -1989,7 +1989,7 @@ def test_campo_novo_de_settings_tem_interface(journey):
     """O core renderiza a screen `config:true` NO LUGAR do form declarativo, então
     setting sem campo em `config.js` fica sem interface nenhuma — e o PUT é
     destrutivo, então um campo esquecido volta ao default a cada save."""
-    settings = _load("settings")
+    settings, actions = _load("settings"), _load("actions")
     # A tela é composta: `config.js` + os módulos de aba que ela embute.
     telas = "".join((_SRC / "static" / n).read_text(encoding="utf-8")
                     for n in ("config.js", "FieldSync.js", "Consent.js"))
@@ -1999,10 +1999,28 @@ def test_campo_novo_de_settings_tem_interface(journey):
         # efetivo aparece read-only no card da API key.
         "sync_api_base",
     }
+    # A aba "Descadastro por botão" é DIRIGIDA PELO SERVIDOR: ela desenha uma
+    # linha por ação a partir de `/consent/status`, então o nome literal destas
+    # settings não aparece no JS — aparece no registro de ações. A garantia
+    # anti-órfã continua valendo, pela outra ponta: setting que não estiver nem
+    # no JS nem declarada por uma ação segue sem interface nenhuma.
+    por_registro_de_acao = set()
+    for acao in actions.registered():
+        por_registro_de_acao.add(acao.codes_setting)
+        por_registro_de_acao.update(f.key for f in acao.settings_fields)
+
     for campo in settings.Settings.model_fields:
         if campo in por_rota_propria:
             continue
+        if campo in por_registro_de_acao:
+            continue
         assert campo in telas, f"setting '{campo}' não tem campo na tela Configurar"
+
+    # E o outro lado da garantia: toda setting declarada por uma ação existe de
+    # fato em `Settings` (senão o PUT destrutivo a apagaria a cada save).
+    for chave in por_registro_de_acao:
+        assert chave in settings.Settings.model_fields, \
+            f"ação declara a setting '{chave}', que não existe em Settings"
 
 
 def test_modal_reusa_o_event_row_no_historico_do_produto():
@@ -2151,7 +2169,8 @@ def test_as_telas_do_plugin_EXECUTAM():
     """
     static = _SRC / "static"
     for arquivo, componentes in (("config.js", []),
-                                 ("FieldSync.js", ["default", "ApiKeyCard"])):
+                                 ("FieldSync.js", ["default", "ApiKeyCard"]),
+                                 ("Consent.js", ["default"])):
         code, saida = _node("smoke_plugin_screen.mjs", str(static), arquivo, *componentes)
         assert code == 0, f"{arquivo} não executa:\n{saida}"
 
@@ -2732,47 +2751,117 @@ def test_normalizacao_ignora_acento_e_caixa_mas_preserva_emoji(cmatch):
     assert cmatch.normalize("🚫 Parar") != cmatch.normalize("Parar")
 
 
-# ── Puros: resolução da regra ────────────────────────────────────────────
+# ── Puros: códigos → ação ────────────────────────────────────────────────
 
-def _regra(**kw):
-    base = {"id": 1, "channel_id": "", "match_field": "any", "match_norm": "parar",
-            "meaning": "optout", "enabled": 1}
-    base.update(kw)
-    return base
+def _idx(cmatch, **por_acao):
+    """``_idx(cmatch, optout="A, B")`` → o índice que o handler consulta."""
+    return cmatch.code_index({k: cmatch.parse_codes(v) for k, v in por_acao.items()})
 
 
-def test_payload_casa_antes_do_rotulo(cmatch):
-    """Precedência determinística: com duas regras casando tokens diferentes do
-    MESMO clique, o operador precisa poder prever qual vence."""
-    cand = cmatch.tokens({"payload": {"payload": "OPT_OUT", "text": "Parar"}})
-    regras = [
-        _regra(id=1, match_norm="parar", meaning="optin"),
-        _regra(id=2, match_norm="opt_out", meaning="optout"),
-    ]
-    assert cmatch.resolve(cand, regras)["id"] == 2
+def test_payload_igual_a_um_dos_codigos_ativa_a_acao(cmatch):
+    """A regra inteira cabe aqui: payload == um dos códigos configurados.
+
+    Insensível a acento/caixa/espaço porque o MESMO código é digitado à mão em
+    dois sistemas diferentes — no plugin e no módulo Campanhas.
+    """
+    idx, conf = _idx(cmatch, optout="PARAR_PROMOS")
+    assert conf == {}
+
+    cand = cmatch.tokens({"payload": {"payload": "PARAR_PROMOS", "text": "Parar"}})
+    assert cmatch.action_for(cand, idx) == "optout"
+
+    caixa = cmatch.tokens({"payload": {"payload": " parar_promos ", "text": "Parar"}})
+    assert cmatch.action_for(caixa, idx) == "optout"
+
+    outro = cmatch.tokens({"payload": {"payload": "OUTRO_CODIGO", "text": "x"}})
+    assert cmatch.action_for(outro, idx) is None
 
 
-def test_regra_do_canal_vence_a_regra_global(cmatch):
-    """Instalação multi-número raramente quer a mesma política de marketing em
-    todos os canais."""
-    cand = cmatch.tokens({"payload": {"payload": "", "text": "Parar"}})
-    regras = [
-        _regra(id=1, channel_id="", meaning="optin"),
-        _regra(id=2, channel_id="ch_a", meaning="optout"),
-    ]
-    assert cmatch.resolve(cand, regras, "ch_a")["id"] == 2
-    assert cmatch.resolve(cand, regras, "ch_b")["id"] == 1
+def test_varios_codigos_da_mesma_acao_casam_todos(cmatch):
+    """O requisito direto: trocar o código de um template não pode calar o
+    antigo, porque campanhas já disparadas continuam recebendo cliques por dias.
+    """
+    idx, conf = _idx(cmatch, optout="PARAR_PROMOS, PARAR_PROMOS_2")
+    assert conf == {}
+
+    for codigo in ("PARAR_PROMOS", "PARAR_PROMOS_2"):
+        cand = cmatch.tokens({"payload": {"payload": codigo, "text": "Parar"}})
+        assert cmatch.action_for(cand, idx) == "optout", codigo
 
 
-def test_regra_restrita_a_payload_nao_casa_pelo_rotulo(cmatch):
-    cand = cmatch.tokens({"payload": {"payload": "", "text": "Parar"}})
-    assert cmatch.resolve(cand, [_regra(match_field="payload")]) is None
-    assert cmatch.resolve(cand, [_regra(match_field="text")])["id"] == 1
+def test_parse_de_codigos_separa_dedupe_e_descarta_vazio(cmatch):
+    """Devolve como DIGITADO (a aba ecoa), mas dedupe pela forma normalizada:
+    listar "PARAR" e "parar" faria a tela mentir sobre quantos códigos existem.
+    """
+    assert cmatch.parse_codes("PARAR_PROMOS, PARAR_PROMOS_2") == \
+        ["PARAR_PROMOS", "PARAR_PROMOS_2"]
+    assert cmatch.parse_codes("A,,B, ") == ["A", "B"]
+    assert cmatch.parse_codes("a, A") == ["a"]
+    assert cmatch.parse_codes("") == []
+    assert cmatch.parse_codes(None) == []
+    assert cmatch.parse_codes(" , , ") == []
 
 
-def test_regra_desligada_nao_casa(cmatch):
-    cand = cmatch.tokens({"payload": {"payload": "PARAR", "text": "Parar"}})
-    assert cmatch.resolve(cand, [_regra(enabled=0)]) is None
+def test_codigos_de_acoes_diferentes_nao_se_cruzam(cmatch):
+    """O Campanhas passa a mandar um código por botão, e a maioria não significa
+    nada para uma dada ação. Um vazar para a outra escreveria no campo errado."""
+    idx, conf = _idx(cmatch, optout="PARAR", outra="QUERO_FALAR")
+    assert conf == {}
+
+    parar = cmatch.tokens({"payload": {"payload": "PARAR", "text": "x"}})
+    falar = cmatch.tokens({"payload": {"payload": "QUERO_FALAR", "text": "x"}})
+    assert cmatch.action_for(parar, idx) == "optout"
+    assert cmatch.action_for(falar, idx) == "outra"
+
+
+def test_codigo_de_duas_acoes_nao_vale_para_nenhuma(cmatch):
+    """"A primeira ganha" faria o comportamento depender da ordem de declaração
+    num arquivo ``.py`` — invisível ao operador — e o lado errado do erro escreve
+    no CRM do cliente. Recusar os dois só apaga AQUELE código."""
+    idx, conf = _idx(cmatch, optout="PARAR, SO_DELE", outra="PARAR, SO_DELA")
+
+    assert conf == {"parar": ["optout", "outra"]}
+    disputado = cmatch.tokens({"payload": {"payload": "PARAR", "text": "x"}})
+    assert cmatch.action_for(disputado, idx) is None
+
+    # E os demais códigos das DUAS ações continuam valendo.
+    for codigo, esperado in (("SO_DELE", "optout"), ("SO_DELA", "outra")):
+        cand = cmatch.tokens({"payload": {"payload": codigo, "text": "x"}})
+        assert cmatch.action_for(cand, idx) == esperado, codigo
+
+
+def test_rotulo_do_botao_nunca_ativa_acao(cmatch):
+    """Só o payload conta.
+
+    O rótulo é texto de marketing: muda a cada campanha e pode coincidir por
+    acaso com o de outro botão. Aceitá-lo reintroduziria exatamente o falso
+    positivo que o código explícito veio eliminar — e é o que acontece com um
+    template antigo, sem payload, em que a Meta ECOA o rótulo.
+    """
+    idx, _ = _idx(cmatch, optout="PARAR_PROMOS")
+
+    cand = cmatch.tokens({"payload": {"payload": "", "text": "PARAR_PROMOS"}})
+    assert cmatch.action_for(cand, idx) is None
+
+    ecoado = cmatch.tokens({"payload": {"payload": "Não quero mais",
+                                        "text": "Não quero mais"}})
+    assert cmatch.action_for(ecoado, idx) is None
+
+
+def test_codigo_vazio_nunca_casa(cmatch):
+    """Configuração pela metade não pode descadastrar todo mundo. A guarda vive
+    em DOIS lugares e os dois são travados aqui: ``parse_codes`` descarta o
+    vazio, e ``action_for`` recusa um ``payload_norm`` vazio mesmo com o índice
+    cheio."""
+    vazio, _ = _idx(cmatch, optout="")
+    assert vazio == {}
+
+    cand = cmatch.tokens({"payload": {"payload": "", "text": "x"}})
+    assert cmatch.action_for(cand, vazio) is None
+
+    cheio, _ = _idx(cmatch, optout="PARAR")
+    assert cmatch.action_for(cand, cheio) is None
+    assert cmatch.action_for(None, cheio) is None
 
 
 # ── Puros: o contrato do campo (o elo com o módulo Campanhas) ────────────
@@ -2794,14 +2883,19 @@ def test_valores_que_liberam_o_contato(cmatch):
 
 def test_valor_de_opt_out_que_libera_e_recusado_na_configuracao(cmatch):
     """Escolher ``0`` como "descadastrado" produz uma configuração que PARECE
-    funcionar (o valor é gravado, a fila fica verde) e não bloqueia ninguém."""
-    assert cmatch.validate_values("0", "") != []
-    assert cmatch.validate_values("sim", "sim") != []
-    assert cmatch.validate_values("sim", "") == []
-    assert cmatch.validate_values("2026-08-06", "nao") == []
+    funcionar (o valor é gravado, nenhum erro aparece) e não bloqueia ninguém."""
+    assert cmatch.validate_values("0") != []
+    assert cmatch.validate_values("") != []
+    assert cmatch.validate_values("sim") == []
+    assert cmatch.validate_values("2026-08-06") == []
 
 
 # ── Com app: captura do clique ───────────────────────────────────────────
+
+CODIGO = "PARAR_PROMOS"
+# A ação embutida. Identidade, não rótulo: é o valor da coluna `action`.
+OPTOUT = "optout"
+
 
 def _consent_on(**extra):
     base = {
@@ -2809,7 +2903,7 @@ def _consent_on(**extra):
         "plugin.trackify.consent_dry_run": True,
         "plugin.trackify.consent_field_slug": "optout_marketing",
         "plugin.trackify.consent_optout_value": "sim",
-        "plugin.trackify.consent_optin_value": "",
+        "plugin.trackify.consent_optout_payload": CODIGO,
         "plugin.trackify.sync_api_key": "tk_teste",
         "plugin.trackify.sync_api_base": "https://nexus.example/trackify/api/v1",
         "plugin.trackify.sync_blocked_reason": "",
@@ -2825,35 +2919,40 @@ def _canal(cid, provider="whatsapp_cloud"):
     return cid
 
 
-def _permite(consent, *cids):
-    consent.replace_channels(list(cids), official_ids=set(cids))
-
-
-def _regras(consent, rows, *, canais=()):
-    clean, errors = consent.validate_rules(rows, official_ids=set(canais))
-    assert errors == {}, errors
-    consent.replace_rules(clean)
-
-
-def _clique(channel_id, phone, *, payload="", texto="", msg_id="wamid.1"):
+def _clique(channel_id, phone, *, payload=CODIGO, texto="Parar", msg_id="wamid.1"):
     return {"phone": phone, "channel_id": channel_id, "msg_id": msg_id,
             "media_type": "interactive", "is_group": False, "text": texto,
             "media_extras": {"payload": {"payload": payload, "text": texto}}}
 
 
-def _visto(consent, norm):
-    return next((s for s in consent.list_seen(200) if s["match_norm"] == norm), None)
+def _sem_gravar(monkeypatch, consent):
+    """Isola a CAPTURA da ENTREGA.
+
+    O handler agenda a gravação numa task; num teste síncrono não há laço para
+    agendá-la (e o caminho real disso tem teste próprio). Capturar as chamadas
+    deixa cada teste falando de uma coisa só.
+    """
+    agendados = []
+    monkeypatch.setattr(consent, "_spawn_write",
+                        lambda contact_id, action_id: agendados.append(
+                            (contact_id, action_id)))
+    return agendados
 
 
-def _fila(consent, contact_id, status=""):
-    return [r for r in consent.list_queue(status, 200)
-            if int(r["contact_id"]) == int(contact_id)]
+def _grava_fake(monkeypatch, consent):
+    """Troca a ida ao Trackify por um registro do que FOI agendado.
 
+    Diferente de :func:`_sem_gravar`, que corta o agendamento: aqui o caminho
+    de ``_spawn_write`` roda inteiro — é a costura que se quer exercitar.
+    """
+    gravados = []
 
-def _reserva(consent, contact_id):
-    linha = next(r for r in consent.claim(20, "teste")
-                 if int(r["contact_id"]) == int(contact_id))
-    return linha
+    async def _fake(contact_id, action_id):
+        gravados.append(contact_id)
+        return "sent"
+
+    monkeypatch.setattr(consent, "write_now", _fake)
+    return gravados
 
 
 def _linkado(monkeypatch, push, tk_id="uuid-cdp-consent"):
@@ -2862,21 +2961,28 @@ def _linkado(monkeypatch, push, tk_id="uuid-cdp-consent"):
     monkeypatch.setattr(push, "_linked_id", _fake)
 
 
-def test_migracao_003_cria_as_tabelas_do_consentimento(plugin_app):
+def test_migracao_004_apaga_as_tabelas_de_adivinhacao(plugin_app):
+    """Regras por botão, allow-list de canais, "botões vistos" e a fila existiam
+    para o operador descobrir qual string a Meta devolveria. Com o código
+    explícito não há o que descobrir — e tabela órfã vira dívida silenciosa."""
     plugin_app("trackify")
     from sqlalchemy import text
     from db.engine import get_engine
+
     with get_engine().begin() as conn:
-        conn.execute(text("SELECT id, channel_id, match_norm, meaning, hits "
-                          "FROM plugin_trackify_consent_button LIMIT 1"))
-        conn.execute(text("SELECT channel_id, enabled "
-                          "FROM plugin_trackify_consent_channel LIMIT 1"))
-        conn.execute(text("SELECT contact_id, desired, written_value "
-                          "FROM plugin_trackify_consent_state LIMIT 1"))
-        conn.execute(text("SELECT id, contact_id, status, attempts, enqueued_at "
-                          "FROM plugin_trackify_consent_outbox LIMIT 1"))
-        conn.execute(text("SELECT channel_id, match_norm, hits, shape "
-                          "FROM plugin_trackify_consent_seen LIMIT 1"))
+        # A evidência do pedido FICA, agora com o carimbo da última tentativa e
+        # com a AÇÃO no lugar do antigo `desired` (migration 006).
+        conn.execute(text(
+            "SELECT contact_id, action, written_value, written_msg_id, "
+            " last_error, last_attempt_at "
+            "FROM plugin_trackify_consent_state LIMIT 1"))
+
+    for morta in ("button", "channel", "seen", "outbox"):
+        with get_engine().begin() as conn:
+            existe = conn.execute(text(
+                "SELECT to_regclass(:t) IS NOT NULL"),
+                {"t": f"plugin_trackify_consent_{morta}"}).scalar()
+        assert existe is False, morta
 
 
 def test_mensagem_de_texto_nao_toca_o_banco(plugin_app, monkeypatch):
@@ -2890,6 +2996,7 @@ def test_mensagem_de_texto_nao_toca_o_banco(plugin_app, monkeypatch):
     plugin_app("trackify", settings_overrides=_consent_on())
     consent = _load("consent")
     consent.reset_for_tests()
+    _sem_gravar(monkeypatch, consent)
 
     chamadas = []
     monkeypatch.setattr(consent, "provider_of",
@@ -2902,98 +3009,293 @@ def test_mensagem_de_texto_nao_toca_o_banco(plugin_app, monkeypatch):
     assert chamadas == []
 
     # E o caminho positivo de fato chega lá — senão o teste acima seria vácuo.
-    consent.on_message_received(None, _clique("ch", "5511900000900", texto="Parar"))
+    consent.on_message_received(None, _clique("ch", "5511900000900"))
     assert chamadas == ["ch"]
 
 
-def test_clique_em_canal_nao_oficial_nao_enfileira_nem_registra(plugin_app):
-    """Gate DURO de provider. Um contato que responde num canal GOWA/Telegram
-    não é descadastrado por esta feature — limitação conhecida e aceita."""
+def test_clique_em_canal_nao_oficial_nao_descadastra(plugin_app, monkeypatch):
+    """Gate DURO de provider, e agora o ÚNICO: sem allow-list, é ele que decide
+    de onde um clique pode virar descadastro. Um contato que responde num canal
+    GOWA/Telegram não é descadastrado — limitação conhecida e aceita."""
     plugin_app("trackify", settings_overrides=_consent_on())
     consent = _load("consent")
     consent.reset_for_tests()
+    agendados = _sem_gravar(monkeypatch, consent)
 
     gowa = _canal("consent_gowa", provider="gowa")
-    _permite(consent, gowa)
-    _regras(consent, [{"match_value": "Parar", "meaning": "optout"}])
-
     from db.repositories import contact_repo
     c = contact_repo.get_or_create("5511900000901")
-    consent.on_message_received(None, _clique(gowa, "5511900000901", texto="Parar"))
+    consent.on_message_received(None, _clique(gowa, "5511900000901"))
 
-    assert _visto(consent, "parar") is None
-    assert _fila(consent, int(c["id"])) == []
+    assert agendados == []
+    assert consent.get_state(int(c["id"]), OPTOUT) is None
 
 
-def test_clique_em_canal_oficial_fora_da_lista_so_registra_visto(plugin_app):
-    """Fail-closed sem matar a descoberta: sem canal marcado nada é gravado, mas
-    o clique vira material para o operador configurar."""
+def test_qualquer_canal_oficial_vale(plugin_app, monkeypatch):
+    """A allow-list saiu de propósito: quem pede para sair num número da empresa
+    pediu para sair, e o código do payload é global."""
     plugin_app("trackify", settings_overrides=_consent_on())
     consent = _load("consent")
     consent.reset_for_tests()
-
-    ch = _canal("consent_cloud_a")
-    _permite(consent)                    # allow-list VAZIA
-    _regras(consent, [{"match_value": "Sair agora", "meaning": "optout"}])
+    agendados = _sem_gravar(monkeypatch, consent)
 
     from db.repositories import contact_repo
-    c = contact_repo.get_or_create("5511900000902")
-    consent.on_message_received(None, _clique(ch, "5511900000902", texto="Sair agora"))
+    for i, cid in enumerate(("consent_cloud_a1", "consent_cloud_a2")):
+        _canal(cid)
+        phone = f"551190000091{i}"
+        contact_repo.get_or_create(phone)
+        consent.on_message_received(None, _clique(cid, phone))
 
-    visto = _visto(consent, "sair agora")
-    assert visto is not None and visto["hits"] == 1
-    assert _fila(consent, int(c["id"])) == []
+    assert len(agendados) == 2
 
 
-def test_botao_sem_regra_vai_para_vistos_com_contador(plugin_app):
-    """Caminho de onboarding: o template é criado do lado do Campanhas e a Meta
-    ecoa o próprio rótulo quando não há payload, então o operador só descobre a
-    string exata vendo o clique chegar."""
+def test_segundo_codigo_da_lista_descadastra_igual(plugin_app, monkeypatch):
+    """O requisito, ponta a ponta: dois códigos separados por vírgula no MESMO
+    campo, e qualquer um dos dois ativa a ação.
+
+    É o que permite trocar o código de um template sem calar o antigo —
+    campanhas já disparadas continuam recebendo cliques por dias.
+    """
+    plugin_app("trackify", settings_overrides=_consent_on(**{
+        "plugin.trackify.consent_optout_payload": f"{CODIGO}, {CODIGO}_2"}))
+    consent = _load("consent")
+    consent.reset_for_tests()
+    agendados = _sem_gravar(monkeypatch, consent)
+
+    ch = _canal("consent_cloud_b2")
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5511900000923")
+    cid = int(c["id"])
+
+    consent.on_message_received(
+        None, _clique(ch, "5511900000923", payload=f"{CODIGO}_2", msg_id="wamid.b2"))
+
+    assert agendados == [(cid, OPTOUT)]
+    estado = consent.get_state(cid, OPTOUT)
+    assert estado["raw_payload"] == f"{CODIGO}_2"
+
+
+def test_uma_linha_de_estado_por_acao(plugin_app, monkeypatch):
+    """Duas ações, um contato: duas linhas independentes.
+
+    Antes da 006 a chave era só ``contact_id``, então a segunda ação sobrescrevia
+    a evidência da primeira — e o carimbo de entrega (``written_msg_id``) de uma
+    marcaria a outra como já entregue.
+    """
+    plugin_app("trackify", settings_overrides=_consent_on(**{
+        "plugin.trackify.consent_optout_payload": CODIGO,
+        "plugin.trackify.consent_field_slug": "optout_marketing"}))
+    consent, actions = _load("consent"), _load("actions")
+    consent.reset_for_tests()
+    agendados = _sem_gravar(monkeypatch, consent)
+
+    # Uma ação de teste registrada só para este cenário. É o contrato que a
+    # feature promete: ação nova = uma dataclass, sem tocar em UI nem em SQL.
+    extra = actions.Action(
+        id="teste", label="Ação de teste", description="",
+        codes_setting="product_identity_fields",   # setting escalar qualquer
+        codes_label="Códigos", codes_help="", codes_placeholder="",
+        plan=lambda: actions.Plan({"campo_de_teste": "x"}, "campo_de_teste='x'"),
+    )
+    monkeypatch.setitem(actions._REGISTRY, "teste", extra)
+
+    from db.repositories import config_repo
+    cfg = _load("_config")
+    config_repo.set(cfg.PREFIX + "product_identity_fields", "QUERO_FALAR")
+
+    ch = _canal("consent_cloud_multi")
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5511900000924")
+    cid = int(c["id"])
+
+    consent.on_message_received(
+        None, _clique(ch, "5511900000924", payload=CODIGO, msg_id="wamid.m1"))
+    consent.on_message_received(
+        None, _clique(ch, "5511900000924", payload="QUERO_FALAR", msg_id="wamid.m2"))
+
+    assert agendados == [(cid, OPTOUT), (cid, "teste")]
+
+    a, b = consent.get_state(cid, OPTOUT), consent.get_state(cid, "teste")
+    assert a["raw_payload"] == CODIGO and a["msg_id"] == "wamid.m1"
+    assert b["raw_payload"] == "QUERO_FALAR" and b["msg_id"] == "wamid.m2"
+
+
+def test_migracao_006_da_a_chave_por_acao(plugin_app):
+    """Sem a chave composta, a segunda ação do mesmo contato daria conflito de PK
+    — e um DEFAULT sobrevivente na coluna faria um INSERT sem `action` virar
+    descadastro em silêncio, que é o pior erro possível nesta tabela."""
+    plugin_app("trackify")
+    from sqlalchemy import text
+    from db.engine import get_engine
+
+    with get_engine().begin() as conn:
+        cols = dict(conn.execute(text(
+            "SELECT column_name, column_default FROM information_schema.columns "
+            "WHERE table_name = 'plugin_trackify_consent_state'")).all())
+        pk = [r[0] for r in conn.execute(text(
+            "SELECT a.attname FROM pg_index i "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+            " AND a.attnum = ANY(i.indkey) "
+            "WHERE i.indrelid = 'plugin_trackify_consent_state'::regclass "
+            " AND i.indisprimary")).all()]
+
+    assert "desired" not in cols
+    assert "action" in cols and cols["action"] is None      # DEFAULT removido
+    assert set(pk) == {"contact_id", "action"}
+
+    # Duas ações do mesmo contato convivem; a mesma duas vezes, não.
+    import pytest as _pytest
+    with get_engine().begin() as conn:
+        for acao in ("optout", "teste"):
+            conn.execute(text(
+                "INSERT INTO plugin_trackify_consent_state "
+                "(contact_id, action, clicked_at, clicks, created_at, updated_at) "
+                "VALUES (-991, :a, 0, 1, 0, 0)"), {"a": acao})
+    with _pytest.raises(Exception):
+        with get_engine().begin() as conn:
+            conn.execute(text(
+                "INSERT INTO plugin_trackify_consent_state "
+                "(contact_id, action, clicked_at, clicks, created_at, updated_at) "
+                "VALUES (-991, 'optout', 0, 1, 0, 0)"))
+    with get_engine().begin() as conn:
+        conn.execute(text(
+            "DELETE FROM plugin_trackify_consent_state WHERE contact_id = -991"))
+
+
+def test_payload_diferente_do_codigo_nao_faz_nada(plugin_app, monkeypatch):
+    """Todo template de marketing tem outros botões ("Ver ofertas", "Falar com
+    atendente"). Nenhum deles pode descadastrar ninguém — e agora, com o
+    Campanhas mandando um código por botão, esse é o caso COMUM."""
     plugin_app("trackify", settings_overrides=_consent_on())
     consent = _load("consent")
     consent.reset_for_tests()
+    agendados = _sem_gravar(monkeypatch, consent)
 
     ch = _canal("consent_cloud_b")
-    _permite(consent, ch)
-    _regras(consent, [], canais=(ch,))
-
     from db.repositories import contact_repo
-    contact_repo.get_or_create("5511900000903")
-    for _ in range(3):
-        consent.on_message_received(
-            None, _clique(ch, "5511900000903", texto="Nao quero mais"))
+    c = contact_repo.get_or_create("5511900000903")
+    consent.on_message_received(
+        None, _clique(ch, "5511900000903", payload="VER_OFERTAS", texto="Ver ofertas"))
 
-    visto = _visto(consent, "nao quero mais")
-    assert visto["hits"] == 3
-    assert visto["shape"] == "button"
+    assert agendados == []
+    assert consent.get_state(int(c["id"]), OPTOUT) is None
 
 
-def test_clique_repetido_colapsa_numa_linha_pendente(plugin_app):
-    """Índice único parcial + último-clique-vence: cinco toques em dez segundos
-    viram um PUT só, com o estado final."""
+def test_clique_registra_a_evidencia_e_agenda_a_gravacao(plugin_app, monkeypatch):
+    """O estado é a EVIDÊNCIA do pedido (quem, quando, qual payload) e é gravado
+    de forma síncrona, no handler. Só a ida ao Trackify é adiada — perder a
+    evidência seria perder o pedido."""
     plugin_app("trackify", settings_overrides=_consent_on())
     consent = _load("consent")
     consent.reset_for_tests()
+    agendados = _sem_gravar(monkeypatch, consent)
 
     ch = _canal("consent_cloud_c")
-    _permite(consent, ch)
-    _regras(consent, [
-        {"channel_id": ch, "match_value": "Parar", "meaning": "optout"},
-        {"channel_id": ch, "match_value": "Voltar", "meaning": "optin"},
-    ], canais=(ch,))
-
     from db.repositories import contact_repo
     c = contact_repo.get_or_create("5511900000904")
     cid = int(c["id"])
-    for texto in ("Parar", "Voltar", "Parar"):
-        consent.on_message_received(None, _clique(ch, "5511900000904", texto=texto))
 
-    assert len(_fila(consent, cid, "pending")) == 1
-    estado = consent.get_state(cid)
-    assert estado["desired"] == "optout" and estado["clicks"] == 3
+    for _ in range(3):
+        consent.on_message_received(None, _clique(ch, "5511900000904"))
+
+    assert agendados == [(cid, OPTOUT)] * 3
+    estado = consent.get_state(cid, OPTOUT)
+    assert estado["action"] == OPTOUT
+    assert estado["clicks"] == 3
+    assert estado["raw_payload"] == CODIGO
+
+
+def test_handler_despachado_como_o_core_despacha_grava_mesmo_assim(plugin_app,
+                                                                   monkeypatch):
+    """Reproduz o DESPACHO REAL: handler síncrono dentro de ``asyncio.to_thread``.
+
+    É assim que ``plugins/events.py`` chama todo handler não-async — e numa
+    thread do executor ``get_running_loop()`` levanta. Este teste existe porque
+    a versão anterior desistia aí e gravava "sem laço de eventos": em produção
+    **nenhum** clique chegava ao Trackify, com a suíte verde, porque captura e
+    entrega eram exercitadas cada uma do seu lado e ninguém testava a emenda.
+    """
+    import asyncio
+
+    plugin_app("trackify", settings_overrides=_consent_on())
+    consent = _load("consent")
+    consent.reset_for_tests()
+    gravados = _grava_fake(monkeypatch, consent)
+
+    ch = _canal("consent_cloud_c2")
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5511900000905")
+    cid = int(c["id"])
+
+    async def cenario():
+        consent.bind_loop(asyncio.get_running_loop())   # o que o ``setup`` faz
+        await asyncio.to_thread(
+            consent.on_message_received, None, _clique(ch, "5511900000905"))
+        for _ in range(100):                            # a task veio de outra thread
+            if gravados:
+                return
+            await asyncio.sleep(0.01)
+
+    _run(cenario())
+
+    assert gravados == [cid]
+    assert (consent.get_state(cid, OPTOUT)["last_error"] or "") == ""
+
+
+def test_sem_laco_nenhum_grava_na_propria_thread(plugin_app, monkeypatch):
+    """Último recurso: script, boot ou teste síncrono, sem laço em lugar nenhum.
+
+    Segura a thread durante a gravação em vez de descartar o pedido. O antigo
+    ramo de desistência era o caminho ÚNICO em produção, então "raro" não podia
+    significar "perdido".
+    """
+    plugin_app("trackify", settings_overrides=_consent_on())
+    consent = _load("consent")
+    consent.reset_for_tests()                 # nenhum laço guardado
+    gravados = _grava_fake(monkeypatch, consent)
+
+    ch = _canal("consent_cloud_c3")
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5511900000907")
+    cid = int(c["id"])
+    consent.on_message_received(None, _clique(ch, "5511900000907"))
+
+    assert gravados == [cid]
+
+
+def test_setup_guarda_o_laco_para_o_handler(plugin_app):
+    """A ponta solta da correção: quem entrega o laço ao ``consent`` é o ``setup``.
+
+    Sem esta chamada a gravação cai no modo bloqueante e passa a segurar uma
+    thread do executor por clique — funciona, mas pelo motivo errado.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    plugin_app("trackify", settings_overrides=_consent_on())
+    lifecycle, consent = _load("lifecycle"), _load("consent")
+    consent.reset_for_tests()
+
+    laco = asyncio.new_event_loop()
+    try:
+        # Sem ``spawn_task``: o supervisor não é o assunto aqui, e o ``setup``
+        # tolera a ausência dele por contrato.
+        lifecycle.setup(SimpleNamespace(loop=laco))
+        assert consent._loop is laco
+    finally:
+        laco.close()
+        consent.reset_for_tests()
 
 
 # ── Com app: entrega ─────────────────────────────────────────────────────
+
+def _marcar(consent, monkeypatch, phone, channel):
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create(phone)
+    _sem_gravar(monkeypatch, consent)
+    consent.on_message_received(None, _clique(channel, phone))
+    return int(c["id"])
+
 
 def test_modo_seco_nao_chama_o_trackify(plugin_app, monkeypatch):
     """Padrão de propósito: a primeira gravação no CRM do cliente não pode ser
@@ -3002,128 +3304,110 @@ def test_modo_seco_nao_chama_o_trackify(plugin_app, monkeypatch):
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
-    ch = _canal("consent_cloud_d")
-    _permite(consent, ch)
-    _regras(consent, [{"channel_id": ch, "match_value": "Parar", "meaning": "optout"}],
-            canais=(ch,))
-
-    from db.repositories import contact_repo
-    c = contact_repo.get_or_create("5511900000905")
-    consent.on_message_received(None, _clique(ch, "5511900000905", texto="Parar"))
-
+    cid = _marcar(consent, monkeypatch, "5511900000906", _canal("consent_cloud_d"))
     _linkado(monkeypatch, push)
+
     client = _FakeClient(_FakeResp(500, {}))     # qualquer ida à rede seria erro
-    assert _run(consent.deliver_one(client, _reserva(consent, int(c["id"])))) == "dry_run"
+    desfecho, _, repetir = _run(consent._write_once(client, cid, OPTOUT))
+    assert (desfecho, repetir) == ("dry_run", False)
     assert client.calls == []
-    assert consent.get_state(int(c["id"]))["written_value"] is None
+    assert consent.get_state(cid, OPTOUT)["written_value"] is None
 
 
-def test_opt_out_grava_valor_cheio_e_opt_in_apaga(plugin_app, monkeypatch):
-    """O corpo do PUT é o contrato com o módulo Campanhas.
+def test_descadastro_grava_o_valor_que_bloqueia(plugin_app, monkeypatch):
+    """O corpo do PUT é o contrato com o módulo Campanhas: um valor que BLOQUEIA
+    (``sim``) no campo combinado."""
+    plugin_app("trackify", settings_overrides=_consent_on(
+        **{"plugin.trackify.consent_dry_run": False}))
+    consent, push = _load("consent"), _load("push")
+    consent.reset_for_tests()
 
-    Descadastrar grava um valor que BLOQUEIA (``sim``); voltar a receber grava
-    ``""``, que apaga a linha do campo no CDP — e o sucesso da limpeza é a
-    AUSÊNCIA da linha na resposta, não o código HTTP.
+    cid = _marcar(consent, monkeypatch, "5511900000907", _canal("consent_cloud_e"))
+    _linkado(monkeypatch, push, "uuid-cdp-e")
+
+    client = _FakeClient(_FakeResp(200, _cdp_contact(optout_marketing="sim")))
+    assert _run(consent._write_once(client, cid, OPTOUT))[0] == "sent"
+    assert client.calls[0]["method"] == "PUT"
+    assert client.calls[0]["json"] == {"fieldValues": {"optout_marketing": "sim"}}
+
+    estado = consent.get_state(cid, OPTOUT)
+    assert estado["written_value"] == "sim"
+    assert estado["last_error"] == ""
+
+
+def test_novo_clique_reescreve_mesmo_com_o_valor_ja_gravado(plugin_app, monkeypatch):
+    """Regressão: campo apagado no CDP tem de voltar no clique seguinte.
+
+    A guarda antiga comparava o VALOR gravado, tratando o registro local como
+    prova do estado remoto. Bastava alguém limpar o campo no Trackify — correção
+    manual, merge de contatos, outro sistema — para o contato clicar "não quero
+    mais receber" e o plugin pular a escrita, em silêncio e para sempre. Foi o
+    que aconteceu no primeiro teste de ponta a ponta.
     """
     plugin_app("trackify", settings_overrides=_consent_on(
         **{"plugin.trackify.consent_dry_run": False}))
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
-    ch = _canal("consent_cloud_e")
-    _permite(consent, ch)
-    _regras(consent, [
-        {"channel_id": ch, "match_value": "Parar", "meaning": "optout"},
-        {"channel_id": ch, "match_value": "Voltar", "meaning": "optin"},
-    ], canais=(ch,))
-    _linkado(monkeypatch, push, "uuid-cdp-e")
+    ch, phone = _canal("consent_cloud_f2"), "5511900000917"
+    cid = _marcar(consent, monkeypatch, phone, ch)
+    _linkado(monkeypatch, push, "uuid-cdp-f2")
 
-    from db.repositories import contact_repo
-    c = contact_repo.get_or_create("5511900000906")
-    cid = int(c["id"])
-
-    consent.on_message_received(None, _clique(ch, "5511900000906", texto="Parar"))
     client = _FakeClient(_FakeResp(200, _cdp_contact(optout_marketing="sim")))
-    assert _run(consent.deliver_one(client, _reserva(consent, cid))) == "sent"
-    assert client.calls[0]["method"] == "PUT"
-    assert client.calls[0]["json"] == {"fieldValues": {"optout_marketing": "sim"}}
-    assert consent.get_state(cid)["written_value"] == "sim"
+    assert _run(consent._write_once(client, cid, OPTOUT))[0] == "sent"
 
-    consent.on_message_received(None, _clique(ch, "5511900000906", texto="Voltar"))
-    client = _FakeClient(_FakeResp(200, _cdp_contact()))   # campo AUSENTE = apagado
-    assert _run(consent.deliver_one(client, _reserva(consent, cid))) == "sent"
-    assert client.calls[0]["json"] == {"fieldValues": {"optout_marketing": ""}}
-    assert consent.get_state(cid)["written_value"] == ""
+    # Alguém apaga o campo no CDP; o contato clica DE NOVO (outra mensagem).
+    consent.on_message_received(None, _clique(ch, phone, msg_id="wamid.2"))
+
+    client = _FakeClient(_FakeResp(200, _cdp_contact(optout_marketing="sim")))
+    assert _run(consent._write_once(client, cid, OPTOUT))[0] == "sent"
+    assert client.calls[0]["json"] == {"fieldValues": {"optout_marketing": "sim"}}
 
 
 def test_estado_ja_gravado_nao_gasta_uma_chamada(plugin_app, monkeypatch):
-    """Clique repetido no mesmo botão é o caminho comum. Zero HTTP aqui é o que
-    mantém o orçamento de 30/min utilizável."""
+    """Reentrega do MESMO clique é o caminho comum. Zero HTTP aqui é o que
+    mantém o orçamento de 30/min por IP utilizável."""
     plugin_app("trackify", settings_overrides=_consent_on(
         **{"plugin.trackify.consent_dry_run": False}))
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
-    ch = _canal("consent_cloud_f")
-    _permite(consent, ch)
-    _regras(consent, [{"channel_id": ch, "match_value": "Parar", "meaning": "optout"}],
-            canais=(ch,))
+    cid = _marcar(consent, monkeypatch, "5511900000908", _canal("consent_cloud_f"))
     _linkado(monkeypatch, push, "uuid-cdp-f")
 
-    from db.repositories import contact_repo
-    c = contact_repo.get_or_create("5511900000907")
-    cid = int(c["id"])
-
-    consent.on_message_received(None, _clique(ch, "5511900000907", texto="Parar"))
     client = _FakeClient(_FakeResp(200, _cdp_contact(optout_marketing="sim")))
-    assert _run(consent.deliver_one(client, _reserva(consent, cid))) == "sent"
+    assert _run(consent._write_once(client, cid, OPTOUT))[0] == "sent"
 
-    consent.on_message_received(None, _clique(ch, "5511900000907", texto="Parar"))
     client = _FakeClient(_FakeResp(500, {}))
-    assert _run(consent.deliver_one(client, _reserva(consent, cid))) == "noop"
+    assert _run(consent._write_once(client, cid, OPTOUT))[0] == "noop"
     assert client.calls == []
 
 
-def test_contato_nao_vinculado_e_retentado_e_nunca_cria_cadastro(plugin_app, monkeypatch):
-    """Descadastro tem peso legal: desistir em silêncio é o pior desfecho.
+def test_contato_nao_vinculado_nao_e_retentado_e_nunca_cria_cadastro(plugin_app,
+                                                                     monkeypatch):
+    """Sem vínculo não há onde gravar, e tentar de novo em 8s não vai criar um.
 
-    Diferente do field sync (que marca ``blocked`` na hora), aqui reagenda por
-    até 24h — e NUNCA cria cadastro no CDP para ter onde gravar.
+    Sem fila, este é o desfecho que MAIS aparece na prática — por isso vira erro
+    visível na aba com o texto do conserto, e não uma retentativa infinita.
     """
     plugin_app("trackify", settings_overrides=_consent_on(
         **{"plugin.trackify.consent_dry_run": False}))
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
-    ch = _canal("consent_cloud_g")
-    _permite(consent, ch)
-    _regras(consent, [{"channel_id": ch, "match_value": "Parar", "meaning": "optout"}],
-            canais=(ch,))
+    cid = _marcar(consent, monkeypatch, "5511900000909", _canal("consent_cloud_g"))
     _linkado(monkeypatch, push, "")           # sem vínculo no CDP
 
-    from db.repositories import contact_repo
-    c = contact_repo.get_or_create("5511900000908")
-    cid = int(c["id"])
-    consent.on_message_received(None, _clique(ch, "5511900000908", texto="Parar"))
+    desfecho, _, repetir = _run(consent._write_once(_FakeHttp(), cid, OPTOUT))
+    assert (desfecho, repetir) == ("unlinked", False)
 
-    linha = _reserva(consent, cid)
-    assert _run(consent.deliver_one(_FakeHttp(), linha)) == "unlinked_retry"
-    pend = _fila(consent, cid, "pending")[0]
-    assert pend["attempts"] == 0              # não gasta tentativa
-    assert "não vinculado" in pend["last_error"]
-
-    # Passado o prazo, vira erro VISÍVEL com botão de reprocessar — não some.
-    from sqlalchemy import text
-    from db.engine import get_engine
-    with get_engine().begin() as conn:
-        conn.execute(text("UPDATE plugin_trackify_consent_outbox "
-                          "SET enqueued_at = 0, next_attempt_at = 0 "
-                          "WHERE contact_id = :c"), {"c": cid})
-    assert _run(consent.deliver_one(_FakeHttp(), _reserva(consent, cid))) == "unlinked"
-    assert _fila(consent, cid, "blocked")
+    estado = consent.get_state(cid, OPTOUT)
+    assert "não vinculado" in estado["last_error"]
+    assert estado["written_value"] is None
+    assert any(int(r["contact_id"]) == cid for r in consent.pending_errors())
 
 
-def test_slug_ignorado_pelo_cdp_vira_blocked_acionavel(plugin_app, monkeypatch):
+def test_slug_ignorado_pelo_cdp_vira_erro_acionavel(plugin_app, monkeypatch):
     """A falha mais perigosa da feature: o Trackify pula slug desconhecido EM
     SILÊNCIO e devolve 200. Sem conferir a resposta, contaríamos como
     descadastrado alguém que continua na lista."""
@@ -3132,51 +3416,66 @@ def test_slug_ignorado_pelo_cdp_vira_blocked_acionavel(plugin_app, monkeypatch):
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
-    ch = _canal("consent_cloud_h")
-    _permite(consent, ch)
-    _regras(consent, [{"channel_id": ch, "match_value": "Parar", "meaning": "optout"}],
-            canais=(ch,))
+    cid = _marcar(consent, monkeypatch, "5511900000910", _canal("consent_cloud_h"))
     _linkado(monkeypatch, push, "uuid-cdp-h")
-
-    from db.repositories import contact_repo
-    c = contact_repo.get_or_create("5511900000909")
-    cid = int(c["id"])
-    consent.on_message_received(None, _clique(ch, "5511900000909", texto="Parar"))
 
     # 200, mas o campo não voltou na resposta → não foi gravado.
     client = _FakeClient(_FakeResp(200, _cdp_contact(email="a@b.com")))
-    assert _run(consent.deliver_one(client, _reserva(consent, cid))) == "blocked"
-    linha = _fila(consent, cid, "blocked")[0]
-    assert "ignorou" in linha["last_error"] and "optout_marketing" in linha["last_error"]
-    assert consent.get_state(cid)["written_value"] is None
+    desfecho, erro, repetir = _run(consent._write_once(client, cid, OPTOUT))
+    assert (desfecho, repetir) == ("blocked", False)
+    assert "ignorou" in erro and "optout_marketing" in erro
+    assert consent.get_state(cid, OPTOUT)["written_value"] is None
 
 
 def test_credencial_ruim_para_as_duas_sincronizacoes(plugin_app, monkeypatch):
     """A API key é UMA só. Parar as duas é o certo — e a tela mostra o motivo em
-    vez de martelar o Nexus do cliente."""
+    vez de martelar o Nexus do cliente. Repetir não resolveria: chave inválida ou
+    sem escopo não conserta sozinha."""
     plugin_app("trackify", settings_overrides=_consent_on(
         **{"plugin.trackify.consent_dry_run": False}))
     consent, push, cfg = _load("consent"), _load("push"), _load("_config")
     consent.reset_for_tests()
 
-    ch = _canal("consent_cloud_i")
-    _permite(consent, ch)
-    _regras(consent, [{"channel_id": ch, "match_value": "Parar", "meaning": "optout"}],
-            canais=(ch,))
+    cid = _marcar(consent, monkeypatch, "5511900000911", _canal("consent_cloud_i"))
     _linkado(monkeypatch, push, "uuid-cdp-i")
 
-    from db.repositories import config_repo, contact_repo
-    c = contact_repo.get_or_create("5511900000910")
-    cid = int(c["id"])
-    consent.on_message_received(None, _clique(ch, "5511900000910", texto="Parar"))
-
+    from db.repositories import config_repo
     client = _FakeClient(_FakeResp(401, {}))
     try:
-        assert _run(consent.deliver_one(client, _reserva(consent, cid))) == "unauthorized"
+        desfecho, _, repetir = _run(consent._write_once(client, cid, OPTOUT))
+        assert (desfecho, repetir) == ("unauthorized", False)
         assert (cfg.setting("sync_blocked_reason") or "").strip()
     finally:
         # Não vaza para os testes seguintes: config vive no banco COMPARTILHADO.
         config_repo.set(cfg.PREFIX + "sync_blocked_reason", "")
+
+
+def test_falha_de_rede_e_retentada_e_desiste_com_registro(plugin_app, monkeypatch):
+    """Sem fila, o que sobra é um punhado de tentativas na mesma task.
+
+    O teste trava o contrato dos dois lados: 5xx VALE repetir, e esgotadas as
+    tentativas o pedido não some — fica em ``last_error`` para ser marcado à mão.
+    """
+    plugin_app("trackify", settings_overrides=_consent_on(
+        **{"plugin.trackify.consent_dry_run": False}))
+    consent, push = _load("consent"), _load("push")
+    consent.reset_for_tests()
+
+    cid = _marcar(consent, monkeypatch, "5511900000912", _canal("consent_cloud_j"))
+    _linkado(monkeypatch, push, "uuid-cdp-j")
+
+    assert _run(consent._write_once(_FakeClient(_FakeResp(503, {})), cid, OPTOUT))[2] is True
+
+    # A sequência completa, sem esperar os backoffs reais.
+    import httpx
+    monkeypatch.setattr(consent, "RETRY_DELAYS", ())
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: _FakeClient(_FakeResp(503, {})))
+    assert _run(consent.write_now(cid, OPTOUT)) == "failed"
+
+    estado = consent.get_state(cid, OPTOUT)
+    assert estado["written_value"] is None
+    assert estado["last_error"] and estado["last_attempt_at"]
 
 
 def test_mapeamento_de_campo_nao_pode_reivindicar_o_slug_do_consentimento(plugin_app):
@@ -3201,11 +3500,48 @@ def test_mapeamento_de_campo_nao_pode_reivindicar_o_slug_do_consentimento(plugin
     assert errors == {} and len(clean) == 1
 
 
+def test_reserva_cobre_o_campo_de_toda_acao_registrada(plugin_app, monkeypatch):
+    """A guarda cruzada tem de crescer junto com o catálogo: uma ação nova cujo
+    campo ficasse de fora poderia ter o que grava DESFEITO pelo pull.
+
+    ⚠️ Devolve ``dict``, não ``set``: ``field_map.validate`` usa o valor como o
+    texto do erro mostrado ao operador.
+    """
+    plugin_app("trackify", settings_overrides=_consent_on())
+    routes, actions = _load("routes"), _load("actions")
+
+    extra = actions.Action(
+        id="teste", label="Ação de teste", description="",
+        codes_setting="consent_optout_payload",
+        codes_label="", codes_help="", codes_placeholder="",
+        plan=lambda: actions.Plan({"campo_de_teste": "x"}, "campo_de_teste='x'"),
+    )
+    monkeypatch.setitem(actions._REGISTRY, "teste", extra)
+
+    reservados = routes._reserved_slugs()
+    assert isinstance(reservados, dict)
+    assert set(reservados) == {"optout_marketing", "campo_de_teste"}
+    assert all(isinstance(v, str) and v for v in reservados.values())
+
+
+def test_reserva_some_com_a_captura_desligada(plugin_app):
+    """Desligada a aba, o campo deixa de ter dono aqui e pode ser mapeado
+    normalmente do outro lado."""
+    plugin_app("trackify", settings_overrides=_consent_on(
+        **{"plugin.trackify.consent_enabled": False}))
+    assert _load("routes")._reserved_slugs() == {}
+
+
 # ── Com app: rotas ───────────────────────────────────────────────────────
 
 def test_status_do_consentimento_responde_sem_configuracao(plugin_app):
-    """*Desligado*, *sem credencial*, *sem canal* e *sem regra* falham todos do
-    mesmo jeito (nada acontece) e exigem consertos diferentes."""
+    """*Desligado*, *sem credencial*, *sem código* e *campo errado no CDP* falham
+    todos do mesmo jeito (nada acontece) e exigem consertos diferentes.
+
+    O que é GLOBAL fica no topo; o que é de UMA ação desceu para a linha dela —
+    manter ``field_slug``/``optout_payload`` no topo especializaria o endpoint
+    numa ação para sempre.
+    """
     built = plugin_app("trackify", settings_overrides=_consent_on(**{
         "plugin.trackify.consent_enabled": False,
         "plugin.trackify.sync_api_key": "",
@@ -3216,157 +3552,87 @@ def test_status_do_consentimento_responde_sem_configuracao(plugin_app):
     assert d["enabled"] is False
     assert d["credential_set"] is False
     assert "api key" in d["field_error"].lower()
-    assert d["field_slug"] == "optout_marketing"
-    assert d["value_errors"] == []
+
+    for morta in ("field_slug", "optout_value", "optout_payload", "value_errors"):
+        assert morta not in d, morta
+
+    linha = next(a for a in d["actions"] if a["id"] == OPTOUT)
+    assert linha["codes"] == [CODIGO]
+    assert linha["config_errors"] == []
+    assert [t["slug"] for t in linha["targets"]] == ["optout_marketing"]
+    assert [f["key"] for f in linha["settings_fields"]] == [
+        "consent_field_slug", "consent_optout_value"]
 
 
-def test_rotas_de_consentimento_devolvem_o_envelope_do_plugin(plugin_app):
-    built = plugin_app("trackify", settings_overrides=_consent_on())
-    for path in ("/consent/rules", "/consent/seen?limit=5", "/consent/queue?limit=5"):
-        r = built.client.get(f"/api/plugins/trackify{path}")
-        assert r.status_code == 200, path
-        assert r.json()["ok"] is True, path
+def test_status_lista_uma_linha_por_acao_com_uma_leitura_do_catalogo(plugin_app,
+                                                                     monkeypatch):
+    """A tela é dirigida pelo servidor, e uma ação nova não pode custar um
+    round-trip novo: o catálogo de ``custom-fields`` é lido UMA vez e consultado
+    em memória, mesmo com ações apontando para slugs diferentes.
 
-
-def test_templates_recusam_canal_nao_oficial(plugin_app):
-    built = plugin_app("trackify", settings_overrides=_consent_on())
-    _load("consent").reset_for_tests()
-    _canal("consent_tg", provider="telegram")
-
-    assert built.client.get(
-        "/api/plugins/trackify/consent/templates").status_code == 400
-    r = built.client.get(
-        "/api/plugins/trackify/consent/templates?channel_id=consent_tg")
-    assert r.status_code == 400 and r.json()["ok"] is False
-
-
-def test_templates_degradam_sem_registry(plugin_app):
-    """Sem o registry cabeado (harness) ou com um canal que não sabe listar
-    template, a tela recebe uma explicação — não um 500."""
-    built = plugin_app("trackify", settings_overrides=_consent_on())
-    _load("consent").reset_for_tests()
-    ch = _canal("consent_cloud_tpl")
-
-    r = built.client.get(
-        f"/api/plugins/trackify/consent/templates?channel_id={ch}")
-    assert r.status_code == 200
-    d = r.json()["data"]
-    assert d["supported"] is False and d["message"]
-
-
-def test_so_template_marketing_com_botao_de_resposta_vira_opcao(plugin_app):
-    """A listagem já chega filtrada: o clique não diz de qual template veio,
-    então a criação da regra é o ÚNICO ponto onde a categoria pode ser exigida.
-    Botão de URL não produz mensagem de volta e também fica de fora."""
-    plugin_app("trackify")
-    routes = _load("routes")
-
-    brutos = [
-        {"name": "promo", "category": "MARKETING", "language": "pt_BR",
-         "status": "APPROVED", "components": [
-             {"type": "BODY", "text": "oi"},
-             {"type": "BUTTONS", "buttons": [
-                 {"type": "QUICK_REPLY", "text": "Parar"},
-                 {"type": "URL", "text": "Site", "url": "https://x"}]}]},
-        {"name": "otp", "category": "AUTHENTICATION", "components": [
-            {"type": "BUTTONS", "buttons": [{"type": "QUICK_REPLY", "text": "Ok"}]}]},
-        {"name": "aviso", "category": "MARKETING", "components": [
-            {"type": "BODY", "text": "sem botão"}]},
-    ]
-    out = routes._templates_com_botoes(brutos)
-    assert [t["name"] for t in out] == ["promo"]
-    assert out[0]["buttons"] == [{"text": "Parar", "payload": ""}]
-
-
-def test_filtro_aceita_a_forma_NORMALIZADA_pelo_canal(plugin_app):
-    """A forma que de fato chega não é a crua da Graph API.
-
-    ``whatsapp_cloud._normalize_template`` **minúscula o `type` do componente**
-    (``BUTTONS`` → ``buttons``) e deixa `category` e o tipo do botão intactos.
-    Comparar o tipo do componente faria a lista voltar sempre vazia em produção
-    enquanto passava com um fixture escrito à mão.
+    Chama ``status()`` direto em vez de passar pela rota: o app monta o plugin
+    como ``whatsbot_plugins.trackify`` e o ``_load`` daqui carrega ``trackify_src``
+    — são objetos de módulo DIFERENTES, e um monkeypatch num não alcança o outro.
     """
-    plugin_app("trackify")
-    routes = _load("routes")
+    plugin_app("trackify", settings_overrides=_consent_on())
+    consent, actions, tk_client = _load("consent"), _load("actions"), _load("client")
+    consent.reset_for_tests()
+    tk_client.invalidate_cache()
 
-    normalizado = [{
-        "name": "descadastro_teste", "language": "pt_BR", "status": "APPROVED",
-        "category": "MARKETING",
-        "components": [
-            {"type": "body", "text": "Quer continuar recebendo?"},
-            {"type": "buttons", "buttons": [
-                {"type": "QUICK_REPLY", "text": "Quero continuar"},
-                {"type": "QUICK_REPLY", "text": "Não quero mais"}]},
-        ],
-    }]
-    out = routes._templates_com_botoes(normalizado)
-    assert len(out) == 1
-    assert [b["text"] for b in out[0]["buttons"]] == ["Quero continuar", "Não quero mais"]
-
-
-def test_listagem_de_templates_nao_quebra_com_funcao_sincrona(plugin_app, monkeypatch):
-    """Regressão: ``list_templates`` é SÍNCRONA e mora no ``outbound_router``.
-
-    A primeira versão pegava o canal no registry e dava ``await`` no retorno,
-    o que produzia ``TypeError: object list can't be used in 'await' expression``
-    — e a tela mostrava só "Não foi possível listar os templates (TypeError)".
-    """
-    built = plugin_app("trackify", settings_overrides=_consent_on())
-    _load("consent").reset_for_tests()
-    ch = _canal("consent_cloud_sync")
+    extra = actions.Action(
+        id="teste", label="Ação de teste", description="só para o teste",
+        codes_setting="consent_optout_payload",  # reusa: o valor não importa aqui
+        codes_label="Códigos", codes_help="", codes_placeholder="",
+        plan=lambda: actions.Plan({"campo_de_teste": "x"}, "campo_de_teste='x'"),
+    )
+    monkeypatch.setitem(actions._REGISTRY, "teste", extra)
 
     chamadas = []
 
-    class _RouterFake:
-        def supports(self, channel_id, cap):
-            return cap == "templates"
+    async def _fake_fields(client):
+        chamadas.append(1)
+        return tk_client.Result(tk_client.OK, 200, data=[
+            {"slug": "optout_marketing", "name": "Optout", "isActive": True},
+            {"slug": "campo_de_teste", "name": "Teste", "isActive": True},
+        ])
 
-        def list_templates(self, channel_id):      # SÍNCRONA, de propósito
-            chamadas.append(channel_id)
-            return [{"name": "promo", "category": "MARKETING", "language": "pt_BR",
-                     "status": "APPROVED", "components": [
-                         {"type": "buttons", "buttons": [
-                             {"type": "QUICK_REPLY", "text": "Parar"}]}]}]
+    monkeypatch.setattr(tk_client, "custom_fields", _fake_fields)
 
-    import plugins.context as pctx
-    from types import SimpleNamespace
-    # `get_deps()` devolve None no harness — trocamos a própria função, que é
-    # como a rota a resolve (import dentro do handler).
-    monkeypatch.setattr(pctx, "get_deps",
-                        lambda: SimpleNamespace(outbound_router=_RouterFake()))
+    try:
+        d = _run(consent.status(_FakeHttp()))
+    finally:
+        tk_client.invalidate_cache()
 
-    r = built.client.get(f"/api/plugins/trackify/consent/templates?channel_id={ch}")
-    assert r.status_code == 200
-    d = r.json()["data"]
-    assert d["supported"] is True, d
-    assert [t["name"] for t in d["templates"]] == ["promo"]
-    assert chamadas == [ch]
+    assert [a["id"] for a in d["actions"]] == [OPTOUT, "teste"]
+    assert len(chamadas) == 1, "o catálogo do CDP tem de ser lido UMA vez só"
+
+    por_id = {a["id"]: a for a in d["actions"]}
+    assert por_id[OPTOUT]["field"]["slug"] == "optout_marketing"
+    assert por_id[OPTOUT]["codes"] == [CODIGO]
+    assert por_id["teste"]["field"]["slug"] == "campo_de_teste"
+    assert por_id["teste"]["field_error"] == ""
 
 
-def test_conta_sem_template_e_conta_sem_botao_dao_recados_diferentes(plugin_app, monkeypatch):
-    """`outbound_router.list_templates` engole erro e devolve `[]`, então "a conta
-    não respondeu" e "nenhum template serve" chegam iguais. Os consertos são
-    diferentes — WABA/token de um lado, criar o template do outro."""
+def test_status_lista_os_canais_oficiais_disponiveis(plugin_app):
+    """Sem canal oficial não há clique de botão de template para capturar — e o
+    sintoma (nada acontece) é o mesmo de tudo o mais."""
     built = plugin_app("trackify", settings_overrides=_consent_on())
     _load("consent").reset_for_tests()
-    ch = _canal("consent_cloud_msg")
+    _canal("consent_cloud_status")
+    _canal("consent_tg", provider="telegram")
 
-    class _Router:
-        def __init__(self, saida): self.saida = saida
-        def supports(self, channel_id, cap): return True
-        def list_templates(self, channel_id): return self.saida
+    d = built.client.get("/api/plugins/trackify/consent/status").json()["data"]
+    ids = [c["channel_id"] for c in d["channels"]]
+    assert "consent_cloud_status" in ids
+    assert "consent_tg" not in ids
 
-    import plugins.context as pctx
-    from types import SimpleNamespace
 
-    def _usar(router):
-        monkeypatch.setattr(pctx, "get_deps",
-                            lambda: SimpleNamespace(outbound_router=router))
-        return built.client.get(
-            f"/api/plugins/trackify/consent/templates?channel_id={ch}").json()["data"]
-
-    d = _usar(_Router([]))
-    assert d["supported"] is True and "WABA" in d["message"], d
-
-    d = _usar(_Router([{"name": "x", "category": "UTILITY", "components": []}]))
-    assert d["supported"] is True and "nenhum é MARKETING" in d["message"], d
+def test_rotas_de_regra_fila_e_template_nao_existem_mais(plugin_app):
+    """Elas eram a máquina de adivinhar o texto do botão. Manter uma rota morta
+    respondendo 200 faria uma tela antiga parecer funcionar."""
+    built = plugin_app("trackify", settings_overrides=_consent_on())
+    for path in ("/consent/rules", "/consent/seen", "/consent/queue",
+                 "/consent/templates?channel_id=x"):
+        assert built.client.get(f"/api/plugins/trackify{path}").status_code == 404, path
+    assert built.client.put("/api/plugins/trackify/consent/channels",
+                            json={"channel_ids": []}).status_code == 404

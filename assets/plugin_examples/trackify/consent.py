@@ -1,52 +1,49 @@
-"""Consentimento de marketing: clique em botão → campo de descadastro no CDP.
+"""Clique em botão → AÇÃO → escrita no cadastro do CDP.
 
-Duas metades bem separadas, pelo mesmo motivo do ``push.py``: **o handler de
-evento NUNCA posta**. O barramento é fire-and-forget e engole exceção, então uma
-falha de rede dentro do handler viraria perda silenciosa — e aqui o dado perdido
-é um pedido de descadastro, que tem peso legal.
+Um clique cujo **payload** casa um dos códigos configurados ativa a ação dona
+daquele código. Os códigos são os mesmos dos dois lados: o módulo Campanhas os
+manda nos botões do template, este plugin os reconhece. Hoje existe uma ação
+(descadastro de marketing); o catálogo mora em ``actions.py``.
 
-O handler marca o contato numa fila própria e a task supervisionada entrega,
-recalculando o valor na hora do envio. Com isso um contato que clica "sair" e
-depois "voltar" em dez segundos produz **um** PUT, com o estado final.
+Não há tabela de regras, allow-list de canais nem lista de "botões vistos" —
+todos existiam para o operador **adivinhar** qual string a Meta devolveria, e
+com o payload explícito não há o que adivinhar.
 
-Fila PRÓPRIA e não a do ``push``: aquela é dirigida pelo mapeamento
-atributo-do-WhatsBot ↔ slug-do-CDP, e o campo de descadastro não tem contraparte
-no WhatsBot. Reusá-la arrastaria junto o motor de conflito e o ``pull``, que
-poderia **sobrescrever** um descadastro com o valor antigo do CDP.
+Também não há fila. O handler grava direto, numa task própria:
+
+* **numa task, não no handler** — o barramento é fire-and-forget e engole
+  exceção, e uma chamada HTTP dentro dele seguraria o evento mais quente do
+  sistema;
+* **direto, sem outbox** — decisão explícita do produto. O preço está registrado
+  em :func:`write_now`: um descadastro perdido numa queda de rede longa ou num
+  restart no meio da entrega **não é recuperado sozinho**. As tentativas
+  internas encurtam a janela, não a fecham; o que sobra fica em
+  ``plugin_trackify_consent_state.last_error``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
-import random
 import time
 
 from sqlalchemy import text
 
-from plugins.context import make_plugin_db
+from plugins.context import audit, make_plugin_db
 
-from . import _config, consent_match, field_map, push, writer
+from . import _config, actions, consent_match, field_map, push, writer
 from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.consent")
 
 OFFICIAL_PROVIDER = "whatsapp_cloud"
 
-MAX_ATTEMPTS = 8
-BACKOFF_CAP = 300.0
-LOCK_STALE_AFTER = 300.0
 CHANNEL_TTL = 30.0
-MAX_RULES = 200
 
-# Contato sem cadastro no CDP não é falha do item: pode aparecer daqui a pouco
-# (um e-mail preenchido no painel, a varredura de conferência criando o vínculo).
-# Desistir em silêncio de um descadastro é o pior desfecho possível, então
-# reagenda de hora em hora por um dia antes de virar erro visível na tela.
-UNLINKED_RETRY = 3600.0
-UNLINKED_GIVE_UP = 24 * 3600.0
-
-_worker_id = f"{os.getpid()}"
+# Tentativas dentro da MESMA task, para falha de rede/ritmo passageira. Não é
+# fila: nada disto sobrevive a um restart.
+MAX_ATTEMPTS = 3
+RETRY_DELAYS = (2.0, 8.0)
 
 # Cache de provider por canal. ``message.received`` é o evento mais quente do
 # sistema — mesmo com os guards baratos na frente, uma ida ao banco por clique
@@ -54,14 +51,44 @@ _worker_id = f"{os.getpid()}"
 # ``app/services/message_ingest_service.py``.
 _channel_cache: dict[str, tuple[float, str]] = {}
 
+# Referência forte das tasks em voo. Sem isso o GC pode coletar uma task ainda
+# não concluída e o descadastro some sem log (documentado em
+# `plugins/context.py`, mesmo cuidado dos observadores de webhook).
+_inflight: set = set()
+
+# O laço do servidor, guardado no ``setup(ctx)``.
+#
+# ⚠️ Este handler é SÍNCRONO, e o core despacha handler síncrono com
+# ``await asyncio.to_thread(handler, ctx, payload)`` (``plugins/events.py``) —
+# ou seja, ele roda numa thread do executor, onde ``get_running_loop()``
+# SEMPRE levanta. Sem esta referência não haveria onde agendar a gravação e
+# todo clique morreria em "sem laço de eventos", que foi exatamente o que
+# aconteceu em produção. O handler continua síncrono de propósito: ele toca o
+# banco, e banco no laço travaria o evento mais quente do sistema.
+_loop: asyncio.AbstractEventLoop | None = None
+
 
 def _now() -> float:
     return time.time()
 
 
+def bind_loop(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """Guarda o laço em que a gravação será agendada. Chamado no ``setup``."""
+    global _loop
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+    _loop = loop
+
+
 def reset_for_tests() -> None:
     """Zera o estado de módulo. Só para a suíte — o cache é global."""
+    global _loop
     _channel_cache.clear()
+    _inflight.clear()
+    _loop = None
 
 
 # ── Gates ────────────────────────────────────────────────────────────────
@@ -84,12 +111,18 @@ def provider_of(channel_id: str) -> str:
 
 
 def is_official(channel_id: str) -> bool:
-    """Gate DURO da feature. Só WhatsApp oficial (Cloud API)."""
+    """Gate DURO da feature. Só WhatsApp oficial (Cloud API).
+
+    Com a allow-list de canais removida, é ele sozinho que decide de onde um
+    clique pode virar descadastro. Continua valendo para TODO canal oficial:
+    o código do payload é global, e um contato que pede para sair num número
+    pediu para sair.
+    """
     return provider_of(channel_id) == OFFICIAL_PROVIDER
 
 
 def official_channels() -> list[dict]:
-    """Canais elegíveis, para a tela oferecer. Nunca levanta."""
+    """Canais elegíveis, para a tela mostrar. Nunca levanta."""
     try:
         from db.repositories import channel_repo
         rows = channel_repo.list_all() or []
@@ -110,21 +143,10 @@ def official_channels() -> list[dict]:
     return out
 
 
-def allowed_channel_ids() -> set[str]:
-    try:
-        with make_plugin_db() as conn:
-            rows = conn.execute(text(
-                "SELECT channel_id FROM plugin_trackify_consent_channel "
-                "WHERE enabled = 1")).mappings().all()
-        return {str(r["channel_id"]) for r in rows}
-    except Exception:  # noqa: BLE001
-        return set()
-
-
 # ── Gancho do barramento ─────────────────────────────────────────────────
 
 def on_message_received(ctx, payload: dict) -> None:
-    """Um clique de botão virou intenção de consentimento?
+    """Um clique de botão ativou alguma ação?
 
     A ordem dos guards é deliberada: a primeira comparação é em memória e mata
     ~99,9% do tráfego (toda mensagem de texto) **sem tocar no banco**. É isso
@@ -148,18 +170,16 @@ def on_message_received(ctx, payload: dict) -> None:
         if not is_official(channel_id):
             return
 
-        # Registrado SEMPRE, antes da allow-list e do interruptor: é a fonte da
-        # tela "botões vistos recentemente", e sem ela o operador não tem como
-        # descobrir qual string a Meta devolve para configurar a regra.
-        _record_seen(channel_id, cand)
-
-        if channel_id not in allowed_channel_ids():
+        # UMA leitura de settings por clique casável: o gate e o índice de
+        # códigos saem do mesmo snapshot.
+        snap = actions.snapshot()
+        if not snap.ready:
             return
-        if not _config.consent_ready():
-            return
-
-        rule = consent_match.resolve(cand, list_rules(enabled_only=True), channel_id)
-        if not rule or rule.get("meaning") == consent_match.IGNORE:
+        action_id = consent_match.action_for(cand, snap.index)
+        if not action_id:
+            # Código que não é de ação nenhuma (ou está em conflito entre duas).
+            # O Campanhas manda um código por botão e a maioria não significa
+            # nada para este plugin — ignorar em silêncio é o caso comum.
             return
 
         from db.repositories import contact_repo
@@ -168,601 +188,315 @@ def on_message_received(ctx, payload: dict) -> None:
             return
 
         contact_id = int(contact["id"])
-        _record_state(contact_id, rule, cand, channel_id, str(p.get("msg_id") or ""))
-        bump(int(rule["id"]))
-        enqueue(contact_id, f"botao:{rule['meaning']}")
+        _record_state(contact_id, action_id, cand, channel_id,
+                      str(p.get("msg_id") or ""))
+        _spawn_write(contact_id, action_id)
     except Exception:  # noqa: BLE001 — handler de bus nunca derruba o pipeline
         logger.debug("trackify: falha ao processar clique de consentimento",
                      exc_info=True)
 
 
-def _record_seen(channel_id: str, cand: dict) -> None:
-    chave = consent_match.seen_key(cand)
-    if not chave:
-        return
-    agora = _now()
+def _spawn_write(contact_id: int, action_id: str) -> None:
+    """Agenda a gravação fora do caminho quente.
+
+    Três caminhos, nesta ordem — o do meio é o de produção:
+
+    1. **já estamos no laço** (handler async, teste async): ``create_task``;
+    2. **thread do executor com laço guardado**: ``run_coroutine_threadsafe``.
+       É por onde o core entrega este handler (veja ``_loop``);
+    3. **nenhum laço à vista** (script, teste síncrono, boot): roda um laço
+       próprio NESTA thread. Segura a thread durante as tentativas, mas é
+       preferível a descartar um descadastro — o pedido é raro e o custo é de
+       uma thread do executor.
+    """
     try:
-        with make_plugin_db() as conn:
-            conn.execute(text(
-                "INSERT INTO plugin_trackify_consent_seen "
-                "(channel_id, match_norm, raw_payload, raw_text, shape, hits, "
-                " first_seen_at, last_seen_at) "
-                "VALUES (:c, :k, :p, :t, :s, 1, :now, :now) "
-                "ON CONFLICT (channel_id, match_norm) DO UPDATE SET "
-                " hits = plugin_trackify_consent_seen.hits + 1, "
-                " last_seen_at = :now, raw_payload = EXCLUDED.raw_payload, "
-                " raw_text = EXCLUDED.raw_text, shape = EXCLUDED.shape"),
-                {"c": channel_id, "k": chave[:300], "p": cand["payload"][:300],
-                 "t": cand["text"][:300], "s": cand["shape"], "now": agora})
-    except Exception:  # noqa: BLE001 — o registro de descoberta nunca bloqueia
-        logger.debug("trackify: falha ao registrar botão visto", exc_info=True)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        task = loop.create_task(write_now(contact_id, action_id))
+        _inflight.add(task)
+        task.add_done_callback(_inflight.discard)
+        return
+
+    alvo = _loop
+    if alvo is not None and not alvo.is_closed():
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                write_now(contact_id, action_id), alvo)
+        except RuntimeError:
+            # Laço morrendo no meio de um restart: cai para o modo bloqueante.
+            pass
+        else:
+            _inflight.add(fut)
+            fut.add_done_callback(_inflight.discard)
+            return
+
+    try:
+        asyncio.run(write_now(contact_id, action_id))
+    except Exception as e:  # noqa: BLE001 — a entrega falha, o registro fica
+        _record_error(contact_id, action_id,
+                      f"falha ao gravar no Trackify: {type(e).__name__}")
+        logger.warning("trackify: gravação síncrona do descadastro falhou: %s", e)
 
 
-def _record_state(contact_id: int, rule: dict, cand: dict, channel_id: str,
+def _record_state(contact_id: int, action_id: str, cand: dict, channel_id: str,
                   msg_id: str) -> None:
     agora = _now()
     with make_plugin_db() as conn:
         conn.execute(text(
             "INSERT INTO plugin_trackify_consent_state "
-            "(contact_id, desired, channel_id, raw_payload, raw_text, msg_id, "
-            " button_id, clicked_at, clicks, created_at, updated_at) "
-            "VALUES (:cid, :d, :ch, :p, :t, :m, :b, :now, 1, :now, :now) "
-            "ON CONFLICT (contact_id) DO UPDATE SET "
-            " desired = EXCLUDED.desired, channel_id = EXCLUDED.channel_id, "
+            "(contact_id, action, channel_id, raw_payload, raw_text, msg_id, "
+            " clicked_at, clicks, created_at, updated_at) "
+            "VALUES (:cid, :a, :ch, :p, :t, :m, :now, 1, :now, :now) "
+            "ON CONFLICT (contact_id, action) DO UPDATE SET "
+            " channel_id = EXCLUDED.channel_id, "
             " raw_payload = EXCLUDED.raw_payload, raw_text = EXCLUDED.raw_text, "
-            " msg_id = EXCLUDED.msg_id, button_id = EXCLUDED.button_id, "
-            " clicked_at = EXCLUDED.clicked_at, "
+            " msg_id = EXCLUDED.msg_id, clicked_at = EXCLUDED.clicked_at, "
             " clicks = plugin_trackify_consent_state.clicks + 1, "
             " updated_at = EXCLUDED.updated_at"),
-            {"cid": contact_id, "d": rule["meaning"], "ch": channel_id,
+            {"cid": contact_id, "a": action_id, "ch": channel_id,
              "p": cand["payload"][:300], "t": cand["text"][:300],
-             "m": msg_id[:120], "b": int(rule["id"]), "now": agora})
+             "m": msg_id[:120], "now": agora})
 
 
-def get_state(contact_id: int) -> dict | None:
+def get_state(contact_id: int, action_id: str) -> dict | None:
+    """O estado de UMA ação daquele contato.
+
+    ``action_id`` não tem default de propósito: o caminho de escrita sempre sabe
+    de qual ação está falando, e um default esconderia justamente o eixo novo.
+    """
     with make_plugin_db() as conn:
         row = conn.execute(text(
-            "SELECT * FROM plugin_trackify_consent_state WHERE contact_id = :c"),
-            {"c": contact_id}).mappings().first()
+            "SELECT * FROM plugin_trackify_consent_state "
+            "WHERE contact_id = :c AND action = :a"),
+            {"c": contact_id, "a": action_id}).mappings().first()
     return dict(row) if row else None
-
-
-# ── Regras (configuração) ────────────────────────────────────────────────
-
-_RULE_COLS = ("id, channel_id, match_field, match_value, match_norm, meaning, "
-              "template_name, template_category, enabled, position, hits, "
-              "last_hit_at, created_at, updated_at")
-
-
-def list_rules(*, enabled_only: bool = False) -> list[dict]:
-    sql = f"SELECT {_RULE_COLS} FROM plugin_trackify_consent_button"
-    if enabled_only:
-        sql += " WHERE enabled = 1"
-    sql += " ORDER BY position, id"
-    try:
-        with make_plugin_db() as conn:
-            rows = conn.execute(text(sql)).mappings().all()
-    except Exception:  # noqa: BLE001
-        return []
-    return [dict(r) for r in rows]
-
-
-def validate_rules(rows, *, official_ids: set[str]) -> tuple[list[dict], dict]:
-    """``(linhas_limpas, erros_por_índice)``.
-
-    Erros são POR LINHA (``{"2": ["..."]}``) e não uma frase só, no molde de
-    ``field_map.validate``: com dez botões na tela, "configuração inválida" não
-    diz qual deles.
-
-    ``official_ids`` entra como parâmetro para esta função continuar testável
-    sem tocar no banco.
-    """
-    errors: dict[str, list[str]] = {}
-    clean: list[dict] = []
-
-    def err(i: int, msg: str) -> None:
-        errors.setdefault(str(i), []).append(msg)
-
-    if not isinstance(rows, list):
-        return [], {"_": ["Formato inválido."]}
-    if len(rows) > MAX_RULES:
-        return [], {"_": [f"Máximo de {MAX_RULES} regras."]}
-
-    vistos: dict[tuple[str, str], int] = {}
-
-    for i, raw in enumerate(rows):
-        if not isinstance(raw, dict):
-            err(i, "Formato inválido.")
-            continue
-
-        channel_id = str(raw.get("channel_id") or "").strip()
-        match_field = str(raw.get("match_field") or "any").strip()
-        match_value = str(raw.get("match_value") or "").strip()
-        meaning = str(raw.get("meaning") or "").strip()
-        template_name = str(raw.get("template_name") or "").strip()
-        template_category = str(raw.get("template_category") or "").strip().upper()
-        enabled = bool(raw.get("enabled", True))
-
-        if channel_id and channel_id not in official_ids:
-            err(i, "Este canal não existe ou não é de WhatsApp oficial.")
-            continue
-        if match_field not in ("any", "payload", "text"):
-            err(i, "Critério de casamento inválido.")
-            continue
-        if not match_value:
-            err(i, "Informe o texto ou o payload do botão.")
-            continue
-        if meaning not in consent_match.MEANINGS:
-            err(i, "Escolha o que o botão significa.")
-            continue
-
-        match_norm = consent_match.normalize(match_value)
-        if not match_norm:
-            err(i, "Este valor não sobra nada depois de normalizado.")
-            continue
-
-        # Decisão de escopo: só botão de template MARKETING vira regra. O clique
-        # em si não diz de qual template veio, então este é o ÚNICO ponto onde a
-        # categoria pode ser exigida — vale para o que a tela importou. Regra
-        # digitada à mão chega sem categoria e é aceita.
-        if template_category and template_category != "MARKETING":
-            err(i, f"Só botões de template MARKETING viram regra "
-                   f"(este é {template_category}).")
-            continue
-
-        dup = vistos.get((channel_id, match_norm))
-        if dup is not None:
-            err(i, f"Este botão já está configurado na linha {dup + 1}.")
-            continue
-        vistos[(channel_id, match_norm)] = i
-
-        clean.append({
-            "channel_id": channel_id,
-            "match_field": match_field,
-            "match_value": match_value,
-            "match_norm": match_norm,
-            "meaning": meaning,
-            "template_name": template_name,
-            "template_category": template_category,
-            "enabled": 1 if enabled else 0,
-            "position": len(clean),
-        })
-
-    return clean, errors
-
-
-def replace_rules(rows: list[dict]) -> None:
-    """Troca o conjunto inteiro numa transação.
-
-    Apaga-e-insere (em vez de diferenciar) porque o índice UNIQUE
-    ``(channel_id, match_norm)`` tropeçaria numa simples reordenação. Os
-    contadores de acerto (``hits``) são reancorados pela chave lógica: sem isso
-    editar o rótulo de um botão zeraria a evidência de que ele vinha sendo
-    clicado.
-    """
-    agora = _now()
-    with make_plugin_db() as conn:
-        antigos = conn.execute(text(
-            "SELECT channel_id, match_norm, hits, last_hit_at, created_at "
-            "FROM plugin_trackify_consent_button")).mappings().all()
-        historico = {(str(r["channel_id"]), str(r["match_norm"])): dict(r)
-                     for r in antigos}
-        conn.execute(text("DELETE FROM plugin_trackify_consent_button"))
-        for r in rows:
-            velho = historico.get((r["channel_id"], r["match_norm"])) or {}
-            conn.execute(text(
-                "INSERT INTO plugin_trackify_consent_button "
-                "(channel_id, match_field, match_value, match_norm, meaning, "
-                " template_name, template_category, enabled, position, hits, "
-                " last_hit_at, created_at, updated_at) "
-                "VALUES (:ch, :mf, :mv, :mn, :me, :tn, :tc, :en, :po, :hits, "
-                " :last, :created, :now)"),
-                {"ch": r["channel_id"], "mf": r["match_field"],
-                 "mv": r["match_value"], "mn": r["match_norm"],
-                 "me": r["meaning"], "tn": r["template_name"],
-                 "tc": r["template_category"], "en": r["enabled"],
-                 "po": r["position"], "hits": int(velho.get("hits") or 0),
-                 "last": velho.get("last_hit_at"),
-                 "created": velho.get("created_at") or agora, "now": agora})
-
-
-def bump(rule_id: int) -> None:
-    """Incremento isolado do contador. Nunca reescreve a linha inteira: a tela
-    pode estar salvando o conjunto no mesmo instante."""
-    try:
-        with make_plugin_db() as conn:
-            conn.execute(text(
-                "UPDATE plugin_trackify_consent_button "
-                "SET hits = hits + 1, last_hit_at = :now WHERE id = :id"),
-                {"id": rule_id, "now": _now()})
-    except Exception:  # noqa: BLE001
-        logger.debug("trackify: falha ao contar acerto de regra", exc_info=True)
-
-
-# ── Canais permitidos (configuração) ─────────────────────────────────────
-
-def list_channels() -> list[dict]:
-    try:
-        with make_plugin_db() as conn:
-            rows = conn.execute(text(
-                "SELECT channel_id, enabled FROM plugin_trackify_consent_channel "
-                "ORDER BY channel_id")).mappings().all()
-    except Exception:  # noqa: BLE001
-        return []
-    return [dict(r) for r in rows]
-
-
-def replace_channels(channel_ids, *, official_ids: set[str]) -> list[str]:
-    """Troca a allow-list. Devolve os ids aceitos (os não-oficiais caem fora)."""
-    aceitos = [c for c in dict.fromkeys(str(x).strip() for x in (channel_ids or []))
-               if c and c in official_ids]
-    agora = _now()
-    with make_plugin_db() as conn:
-        conn.execute(text("DELETE FROM plugin_trackify_consent_channel"))
-        for cid in aceitos:
-            conn.execute(text(
-                "INSERT INTO plugin_trackify_consent_channel "
-                "(channel_id, enabled, created_at, updated_at) "
-                "VALUES (:c, 1, :now, :now)"), {"c": cid, "now": agora})
-    return aceitos
-
-
-# ── Botões vistos ────────────────────────────────────────────────────────
-
-def list_seen(limit: int = 50) -> list[dict]:
-    try:
-        with make_plugin_db() as conn:
-            rows = conn.execute(text(
-                "SELECT channel_id, match_norm, raw_payload, raw_text, shape, "
-                " hits, first_seen_at, last_seen_at "
-                "FROM plugin_trackify_consent_seen "
-                "ORDER BY last_seen_at DESC LIMIT :lim"),
-                {"lim": max(1, min(int(limit or 50), 200))}).mappings().all()
-    except Exception:  # noqa: BLE001
-        return []
-    return [dict(r) for r in rows]
-
-
-def prune_seen(days: int = 30) -> int:
-    corte = _now() - max(1, int(days or 30)) * 86400.0
-    try:
-        with make_plugin_db() as conn:
-            res = conn.execute(text(
-                "DELETE FROM plugin_trackify_consent_seen WHERE last_seen_at < :c"),
-                {"c": corte})
-        return int(res.rowcount or 0)
-    except Exception:  # noqa: BLE001
-        return 0
-
-
-# ── Fila ─────────────────────────────────────────────────────────────────
-
-def enqueue(contact_id: int, reason: str = "") -> None:
-    """Marca o contato. Idempotente por construção: o índice único parcial
-    garante no máximo uma linha pendente por contato."""
-    agora = _now()
-    with make_plugin_db() as conn:
-        conn.execute(text(
-            "INSERT INTO plugin_trackify_consent_outbox "
-            "(contact_id, reason, status, next_attempt_at, enqueued_at, "
-            " created_at, updated_at) "
-            "VALUES (:c, :r, 'pending', :now, :now, :now, :now) "
-            "ON CONFLICT (contact_id) WHERE status = 'pending' "
-            "DO UPDATE SET reason = :r, updated_at = :now"),
-            {"c": contact_id, "r": (reason or "")[:100], "now": agora})
-
-
-def claim(limit: int, worker: str) -> list[dict]:
-    agora = _now()
-    with make_plugin_db() as conn:
-        conn.execute(text(
-            "UPDATE plugin_trackify_consent_outbox SET status = 'pending', "
-            " locked_by = '' "
-            "WHERE status = 'sending' AND COALESCE(locked_at, 0) < :stale"),
-            {"stale": agora - LOCK_STALE_AFTER})
-        rows = conn.execute(text(
-            "UPDATE plugin_trackify_consent_outbox SET status = 'sending', "
-            " locked_by = :w, locked_at = :now, updated_at = :now "
-            "WHERE id IN ("
-            "  SELECT id FROM plugin_trackify_consent_outbox "
-            "  WHERE status = 'pending' AND next_attempt_at <= :now "
-            "  ORDER BY next_attempt_at, id LIMIT :lim FOR UPDATE SKIP LOCKED"
-            ") RETURNING id, contact_id, reason, attempts, enqueued_at"),
-            {"w": worker, "now": agora, "lim": limit}).mappings().all()
-    return [dict(r) for r in rows]
-
-
-def finish(row_id: int, status: str, *, error: str = "",
-           http: int | None = None) -> None:
-    with make_plugin_db() as conn:
-        conn.execute(text(
-            "UPDATE plugin_trackify_consent_outbox SET status = :st, "
-            " locked_by = '', last_error = :err, last_http_status = :http, "
-            " updated_at = :now WHERE id = :id"),
-            {"id": row_id, "st": status, "err": (error or "")[:500],
-             "http": http, "now": _now()})
-
-
-def retry_later(row_id: int, attempts: int, *, error: str = "",
-                http: int | None = None, count_attempt: bool = True,
-                delay: float | None = None) -> None:
-    """Reagenda com backoff exponencial e jitter, ou com um atraso fixo.
-
-    ``count_attempt=False`` para 429 e para "sem vínculo": é falha de RITMO ou
-    de estado externo, não do item — incrementar mataria um backlog saudável.
-    """
-    n = attempts + 1 if count_attempt else attempts
-    if n >= MAX_ATTEMPTS:
-        finish(row_id, "failed", error=error, http=http)
-        return
-    if delay is None:
-        delay = min(2.0 * (2 ** max(0, n - 1)), BACKOFF_CAP)
-        delay *= 0.8 + random.random() * 0.4
-    with make_plugin_db() as conn:
-        conn.execute(text(
-            "UPDATE plugin_trackify_consent_outbox SET status = 'pending', "
-            " attempts = :n, next_attempt_at = :next, locked_by = '', "
-            " last_error = :err, last_http_status = :http, updated_at = :now "
-            "WHERE id = :id"),
-            {"id": row_id, "n": n, "next": _now() + delay,
-             "err": (error or "")[:500], "http": http, "now": _now()})
-
-
-def stats() -> dict:
-    try:
-        with make_plugin_db() as conn:
-            rows = conn.execute(text(
-                "SELECT status, COUNT(*) AS n FROM plugin_trackify_consent_outbox "
-                "GROUP BY status")).mappings().all()
-        return {r["status"]: int(r["n"]) for r in rows}
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def list_queue(status: str = "", limit: int = 50) -> list[dict]:
-    sql = ("SELECT id, contact_id, reason, status, attempts, last_error, "
-           " last_http_status, enqueued_at, updated_at "
-           "FROM plugin_trackify_consent_outbox")
-    params: dict = {"lim": max(1, min(int(limit or 50), 200))}
-    if status:
-        sql += " WHERE status = :st"
-        params["st"] = status
-    sql += " ORDER BY updated_at DESC LIMIT :lim"
-    try:
-        with make_plugin_db() as conn:
-            rows = conn.execute(text(sql), params).mappings().all()
-    except Exception:  # noqa: BLE001
-        return []
-    return [dict(r) for r in rows]
-
-
-def retry_failed() -> int:
-    """Devolve à fila tudo que parou em ``failed``/``blocked``."""
-    agora = _now()
-    with make_plugin_db() as conn:
-        res = conn.execute(text(
-            "UPDATE plugin_trackify_consent_outbox SET status = 'pending', "
-            " attempts = 0, next_attempt_at = :now, locked_by = '', "
-            " last_error = '', updated_at = :now "
-            "WHERE status IN ('failed', 'blocked')"), {"now": agora})
-    return int(res.rowcount or 0)
 
 
 # ── Entrega ──────────────────────────────────────────────────────────────
 
-def desired_value(desired: str) -> str:
-    return (_config.consent_optout_value() if desired == consent_match.OPTOUT
-            else _config.consent_optin_value())
+async def write_now(contact_id: int, action_id: str) -> str:
+    """Executa a ação no CDP. Devolve um rótulo do desfecho.
+
+    ⚠️ **Não há rede de segurança depois daqui.** Esgotadas as tentativas, o
+    pedido fica só como ``last_error`` no estado — ninguém tenta de novo. Foi a
+    escolha feita ao remover a fila; se um dia incomodar, a volta do outbox é
+    aditiva e este é o único ponto que muda.
+    """
+    import httpx
+
+    erro = ""
+    # Um client para a sequência inteira: as tentativas são do mesmo pedido, e
+    # abrir conexão a cada uma só somaria latência ao retry.
+    async with httpx.AsyncClient(timeout=tk_client.WRITE_TIMEOUT) as http:
+        for tentativa in range(MAX_ATTEMPTS):
+            desfecho, erro, repetir = await _write_once(http, contact_id, action_id)
+            if not repetir:
+                return desfecho
+            if tentativa < len(RETRY_DELAYS):
+                await asyncio.sleep(RETRY_DELAYS[tentativa])
+
+    await asyncio.to_thread(_record_error, contact_id, action_id, erro)
+    logger.warning("trackify: ação %r do contato %s NÃO foi gravada no "
+                   "Trackify após %s tentativas: %s",
+                   action_id, contact_id, MAX_ATTEMPTS, erro)
+    audit("trackify", "consent.write_failed",
+          after={"contact_id": contact_id, "action": action_id,
+                 "error": erro[:200]})
+    return "failed"
 
 
-async def deliver_one(client, row: dict) -> str:
-    """Processa uma linha da fila. Devolve um rótulo do desfecho (para o laço)."""
-    import asyncio
+async def _write_once(client, contact_id: int, action_id: str) -> tuple[str, str, bool]:
+    """Uma tentativa. ``(desfecho, erro, vale_repetir)``."""
+    estado = await asyncio.to_thread(get_state, contact_id, action_id)
+    if not estado:
+        return "skipped", "sem clique registrado", False
 
-    contact_id = int(row["contact_id"])
-    estado = await asyncio.to_thread(get_state, contact_id)
-    if not estado or not estado.get("desired"):
-        await asyncio.to_thread(finish, row["id"], "blocked",
-                                error="sem decisão de consentimento registrada")
-        return "skipped"
+    # Também cobre a linha órfã: uma ação que existia numa versão anterior e foi
+    # removida do registro não tem mais o que gravar.
+    acao = actions.get(action_id)
+    if acao is None:
+        return "skipped", f"ação '{action_id}' não existe mais", False
 
     from db.repositories import contact_repo
     contact = await asyncio.to_thread(contact_repo.get, contact_id)
     if not contact:
-        await asyncio.to_thread(finish, row["id"], "blocked",
-                                error="contato não existe mais")
-        return "skipped"
+        return "skipped", "contato não existe mais", False
     if contact.get("is_group"):
-        await asyncio.to_thread(finish, row["id"], "blocked",
-                                error="grupo não tem cadastro no CDP")
-        return "skipped"
+        return "skipped", "grupo não tem cadastro no CDP", False
 
-    # Reuso deliberado: a resolução de identidade, o cache de 7 dias, a regra de
-    # "só grava com acerto ÚNICO" e o "nunca cria contato no CDP" já vivem lá.
-    # Uma segunda cópia divergiria e passaria a colar consentimento no cadastro
-    # errado.
+    if not tk_client.is_configured():
+        motivo = (_config.setting("sync_blocked_reason")
+                  or "API key do Trackify não configurada")
+        await asyncio.to_thread(_record_error, contact_id, action_id, motivo)
+        return "no_credential", motivo, False
+
+    # Reuso deliberado: a resolução de identidade, o cache, a regra de "só grava
+    # com acerto ÚNICO" e o "nunca cria contato no CDP" já vivem lá. Uma segunda
+    # cópia divergiria e passaria a colar consentimento no cadastro errado.
     try:
         tk_id = await push._linked_id(client, str(contact.get("phone") or ""), contact)
     except Exception as e:  # noqa: BLE001
-        await asyncio.to_thread(retry_later, row["id"], int(row["attempts"]),
-                                error=f"resolução de identidade falhou: {type(e).__name__}",
-                                count_attempt=False)
-        return "read_failed"
+        return "read_failed", f"resolução de identidade falhou: {type(e).__name__}", True
 
     if not tk_id:
-        # ⚠️ Nada de ``row.get(...) or _now()``: um epoch 0 é falsy e a idade
-        # daria zero, então a linha nunca envelheceria e o item ficaria
-        # reagendando para sempre sem nunca aparecer como erro na tela.
-        try:
-            enfileirado_em = float(row.get("enqueued_at"))
-        except (TypeError, ValueError):
-            enfileirado_em = _now()
-        if (_now() - enfileirado_em) > UNLINKED_GIVE_UP:
-            await asyncio.to_thread(
-                finish, row["id"], "blocked",
-                error="contato não vinculado a um cadastro no Trackify há mais "
-                      "de 24h — vincule ou marque o descadastro à mão no CDP")
-            return "unlinked"
-        await asyncio.to_thread(retry_later, row["id"], int(row["attempts"]),
-                                error="contato ainda não vinculado a um cadastro "
-                                      "no Trackify",
-                                count_attempt=False, delay=UNLINKED_RETRY)
-        return "unlinked_retry"
+        # Sem vínculo não há o que gravar, e tentar de novo daqui a 8s não vai
+        # criar um. Fica registrado para o operador vincular ou marcar à mão.
+        motivo = ("contato não vinculado a um cadastro no Trackify — vincule ou "
+                  "marque o descadastro à mão no CDP")
+        await asyncio.to_thread(_record_error, contact_id, action_id, motivo)
+        return "unlinked", motivo, False
 
-    slug = _config.consent_field_slug()
-    valor = desired_value(str(estado["desired"]))
+    # O que a ação grava. `None` = configuração pela metade (campo ou valor em
+    # branco): registrar o motivo é melhor que um PUT que apagaria o campo.
+    plano = acao.plan()
+    if plano is None:
+        motivo = "; ".join(acao.errors()) or "configuração da ação incompleta"
+        await asyncio.to_thread(_record_error, contact_id, action_id, motivo)
+        return "misconfigured", motivo, False
 
-    # Já está como queremos: caminho comum de clique repetido. Zero HTTP é o que
-    # mantém o orçamento de 30/min utilizável.
-    if (estado.get("written_value") is not None
-            and str(estado["written_value"]) == valor
+    # Este MESMO clique já foi gravado: reentrega do webhook ou retentativa
+    # depois de um sucesso. Zero HTTP é o que mantém o orçamento de 30/min por
+    # IP do Trackify utilizável.
+    #
+    # ⚠️ A comparação é pelo ``msg_id``, não pelo valor. Comparar valores
+    # tratava o registro local como prova do estado remoto: apagado o campo no
+    # CDP (correção manual, merge, outro sistema), o contato clicava e o plugin
+    # pulava a escrita para sempre. Sem ``msg_id`` (provider que não manda um)
+    # a guarda não trava — escrever de novo é o lado seguro do erro.
+    clique = str(estado.get("msg_id") or "")
+    if (clique
+            and str(estado.get("written_msg_id") or "") == clique
             and str(estado.get("trackify_contact_id") or "") == tk_id):
-        await asyncio.to_thread(finish, row["id"], "sent")
-        return "noop"
+        return "noop", "", False
 
     if bool(_config.setting("consent_dry_run", True)):
         await asyncio.to_thread(
-            finish, row["id"], "sent",
-            error=f"[modo seco] gravaria {slug}={valor!r} no contato {tk_id}")
-        return "dry_run"
+            _record_error, contact_id, action_id,
+            f"[modo seco] gravaria {plano.describe} no contato {tk_id}")
+        return "dry_run", "", False
 
-    if not tk_client.is_configured():
-        await asyncio.to_thread(
-            retry_later, row["id"], int(row["attempts"]),
-            error=_config.setting("sync_blocked_reason")
-                  or "API key do Trackify não configurada",
-            count_attempt=False)
-        return "no_credential"
-
-    res = await writer.put_contact(client, tk_id, {slug: valor})
-    return await asyncio.to_thread(_apply_result, row, contact_id, tk_id, valor, res)
+    res = await writer.put_contact(client, tk_id, plano.field_values)
+    return await asyncio.to_thread(_apply_result, contact_id, action_id, tk_id,
+                                   plano.field_values, res, clique)
 
 
-def _apply_result(row: dict, contact_id: int, tk_id: str, valor: str, res) -> str:
+def _apply_result(contact_id: int, action_id: str, tk_id: str, valores: dict, res,
+                  clique: str = "") -> tuple[str, str, bool]:
     if res.verdict == writer.OK:
-        _record_written(contact_id, tk_id, valor)
-        finish(row["id"], "sent", http=res.http_status)
-        return "sent"
+        _record_written(contact_id, action_id, tk_id, valores, clique)
+        return "sent", "", False
 
     if res.verdict == writer.UNLINKED:
         # Merge no CDP apagou a grafia deste contato: esquece o vínculo para a
-        # próxima tentativa resolver do zero.
+        # próxima tentativa resolver do zero. Identidade é do CONTATO, não da
+        # ação — por isso este esquecimento não é namespaceado.
         push._forget_identity(contact_id)
-        retry_later(row["id"], int(row["attempts"]), error=res.error,
-                    http=res.http_status, count_attempt=False,
-                    delay=UNLINKED_RETRY)
-        return "unlinked"
+        _record_error(contact_id, action_id, res.error)
+        return "unlinked", res.error, True
 
     if res.verdict == writer.UNAUTHORIZED:
         # A credencial é UMA só para as duas sincronizações: parar as duas é o
         # comportamento certo, e a tela mostra o motivo em vez de martelar o
-        # Nexus do cliente.
+        # Nexus do cliente. Repetir não resolveria — chave inválida/sem escopo
+        # não conserta sozinha.
         push._block_sync(res.error)
-        finish(row["id"], "blocked", error=res.error, http=res.http_status)
-        return "unauthorized"
+        _record_error(contact_id, action_id, res.error)
+        return "unauthorized", res.error, False
 
     if res.verdict in (writer.BLOCKED, writer.CONFLICT):
-        _record_error(contact_id, res.error)
-        finish(row["id"], "blocked", error=res.error, http=res.http_status)
-        return "blocked"
+        _record_error(contact_id, action_id, res.error)
+        return "blocked", res.error, False
 
     if res.verdict == writer.THROTTLED:
         push.note_cooldown(res.retry_after or 5.0)
-        retry_later(row["id"], int(row["attempts"]), error=res.error,
-                    http=res.http_status, count_attempt=False)
-        return "throttled"
+        return "throttled", res.error, True
 
-    retry_later(row["id"], int(row["attempts"]), error=res.error,
-                http=res.http_status)
-    return "retry"
+    return "retry", res.error, True
 
 
-def _record_written(contact_id: int, tk_id: str, valor: str) -> None:
+def _written_value(valores: dict) -> str:
+    """O que vai para a coluna ``written_value``.
+
+    Um campo só grava o VALOR (é o que a tela e os testes leem); mais de um
+    grava o JSON. A coluna é TEXT desde a 003 e continua servindo aos dois —
+    ``written_values JSONB`` é a saída limpa quando existir uma ação multi-campo
+    de verdade.
+    """
+    if len(valores) == 1:
+        return str(next(iter(valores.values())))
+    import json
+    return json.dumps(valores, ensure_ascii=False, sort_keys=True)
+
+
+def _record_written(contact_id: int, action_id: str, tk_id: str, valores: dict,
+                    msg_id: str) -> None:
+    """Carimba a entrega — inclusive QUAL clique ela atendeu.
+
+    O ``msg_id`` vem de fora, lido no INÍCIO da tentativa, e não da linha: um
+    clique novo chegando no meio da entrega reescreve o ``msg_id`` do estado, e
+    copiá-lo aqui marcaria como entregue um clique que ninguém gravou.
+    """
     agora = _now()
     with make_plugin_db() as conn:
         conn.execute(text(
             "UPDATE plugin_trackify_consent_state SET written_value = :v, "
             " written_at = :now, trackify_contact_id = :tk, last_error = '', "
-            " updated_at = :now WHERE contact_id = :c"),
-            {"c": contact_id, "v": valor, "tk": tk_id, "now": agora})
+            " written_msg_id = :mid, "
+            " last_attempt_at = :now, updated_at = :now "
+            "WHERE contact_id = :c AND action = :a"),
+            {"c": contact_id, "a": action_id, "v": _written_value(valores),
+             "tk": tk_id, "now": agora, "mid": msg_id})
 
 
-def _record_error(contact_id: int, erro: str) -> None:
+def _record_error(contact_id: int, action_id: str, erro: str) -> None:
     agora = _now()
-    with make_plugin_db() as conn:
-        conn.execute(text(
-            "UPDATE plugin_trackify_consent_state SET last_error = :e, "
-            " updated_at = :now WHERE contact_id = :c"),
-            {"c": contact_id, "e": (erro or "")[:500], "now": agora})
+    try:
+        with make_plugin_db() as conn:
+            conn.execute(text(
+                "UPDATE plugin_trackify_consent_state SET last_error = :e, "
+                " last_attempt_at = :now, updated_at = :now "
+                "WHERE contact_id = :c AND action = :a"),
+                {"c": contact_id, "a": action_id, "e": (erro or "")[:500],
+                 "now": agora})
+    except Exception:  # noqa: BLE001 — registrar o erro não pode virar outro
+        logger.debug("trackify: falha ao registrar erro de descadastro",
+                     exc_info=True)
+
+
+def pending_errors(limit: int = 20) -> list[dict]:
+    """Cliques que não chegaram ao CDP. Alimenta o aviso da tela.
+
+    Devolve o ``action`` junto: o agrupamento por ação é feito em Python pelo
+    :func:`status`, para a tela continuar custando UMA consulta.
+    """
+    try:
+        with make_plugin_db() as conn:
+            rows = conn.execute(text(
+                "SELECT contact_id, action, last_error, last_attempt_at, clicked_at "
+                "FROM plugin_trackify_consent_state "
+                "WHERE COALESCE(last_error, '') <> '' AND written_at IS NULL "
+                "ORDER BY updated_at DESC LIMIT :lim"),
+                {"lim": max(1, min(int(limit or 20), 100))}).mappings().all()
+    except Exception:  # noqa: BLE001
+        return []
+    return [dict(r) for r in rows]
 
 
 # ── Status para a tela ───────────────────────────────────────────────────
 
-def _mapped_here(slug: str) -> bool:
-    """O slug do descadastro também está mapeado na aba 'Campos do contato'?"""
-    if not slug:
-        return False
+def _mapped_slugs() -> set:
+    """Slugs mapeados na aba 'Campos do contato'. UMA consulta para N ações."""
     try:
-        return any(str(m.get("tk_slug") or "") == slug
-                   for m in field_map.list_maps())
+        return {str(m.get("tk_slug") or "") for m in field_map.list_maps()}
     except Exception:  # noqa: BLE001
-        return False
+        return set()
 
 
-
-async def status(client) -> dict:
-    """Diagnóstico acionável: o que falta para isto funcionar.
-
-    Distingue os estados de propósito — *desligado*, *sem credencial*, *sem
-    canal marcado*, *sem regra ativa* e *campo errado no CDP* falham todos do
-    mesmo jeito (nada acontece) e exigem consertos diferentes.
-    """
-    import asyncio
-
-    slug = _config.consent_field_slug()
-    optout = _config.consent_optout_value()
-    optin = _config.consent_optin_value()
-
-    out = {
-        "enabled": bool(_config.setting("consent_enabled", False)),
-        "dry_run": bool(_config.setting("consent_dry_run", True)),
-        "credential_set": _config.credential_set(),
-        "blocked_reason": (_config.setting("sync_blocked_reason") or "").strip(),
-        "field_slug": slug,
-        "optout_value": optout,
-        "optin_value": optin,
-        "value_errors": consent_match.validate_values(optout, optin),
-        "channels": await asyncio.to_thread(official_channels),
-        "allowed_channel_ids": sorted(await asyncio.to_thread(allowed_channel_ids)),
-        "rules": await asyncio.to_thread(list_rules),
-        "queue": await asyncio.to_thread(stats),
-        "field": None,
-        "field_error": "",
-        # Guarda cruzada com a aba "Campos do contato": o mesmo slug mapeado
-        # dos dois lados ligaria o ``pull``, que traria o valor antigo do CDP e
-        # poderia DESFAZER um descadastro.
-        "field_map_conflict": await asyncio.to_thread(_mapped_here, slug),
-    }
-
-    if not out["credential_set"]:
-        out["field_error"] = "API key do Trackify não configurada."
-        return out
-
-    res = await tk_client.cached("custom-fields", lambda: tk_client.custom_fields(client))
-    if not res.ok:
-        out["field_error"] = res.error or "não foi possível ler os campos do Trackify"
-        return out
-
-    linhas = res.data if isinstance(res.data, list) else (res.data or {}).get("data") or []
-    achado = next((f for f in linhas if str(f.get("slug") or "") == slug), None)
-    if achado is None:
-        out["field_error"] = (
-            f"O campo '{slug}' não existe no Trackify. Enquanto ele não existir, "
-            "o Campanhas também não consegue ler o descadastro — os dois lados "
-            "precisam apontar para o mesmo slug.")
-        return out
-
-    out["field"] = {
+def _field_view(slug: str, achado: dict) -> dict:
+    return {
         "slug": slug,
         "name": achado.get("name") or "",
         "is_active": bool(achado.get("isActive", achado.get("is_active", True))),
@@ -773,8 +507,121 @@ async def status(client) -> dict:
                        else achado.get("fieldType") or achado.get("field_type") or ""),
         "regex_pattern": achado.get("regexPattern") or achado.get("regex_pattern") or "",
     }
-    if not out["field"]["is_active"]:
-        out["field_error"] = (
-            f"O campo '{slug}' está desativado no Trackify: o PUT devolve 200 e "
-            "não grava nada.")
+
+
+async def status(client) -> dict:
+    """Diagnóstico acionável: o que falta para isto funcionar.
+
+    Distingue os estados de propósito — *desligado*, *sem credencial*, *sem
+    código*, *código em conflito*, *sem canal oficial* e *campo errado no CDP*
+    falham todos do mesmo jeito (nada acontece) e exigem consertos diferentes.
+
+    Uma linha por ação registrada, e **nenhum round-trip extra por ação**: o
+    catálogo de ``custom-fields`` já é buscado (e cacheado) uma vez, e a consulta
+    por ação é ``dict.get`` em memória.
+    """
+    snap = actions.snapshot()
+
+    erros = await asyncio.to_thread(pending_errors)
+    por_acao: dict = {}
+    for linha in erros:
+        por_acao.setdefault(str(linha.get("action") or ""), []).append(linha)
+
+    mapeados = await asyncio.to_thread(_mapped_slugs)
+
+    out = {
+        "enabled": snap.enabled,
+        "dry_run": bool(_config.setting("consent_dry_run", True)),
+        "credential_set": snap.credential_set,
+        "blocked_reason": (_config.setting("sync_blocked_reason") or "").strip(),
+        "channels": await asyncio.to_thread(official_channels),
+        # Código reivindicado por duas ações: não vale para nenhuma.
+        "code_conflicts": [{"code": c, "actions": ids}
+                           for c, ids in sorted(snap.conflicts.items())],
+        # Erro de LEITURA do catálogo do CDP — vale para todas as linhas.
+        "field_error": "",
+        "actions": [],
+    }
+
+    por_slug: dict = {}
+    if not snap.credential_set:
+        out["field_error"] = "API key do Trackify não configurada."
+    else:
+        res = await tk_client.cached("custom-fields",
+                                     lambda: tk_client.custom_fields(client))
+        if not res.ok:
+            out["field_error"] = (res.error
+                                  or "não foi possível ler os campos do Trackify")
+        else:
+            linhas = (res.data if isinstance(res.data, list)
+                      else (res.data or {}).get("data") or [])
+            por_slug = {str(f.get("slug") or ""): f for f in linhas}
+
+    catalogo_lido = bool(por_slug) or (snap.credential_set and not out["field_error"])
+
+    for acao in actions.registered():
+        slugs = list(acao.slugs())
+        linha = {
+            "id": acao.id,
+            "label": acao.label,
+            "description": acao.description,
+            "codes_setting": acao.codes_setting,
+            "codes_label": acao.codes_label,
+            "codes_help": acao.codes_help,
+            "codes_placeholder": acao.codes_placeholder,
+            "codes": snap.codes.get(acao.id, []),
+            # Os que de fato entraram no índice. A tela NÃO recalcula isso: a
+            # normalização (NFKD + casefold + colapso de espaço) é do Python, e
+            # uma segunda implementação em JS divergiria justamente nos casos
+            # que o operador não vê (acento, emoji, espaço duplo).
+            "codes_active": [c for c in snap.codes.get(acao.id, [])
+                             if consent_match.normalize(c) in snap.index],
+            # Descritores dos campos que a linha renderiza. O VALOR vem do
+            # objeto de settings do cliente — este payload só descreve.
+            "settings_fields": [
+                {"key": f.key, "label": f.label, "help": f.help,
+                 "placeholder": f.placeholder}
+                for f in acao.settings_fields
+            ],
+            "code_conflicts": sorted(c for c, ids in snap.conflicts.items()
+                                     if acao.id in ids),
+            "config_errors": acao.errors(),
+            # Guarda cruzada com a aba "Campos do contato": o mesmo slug mapeado
+            # dos dois lados ligaria o ``pull``, que traria o valor antigo do CDP
+            # e poderia DESFAZER o que esta ação grava.
+            "field_map_conflict": any(s in mapeados for s in slugs),
+            "targets": [],
+            "field": None,
+            "field_error": "",
+        }
+
+        try:
+            plano = acao.plan()
+        except Exception:  # noqa: BLE001
+            plano = None
+        if plano:
+            linha["targets"] = [{"slug": s, "value": str(v)}
+                                for s, v in plano.field_values.items()]
+
+        for slug in slugs:
+            if not catalogo_lido:
+                break
+            achado = por_slug.get(slug)
+            if achado is None:
+                linha["field_error"] = (
+                    f"O campo '{slug}' não existe no Trackify. Enquanto ele não "
+                    "existir, o Campanhas também não consegue ler o descadastro — "
+                    "os dois lados precisam apontar para o mesmo slug.")
+                break
+            vista = _field_view(slug, achado)
+            if linha["field"] is None:
+                linha["field"] = vista
+            if not vista["is_active"]:
+                linha["field_error"] = (
+                    f"O campo '{slug}' está desativado no Trackify: o PUT devolve "
+                    "200 e não grava nada.")
+                break
+
+        out["actions"].append(linha)
+
     return out

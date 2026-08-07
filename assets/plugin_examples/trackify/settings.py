@@ -177,17 +177,17 @@ class Settings(BaseModel):
     )
 
     # ── Consentimento de marketing por clique em botão ───────────────────
-    # Só ESCALARES aqui. A lista de canais permitidos e o mapa de botões moram
-    # em tabela (ver migrations/003_consent.sql): o PUT de settings do core é
-    # destrutivo, e um array aqui seria zerado por qualquer save de outra aba.
+    # Tudo escalar: desde a 3.0.0 não há mais tabela de regras nem allow-list de
+    # canais. Um único código de payload identifica o botão de descadastro em
+    # qualquer canal de WhatsApp oficial.
     consent_enabled: bool = Field(
         default=False,
         title="Registrar descadastro por clique em botão",
         description=(
-            "Quando o contato toca um botão de template num canal de WhatsApp "
-            "oficial, grava o resultado no campo de descadastro do cadastro dele "
-            "no Trackify. Só vale para canais marcados na aba, e só para contatos "
-            "já vinculados a um cadastro lá — nunca cria contato no CDP."
+            "Quando o contato toca o botão de descadastro de um template num "
+            "canal de WhatsApp oficial, grava o valor de descadastro no cadastro "
+            "dele no Trackify. Vale para todos os canais oficiais, e só para "
+            "contatos já vinculados a um cadastro lá — nunca cria contato no CDP."
         ),
     )
     consent_dry_run: bool = Field(
@@ -195,8 +195,21 @@ class Settings(BaseModel):
         title="Modo seco (não grava no Trackify)",
         description=(
             "Captura o clique e registra o que gravaria, mas NÃO envia. Deixe "
-            "ligado até conferir, na lista de botões vistos, que o texto que "
-            "chega da Meta é o que você espera."
+            "ligado até conferir que o código combinado com o módulo Campanhas "
+            "está chegando de fato."
+        ),
+    )
+    consent_optout_payload: str = Field(
+        default="PARAR_PROMOS",
+        title="Códigos que significam descadastro",
+        description=(
+            "Um ou mais códigos SEPARADOS POR VÍRGULA (ex.: 'PARAR_PROMOS, "
+            "PARAR_PROMOS_2'). Todo clique cujo PAYLOAD for igual a qualquer um "
+            "deles é tratado como 'não quero mais receber disparos'. São os "
+            "códigos que o módulo Campanhas põe nos botões dos templates — lá "
+            "cada botão tem o seu, e é AQUI que um código ganha função. Ao trocar "
+            "o código de um template, ACRESCENTE o novo sem remover o antigo: "
+            "campanhas já disparadas continuam recebendo cliques por dias."
         ),
     )
     consent_field_slug: str = Field(
@@ -216,21 +229,5 @@ class Settings(BaseModel):
             "O Campanhas trata vazio, 'nao', 'não', 'n', 'no', 'false' e '0' como "
             "quem CONTINUA recebendo — qualquer outro valor bloqueia. Use 'sim', "
             "'true' ou a data do descadastro."
-        ),
-    )
-    consent_optin_value: str = Field(
-        default="",
-        title="Valor gravado ao voltar a receber",
-        description=(
-            "Vazio APAGA o campo no Trackify, que é o estado mais limpo e o único "
-            "que libera o contato sob qualquer leitura do contrato."
-        ),
-    )
-    consent_rate_per_min: int = Field(
-        default=10, ge=1, le=25,
-        title="Gravações de consentimento por minuto",
-        description=(
-            "Divide com a sincronização de campos o mesmo balde de 30/min por IP "
-            "das rotas de contato do Trackify. Mantenha a soma dos dois com folga."
         ),
     )

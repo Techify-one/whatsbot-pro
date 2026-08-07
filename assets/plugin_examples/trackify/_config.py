@@ -36,8 +36,7 @@ DEFAULTS: dict = {
     "consent_dry_run": True,
     "consent_field_slug": "optout_marketing",
     "consent_optout_value": "sim",
-    "consent_optin_value": "",
-    "consent_rate_per_min": 10,
+    "consent_optout_payload": "PARAR_PROMOS",
     # Não declarada em settings.py de propósito (segredo, ver docstring de lá).
     # É a ÚNICA credencial do plugin: vale para ler, escrever e ingerir, conforme
     # os escopos concedidos na tela do Trackify.
@@ -153,18 +152,9 @@ def consent_optout_value() -> str:
     return str(setting("consent_optout_value", "sim") or "")
 
 
-def consent_optin_value() -> str:
-    """Valor gravado quando o contato quer continuar recebendo.
-
-    ``""`` APAGA a linha do campo no CDP, que é o único valor liberador sob
-    qualquer leitura do contrato do Campanhas.
-    """
-    return str(setting("consent_optin_value", "") or "")
-
-
-def consent_ready() -> bool:
-    """Ligado E com credencial. Gateia o enfileiramento e a entrega."""
-    return bool(setting("consent_enabled", False)) and credential_set()
+# Os códigos do payload e o gate de prontidão NÃO moram aqui: eles dependem do
+# catálogo de ações (`actions.py`), e `actions` já importa este módulo — o
+# caminho de volta seria ciclo. Use `actions.snapshot()` / `actions.ready()`.
 
 
 def contact_link(contact_id: str) -> str:

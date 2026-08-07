@@ -26,7 +26,6 @@ logger = logging.getLogger("plugins.trackify.lifecycle")
 TICK_BUSY = 1.0     # com fila
 TICK_IDLE = 5.0     # sem fila
 PRUNE_EVERY = 3600.0
-CONSENT_PRUNE_EVERY = 86400.0
 
 _worker_id = f"{os.getpid()}"
 
@@ -164,64 +163,6 @@ async def _field_loop(ctx) -> None:
             await asyncio.sleep(max(cool, TICK_BUSY if processed else TICK_IDLE))
 
 
-# ── Consentimento de marketing ───────────────────────────────────────────
-
-def _consent_rate_per_min() -> int:
-    try:
-        v = int(_config.setting("consent_rate_per_min", 10))
-    except (TypeError, ValueError):
-        return 10
-    return max(1, min(v, 25))
-
-
-async def _consent_cycle(client: httpx.AsyncClient) -> int:
-    if not _config.consent_ready() or _blocked_reason():
-        return 0
-    # ⚠️ O relógio de cooldown é COMPARTILHADO com o ``push`` de propósito: as
-    # duas features batem em PUT /contacts/{id}, que é o MESMO balde de 30/min
-    # por IP. Um 429 num worker tem de calar o outro, senão os dois brigam pela
-    # mesma janela e nenhum anda.
-    if push.cooldown_remaining() > 0:
-        return 0
-
-    rate = _consent_rate_per_min()
-    gap = 60.0 / rate
-    batch = max(1, min(rate, 5))
-
-    rows = await asyncio.to_thread(consent.claim, batch, _worker_id)
-    if not rows:
-        return 0
-
-    done = 0
-    for row in rows:
-        outcome = await consent.deliver_one(client, row)
-        done += 1
-        if outcome == "throttled" or push.cooldown_remaining() > 0:
-            break
-        # Só espaça quando de fato houve ida à rede.
-        if done < len(rows) and outcome in ("sent", "blocked", "retry", "unlinked"):
-            await asyncio.sleep(gap)
-    return done
-
-
-async def _consent_loop(ctx) -> None:
-    last_prune = 0.0
-    async with httpx.AsyncClient(timeout=tk_client.WRITE_TIMEOUT) as client:
-        while True:
-            processed = 0
-            try:
-                processed = await _consent_cycle(client)
-
-                agora = time.time()
-                if agora - last_prune > CONSENT_PRUNE_EVERY:
-                    last_prune = agora
-                    await asyncio.to_thread(consent.prune_seen, 30)
-            except Exception:  # noqa: BLE001 — o laço NUNCA morre (ver docstring)
-                logger.warning("trackify: ciclo de consentimento falhou", exc_info=True)
-            cool = push.cooldown_remaining()
-            await asyncio.sleep(max(cool, TICK_BUSY if processed else TICK_IDLE))
-
-
 def _poll_seconds() -> float:
     try:
         v = float(_config.setting("field_sync_poll_seconds", 60))
@@ -316,6 +257,15 @@ def setup(ctx) -> None:
     """Sobe as tasks. Nunca derruba o boot: em harness de teste o supervisor não
     está cabeado e ``spawn_task`` levanta (padrão do protocolos)."""
     _limpar_segredos_legados()
+    # O handler de consentimento é síncrono e o core o despacha numa thread do
+    # executor, onde não há laço. Sem esta referência a gravação não tem onde
+    # ser agendada e todo clique morre em "sem laço de eventos". Fica FORA do
+    # try/except do supervisor: não depende dele, e um supervisor ausente (o
+    # harness de teste) não pode levar o descadastro junto.
+    try:
+        consent.bind_loop(getattr(ctx, "loop", None))
+    except Exception:  # noqa: BLE001 — nunca derruba o boot
+        logger.debug("trackify: não foi possível guardar o laço", exc_info=True)
     try:
         from runtime.supervisor import RestartPolicy
         ctx.spawn_task("outbox", lambda: _loop(ctx), policy=RestartPolicy.PERMANENT)
@@ -325,8 +275,8 @@ def setup(ctx) -> None:
                        policy=RestartPolicy.PERMANENT)
         ctx.spawn_task("fieldreconcile", lambda: _reconcile_loop(ctx),
                        policy=RestartPolicy.PERMANENT)
-        ctx.spawn_task("consent", lambda: _consent_loop(ctx),
-                       policy=RestartPolicy.PERMANENT)
+        # Não há task de consentimento: desde a 3.0.0 o clique é gravado direto
+        # numa task própria disparada pelo handler (ver ``consent.write_now``).
     except Exception:  # noqa: BLE001
         logger.debug("trackify: supervisor indisponível — tasks não iniciadas",
                      exc_info=True)

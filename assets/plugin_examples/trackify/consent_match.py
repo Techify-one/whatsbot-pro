@@ -1,36 +1,38 @@
-"""Casamento do clique em botão → significado de consentimento.
+"""Casamento do clique em botão → AÇÃO.
 
 Módulo **puro**: sem banco, sem rede, sem import do core. Tudo aqui é função de
 entrada/saída, e é de propósito — é a parte da feature que precisa ser
 exercitada em milissegundos, sem subir app nem Postgres.
 
-Três responsabilidades:
+Quatro responsabilidades:
 
 1. **Extrair o token** do ``media_extras`` que o canal WhatsApp Cloud produz.
-2. **Normalizar** esse token e o que o operador digitou, para os dois casarem.
-3. **Traduzir o contrato do Campanhas** (``frees_contact``), que é a única coisa
+2. **Normalizar** esse token e os códigos configurados, para casarem.
+3. **Indexar** os códigos de cada ação e casar um clique com uma delas
+   (:func:`parse_codes`, :func:`code_index`, :func:`action_for`).
+4. **Traduzir o contrato do Campanhas** (``frees_contact``), que é a única coisa
    que liga os dois sistemas depois desta mudança.
 
-Por que a chave de casamento é o TOKEN e não "nome do template + índice do
+Este módulo NÃO sabe o que uma ação faz — ele devolve um id opaco. Quem declara
+o catálogo e o que cada ação grava é ``actions.py``; quem entrega é ``consent``.
+
+Por que o casamento é pelo PAYLOAD e não por "nome do template + índice do
 botão": o objeto que a Meta manda no clique **não carrega nome de template nem
 índice**. O único elo seria ``context.id`` (o wamid da mensagem original), que
 exigiria ter registrado o envio — e quem envia o template é o módulo Campanhas,
-fora deste WhatsBot. O texto/payload do botão é o único dado presente em todas
-as formas e independente de quem disparou.
+fora deste WhatsBot.
+
+O payload, por sua vez, é **escolhido pelo Campanhas** no momento do disparo
+(componente ``button`` / ``sub_type: quick_reply`` / ``type: payload``). É por
+isso que existem códigos configuráveis em vez de uma tabela de regras: o
+operador não precisa adivinhar qual string a Meta devolve, porque é ele quem a
+define nos dois lados.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-
-# ── Significados ─────────────────────────────────────────────────────────
-
-OPTOUT = "optout"    # não quer mais receber
-OPTIN = "optin"      # quer continuar recebendo
-IGNORE = "ignore"    # botão conhecido e deliberadamente sem efeito
-
-MEANINGS = (OPTOUT, OPTIN, IGNORE)
 
 # ── Formas que a Meta usa para um clique de botão ────────────────────────
 #
@@ -103,9 +105,11 @@ def tokens(media_extras) -> dict | None:
             return None
         payload, label, shape = _text(reply.get("id")), _text(reply.get("title")), subtype
     elif "payload" in inter:
-        # Quick-reply de template. ⚠️ Quando o template não define payload
-        # explícito, a Meta ecoa o TEXTO do botão aqui — por isso o casamento
-        # aceita os dois campos em vez de exigir um payload estável.
+        # Quick-reply de template. ⚠️ Quando o template NÃO define payload
+        # explícito, a Meta ecoa o TEXTO do botão aqui. Isso deixou de ser um
+        # problema (o Campanhas passou a mandar o payload sempre) e virou uma
+        # garantia: um template antigo, sem payload, ecoa o rótulo e portanto
+        # nunca casa o código — não descadastra ninguém por engano.
         payload, label, shape = _text(inter.get("payload")), _text(inter.get("text")), SHAPE_BUTTON
     else:
         return None
@@ -121,57 +125,83 @@ def tokens(media_extras) -> dict | None:
     }
 
 
-def seen_key(cand: dict) -> str:
-    """Token pelo qual um clique é registrado em "botões vistos".
+# ── Códigos → ação ───────────────────────────────────────────────────────
 
-    O payload manda quando existe — é o mais estável dos dois.
+def parse_codes(raw) -> list[str]:
+    """``"A, B , , a "`` → ``["A", "B"]``.
+
+    Devolve os códigos **como digitados** (a aba os ecoa de volta ao operador),
+    mas descarta o segundo de um par que normaliza igual: ``"PARAR, parar"`` é
+    um código só, e listar os dois faria a tela mentir sobre quantos existem.
+
+    Vírgula é o separador porque é o que cabe numa setting escalar — o PUT de
+    settings do core é destrutivo e reescreve o objeto inteiro, então uma lista
+    de verdade em settings seria revertida por qualquer save de outra aba.
     """
-    return (cand or {}).get("payload_norm") or (cand or {}).get("text_norm") or ""
+    vistos: set[str] = set()
+    saida: list[str] = []
+    for parte in str(raw or "").split(","):
+        codigo = _text(parte)
+        if not codigo:
+            continue
+        chave = normalize(codigo)
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        saida.append(codigo)
+    return saida
 
 
-def resolve(cand: dict, rules, channel_id: str = "") -> dict | None:
-    """Regra que casa o clique, ou ``None``.
+def code_index(codes_by_action: dict) -> tuple[dict, dict]:
+    """``{action_id: [códigos]}`` → ``({código_norm: action_id}, conflitos)``.
 
-    Precedência, nesta ordem: **regra do canal antes da global**, e dentro de
-    cada escopo **payload antes do rótulo**. Determinística de propósito: com
-    dois botões cujo rótulo coincide, o operador precisa conseguir prever qual
-    regra vence sem ler o código.
+    Conflito = o mesmo código reivindicado por DUAS ações. Ele não fica com
+    nenhuma: sai do índice e entra em ``{código_norm: [action_id, ...]}``, que a
+    tela mostra em vermelho.
+
+    "A primeira ganha" faria o comportamento depender da ordem de declaração num
+    arquivo ``.py`` — invisível ao operador — e o lado errado do erro escreve no
+    CRM do cliente. Recusar os dois só apaga AQUELE código: os demais códigos
+    das duas ações continuam valendo.
     """
-    if not cand:
+    index: dict[str, str] = {}
+    donos: dict[str, list[str]] = {}
+    for action_id, codigos in (codes_by_action or {}).items():
+        for codigo in codigos or []:
+            chave = normalize(codigo)
+            if not chave:
+                continue
+            if action_id not in donos.setdefault(chave, []):
+                donos[chave].append(action_id)
+
+    conflitos = {}
+    for chave, ids in donos.items():
+        if len(ids) > 1:
+            conflitos[chave] = ids
+        else:
+            index[chave] = ids[0]
+    return index, conflitos
+
+
+def action_for(cand: dict, index: dict) -> str | None:
+    """Este clique é qual ação? ``None`` = nenhuma (código desconhecido).
+
+    **Só o payload conta.** O rótulo do botão fica de fora de propósito: o
+    payload é escolhido pelo Campanhas e é um código, enquanto o rótulo é texto
+    de marketing que muda a cada campanha e pode coincidir por acaso com o de
+    outro botão. Aceitar o rótulo reintroduziria exatamente o falso positivo que
+    o código explícito veio eliminar.
+
+    A comparação é normalizada (acento/caixa/espaço) porque o mesmo código é
+    digitado à mão nos dois sistemas. Payload vazio nunca casa, nem com o índice
+    cheio — é a guarda contra "configuração pela metade descadastra todo mundo".
+    """
+    if not cand or not index:
         return None
-
-    index: dict[tuple[str, str], dict] = {}
-    for r in rules or []:
-        try:
-            if not int(r.get("enabled", 1) or 0):
-                continue
-        except (TypeError, ValueError):
-            continue
-        norm = str(r.get("match_norm") or "")
-        if not norm:
-            continue
-        # O UNIQUE (channel_id, match_norm) garante no máximo uma linha por
-        # chave, então o primeiro a chegar é o único.
-        index.setdefault((str(r.get("channel_id") or ""), norm), r)
-
-    scopes: list[str] = []
-    for s in (str(channel_id or ""), ""):
-        if s not in scopes:
-            scopes.append(s)
-
-    for scope in scopes:
-        for kind in ("payload", "text"):
-            tok = cand.get(f"{kind}_norm") or ""
-            if not tok:
-                continue
-            r = index.get((scope, tok))
-            if not r:
-                continue
-            mf = str(r.get("match_field") or "any")
-            if mf not in ("any", kind):
-                continue
-            return r
-    return None
+    chave = cand.get("payload_norm") or ""
+    if not chave:
+        return None
+    return index.get(chave)
 
 
 # ── O contrato do campo de descadastro (lado Campanhas) ──────────────────
@@ -206,12 +236,12 @@ def blocks_contact(value) -> bool:
     return not frees_contact(value)
 
 
-def validate_values(optout_value: str, optin_value: str) -> list[str]:
-    """Erros de configuração dos valores gravados no campo. Lista vazia = ok.
+def validate_values(optout_value: str) -> list[str]:
+    """Erros de configuração do valor gravado no campo. Lista vazia = ok.
 
     Existe porque um operador que escolhe ``0`` como "descadastrado" produz uma
-    configuração que **parece** funcionar (o valor é gravado, a fila fica verde)
-    e não bloqueia ninguém. É a única checagem que traduz o contrato do
+    configuração que **parece** funcionar (o valor é gravado, nenhum erro
+    aparece) e não bloqueia ninguém. É a única checagem que traduz o contrato do
     Campanhas para a tela.
     """
     erros: list[str] = []
@@ -221,8 +251,4 @@ def validate_values(optout_value: str, optin_value: str) -> list[str]:
             "o Campanhas trata vazio, 'nao', 'não', 'n', 'no', 'false' e '0' "
             "como quem continua recebendo. Use 'sim', 'true' ou a data do "
             "descadastro.")
-    if not frees_contact(optin_value):
-        erros.append(
-            f"O valor de reinscrição ({optin_value!r}) mantém o contato "
-            "bloqueado. Use vazio (apaga o campo), 'nao' ou 'false'.")
     return erros
