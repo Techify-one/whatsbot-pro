@@ -136,8 +136,13 @@ function isFilled(def, v) {
 // Os botões de finalizar ("Resolver" e "Resolver e ir ao protocolo") só habilitam
 // quando todos os obrigatórios estão preenchidos. onOk devolve { fields, goTo } —
 // goTo=true só no botão "ir ao protocolo".
+// `protocoloId` (opcional) liga o atalho "Ver protocolo" no cabeçalho: consultar o
+// protocolo atual SEM resolver o atendimento. É um `<a target="_blank">` de propósito —
+// navegar na mesma guia desmontaria o modal e jogaria fora o que já foi preenchido.
+// Sem protocolo aberto (ou falha ao resolvê-lo) o atalho simplesmente não aparece.
 export function ResolveForm({ defs = [], initialValues = {}, defaultAssignee = null,
-                              defaultAssigneeName = null, onOk, onCancel }) {
+                              defaultAssigneeName = null, protocoloId = null,
+                              onOk, onCancel }) {
   const [vals, setVals] = useState(() => seedResolveValues(defs, { initialValues, defaultAssignee }));
 
   const missing = defs.filter((d) => d.required && !isFilled(d, vals[d.key])).map((d) => d.label || d.key);
@@ -147,7 +152,19 @@ export function ResolveForm({ defs = [], initialValues = {}, defaultAssignee = n
     <div class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4"
       onClick=${(e) => { if (e.target === e.currentTarget) onCancel(); }}>
       <div class="bg-wa-bg rounded-2xl shadow-2xl max-w-sm w-full p-6 max-h-[85vh] overflow-auto">
-        <h2 class="text-base font-semibold text-wa-text mb-1">Resolver atendimento</h2>
+        <div class="flex items-start justify-between gap-3 mb-1">
+          <h2 class="text-base font-semibold text-wa-text">Resolver atendimento</h2>
+          ${protocoloId != null ? html`
+            <a href=${`/protocolos?detail=${protocoloId}`} target="_blank" rel="noopener"
+              title="Abrir o protocolo atual em outra guia (o formulário fica como está)"
+              class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-wa-teal
+                     text-wa-teal hover:bg-wa-teal/10 text-[13px] font-medium no-underline">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+                <path d="M14 3h7v7h-2V6.41l-9.29 9.3-1.42-1.42 9.3-9.29H14V3zM5 5h5v2H7v10h10v-3h2v5H5V5z"/>
+              </svg>
+              Ver protocolo
+            </a>` : null}
+        </div>
         <p class="text-sm text-wa-secondary mb-4">Preencha antes de resolver:</p>
 
         ${defs.length ? html`

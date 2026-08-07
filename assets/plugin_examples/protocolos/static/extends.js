@@ -56,6 +56,7 @@ async function resolveAndCloseAll(api, apiBase, conversationId, protocoloId) {
       const picked = await api.ui.openModal((close) => html`
         <${ResolveForm} defs=${defs} initialValues=${{}} defaultAssignee=${currentUserId()}
           defaultAssigneeName=${currentUserName()}
+          protocoloId=${protocoloId || null}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!picked) return { ok: false, error: 'Cancelado.' };
       fields = picked.fields || {};
@@ -81,6 +82,20 @@ async function contactIdOf(atend) {
     const c = await getConversation(atend.id);
     const cv = (c && c.ok && c.data) ? c.data.conversation : null;
     return cv ? cv.contact_id : null;
+  } catch (_) { return null; }
+}
+
+// Protocolo ABERTO do contato — alimenta SÓ o atalho "Ver protocolo" do popup de resolver
+// (consulta em outra guia, sem resolver nada). Best-effort: qualquer falha, contato sem
+// protocolo aberto ou conversa sem contato ⇒ null, e o atalho não aparece. Nunca atrapalha
+// o fluxo de resolver.
+async function openProtocoloIdOf(api, apiBase, atend) {
+  try {
+    const contactId = await contactIdOf(atend);
+    if (contactId == null) return null;
+    const r = await api.http.get(`${apiBase}/contacts/${contactId}/protocolo`);
+    const p = (r && r.ok && r.data) ? r.data.protocolo : null;
+    return (p && p.id != null) ? p.id : null;
   } catch (_) { return null; }
 }
 
@@ -209,10 +224,15 @@ export default function register(api) {
 
     let result = { fields: {} };
     if (defs.length) {
+      // Protocolo atual do contato: só o atalho "Ver protocolo" do cabeçalho depende dele
+      // (abre em outra guia). Resolvido ANTES do modal para o link já nascer pronto —
+      // null apenas esconde o atalho.
+      const currentProtocoloId = await openProtocoloIdOf(api, apiBase, atend);
       const r = await api.ui.openModal((close) => html`
         <${ResolveForm} defs=${defs} initialValues=${initialValues}
           defaultAssignee=${currentUserId()}
           defaultAssigneeName=${currentUserName()}
+          protocoloId=${currentProtocoloId}
           onOk=${(v) => close(v)} onCancel=${() => close(null)} />`);
       if (!r) return null;                       // cancelado → aborta o fechar
       result = r;

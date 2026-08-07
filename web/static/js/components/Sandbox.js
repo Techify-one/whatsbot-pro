@@ -215,7 +215,6 @@ export function Sandbox({ newMessage }) {
           contact=${contactData}
           setContactData=${setContactData}
           contactTyping=${botTyping}
-          globalTags=${{}}
           onBack=${() => {}}
           onAvatarClick=${() => {}}
         />

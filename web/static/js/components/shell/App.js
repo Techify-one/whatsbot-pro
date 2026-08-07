@@ -27,6 +27,7 @@ import { shouldNotifyNewMessage } from '../../services/conversationRows.js';
 import { isModifiedClick, spaLinkTarget } from '../../services/spaLink.js';
 import * as soundEngine from '../../utils/soundEngine.js';
 import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
+import { hasPermission } from '../../utils/permissions.js';
 import { GearMenu } from './GearMenu.js';
 import { ScreenRouter } from './ScreenRouter.js';
 import { Toaster } from './Toaster.js';
@@ -512,17 +513,39 @@ export function App({ onLogout, hasPassword, currentUser }) {
 
   // The full prop bundle the chat hub (Contacts) receives — same keys/values as
   // the pre-decomposition inline element (ScreenRouter spreads it).
+  // A engrenagem é UMA só (mesmo componente, mesmas ações/permissões): no hub de
+  // conversas ela mora DENTRO da barra verde da sidebar, ao lado do botão de
+  // arquivar; nas demais telas continua flutuando no canto superior direito. O
+  // hub recebe uma FÁBRICA (`renderGear`) em vez de um elemento pronto porque ele
+  // é quem sabe se a sidebar está na tela — quando ela é recolhida (desktop) ou
+  // cede lugar ao chat (mobile), ele volta a pintar a versão flutuante para o
+  // menu nunca ficar inalcançável.
+  const gearProps = {
+    tab, onTabChange: setTab, pluginScreens, hasPassword, onLogout,
+    accountUrl: config && config.account_url, currentUser,
+    onChangePassword: () => setShowChangePassword(true),
+  };
+  const renderGear = (variant) => html`<${GearMenu} ...${gearProps} variant=${variant} />`;
+  // O flutuante só é suprimido quando o hub NATIVO de conversas é o que está na
+  // tela — ou seja, quando a sidebar (que hospeda a engrenagem inline) de fato
+  // renderiza. Plugin que reivindica a rota 'contacts' ou usuário sem
+  // `conversation.read` continuam vendo o botão flutuante; sem esse guard a
+  // engrenagem sumiria e o menu ficaria inalcançável.
+  const showsInlineGear = tab === 'contacts' && !activeRouteOverride
+    && hasPermission(currentUser, 'conversation.read');
+
   const contactsProps = {
     newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged,
     contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, groupParticipantsChanged,
     initialContactId, initialConversationId, initialScrollMsgId, conversationCreated,
     wsConnected, config, onConfigSave: save, onUnreadChange: refreshUnreadCount,
+    renderGear,
   };
 
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} onChangePassword=${() => setShowChangePassword(true)} />
+      ${showsInlineGear ? null : renderGear('floating')}
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         <${ScreenRouter}
