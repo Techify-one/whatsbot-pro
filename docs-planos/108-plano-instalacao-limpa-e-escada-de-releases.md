@@ -260,11 +260,18 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** `venv/bin/python -m pytest` verde, `assets/plugin_examples/` ainda intacto, e `grep -c 'assets/plugin_examples' tests/core/legacy/legacy_endpoints.py` só devolve ocorrências de `gowa` ou comentário.
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher — quais call sites viraram fake_provider e quais migraram)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07)
+- **O que foi feito:** ⚠️ **O escopo real era MAIOR que o mapeado.** Não eram 5 call sites, e sim **7 regiões (~1.400 linhas)** em `legacy_endpoints.py`, mais **11 outros arquivos** de teste que pedem plugin por outro caminho. Detalhe:
+  1. Guardadas 7 regiões da suíte legada com o helper novo `plugin_source_or_skip` (definido junto de `check`/`section`): capabilities revoke/edit (`:683-695`), Kanban do `protocolos` (`:2552-3417`, 865 linhas), seção 19c do Telegram (`:5120-5253`), parse de `edited_message` (`:5333-5347`), templates + upload + dedup (`:6587-6947`) e mascaramento de credencial do plano 76.
+  2. O loader genérico `_p32_load_provider` foi **içado para fora** do guard — a região do plano 76, ~200 linhas adiante, o usa.
+  3. O sumário passou a imprimir `N blocks skipped` e a listar quais.
+  4. **Costura de origem** (o que de fato resolveu os outros 11 arquivos): `build_test_app` ([tests/support.py](../tests/support.py)) e `load_plugin_package` ([tests/plugin_test_utils.py](../tests/plugin_test_utils.py)) passaram a **`pytest.skip`** quando a fonte não existe. `gowa` ausente continua falha dura — esse é bundled.
+- **Como foi feito / decisões:**
+  - ⚠️ **Descartei as duas opções do plano** ((a) `fake_provider`, (b) mover para o privado) para estas regiões: elas asseram comportamento **específico do provider** (o `fake_provider` não substitui) e estão **coladas no estado compartilhado** de um script linear de 7.174 linhas (mover = reescrever, com risco alto de perder asserção em silêncio). Conferi antes: a cobertura **não** está duplicada no repo privado (o `telegram` lá só cobre `parse_inbound` de citação; o `whatsapp_cloud` não cobre capabilities). Apagar perderia asserções de verdade.
+  - Preferi consertar **na origem** (2 funções) a marcar 11 arquivos um a um. O princípio: *a suíte do núcleo não pode ficar vermelha por faltar um plugin que o núcleo deliberadamente não distribui.*
+  - Indentação mecânica validada por três provas independentes: `py_compile`, contagem de `check(` idêntica antes/depois (**1607**), e o resultado de execução idêntico.
+- **Problemas / pendências:** 🔴 **Armadilha grave descoberta e contornada** — o resolvedor cai em `storages/plugins/<id>`, e esta máquina tem 6 dos 9 plugins **instalados** ali. A suíte ficaria **verde aqui e vermelha num clone limpo**. Por isso a F7 roda num **worktree limpo**, não neste checkout. Documentado no [CLAUDE.md](../CLAUDE.md).
+- **Verificação:** com os plugins presentes, `RESULTS: 1640 passed, 0 failed, 0 blocks skipped` — **idêntico à linha de base** medida antes de qualquer mudança. Sem eles, `1337 passed, 0 failed, 9 blocks skipped` (303 checks pulados, nenhum quebrado).
 
 ---
 
@@ -281,11 +288,11 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** `cd ../whatsbot-pro-plugins && python3 scripts/test_plugins.py trackify` verde.
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07)
+- **O que foi feito:** `tests/integration/test_trackify_plugin.py` (2.657 linhas) foi para `whatsbot-pro-plugins/plugins/trackify/tests/python/` — o `trackify` era o único plugin do repo privado **sem** pasta `tests/`, e agora tem. Duas âncoras trocadas: `_SRC` fixo → `resolve_plugin_source("trackify")` (que o `conftest.py` de lá já alimenta via `WHATSBOT_PLUGIN_SOURCE_ROOT`), e `_SUPORTE_JS` → `scripts/js/` na raiz daquele repo, para onde `smoke_plugin_screen.mjs` e `lint_phantom_setters.mjs` foram **copiados** (o núcleo mantém a própria cópia — são genéricos).
+- **Como foi feito / decisões:** **Os outros 2 movimentos previstos não existiam.** O plano supunha arquivos de teste próprios para `facebook_messenger` e `website`; a varredura mostrou que ambos só apareciam **dentro** de `legacy_endpoints.py`, já coberto pela F2. Um item a menos, não um item esquecido.
+- **Problemas / pendências:** o repo privado ainda **não foi commitado** — os arquivos estão em disco lá, aguardando junto do resto da aprovação de push.
+- **Verificação:** `parents[4]` confere com a raiz do repositório de plugins; o arquivo saiu do núcleo por `git rm` e as 192 falhas que ele produzia no clone limpo desapareceram.
 
 ---
 
@@ -308,11 +315,20 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** `ls assets/plugin_examples/` devolve só `gowa`, e `git status` mostra 178 arquivos removidos.
 
 #### Status de execução — Fase 4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher — resultado do diff de cada um dos 9)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07)
+- **O que foi feito:** os 9 plugins saíram — **178 arquivos**, exatamente o número previsto. `assets/plugin_examples/` ficou só com `gowa`. `DEFAULT_SOURCE_DIR` em [scripts/build_plugin_zips.py](../scripts/build_plugin_zips.py) ganhou o comentário apontando o `--source` para o repositório de plugins.
+- **Como foi feito / decisões:** conferência `diff -rq` **um a um** antes de apagar. Resultado:
+
+  | Plugin | Veredito |
+  |---|---|
+  | `telegram`, `facebook_messenger`, `instagram`, `website`, `retornos`, `trackify` | idênticos, byte a byte |
+  | `whatsapp_cloud` | privado **1.10.3** > espelho 1.10.2 |
+  | `melhorias` | privado **1.7.1** > espelho 1.7.0 |
+  | `protocolos` | privado **1.28.0** > espelho 1.25.0 |
+
+  Todo arquivo `Only in assets/` era um `.test.js` que o privado guarda em `tests/js/`. Conferi os cinco: `phone.test.js`, `proto_fields.test.js`, `chat_core.test.js` e `markdown.test.js` estão lá com o mesmo nome; `templateFilter.test.js` está como `template_filter.test.js` — **19 testes dos dois lados**, `diff` acusando só o comentário de caminho. Nada se perdeu.
+- **Problemas / pendências:** ⚠️ **Achado que o plano não previa:** o `whatsapp_cloud` do espelho tinha um `phone.test.js` além do `templateFilter.test.js` documentado. Também existe no privado — mas é a segunda vez que a conferência acha um arquivo a mais do que o inventário dizia, o que reforça a regra do F4·1: `diff` sempre, nunca confiar na lista.
+- **Verificação:** `ls assets/plugin_examples/` → só `gowa`; `git status` → 178 remoções; a composição por plugin bate com a tabela §3.1.
 
 ---
 
@@ -330,11 +346,11 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** nenhum link de `CLAUDE.md` aponta para `assets/plugin_examples/<id>/` com `<id> != gowa`.
 
 #### Status de execução — Fase 5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07)
+- **O que foi feito:** removida a seção `### Plugin retornos` (16 linhas); **17 links** markdown para plugins que saíram convertidos em code span (o texto continua nomeando o arquivo, sem link morto); 5 afirmações em prosa que passaram a mentir foram reescritas (bundling, bootstrap, o parágrafo do "espelho transitório", a linha 2 da tabela "Onde vive o código" e a nota do resolvedor); os 2 comentários de frontend generalizados.
+- **Como foi feito / decisões:** acrescentei ao `CLAUDE.md` o aviso da armadilha que me custou uma rodada inteira de suíte: **o resolvedor cai em `storages/plugins/`**, então uma máquina de desenvolvimento com o plugin instalado fica verde enquanto um clone limpo fica vermelho. Sem esse aviso, a próxima pessoa cai no mesmo buraco.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `grep` por `assets/plugin_examples/<id>` com `<id> != gowa` → zero.
 
 ---
 
@@ -359,11 +375,11 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** um leitor externo consegue subir o produto seguindo o README literalmente.
 
 #### Status de execução — Fase 6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07)
+- **O que foi feito:** os 3 nomes de launcher corrigidos — **e um quarto que o plano não tinha achado**: a FAQ mandava "abrir o **iniciar.bat** de novo", um nome que nunca existiu em lugar nenhum. Acrescentada a seção **"Um banco PostgreSQL (obrigatório em todas as opções)"** com o exemplo de `DATABASE_URL` e a observação de que serve tanto local quanto hospedado, e cada uma das 3 opções de instalação ganhou o pré-requisito na lista. Declarado o modelo de distribuição na seção de plugins: núcleo + canal WhatsApp, o resto pela loja.
+- **Como foi feito / decisões:** ⏸️ **Não mexi na seção Licença.** Ela diz hoje "Projeto de código aberto. Livre para uso pessoal e comercial." — que é uma concessão em prosa, sem arquivo `LICENSE`. Trocar isso é decisão jurídica do dono do projeto (P2), e qualquer redação que eu escolhesse seria mais restritiva **ou** mais permissiva do que ele pretende. Fica sinalizado, não decidido.
+- **Problemas / pendências:** P2 (licença) continua aberta e **deveria ser resolvida antes da F11** — o README convida a copiar e modificar, e sem `LICENSE` o padrão jurídico é o oposto disso.
+- **Verificação:** `grep` ancorado por `(^|[^_a-z])(start\.bat|start\.command|iniciar\.bat)` → zero; os 4 launchers citados existem em disco.
 
 ---
 
@@ -383,11 +399,25 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** as três verdes, sem falha inexplicada.
 
 #### Status de execução — Fase 7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher — saída do pytest)_
+**Estado:** ✅ Concluída (2026-08-07) — **paridade provada com controle**
+- **O que foi feito:** a suíte rodou num **worktree limpo** (`git worktree add --detach`, sem `storages/`), que é a única forma honesta de medir: neste checkout o resolvedor cairia em `storages/plugins/` e mascararia tudo. Depois rodei o **mesmo experimento no commit `1f11809`** (antes de qualquer mudança minha) como CONTROLE.
+
+  | | Controle (pré-limpeza) | Pós-limpeza |
+  |---|---|---|
+  | Falhas na suíte completa | **4** | **4** |
+  | Conjunto | idêntico | idêntico |
+
+- **Como foi feito / decisões:** ⚠️ **Duas medições intermediárias foram descartadas por serem inválidas, não por serem ruins.**
+  1. **63 falhas** numa rodada — causa: `relation "plugins" does not exist`. Duas execuções concorrentes que eu havia matado deixaram o schema `public` pela metade (48 tabelas inconsistentes). Reset do schema → caiu para 6.
+  2. **6 falhas** na seguinte — 2 a mais que o controle (`legacy_endpoints`, `legacy_agent_json_hardening`). **Repeti a rodada com o mesmo commit e schema resetado: as 2 sumiram.** Eram corrida, não regressão. O mecanismo está nas tracebacks: esses scripts legados rodam como subprocesso e dão `DROP SCHEMA public CASCADE` para virar donos exclusivos do banco, enquanto a sessão-mãe do pytest usa o mesmo banco — `legacy_endpoints` recebeu corpo vazio de `/api/roles`, `legacy_agent_json_hardening` bateu numa tabela ausente. Ambos passam **isolados** no commit pós-limpeza: **1337/0** e **25/0**.
+  - Lição para quem executar isto de novo: **um número de falhas só vale contra um controle no commit anterior**. Sem controle eu teria reportado três vezes um resultado errado.
+- **Problemas / pendências:** 🔵 **As 4 falhas remanescentes são PRÉ-EXISTENTES e já estão na `main`.** Não foram consertadas — estão fora do escopo deste plano, e cada uma merece o seu:
+  1. `test_alembic_hygiene` (2) — revisão de merge `0058_merge_p50_p57` quebra a cadeia linear, e há 5 prefixos de sequência duplicados (`0037`, `0042`, `0043`, `0046`, `0052`).
+  2. `test_audit_matrix_is_complete` — a matriz de caracterização está **9 eventos atrás** de `AUDITABLE_EVENTS` (`channel.created/updated/deleted/restored/session_action/members_changed/duplicate_refused`, `plugin.imported/deleted`). Alguém acrescentou os eventos e não atualizou a matriz.
+  3. `legacy_gowa_plugin_lifecycle` — `reconcile: spawns exactly the valid proxied channel`. ⚠️ **Este é do plugin que FICA** (`gowa`, proxy por número — plano 52). Confirmado reprovando **isolado** nos dois commits.
+  - ⚠️ Também vale registrar: a suíte tem uma **fragilidade estrutural** — os scripts legados exigem ser donos exclusivos do banco e derrubam o schema no meio da sessão do pytest. Funciona por acidente de ordenação. Qualquer mudança que altere a duração dos testes (como esta poda, que troca construções de app por skips instantâneos) pode fazê-la aparecer.
+- **Verificação:** conjuntos de falha idênticos entre controle e pós-limpeza (`diff` dos dois arquivos de saída). `legacy_endpoints` isolado: `RESULTS: 1337 passed, 0 failed, 9 blocks skipped`.
+  **Repositório de plugins** (`scripts/test_plugins.py --all`): **13 plugins, ~969 testes Python + 149 JS, ZERO falhas** — incluindo `trackify`, cujo teste migrou na F3 e agora roda na casa dele.
 
 ---
 
@@ -440,11 +470,14 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** 6 textos revisados, cada um com sua seção de "ações de atualização".
 
 #### Status de execução — Fase 9
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07) — **textos prontos, aguardando revisão do dono do projeto**
+- **O que foi feito:** as 6 notas redigidas, uma por arquivo, em `<scratchpad>/releases/v0.{2..7}.0.md`. Cada uma tem seção **"Ações de atualização"**; as duas que quebram (v0.3.0 e v0.5.0) abrem com um bloco de aviso antes de qualquer outra coisa.
+- **Como foi feito / decisões:**
+  - Linguagem de **produto**, para quem usa o WhatsBot — não changelog de commit. Onde a mudança conserta um defeito que o usuário sentiu, a nota **conta o defeito** (a resposta da IA saindo 75s depois do clique; o salto de mensagem que falhava em silêncio; o gerenciador de senhas preenchendo o campo do token com a senha do painel; os 118 grupos materializados).
+  - **D3 aplicado** nas três notas que anunciam plugin: v0.4.0 (widget/melhorias), v0.6.0 (Instagram/Messenger) e v0.7.0 (protocolos/retornos) dizem explicitamente que o recurso vem da **loja**, e a v0.7.0 avisa que `/atendimentos` degrada para a lista de conversas sem o plugin instalado.
+  - A v0.6.0 ganhou um aviso que o plano não previa: **aplicar as migrações antes** de subir a versão, por causa dos índices de busca — quem tem base grande sente na hora.
+- **Problemas / pendências:** os textos **não** foram publicados nem enviados a lugar nenhum. A F11 depende de revisão.
+- **Verificação:** conteúdo conferido contra `git log` de cada intervalo; os 5 alvos retroativos já haviam sido confirmados como ancestrais de `main`.
 
 ---
 
@@ -458,11 +491,14 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** as três confirmadas.
 
 #### Status de execução — Fase 10
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07)
+- **O que foi feito:** os 3 itens.
+  1. **Immutable Releases:** `gh api repos/:owner/:repo/rulesets` devolve `[]` e o payload do repositório não expõe campo de imutabilidade — nada travando. Publicar e corrigir continua possível.
+  2. `gh release list` e `git ls-remote --tags origin` **ambos vazios** — a numeração da escada segue livre.
+  3. [.claude/commands/release-up.md](../.claude/commands/release-up.md) **reescrito**. Tinha três defeitos: mandava dar push num remote `upstream` que **não existe** (`git remote -v` só tem `origin`), descobria a versão por `git describe --tags` (que acha as tags **órfãs** e mente), e usava `--latest` sem nunca mencionar o `--latest=false` das retroativas. Agora começa por `gh release list`, publica como rascunho primeiro e explica por que `--generate-notes` é inútil aqui.
+- **Como foi feito / decisões:** aproveitei para escrever no próprio comando o **motivo** de cada regra, não só a regra — é o arquivo que a próxima release vai seguir.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** os três confirmados por chamada real ao `gh`/`git`.
 
 ---
 
