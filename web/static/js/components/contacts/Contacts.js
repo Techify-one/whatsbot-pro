@@ -49,7 +49,7 @@ const html = htm.bind(h);
 // (`sidebar.row.badges` in ContactList, `chat.header.banner` in ContactDetail)
 // and the `ui.conversation.selected` emit (in useConversationSelection) are the
 // additive seams that keep the attendances flow composing on top.
-export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, initialScrollMsgId = null, wsConnected, config, onConfigSave, onUnreadChange }) {
+export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, initialScrollMsgId = null, wsConnected, config, onConfigSave, onUnreadChange, renderGear = null }) {
   // Refs shared between hooks (owned here so a single instance is threaded into
   // both the selection loader and the WS handlers — same identity, no drift).
   const pageVisibleRef = useRef(!document.hidden);
@@ -387,14 +387,22 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     }
   }, [onConfigSave]);
 
+  // A engrenagem do app vive na barra verde da sidebar (ao lado do botão de
+  // arquivar). Quando a sidebar não está na tela — recolhida pela divisória no
+  // desktop, ou substituída pelo chat no mobile — ela volta a ser o botão
+  // flutuante do canto superior direito, para o menu continuar acessível.
+  const sidebarVisible = isDesktop ? !sidebarHidden : !selectedKey;
+
   return html`
     <div class="flex flex-col lg:flex-row h-full">
+      ${renderGear && !sidebarVisible ? renderGear('floating') : null}
       <!-- Sidebar (largura arrastável no desktop; w-full no mobile) -->
       <div
         class="shrink-0 border-r border-wa-border overflow-hidden ${isResizing ? '' : 'transition-all duration-300'} ${sidebarHidden ? 'lg:border-r-0' : ''} ${selectedKey ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}"
         style=${isDesktop ? `width:${sidebarHidden ? 0 : sidebarWidth}px` : ''}
       >
         <${ContactList}
+          gearMenu=${renderGear ? renderGear('inline') : null}
           contacts=${displayedContacts}
           loading=${loading}
           loadingMore=${loadingMore}
@@ -513,11 +521,11 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 showChannel=${showChannel}
                 onAvatarClick=${canReadContact ? () => selected && setOpenPanel('contact') : null}
                 onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
+                gearFloating=${!!renderGear && !sidebarVisible}
                 currentUser=${currentUser}
                 contactTyping=${selected && typingState[typingKey({ conversationId: selectedConvId, channelId: selectedChannelId, phone: selected })] || null}
                 aiResponding=${selected && !!aiRespondingState[typingKey({ channelId: selectedChannelId, phone: selected })]}
                 operatorTyping=${selected ? operatorTypingFor(operatorTypingState, { conversation_id: selectedConvId, channel_id: selectedChannelId, phone: selected }) : null}
-                globalTags=${globalTags}
                 groupParticipantsChanged=${groupParticipantsChanged}
                 scrollToMsg=${scrollToMsg}
                 onScrolledToMsg=${() => setScrollToMsg(null)}

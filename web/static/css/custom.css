@@ -513,3 +513,30 @@ html.dark .wa-field:focus { box-shadow: inset 0 0 0 1px rgb(var(--wa-teal)); }
    Toast UI's height:100% resolves against a real height. */
 .wa-md-editor.wa-md-editor-nested,
 .wa-md-editor.wa-md-editor-nested .toastui-editor-defaultUI { height: 100%; }
+
+/* Itens que os plugins injetam no menu (⋮) da conversa — slot
+   `conversation.header.actions`, ver components/contacts/ConversationMenu.js.
+   O botão do plugin foi desenhado para a BARRA do cabeçalho (compacto, rótulo
+   escondido no mobile); dentro do menu ele tem de ocupar a linha inteira. É
+   estilizado de fora porque o markup pertence ao plugin — o core não edita
+   plugin, e o menu tem de funcionar com plugin que já está instalado.
+   O seletor é qualificado por elemento (`div.wa-conv-menu-item`) de propósito:
+   `.wa-conv-menu-item > *` empataria em especificidade com as utilitárias do
+   plugin (`.text-wa-secondary`, `.text-[12px]`) e o Tailwind — injetado em runtime,
+   depois desta folha — ganharia no desempate por ordem. */
+div.wa-conv-menu-item > * {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 16px;
+  border-radius: 0;
+  text-align: left;
+  font-size: 14px;
+  color: rgb(var(--wa-text));
+}
+div.wa-conv-menu-item > *:hover { background-color: rgb(var(--wa-hover)); }
+div.wa-conv-menu-item span { font-size: 14px; }
+/* O rótulo do plugin costuma vir `hidden sm:inline` (espaço curto na barra); na
+   linha do menu sobra espaço, e só o ícone seria indecifrável. */
+div.wa-conv-menu-item .hidden { display: inline; }

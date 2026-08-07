@@ -33,9 +33,20 @@ function MenuItem({ active, href, onClick, icon, children, gated = true }) {
   `;
 }
 
-export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, accountUrl, currentUser, onChangePassword }) {
+// `variant` decide APENAS onde/como o botão da engrenagem é pintado — o menu, as
+// permissões e as ações são idênticos nos dois casos:
+//   • 'floating' (default) — o botão flutuante fixo no canto superior direito,
+//     usado nas telas que não são o hub de conversas;
+//   • 'inline' — o botão dentro da barra verde da sidebar, ao LADO do botão de
+//     arquivar. Como fica na borda esquerda da tela, o dropdown abre para a
+//     direita; e como a sidebar é `overflow-hidden`, ele é `position: fixed`
+//     ancorado no botão (mesmo recurso do flyout do ContactList) — em `absolute`
+//     o menu seria CORTADO pela sidebar.
+export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogout, accountUrl, currentUser, onChangePassword, variant = 'floating' }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
+  const btnRef = useRef(null);
+  const [anchor, setAnchor] = useState({ top: 0, left: 0 });
 
   useEffect(() => {
     function handleClick(e) {
@@ -44,6 +55,25 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
     if (open) document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open]);
+
+  // Reancora o menu inline no botão a cada abertura (e em resize/scroll da
+  // página) — `fixed` não acompanha o layout sozinho.
+  useEffect(() => {
+    if (variant !== 'inline' || !open) return;
+    function place() {
+      const el = btnRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      setAnchor({ top: r.bottom + 4, left: r.left });
+    }
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [open, variant]);
 
   const close = () => setOpen(false);
 
@@ -62,18 +92,27 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
   // see everything; a logged-in user sees only what their role allows.
   const can = (perm) => hasPermission(currentUser, perm);
 
+  const inline = variant === 'inline';
+
   return html`
-    <div ref=${menuRef} class="fixed top-3 right-3 z-50">
+    <div ref=${menuRef} class=${inline ? 'relative shrink-0' : 'fixed top-3 right-3 z-50'}>
       <button
+        ref=${btnRef}
         onClick=${() => setOpen(!open)}
-        class="w-[36px] h-[36px] flex items-center justify-center rounded-full bg-wa-bg shadow-md border border-wa-border hover:bg-wa-hover transition-colors"
+        title="Menu"
+        class=${inline
+          ? 'w-[40px] h-[40px] flex items-center justify-center rounded-full hover:bg-white/10 transition-colors'
+          : 'w-[36px] h-[36px] flex items-center justify-center rounded-full bg-wa-bg shadow-md border border-wa-border hover:bg-wa-hover transition-colors'}
       >
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="#54656f">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill=${inline ? 'currentColor' : '#54656f'} class=${inline ? 'text-white' : ''}>
           <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
         </svg>
       </button>
       ${open ? html`
-        <div class="absolute right-0 mt-1 bg-wa-bg rounded-lg shadow-lg border border-wa-border py-1 min-w-[180px] max-h-[80vh] overflow-y-auto">
+        <div
+          class="${inline ? 'fixed z-[70]' : 'absolute right-0 mt-1'} bg-wa-bg rounded-lg shadow-lg border border-wa-border py-1 min-w-[180px] max-h-[80vh] overflow-y-auto"
+          style=${inline ? `top:${anchor.top}px;left:${anchor.left}px` : ''}
+        >
           <${MenuItem} active=${tab === 'dashboard'} href=${CORE_TAB_PATHS.dashboard} onClick=${() => { onTabChange('dashboard'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>`}
           >Configurações Gerais</${MenuItem}>

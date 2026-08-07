@@ -213,7 +213,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
-  loadMore = null, loadingMore = false, hasMore = false }) {
+  loadMore = null, loadingMore = false, hasMore = false, gearMenu = null }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   // Rascunhos (services/drafts.js): re-renderiza quando o compositor — ou outra
   // aba do navegador — mexe no mapa, e resolve o texto de cada linha aqui. A
@@ -520,7 +520,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
       ` : html`
       <!-- Green header bar -->
       <div class="h-[59px] flex items-center justify-between px-4 ${headerBg} shrink-0 transition-colors">
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-1">
           <button
             onClick=${onToggleArchived}
             class="w-[40px] h-[40px] rounded-full flex items-center justify-center hover:bg-white/10 transition-colors ${showArchived ? 'bg-white/15' : ''}"
@@ -528,6 +528,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           >
             <span class="text-white"><${ArchiveIcon} /></span>
           </button>
+          <!-- Engrenagem (menu do app) à DIREITA do botão de arquivar. Vem pronta
+               do App shell (prop gearMenu) — a sidebar só a posiciona. -->
+          ${gearMenu}
         </div>
         <div class="flex items-center gap-2">
           ${wsConnected === false ? html`

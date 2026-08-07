@@ -2,7 +2,7 @@ import { h } from 'preact';
 import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { sendMessage, sendImage, sendAudio, sendDocument, sendVideo } from '../../services/api.js';
-import { BackArrowIcon, DefaultAvatar, GroupAvatar, InfoIcon } from './icons.js';
+import { BackArrowIcon, DefaultAvatar, GroupAvatar } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
 import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon,
@@ -128,15 +128,20 @@ const TypingDots = () => html`
 // stay here; everything composer-related lives in the hooks/components.
 
 export function ContactDetail({ phone, conversationId = null, channelId = null, onBack, messages, info, contact,
-  channelProvider = null, channelName = null, showChannel = false, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, operatorTyping = null, setContactData, globalTags, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null,
+  channelProvider = null, channelName = null, showChannel = false, onAvatarClick, onOpenConversationInfo = null, currentUser = null, contactTyping, aiResponding = false, operatorTyping = null, setContactData, groupParticipantsChanged = null, sandbox = false, api = null, scrollToMsg = null, onScrolledToMsg = null, showAgentName = true, loadOlder = null, loadingOlder = false, hasMore = false, droppedFiles = null, onDroppedFilesConsumed = null,
   // Plano 99 — janela ancorada + os caminhos de salto. Todos opcionais: sem eles
   // (sandbox, chamador antigo) o painel se comporta exatamente como antes.
   loadNewer = null, loadingNewer = false, hasMoreNewer = false, jumping = false,
   onJumpToMessage = null, onJumpToDate = null, onBackToBottom = null,
-  newWhileAnchored = 0 }) {
+  newWhileAnchored = 0,
+  // A engrenagem do app é `fixed` no canto superior direito e passaria POR CIMA do
+  // fim do cabeçalho; por isso o header reserva 56px à direita. Quando ela está na
+  // barra da sidebar (hub de conversas com a sidebar à vista), o canto é livre e o
+  // menu (⋮) da conversa ocupa a ponta. Default `true` = comportamento antigo, para
+  // o chamador que não sabe disso (sandbox).
+  gearFloating = true }) {
   // P48 hides (sandbox is always allowed — no RBAC identity there).
   const canReadContact = sandbox || hasPermission(currentUser, 'contact.read');
-  const canReadConv = sandbox || hasPermission(currentUser, 'conversation.read');
   const canReply = sandbox || hasPermission(currentUser, 'conversation.reply');
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
@@ -702,6 +707,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
            pontos de extensão de plugin ficam ABAIXO daqui e não são afetados. -->
       ${searchOpen ? html`
         <${ConversationSearchBar}
+          tall=${showChannel}
           conversationId=${conversationId}
           term=${searchTerm}
           onTermChange=${setSearchTerm}
@@ -711,7 +717,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           onClose=${closeSearch}
           refTs=${messages && messages.length ? messages[messages.length - 1].ts : null}
         />` : html`
-      <div class="h-[59px] flex items-center pl-4 pr-[56px] bg-wa-panel border-b border-wa-border shrink-0">
+      <!-- Altura: o selo do canal ocupa uma linha PRÓPRIA acima do nome (3 linhas),
+           então a barra precisa de um pouco mais de altura que as outras do painel.
+           Sem o selo (instalação com um único canal) ela continua nos 59px de
+           sempre — e a barra de busca, que a SUBSTITUI, recebe o mesmo veredito
+           pela prop "tall" para abrir/fechar a busca não deslocar a conversa.
+           (Sem crase neste comentário: ele mora DENTRO do template html.) -->
+      <div class="${showChannel ? 'h-[68px]' : 'h-[59px]'} flex items-center pl-4 ${gearFloating ? 'pr-[56px]' : 'pr-2'} bg-wa-panel border-b border-wa-border shrink-0">
         <button onClick=${onBack} class="lg:hidden text-wa-icon hover:text-wa-text mr-2 shrink-0">
           <${BackArrowIcon} />
         </button>
@@ -722,20 +734,22 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           }
         </div>
         <div class="flex-1 min-w-0 ${canReadContact ? 'cursor-pointer' : ''}" onClick=${canReadContact ? onAvatarClick : null} title=${'Conversa com ' + displayName}>
+          <!-- Canal do atendimento, ACIMA do nome — o MESMO selo da linha da barra
+               lateral, gateado pelo mesmo showChannel (só com 2+ canais
+               instalados), para as duas telas nunca discordarem sobre mostrar ou
+               não. Fica numa linha própria (e não ao lado do nome, como era até
+               aqui) porque o nome disputava espaço horizontal com ele e com as
+               etiquetas, e era o nome que truncava. -->
+          ${showChannel ? html`
+            <div class="flex items-center leading-none mb-[2px]">
+              <${ChannelChip} provider=${channelProvider} name=${channelName} margin=${false} />
+            </div>` : null}
+          <!-- Só o nome: as etiquetas da conversa NÃO são mostradas aqui (elas
+               continuam na linha da barra lateral, no painel do contato e no menu
+               de contexto). Com muitas tags o nome era espremido e a barra virava
+               uma fileira de chips. -->
           <div class="text-wa-text text-[16px] leading-tight truncate flex items-center gap-[6px]">
-            <span class=${'truncate' + (isAutoName ? ' underline decoration-1 underline-offset-2' : '')} title=${isAutoName ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${displayName}</span>${
-            // Canal do atendimento, logo após o nome — o MESMO selo da linha da barra
-            // lateral, gateado pelo mesmo `showChannel` (só com 2+ canais instalados),
-            // para as duas telas nunca discordarem sobre mostrar ou não.
-            showChannel ? html`<${ChannelChip} provider=${channelProvider} name=${channelName} margin=${false} />` : null
-            }${contact && contact.tags && contact.tags.length > 0 ? contact.tags.map(tagName => {
-              const tagInfo = globalTags && globalTags[tagName];
-              const color = tagInfo ? tagInfo.color : '#6b7280';
-              return html`<span
-                class="text-[9px] font-semibold rounded-full px-[5px] py-[0.5px] leading-[14px] shrink-0"
-                style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
-              >${tagName}</span>`;
-            }) : null}
+            <span class=${'truncate' + (isAutoName ? ' underline decoration-1 underline-offset-2' : '')} title=${isAutoName ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${displayName}</span>
           </div>
           ${aiResponding
             ? html`<div class="text-wa-teal text-[13px] leading-tight font-medium flex items-center gap-1.5">
@@ -764,20 +778,9 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
           </button>
         ` : null}
 
-        <!-- Conversation actions (FF3): resolver / atribuir / transferir / IA. -->
+        <!-- Ações do atendimento (FF3): "Resolver" na barra + o menu (⋮) do canto,
+             que reúne as informações do atendimento e o que os plugins injetam. -->
         <${ConversationHeaderActions} phone=${phone} conversationId=${conversationId} sandbox=${sandbox} onOpenConversationInfo=${onOpenConversationInfo} onOpenContactInfo=${onAvatarClick} contactInfo=${info} />
-
-        <!-- Informações do atendimento (Onda 2): abre o painel lateral do atendimento. -->
-        ${!sandbox && onOpenConversationInfo && canReadConv ? html`
-          <button
-            type="button"
-            onClick=${onOpenConversationInfo}
-            class="shrink-0 ml-1 text-wa-icon hover:text-wa-text p-[6px] rounded-full hover:bg-wa-hover transition-colors"
-            title="Informações da conversa"
-          >
-            <${InfoIcon} />
-          </button>
-        ` : null}
       </div>`}
 
       <!-- Plugin extension point: banner abaixo do header / acima das mensagens
