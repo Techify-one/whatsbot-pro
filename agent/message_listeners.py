@@ -146,6 +146,53 @@ def _emit_lifecycle_notice(conversation_id: int, contact_id: int, phone: str,
         logger.exception("Falha ao emitir aviso de ciclo de vida para %s", phone)
 
 
+def _emit_created_domain(conversation_id: int, contact_id: int, phone: str,
+                         conv: dict) -> None:
+    """Promote the AUTOMATIC inbound birth of a conversation to the plugin bus
+    (``conversation.created``).
+
+    Why this exists: ``conversation.created`` is a documented plugin event
+    (``KNOWN_EVENTS``), but until now it was emitted ONLY by the route path
+    (``conversation_service.create`` — the "Nova conversa" button). The
+    overwhelmingly common birth — a client sending the first message — reached
+    only the WS broadcast above, so EVERY plugin subscribing to
+    ``conversation.created`` silently missed almost every conversation. This
+    closes that gap; it is not a feature of any one plugin.
+
+    ⚠️ Usa ``emit()`` CRU, e não ``emit_with_filter_sync`` como o irmão
+    ``_emit_reopened_domain`` abaixo. Motivo: ``conversation.created`` está em
+    ``ws_projections._LIFECYCLE_WS_EVENT``, então ``emit_with_filter_sync``
+    dispararia o listener síncrono do core que projeta o evento num broadcast WS
+    ``conversation_created`` — e a função logo acima JÁ fez esse broadcast. O
+    resultado seria a lista do painel recebendo a mesma conversa duas vezes.
+    ``conversation.reopened`` não está nesse mapa (a docstring do
+    ``ws_projections`` diz isso explicitamente), que é por que lá o filtro é
+    seguro e aqui não é.
+
+    O preço é que este evento não passa por ``filter.event.before_emit`` — um
+    plugin não consegue vetá-lo. Aceito: a alternativa seria trocar o broadcast
+    de cima pela projeção do core, o que mudaria o payload que o painel recebe
+    hoje (contrato de frontend) por causa de um evento de plugin."""
+    try:
+        from plugins.events import emit
+        emit("conversation.created", {
+            "conversation_id": conversation_id,
+            "display_id": conv.get("display_id"),
+            "contact_id": contact_id,
+            "phone": phone,
+            "status": conv.get("status"),
+            "assignee_user_id": conv.get("assignee_user_id"),
+            "active_agent_key": conv.get("active_agent_key"),
+            "ai_active": conv.get("ai_active"),
+            "is_archived": conv.get("is_archived"),
+            "inbox_id": conv.get("inbox_id"),
+            "trigger": "inbound",
+            "ts": time.time(),
+        })
+    except Exception:
+        logger.debug("conversation.created emit falhou para %s", phone)
+
+
 def _emit_reopened_domain(conversation_id: int, contact_id: int, phone: str) -> None:
     """Promote the AUTOMATIC inbound/outbound reopen to a distinct domain event
     (``conversation.reopened``, trigger=inbound) on the plugin bus. The status WS
@@ -183,6 +230,10 @@ def on_message_persisted(conversation_id: int, contact_id: int, phone: str, *,
         # plano 11 D1: the new thread must materialize live on the sidebar /
         # conversation list (independent of the notice gate — a list update, not a card).
         _broadcast_conversation_created(conversation_id, contact_id, phone, conv)
+        # plano 94: mesmo verbo no BUS. O WS acima é da lista do painel; este é
+        # para plugins — sem ele, quem assina ``conversation.created`` só via as
+        # conversas criadas pelo botão "Nova conversa" (a minoria).
+        _emit_created_domain(conversation_id, contact_id, phone, conv)
     elif transition == "reopened":
         # closed→open: the list (sidebar + kanban) must re-file the conversation into
         # "Abertas" live (the backend already set status open).

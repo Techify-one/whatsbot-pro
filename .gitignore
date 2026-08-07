@@ -42,3 +42,10 @@ PLANO_setup_wizard.md
 docs-planos/QA-motor-agentes.md
 docs-planos/checklist-testar-tool-dependencias.md
 docs-planos/QA-consolidado.md
+
+# Migração de histórico Chatwoot (dumps + CSVs de PRODUÇÃO — nunca versionar)
+plano-importacao-historico-chatwoot/
+
+# Runbook de merge de contatos duplicados (nome civil + telefone de clientes REAIS,
+# host do banco de produção — nunca versionar; o repositório é público)
+plano-merge-contatos-duplicados/

@@ -13,7 +13,13 @@ import * as coreApi from '../services/api.js';
 import { authHeaders, handleUnauthorized, handleErrorResponse } from '../services/httpClient.js';
 import { notifyPermissionDenied } from '../services/notify.js';
 import { useWebSocket } from '../hooks/useWebSocket.js';
+import { subscribe as subscribeWs } from '../services/wsBus.js';
 import { hasPermission, hasAnyPermission } from '../utils/permissions.js';
+import { satisfiesVersionRange, selectSupportedVersion } from './versionCompat.js';
+import {
+  LEGACY_V1_SERVICE_NAMES,
+  buildVersionedServiceSurface,
+} from './serviceSurface.js';
 
 // Version of THIS extension surface (slots/filters/route-override contract).
 // Plugins declare `frontend_api_version` in plugin.yaml; the loader checks it.
@@ -25,8 +31,9 @@ export const FRONTEND_API_VERSION = '1.0';
 //
 // CONTRACT (versioned by PLUGIN_SERVICES_VERSION below):
 //   `api.services` exposes ONLY the core `api.js` functions named here, plus the
-//   non-`api.js` extras wired in `buildPluginApi` (useWebSocket, hasPermission,
-//   hasAnyPermission). This is the stable surface a plugin screen may call.
+//   non-`api.js` extras wired in `buildPluginApi` (useWebSocket, subscribe,
+//   hasPermission, hasAnyPermission). This is the stable surface a plugin screen
+//   may call.
 //
 //   • ADDITIVE / MINOR: adding a NON-sensitive function to PLUGIN_SERVICES is a
 //     MINOR bump (back-compatible — never remove a name a plugin already uses).
@@ -38,7 +45,7 @@ export const FRONTEND_API_VERSION = '1.0';
 // `...coreApi` spread, so deny-listed members are unreachable from a plugin screen.
 // The list below is the current FULL non-sensitive `coreApi` surface
 // (grandfathering everything except the deny-list), validated against the
-// `atendimentos` plugin, which imports: authHeaders, hasPermission,
+// `protocolos` plugin, which imports: authHeaders, hasPermission,
 // getAssignableAgents — all present here.
 //
 // DENY-LIST rationale: anything touching users / roles / permissions / admin /
@@ -46,7 +53,20 @@ export const FRONTEND_API_VERSION = '1.0';
 // lifecycle is core-operator surface and must NOT be reachable from a plugin
 // screen, even if it currently leaks through the `...coreApi` spread.
 
-export const PLUGIN_SERVICES_VERSION = '1.0';
+// 2.0 removes `getGowaAlertSettings` and the dead attendance batch helper from
+// the current surface. Manifests negotiate this independently from the registry
+// API through `plugin_services_version`; legacy manifests default to 1.x and get
+// a narrow compatibility adapter, while incompatible declared ranges are skipped.
+//
+// 2.1 ADDS `subscribe` (the shared WS bus). Purely additive — nothing was removed,
+// so 2.0 manifests keep working unchanged. It exists because there was NO supported
+// way for a plugin screen to receive its OWN broadcast: `useWebSocket` hard-codes a
+// map of CORE event names, so `plugin_<id>_changed` could never reach a handler
+// through it. Three screens improvised a raw `new WebSocket('/ws')` — which carries
+// no `?token=` and is closed with 4401 the moment ≥1 user exists (plano 48 F0),
+// silently. That was the whole of plano 107; this is the fix for the NEXT plugin.
+export const PLUGIN_SERVICES_VERSION = '2.1';
+export const SUPPORTED_PLUGIN_SERVICES_VERSIONS = Object.freeze(['1.0', '2.0', '2.1']);
 
 /** Sensitive core functions a plugin screen must NEVER reach. Frozen. */
 export const PLUGIN_SERVICES_DENY = Object.freeze([
@@ -87,8 +107,15 @@ const _DENY_SET = new Set(PLUGIN_SERVICES_DENY);
  */
 export const PLUGIN_SERVICES = Object.freeze(
   Object.keys(coreApi)
-    .filter((name) => typeof coreApi[name] === 'function' && !_DENY_SET.has(name))
+    .filter((name) => typeof coreApi[name] === 'function'
+      && !_DENY_SET.has(name)
+      && !LEGACY_V1_SERVICE_NAMES.includes(name))
     .sort()
+);
+
+/** Names available to a manifest that still targets the compatibility surface 1.x. */
+export const PLUGIN_SERVICES_V1 = Object.freeze(
+  [...PLUGIN_SERVICES, ...LEGACY_V1_SERVICE_NAMES].sort()
 );
 
 /**
@@ -100,11 +127,17 @@ export const PLUGIN_SERVICES = Object.freeze(
  * @param {Record<string, any>} extras - non-api.js additions (useWebSocket, …).
  * @returns {Record<string, any>}
  */
-export function buildAllowedServices(extras = {}) {
+export function buildAllowedServices(extras = {}, servicesVersion = PLUGIN_SERVICES_VERSION) {
   /** @type {Record<string, any>} */
-  const out = {};
-  for (const name of PLUGIN_SERVICES) out[name] = coreApi[name];
-  return { ...out, ...extras };
+  const current = {};
+  for (const name of PLUGIN_SERVICES) current[name] = coreApi[name];
+  const legacyHttp = String(servicesVersion).split('.')[0] === '1'
+    ? buildPluginHttp('/api')
+    : null;
+  return {
+    ...buildVersionedServiceSurface(current, servicesVersion, legacyHttp),
+    ...extras,
+  };
 }
 
 /**
@@ -148,25 +181,40 @@ export function buildPluginHttp(apiBase) {
   };
 }
 
-/** Minimal compat guard: '*' or matching MAJOR is accepted. */
+/** Registry/slot API compatibility gate. */
 export function isFrontendApiCompatible(range) {
-  if (!range || range === '*') return true;
-  const wantMajor = parseInt(String(FRONTEND_API_VERSION), 10);
-  const m = String(range).match(/\d+/);
-  if (!m) return true;
-  return parseInt(m[0], 10) === wantMajor;
+  return satisfiesVersionRange(FRONTEND_API_VERSION, range);
 }
 
-export function buildPluginApi(pluginId) {
+/** Return the newest service surface supported by both host and manifest. */
+export function selectPluginServicesVersion(range) {
+  return selectSupportedVersion(range, SUPPORTED_PLUGIN_SERVICES_VERSIONS, {
+    defaultRange: '1.0',
+  });
+}
+
+export function isPluginServicesCompatible(range) {
+  return selectPluginServicesVersion(range) !== null;
+}
+
+export function buildPluginApi(pluginId, pluginServicesRange = '1.0') {
+  const negotiatedServicesVersion = (
+    selectPluginServicesVersion(pluginServicesRange) || PLUGIN_SERVICES_VERSION
+  );
   return {
     pluginId,
     apiBase: `/api/plugins/${pluginId}`,
     frontendApiVersion: FRONTEND_API_VERSION,
+    // The concrete surface this object exposes, plus the newest host surface
+    // for diagnostics. Plugins should feature-detect optional individual names.
+    pluginServicesVersion: negotiatedServicesVersion,
+    pluginServicesHostVersion: PLUGIN_SERVICES_VERSION,
 
     // ── registry (auto-namespaced to this plugin) ──
     addFilter: (name, fn, priority = 100) => registry.addFilter(name, fn, priority, pluginId),
     addSlot: (name, component, priority = 100) => registry.addSlot(name, component, priority, pluginId),
     overrideRoute: (tabId, component, opts = {}) => registry.overrideRoute(tabId, component, opts, pluginId),
+    overrideComponent: (name, component) => registry.overrideComponent(name, component, pluginId),
     on: (name, fn) => registry.on(name, fn, pluginId),
     emit: (name, data) => registry.emit(name, data),
     applyFilter: registry.applyFilter,
@@ -184,14 +232,20 @@ export function buildPluginApi(pluginId) {
     // members instead of spreading `...coreApi` (which leaked ~120 fns incl.
     // createUser/deleteRole). Behavior-preserving: the allowlist was grandfathered
     // from the full NON-sensitive coreApi surface, so every name a known plugin
-    // already imports (atendimentos → authHeaders, getAssignableAgents) is present;
+    // already imports (protocolos → authHeaders, getAssignableAgents) is present;
     // only deny-listed operator surface (RBAC/auth/config/AI-engine/channel admin)
     // is now withheld. To re-expose a name, add it to PLUGIN_SERVICES (MINOR bump),
     // never re-introduce the spread.
     services: buildAllowedServices({
       useWebSocket,
+      // Plugin services 2.1 — subscribe to the SHARED, AUTHENTICATED socket by event
+      // name, including the plugin's own `plugin_<id>_*` broadcasts (which
+      // `useWebSocket` cannot deliver: its event map is hard-coded to core names).
+      // Same handler shape as `useWebSocket`; returns an unsubscribe fn. Feature-detect
+      // (`api.services.subscribe || …`) so the screen still loads on an older core.
+      subscribe: subscribeWs,
       hasPermission,
       hasAnyPermission,
-    }),
+    }, negotiatedServicesVersion),
   };
 }

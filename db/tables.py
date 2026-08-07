@@ -122,6 +122,14 @@ messages = Table(
     Column("ts", Float, nullable=False),
     Column("media_type", Text),
     Column("media_path", Text),
+    # plano 87: a legenda que o CLIENTE digitou junto da mídia, VERBATIM, gravada
+    # no INSERT. Existe porque ``content`` é composto — depois da descrição/
+    # transcrição por IA ele vira "[Descrição da imagem]: <desc>\n<legenda>" (ver
+    # server/transcription.py format_media_content), e o painel não tem como
+    # separar os dois de forma confiável (a descrição é markdown multilinha).
+    # ``content`` continua sendo o que o LLM lê; esta coluna é o que o humano
+    # escreveu. NULL = mídia sem legenda OU linha anterior ao plano 87.
+    Column("media_caption", Text),
     Column("status", Text),
     Column("msg_id", Text),
     Column("revoked", Integer, nullable=False, server_default="0"),

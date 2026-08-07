@@ -6,6 +6,7 @@ import { MediaQueuePreview } from './MediaQueuePreview.js';
 import { EmojiPicker } from './EmojiPicker.js';
 import { MediaRejectedModal } from './MediaRejectedModal.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { templatePickerAvailable } from './TemplatePickerHost.js';
 import { highlightComposerMarkup } from '../../utils/formatWhatsApp.js';
 import { syncMirror } from '../../utils/composerMirror.js';
 
@@ -225,7 +226,9 @@ export function Composer({
         <div class="px-[14px] py-[6px] bg-wa-panel shrink-0">
           <div class="text-[12px] text-wa-secondary bg-wa-bg border border-wa-border rounded-[6px] px-3 py-1.5">
             Fora da janela de 24h: só é possível enviar um ${' '}
-            <button type="button" onClick=${openTemplatePicker} class="text-wa-teal underline font-medium">template aprovado</button>.
+            ${templatePickerAvailable() ? html`
+              <button type="button" onClick=${openTemplatePicker} class="text-wa-teal underline font-medium">template aprovado</button>.
+            ` : html`<span class="font-medium">template aprovado</span>.`}
           </div>
         </div>
       ` : ''}
@@ -271,7 +274,7 @@ export function Composer({
             ` : ''}
           </div>
         `}
-        ${templatesSupported && mode !== 'private' ? html`
+        ${templatesSupported && templatePickerAvailable() && mode !== 'private' ? html`
           <button
             type="button"
             class="p-[8px] ${sessionClosed ? 'text-wa-teal' : ''}"

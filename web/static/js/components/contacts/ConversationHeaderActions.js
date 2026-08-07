@@ -1,31 +1,33 @@
 // Conversation actions in the chat header (plano 10 FF3).
 //
 // Self-contained: resolves the OPEN conversation for the current phone, shows its
-// status + assignee, and offers the per-conversation actions — Resolver/Reabrir,
-// Atribuir a mim and Transferir (when the user may list users). Every
-// action is permission-gated (P48: hide, don't disable). Live-updates via the WS
+// status and offers the per-conversation action Resolver/Reabrir. Every action is
+// permission-gated (P48: hide, don't disable). Live-updates via the WS
 // conversation_* events for this conversation. Renders nothing in sandbox or when
 // the contact has no open conversation.
 //
-// "Atribuir a mim" / "Atribuída a você" route through the per-conversation AI
-// toggle (setConversationAi → set_ai, plano 66): taking the conversation turns the
-// AI OFF and assigns it to the operator; giving it back turns the AI ON and clears
-// the assignee. This keeps the header consistent with the sidebar right-click menu,
-// which also silences the AI on assignment.
+// O header NÃO mostra mais nada sobre o responsável — nem o botão "Atribuir a mim" /
+// "Atribuída a você", nem o rótulo de quem está atendendo. Assumir/devolver a conversa
+// (que desliga/religa a IA via set_ai) continua no menu de contexto da sidebar e no
+// painel de informações do atendimento.
+//
+// Na barra fica SÓ o "Resolver"/"Reabrir" (ação principal do atendente, um clique).
+// O resto — informações do atendimento e as ações que os plugins injetam no slot
+// `conversation.header.actions` — mora no menu (⋮) do canto, ver ConversationMenu.js.
 
 import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import {
-  getContactConversation, getConversation, getMe, getUsers, getCustomAttributes,
-  setConversationStatus, setConversationAi,
+  getContactConversation, getConversation, getMe, getCustomAttributes,
+  setConversationStatus,
 } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
-import { CopyLinkButton } from '../../utils/copyDeepLink.js';
 import { missingRequiredAttributes } from '../../utils/requiredAttributes.js';
 import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { resolveConversation } from '../../utils/resolveConversation.js';
-import { Slot } from '../../plugins/Slot.js';
+import { ConversationMenu } from './ConversationMenu.js';
+import { InfoIcon } from './icons.js';
 import { getFilters } from '../../plugins/registry.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
@@ -46,7 +48,6 @@ function patchFromEvent(data) {
 export function ConversationHeaderActions({ phone, conversationId = null, sandbox = false, onOpenConversationInfo = null, onOpenContactInfo = null, contactInfo = null }) {
   const [conv, setConv] = useState(null);
   const [user, setUser] = useState(null);
-  const [users, setUsers] = useState([]);   // for "Transferir" — vazio (silent) sem users.manage
   const [busy, setBusy] = useState(false);
   const [convDefs, setConvDefs] = useState([]);   // conversation-scoped attribute defs
   const [contactDefs, setContactDefs] = useState([]);   // contact-scoped attribute defs
@@ -57,17 +58,6 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
     let alive = true;
     getMe()
       .then(r => { if (alive && r && r.ok && r.data && r.data.user) setUser(r.data.user); })
-      .catch(() => {});
-    return () => { alive = false; };
-  }, []);
-
-  // Assignable users for "Transferir" (requires users.manage). silent: sem essa
-  // permissão o 403 apenas esvazia a lista, sem toast "Permissão negada." — este
-  // é um read best-effort de fundo, não uma ação do usuário.
-  useEffect(() => {
-    let alive = true;
-    getUsers({ silent: true })
-      .then(r => { if (alive && r && r.ok && r.data && Array.isArray(r.data.users)) setUsers(r.data.users); })
       .catch(() => {});
     return () => { alive = false; };
   }, []);
@@ -121,15 +111,25 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
   }, [load]);
   useWebSocket({ onConversationChanged });
 
-  if (!conv) return null;
+  // No sandbox nada disso existe (não há atendimento nem plugin de conversa).
+  if (sandbox) return null;
 
-  const isOpen = conv.status === 'open';
-  const assignedToMe = user && conv.assignee_user_id != null && conv.assignee_user_id === user.id;
+  // `conv` pode ser nulo (contato sem atendimento resolvido ainda): o menu continua
+  // de pé com as ações que não dependem dele — era assim que o antigo botão "i" do
+  // cabeçalho se comportava, e escondê-lo aqui seria uma regressão.
+  const isOpen = !!conv && conv.status === 'open';
   const can = (p) => hasPermission(user, p);
-  const userLabel = (id) => {
-    const u = users.find(x => x.id === id);
-    return u ? (u.name || u.email || `#${id}`) : `#${id}`;
-  };
+
+  // Itens do core no menu (⋮). Gate por permissão = esconder (P48).
+  const menuItems = [];
+  if (onOpenConversationInfo && can('conversation.read')) {
+    menuItems.push({
+      key: 'conversation-info',
+      label: 'Informações da conversa',
+      icon: html`<span class="text-wa-icon shrink-0"><${InfoIcon} /></span>`,
+      onClick: onOpenConversationInfo,
+    });
+  }
 
   async function run(fn) {
     if (busy) return;
@@ -178,12 +178,9 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
 
   return html`
     <div class="flex items-center gap-1.5 shrink-0">
-      <!-- Copiar link do atendimento (permalink /conversations/<id>) — plano 24 -->
-      ${!sandbox && conversationId != null ? html`
-        <${CopyLinkButton} path=${`/conversations/${conversationId}`} title="Copiar link da conversa" />
-      ` : null}
-      <!-- Status / Resolver / Reabrir (reabrir volta p/ "Não atribuídas", sem responsável) -->
-      ${can('conversation.resolve') ? html`
+      <!-- Status / Resolver / Reabrir (reabrir volta p/ "Não atribuídas", sem responsável).
+           Fica FORA do menu de propósito: é a ação principal, de um clique. -->
+      ${conv ? (can('conversation.resolve') ? html`
         <button
           disabled=${busy}
           onClick=${onStatusClick}
@@ -196,33 +193,11 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
         <span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${isOpen ? 'bg-wa-teal/15 text-wa-teal' : 'bg-wa-hover text-wa-secondary'}">
           ${isOpen ? 'Aberta' : 'Fechada'}
         </span>
-      `}
+      `) : null}
 
-      <!-- Atribuir a mim / responsável (somente em atendimentos abertos).
-           Assumir DESLIGA a IA e atribui a conversa ao operador; devolver RELIGA a IA
-           e limpa o responsável — reusando o toggle /ai (set_ai, plano 66). Gate em
-           conversation.reply: a rota /ai exige reply, e quem assume vai responder. -->
-      ${isOpen && can('conversation.reply') ? html`
-        ${assignedToMe
-          ? html`
-            <button disabled=${busy} onClick=${() => run(() => setConversationAi(conv.id, true))} class=${btn} title="Devolver à IA (religa a IA nesta conversa)">
-              Atribuída a você
-            </button>`
-          : html`
-            <button
-              disabled=${busy}
-              onClick=${() => run(() => setConversationAi(conv.id, false))}
-              class="px-2.5 py-1 rounded-md text-[12px] bg-wa-teal/15 text-wa-teal hover:bg-wa-teal/25 transition-colors disabled:opacity-50 whitespace-nowrap"
-              title="Assumir esta conversa e desligar a IA"
-            >
-              Atribuir a mim
-            </button>`}
-      ` : (conv.assignee_user_id != null ? html`
-        <span class="text-[12px] text-wa-secondary whitespace-nowrap">${userLabel(conv.assignee_user_id)}</span>
-      ` : null)}
-
-      <!-- Extension point: plugins can inject extra conversation actions here. -->
-      <${Slot} name="conversation.header.actions" ctx=${{ conv, user }} />
+      <!-- Menu (⋮): ações do core + extension point dos plugins (o MESMO slot
+           conversation.header.actions de antes — só mudou onde é pintado). -->
+      <${ConversationMenu} items=${menuItems} slotCtx=${{ conv, user }} />
 
       ${missingAttrs ? html`
         <${RequiredAttributesModal} missing=${missingAttrs.list} onConfirm=${onMissingConfirm} />

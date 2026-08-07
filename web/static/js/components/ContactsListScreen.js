@@ -280,10 +280,15 @@ function ContactRow({ c, onOpenDetail, onStartConversation }) {
               : (c.is_group ? 'Grupo' : phoneLabel)}
           </span>
           <span class="text-wa-border">|</span>
-          <button
+          <!-- Plano 106 · F4 (B1): é navegação, então é <a href> de verdade — ganha
+               Ctrl/⌘, clique do meio E "abrir em nova guia" do botão direito. O
+               onClick segue abrindo o detalhe; o push dele é idempotente, e o
+               interceptor do shell não empilha histórico ao ver a URL já no destino. -->
+          <a
+            href=${`/contacts/${c.id}`}
             onClick=${() => onOpenDetail(c)}
-            class="text-wa-teal font-medium hover:underline shrink-0"
-          >Ver detalhes</button>
+            class="text-wa-teal font-medium no-underline hover:underline shrink-0"
+          >Ver detalhes</a>
         </div>
         ${c.email && !c.is_group ? html`
           <div class="text-[13px] text-wa-secondary truncate mt-[1px]">

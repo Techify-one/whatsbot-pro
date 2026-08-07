@@ -34,6 +34,11 @@ export default function GeneralSettings() {
   const [historyExcludePatterns, setHistoryExcludePatterns] = useState('');
   // plano 47 (D9) — tamanho máx. (chars) do resultado de tool reaproveitado.
   const [toolReuseMaxChars, setToolReuseMaxChars] = useState(800);
+  // plano 91 (D1) — os três guardrails de loop. Já eram exposed+writable no
+  // backend; faltava só o campo (antes, mexer neles exigia abrir o banco).
+  const [toolLimitPerTool, setToolLimitPerTool] = useState(0);
+  const [toolLimitTotal, setToolLimitTotal] = useState(25);
+  const [maxRouteDepth, setMaxRouteDepth] = useState(5);
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -48,6 +53,16 @@ export default function GeneralSettings() {
     setShowAgentName(cfg.show_agent_name ?? true);
     setHistoryExcludePatterns((cfg.ai_history_exclude_patterns || []).join('\n'));
     setToolReuseMaxChars(cfg.ai_tool_reuse_result_max_chars ?? 800);
+    setToolLimitPerTool(cfg.ai_tool_call_limit_per_tool ?? 0);
+    setToolLimitTotal(cfg.ai_tool_call_limit_total ?? 25);
+    setMaxRouteDepth(cfg.ai_max_route_depth ?? 5);
+  }
+
+  // Inteiro ≥ 0 (0 = desligado). Campo vazio/lixo cai no default declarado —
+  // nunca manda NaN ao backend nem apaga o limite por acidente de digitação.
+  function intOrDefault(value, fallback) {
+    const n = parseInt(value, 10);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
   }
 
   async function load() {
@@ -102,6 +117,11 @@ export default function GeneralSettings() {
         .split('\n').map((s) => s.trim()).filter(Boolean),
       // plano 47 (D9) — cap por-resultado do reaproveitamento; fallback 800.
       ai_tool_reuse_result_max_chars: parseInt(toolReuseMaxChars, 10) || 800,
+      // plano 91 (D1) — guardrails de loop. 0 = desligado, então o fallback NÃO
+      // pode ser `|| default` (isso ressuscitaria o limite ao desligá-lo).
+      ai_tool_call_limit_per_tool: intOrDefault(toolLimitPerTool, 0),
+      ai_tool_call_limit_total: intOrDefault(toolLimitTotal, 25),
+      ai_max_route_depth: Math.max(1, intOrDefault(maxRouteDepth, 5)),
     };
     // Only include the API key when the user typed a new one.
     if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
@@ -304,6 +324,64 @@ export default function GeneralSettings() {
           class="wa-field w-40 px-3 py-1.5 rounded-md text-[14px]"
         />
         <span class="text-[12px] text-wa-secondary">Padrão: 800. Mínimo efetivo: 50.</span>
+      </div>
+
+      <!-- plano 91 — limites de chamadas de ferramenta (freio de loop caro) -->
+      <div class="flex flex-col gap-3 p-3 bg-wa-panel rounded-lg border border-wa-border">
+        <div class="text-[14px] font-semibold text-wa-text">Limites de chamadas de ferramenta</div>
+        <span class="text-[12px] text-wa-secondary">
+          Freios para a IA não ficar repetindo a mesma consulta quando algo dá errado —
+          cada repetição reenvia o histórico inteiro e custa tokens. Os limites contam
+          <span class="font-medium">por etapa do atendimento</span> (cada vez que a
+          conversa passa para outro agente, a contagem recomeça), não por mensagem.
+          <span class="font-medium">0 desliga</span> o limite.
+        </span>
+
+        <div class="flex flex-wrap gap-6">
+          <div>
+            <label class="block text-[12px] font-medium text-wa-text mb-1">Por ferramenta</label>
+            <input
+              type="number" min="0" max="50" step="1"
+              value=${toolLimitPerTool}
+              onInput=${(e) => setToolLimitPerTool(e.target.value)}
+              class="wa-field w-28 px-3 py-1.5 rounded-md text-[14px]"
+            />
+            <span class="text-[12px] text-wa-secondary block mt-1">
+              Quantas vezes a MESMA ferramenta pode ser usada. Ao atingir, a IA recebe
+              um aviso e segue respondendo (não trava o atendimento). Padrão: 0 (sem limite).
+            </span>
+          </div>
+
+          <div>
+            <label class="block text-[12px] font-medium text-wa-text mb-1">Total</label>
+            <input
+              type="number" min="0" max="100" step="1"
+              value=${toolLimitTotal}
+              onInput=${(e) => setToolLimitTotal(e.target.value)}
+              class="wa-field w-28 px-3 py-1.5 rounded-md text-[14px]"
+            />
+            <span class="text-[12px] text-wa-secondary block mt-1">
+              Teto somando TODAS as ferramentas. ⚠️ Não deixe baixo demais: ao estourar,
+              a IA também perde as ferramentas de <span class="font-medium">transferir
+              para outro agente/atendente</span> — ou seja, fica sem rota de saída.
+              Padrão: 25.
+            </span>
+          </div>
+
+          <div>
+            <label class="block text-[12px] font-medium text-wa-text mb-1">Trocas de agente</label>
+            <input
+              type="number" min="1" max="20" step="1"
+              value=${maxRouteDepth}
+              onInput=${(e) => setMaxRouteDepth(e.target.value)}
+              class="wa-field w-28 px-3 py-1.5 rounded-md text-[14px]"
+            />
+            <span class="text-[12px] text-wa-secondary block mt-1">
+              Quantas vezes a mesma mensagem pode passar de um agente para outro antes de
+              ir para um atendente humano. Padrão: 5.
+            </span>
+          </div>
+        </div>
       </div>
 
       <!-- Save -->

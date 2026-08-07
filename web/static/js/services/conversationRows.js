@@ -23,6 +23,35 @@
 export const isUnassigned = (c) => c.assignee_user_id == null && !c.active_agent_key;
 
 /**
+ * A IA está EFETIVAMENTE ligada nesta conversa? (plano 96 · D4/I10)
+ *
+ * Espelho puro do gate do servidor (`messaging_service._conversation_ai_active` +
+ * o interruptor global): o selo lia só `conv_ai_active` e por isso mentia — 14
+ * conversas abertas apareciam com "IA" verde estando mudas de fato, porque tinham
+ * dono humano. Três camadas, na mesma ordem do backend:
+ *
+ *   1. interruptor GLOBAL (`autoReply`) desligado ⇒ nada fala;
+ *   2. `conv_ai_active` 0/false ⇒ a conversa está pausada;
+ *   3. `assignee_user_id` preenchido ⇒ humano no comando (D2 — independe de
+ *      `active_agent_key`, que só a tool `transferir_agente` escreve).
+ *
+ * ⚠️ NÃO trata "linha sem atendimento" (`conversation_id == null`): essa linha não
+ * tem estado de IA a mostrar e quem a filtra é o chamador — aqui ela cairia no
+ * ramo ligado, porque `conv_ai_active` vem NULL do banco.
+ *
+ * @param {{ conv_ai_active?: number|boolean|null, assignee_user_id?: number|null }} row
+ * @param {{ autoReply?: boolean }} [opts]
+ * @returns {boolean}
+ */
+export function aiEffectivelyOn(row, { autoReply = true } = {}) {
+  const c = row || {};
+  if (!autoReply) return false;
+  if (c.conv_ai_active === 0 || c.conv_ai_active === false) return false;
+  if (c.assignee_user_id != null) return false;
+  return true;
+}
+
+/**
  * Se uma mensagem nova deve NOTIFICAR este atendente (som + pop-up do navegador).
  *
  * Regra: a conversa é minha, OU não tem dono nenhum — nem humano nem IA (a mesma
@@ -187,8 +216,11 @@ export function clauseMatches(c, cl, now) {
     return op === 'ne' ? st !== value : st === value;
   }
   if (dim === 'ai') {
-    // IA ligada/desligada por conversa (mesmo sinal do badge "IA OFF"). value ∈ 'on'|'off'.
-    const isOn = c.conv_ai_active !== 0 && c.conv_ai_active !== false;
+    // IA ligada/desligada por conversa (MESMO sinal do badge "IA OFF" — plano 96
+    // P4: selo e filtro divergirem seria um segundo bug da mesma família).
+    // `autoReply` não entra aqui: o interruptor global vale para TODAS as linhas e
+    // faria o filtro devolver tudo ou nada. value ∈ 'on'|'off'.
+    const isOn = aiEffectivelyOn(c);
     const hit = value === 'on' ? isOn : !isOn;
     return op === 'ne' ? !hit : hit;
   }
@@ -571,6 +603,14 @@ export function shapeConvData(d) {
     messages: d.messages || [],
     // plano 50 F4: keyset — ainda há mensagens mais antigas p/ carregar (scroll-up).
     has_more: !!d.has_more,
+    // plano 99: a janela deixou de terminar sempre na última mensagem.
+    // `has_more_older` é o nome novo do `has_more` (mantidos em sincronia);
+    // `has_more_newer` é o que define a janela ANCORADA. `anchor_id` é a
+    // mensagem em que o servidor aterrissou (salto / ir-para-data), `null`
+    // quando não deu para ancorar — o painel avisa em vez de falhar mudo.
+    has_more_older: d.has_more_older !== undefined ? !!d.has_more_older : !!d.has_more,
+    has_more_newer: !!d.has_more_newer,
+    anchor_id: d.anchor_id != null ? d.anchor_id : null,
     avatar_v: d.avatar_v,
     channel_id: d.channel_id || 'default',
     conversation: d.conversation || null,

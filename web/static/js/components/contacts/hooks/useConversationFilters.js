@@ -39,11 +39,17 @@ const ACTIVE_FILTER_KEY = 'whatsbot_active_conv_filter';
  * @param {{ current: Record<string, any>[] }} opts.displayedRef
  * @param {boolean} [opts.searching] - há um termo de busca ativo na barra lateral.
  * @param {boolean} [opts.showArchived]
+ * @param {string} [opts.defaultAssignmentTab] - aba inicial (plano 88 · F3); 'all' preserva callers antigos.
  */
-export function useConversationFilters({ contacts, search = '', selected, selectedConvId, currentUserId, displayedRef, searching = false, showArchived = false, skipStoredPreset = false, serverFilterRef = null, fetchContacts = null, viewSpecRef = null }) {
+export function useConversationFilters({ contacts, search = '', selected, selectedConvId, currentUserId, displayedRef, searching = false, showArchived = false, skipStoredPreset = false, serverFilterRef = null, fetchContacts = null, viewSpecRef = null, defaultAssignmentTab = 'all' }) {
   // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
   const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
-  const [assignmentTab, setAssignmentTab] = useState('all');  // all|mine|unassigned
+  // plano 88 · F3 — seed do PRIMEIRO frame apenas: a fonte da verdade da aba é o schema
+  // de URL, que o useUrlState hidrata no mount por cima deste valor (hooks/useUrlState.js
+  // hidrata sempre e pula a primeira escrita). Os dois têm que sair do MESMO cálculo —
+  // desalinhados, o hub renderiza "Todas", pisca para "Minhas" e dispara um fetch de
+  // lista que será refeito.
+  const [assignmentTab, setAssignmentTab] = useState(defaultAssignmentTab);  // all|mine|unassigned|mentions
   const [sortBy, setSortBy] = useState('activity');           // activity|oldest|unread
   const [tagFilter, setTagFilter] = useState([]);             // funil simples (esquerda) — etiquetas
   const [advFilters, setAdvFilters] = useState([]);           // [{dim, op, value}] — filtro avançado (direita)

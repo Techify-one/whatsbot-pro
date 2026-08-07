@@ -1,9 +1,9 @@
-# Repo-level tooling config. Today this only holds the pytest configuration
-# (Phase A0 of the refactor). It is intentionally minimal — the project is NOT
+# Repo-level tooling config. Today this only holds the pytest configuration.
+# It is intentionally minimal — the project is NOT
 # packaged via this file (no [build-system]); it ships as a PyInstaller EXE.
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/core", "tests/contracts", "tests/integration"]
 python_files = ["test_*.py"]
 addopts = "-q -ra"
 # Per-test wall-clock cap. The legacy-suite subprocess tests pass their own

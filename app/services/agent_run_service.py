@@ -394,7 +394,13 @@ async def run_turn(handler, sender: str, text: str, *,
         logger.info("Processed message from %s", sender)
 
         updated_info = None
-        if any(tc.get("tool") == "save_contact_info" for tc in executed_tools):
+        # ``skipped`` marca a chamada que NÃO rodou (bloqueada por filter ou por
+        # limite de tool — agno_engine). Sem o filtro, um save_contact_info
+        # bloqueado faria o turno reportar dados de contato como salvos, e isso
+        # vaza para o payload de ``llm.after`` que os plugins leem. Mesmo molde de
+        # ``messaging_service`` no set_custom_attribute (plano 91·F5).
+        if any(tc.get("tool") == "save_contact_info" and not tc.get("skipped")
+               for tc in executed_tools):
             updated_info = dict(contact.info)
             updated_info["observations"] = list(updated_info.get("observations", []))
 

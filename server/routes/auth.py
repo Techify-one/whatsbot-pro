@@ -12,6 +12,7 @@ from server.auth import (
     resolve_request_token,
 )
 from db.repositories import user_repo, session_repo, rbac_repo
+from server.client_ip import client_ip
 from server.helpers import _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -21,10 +22,11 @@ _LOGIN_MAX_FAILURES = 10
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    # Bucket do rate-limit: o IP tem que ser o do NAVEGADOR e NÃO-forjável —
+    # senão basta variar o X-Forwarded-For pra ganhar tentativas infinitas.
+    # ⚠️ `client_ip`, NUNCA `audit_ip` (plano 86 · D4): este último prefere o IP
+    # que o próprio painel declara, que é autodeclarado e anularia o limite.
+    return client_ip(request) or "unknown"
 
 
 def register_routes(app, deps):

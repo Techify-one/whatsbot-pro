@@ -27,7 +27,7 @@ Baixou, instalou, escaneou o QR Code, escreveu como a IA deve se comportar e pro
 
 ### 1. Baixe e abra o programa
 
-Baixe o WhatsBot, extraia a pasta e dê dois cliques no arquivo **start.bat**. O programa vai preparar tudo sozinho e abrir automaticamente no seu navegador.
+Baixe o WhatsBot, extraia a pasta e dê dois cliques no arquivo **windows_start.bat**. O programa vai preparar tudo sozinho e abrir automaticamente no seu navegador.
 
 > **Por que um .bat e não um .exe?** Porque assim você (ou qualquer ferramenta de IA) pode abrir, ler e modificar o código livremente. Com um .exe isso não seria possível. O WhatsBot foi pensado para ser fácil de personalizar.
 
@@ -166,6 +166,8 @@ Quem quiser ir além do básico pode adicionar funcionalidades extras sem mexer 
 
 Plugins ficam isolados na pasta `storages/plugins/` e podem ser instalados, ativados, desativados, exportados (`.zip`) ou removidos diretamente pela interface, sem afetar o resto do programa. Atualizar o WhatsBot **não** mexe nos seus plugins.
 
+**A instalação nasce enxuta de propósito:** o WhatsBot vem com o núcleo e **um** canal — o WhatsApp via QR Code. Tudo o mais (Telegram, WhatsApp Cloud API oficial, Messenger, Instagram, widget de site, protocolos de atendimento, follow-up automático…) é plugin e entra **quando você precisar**, por *Gerenciar Plugins → Importar (.zip)*. Você não carrega o que não usa, e cada plugin sobe e desce sozinho.
+
 Para criar um plugin do zero, abra o projeto no Claude Code e rode `/new-plugin` — a IA pergunta o que você quer fazer e gera tudo (código, banco, tela, configurações) automaticamente.
 
 Documentação técnica completa em [CLAUDE.md](CLAUDE.md) (Sistema de plugins, Events e Filters).
@@ -184,18 +186,33 @@ Documentação técnica completa em [CLAUDE.md](CLAUDE.md) (Sistema de plugins, 
 
 Em qualquer opção, **você não precisa criar conta de IA nem copiar chave** — o assistente de configuração cria sua chave automaticamente na primeira execução, com crédito grátis para começar.
 
+### Um banco PostgreSQL (obrigatório em todas as opções)
+
+O WhatsBot guarda conversas, contatos e configurações num **PostgreSQL** — e **não sobe sem ele**. Não é opcional e não há banco embutido: sem a variável de ambiente `DATABASE_URL`, o programa para no início com uma mensagem dizendo exatamente isso.
+
+Crie um arquivo chamado **`.env`** na pasta do WhatsBot com uma linha:
+
+```
+DATABASE_URL=postgresql+psycopg://usuario:senha@servidor:5432/whatsbot
+```
+
+Serve tanto um PostgreSQL instalado na sua máquina quanto um hospedado (Neon, Supabase, Railway…) — vários têm plano gratuito suficiente para começar. No Docker/Coolify, informe a mesma variável nas configurações do container em vez do `.env`.
+
 ### Opção 1: Windows (direto)
 - **Windows 10** ou mais recente
+- **`DATABASE_URL` no `.env`** (veja acima)
 - **Conexão com internet**
 - **WhatsApp ativo no celular** — para escanear o QR Code na primeira vez
 
 ### Opção 2: macOS (direto)
-- **macOS** — dê dois cliques em **start.command** (na primeira vez ele baixa sozinho o que precisa)
+- **macOS** — dê dois cliques em **macos_start.command** (na primeira vez ele baixa sozinho o que precisa)
+- **`DATABASE_URL` no `.env`** (veja acima)
 - **Conexão com internet**
 - **WhatsApp ativo no celular** — para escanear o QR Code na primeira vez
 
 ### Opção 3: Docker (Windows, Mac ou Linux)
 - **Docker** instalado ([docker.com](https://www.docker.com/get-started))
+- **`DATABASE_URL`** nas variáveis de ambiente do container
 - **Conexão com internet**
 - **WhatsApp ativo no celular** — para escanear o QR Code na primeira vez
 
@@ -236,10 +253,10 @@ Sim. Como tudo roda no seu computador, o programa precisa estar aberto para a IA
 O programa tenta reconectar automaticamente. Quando a internet voltar, ele retoma o funcionamento normalmente.
 
 **Posso usar no Mac ou Linux?**
-Sim! No **Mac**, além do Docker, há um atalho nativo: dê dois cliques em **start.command** (sem precisar de Docker). No **Windows**, use o **start.bat**. E em qualquer sistema (Windows, Mac ou Linux) você pode rodar via **Docker**.
+Sim! No **Mac**, além do Docker, há um atalho nativo: dê dois cliques em **macos_start.command** (sem precisar de Docker). No **Windows**, use o **windows_start.bat**. E em qualquer sistema (Windows, Mac ou Linux) você pode rodar via **Docker**.
 
 **Quero personalizar algo no programa, como faço?**
-O WhatsBot é de código aberto e roda direto do código (sem precisar compilar). Você pode pedir para qualquer ferramenta de IA (como ChatGPT, Claude Code, Cursor, Cowork, etc.) fazer alterações — é só salvar o arquivo, fechar e abrir o iniciar.bat de novo. As mudanças já funcionam. Não precisa saber programar.
+O WhatsBot é de código aberto e roda direto do código (sem precisar compilar). Você pode pedir para qualquer ferramenta de IA (como ChatGPT, Claude Code, Cursor, Cowork, etc.) fazer alterações — é só salvar o arquivo, fechar e abrir o **windows_start.bat** de novo. As mudanças já funcionam. Não precisa saber programar.
 
 **Posso contribuir com o projeto?**
 Sim! O WhatsBot é um projeto de código aberto. Contribuições são bem-vindas.

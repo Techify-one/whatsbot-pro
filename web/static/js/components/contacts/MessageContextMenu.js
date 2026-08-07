@@ -9,6 +9,10 @@ const html = htm.bind(h);
 // Generic per-element action menu, opened by right-click or by the hover
 // arrow inside a bubble. Mirrors the visual language of ContextMenu.js.
 // `items`: [{ label, icon (html), onClick, disabled?, danger? }]
+//          | { separator: true }   ← divisória (plano 97 · F4), sem label nem
+//            onClick: separa o bloco CONTEXTUAL (link/e-mail/telefone sob o
+//            cursor) do bloco da mensagem. A `key` é o ÍNDICE justamente porque
+//            um separador não tem label.
 
 export function MessageContextMenu({ x, y, items, reactionBar, onClose }) {
   const ref = useRef(null);
@@ -86,9 +90,11 @@ export function MessageContextMenu({ x, y, items, reactionBar, onClose }) {
           </div>
         ` : ''}
         <div class="bg-wa-panel rounded-lg shadow-lg border border-wa-border py-[4px] min-w-[180px]">
-        ${items.map((item) => html`
+        ${items.map((item, i) => (item && item.separator) ? html`
+          <div key=${'sep' + i} class="my-[4px] border-t border-wa-border"></div>
+        ` : html`
           <button
-            key=${item.label}
+            key=${'item' + i + ':' + item.label}
             disabled=${item.disabled}
             onClick=${() => { if (item.disabled) return; item.onClick(); onClose(); }}
             class="w-full text-left px-4 py-[10px] text-[14.5px] transition-colors flex items-center gap-3 ${
@@ -135,6 +141,28 @@ export const LinkIcon = html`
 export const EditIcon = html`
   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
     <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+  </svg>
+`;
+
+// Ícones das AÇÕES DE ENTIDADE (plano 97 · F4) — link/e-mail/telefone sob o
+// cursor. Mesmo formato dos de cima (24×24, 18px, `fill="currentColor"`), então
+// herdam a cor do item e o modo escuro sai de graça, sem cor crua.
+
+export const OpenExternalIcon = html`
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/>
+  </svg>
+`;
+
+export const MailIcon = html`
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
+  </svg>
+`;
+
+export const PhoneIcon = html`
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>
   </svg>
 `;
 

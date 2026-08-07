@@ -172,6 +172,24 @@ def delete_definition(def_id: int) -> bool:
     return (result.rowcount or 0) > 0
 
 
+def restore_definition(def_id: int) -> bool:
+    """Undo a soft delete: clear ``deleted_at``. Returns False if it was not deleted.
+
+    Needed because ``ensure_system_definition`` is a deliberate no-op on an existing
+    row (active OR soft-deleted). A mirror that re-registers a key it had retired
+    would otherwise be silently dropped — the row exists, so nothing is created, and
+    it stays invisible. Values in the entity JSON are untouched either way, so a
+    restore brings the old data back into view.
+    """
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            sa_update(cad)
+            .where(cad.c.id == def_id, cad.c.deleted_at.is_not(None))
+            .values(deleted_at=None)
+        )
+    return (result.rowcount or 0) > 0
+
+
 def purge_orphan_values(entity_table, applies_to: str) -> int:
     """Remove from each entity's JSON the keys with no active definition (P49).
 

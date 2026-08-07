@@ -157,15 +157,11 @@ export function ScreenRouter({
       </div>`;
   }
   if (tab === 'attendances') {
-    // A aba "Atendimentos" (kanban/lista) é EXCLUSIVA do plugin protocolos, que a
-    // provê via overrideRoute('attendances') — tratado no topo (activeRouteOverride).
-    // Enquanto as extensões de plugin ainda estão carregando (janela assíncrona do
-    // boot: fetch do manifest + import() do extends.js), NÃO redirecione: o override
-    // pode estar prestes a registrar. Sem esse gate, um F5 em /protocolos cairia no
-    // hub de Contatos antes do plugin subir (e perderia o ?detail).
+    // The native attendance screen was removed: this route only exists while a
+    // plugin claims it through overrideRoute().  Wait for extension discovery so
+    // a hard reload never flashes Sandbox before the claim is registered; when
+    // no plugin claims it, return to the conversations hub.
     if (!extensionsLoaded) return null;
-    // Extensões já carregadas e ainda sem override → o plugin está de fato desligado:
-    // não há tela nativa. Volta ao hub de conversas (Contatos) em vez do fallback Sandbox.
     queueMicrotask(() => setTab('contacts'));
     return null;
   }

@@ -349,6 +349,22 @@ async def _clear_transfer_tag(deps, contact_id) -> None:
     except Exception:
         logger.debug("Falha ao limpar tag de transferência do contato %s", contact_id)
 
+def _abort_ai_cycle(deps, conv: dict) -> None:
+    """Interrompe o ciclo de IA em voo desta conversa (plano 96 I6).
+
+    Escrever ``ai_active=0`` no banco não bastava: o gate é lido no começo do
+    ciclo e a resposta já a caminho seguia saindo (1,6s a 75s depois do clique,
+    em 19 de 22 incidentes medidos). Import tardio pelo mesmo motivo do
+    ``_broadcast``: ``messaging_service`` importa de volta para ``server``.
+    Best-effort — nunca quebra a atribuição."""
+    try:
+        from app.services.messaging_service import abort_ai_cycle_for_conversation
+        abort_ai_cycle_for_conversation(deps, conv)
+    except Exception:
+        logger.debug("Falha ao abortar o ciclo da IA da conversa %s",
+                     (conv or {}).get("id"))
+
+
 async def _transfer(deps, conv: dict, *, assignee_user_id, active_agent_key,
                     ai_active, mirror_contact_ai: bool | None,
                     contact_id=None, clear_transfer_tag: bool = True) -> dict | None:
@@ -409,6 +425,14 @@ async def assign(deps, conv: dict, assignee_user_id, *, actor_id=None,
         (assignee cleared) — the WS event stays ``conversation_assigned`` either way;
       * the ``assigned`` / ``unassigned`` system-notice card.
 
+    Plano 96 D1/I5 — atribuir a um HUMANO cala a IA, por qualquer caminho. Este
+    era o caminho divergente: a tela Atendimentos e o plugin
+    ``agendamento_retorno`` chamam aqui, e só o ``assignee_user_id`` era escrito
+    (``ai_active``/``active_agent_key`` intactos) enquanto o botão do cabeçalho e
+    o picker já calavam. Agora passa pelo mesmo :func:`_transfer` do
+    ``assign_unified``. ⚠️ **DESATRIBUIR continua não tocando na IA** — soltar uma
+    conversa não pode devolvê-la ao bot sem ninguém pedir.
+
     Returns the updated conversation, ``None`` if it vanished, or the string
     ``"blocked"`` when a plugin aborted the assign (the route maps it to a 403).
     """
@@ -420,10 +444,21 @@ async def assign(deps, conv: dict, assignee_user_id, *, actor_id=None,
     if allowed is None:
         return "blocked"
     previous_assignee = conv.get("assignee_user_id")
-    updated = await asyncio.to_thread(
-        conversation_repo.set_assignee, conv["id"], assignee_user_id)
+    if assignee_user_id:
+        # ``mirror_contact_ai=None``: NÃO mexer no gate do contato — quem faz isso é
+        # o ``assign_unified``, e mudar aqui alteraria o contrato de evento
+        # (``contact.ai_toggled`` passaria a sair de um caminho que nunca o emitiu).
+        updated = await _transfer(
+            deps, conv, assignee_user_id=assignee_user_id, active_agent_key=None,
+            ai_active=0, mirror_contact_ai=None)
+    else:
+        updated = await asyncio.to_thread(
+            conversation_repo.set_assignee, conv["id"], assignee_user_id)
     if not updated:
         return None
+    if assignee_user_id:
+        # O banco já está certo; falta interromper o que estiver em voo (I6).
+        _abort_ai_cycle(deps, updated)
     # plano 23 Fase C0: distinct verb for the removal case (WS unchanged).
     bus_event = "conversation.assigned" if assignee_user_id else "conversation.unassigned"
     await _broadcast(deps, "conversation_assigned", bus_event, updated,
@@ -442,11 +477,19 @@ async def assign(deps, conv: dict, assignee_user_id, *, actor_id=None,
 async def assign_me(deps, conv: dict, user_id: int, *, actor_name: str | None = None
                     ) -> dict | None:
     """Assign a conversation to the calling user (assign-me). Emits
-    ``conversation.assigned`` + the ``assigned_me`` system-notice card, once each."""
-    updated = await asyncio.to_thread(
-        conversation_repo.set_assignee, conv["id"], user_id)
+    ``conversation.assigned`` + the ``assigned_me`` system-notice card, once each.
+
+    Plano 96 D1 — mesma passagem por :func:`_transfer` do :func:`assign`. O painel
+    não chama esta rota hoje (``assignMeConversation`` está definido em
+    ``api.js`` e não é usado por ninguém), mas o endpoint existe e um plugin pode
+    chamá-lo: deixar a porta aberta reintroduziria exatamente o bug que o plano
+    fecha, num caminho que ninguém olharia."""
+    updated = await _transfer(
+        deps, conv, assignee_user_id=user_id, active_agent_key=None,
+        ai_active=0, mirror_contact_ai=None)
     if not updated:
         return None
+    _abort_ai_cycle(deps, updated)
     await _broadcast(deps, "conversation_assigned", "conversation.assigned", updated,
                      by_user_id=user_id)
     await _emit_notice(updated, "assigned_me", actor_name=actor_name)
@@ -481,6 +524,9 @@ async def assign_unified(deps, conv: dict, *, kind: str, user_id=None,
             ai_active=None, mirror_contact_ai=None)
     if not updated:
         return None
+    if kind == "user":
+        # Já calava no banco; o que faltava era interromper o ciclo em voo (I6).
+        _abort_ai_cycle(deps, updated)
     await _broadcast(deps, "conversation_assigned", "conversation.assigned", updated)
     if kind == "user":
         await _maybe_agent_transfer_alert(deps, updated, user_id, actor_id)
@@ -554,6 +600,11 @@ async def set_ai(deps, conv: dict, active: int, *, actor_id=None,
             ai_active=0, mirror_contact_ai=None)
     if not updated:
         return None
+    if not active:
+        # Desligar a IA pelo painel interrompe a resposta que já estava a caminho
+        # (I6) — o caso mais comum dos incidentes: o operador clica em "Atribuir a
+        # mim" (que é um ``set_ai(0)``) enquanto o balão "IA respondendo…" está no ar.
+        _abort_ai_cycle(deps, updated)
     await _broadcast(deps, "conversation_assigned", "conversation.assigned", updated)
     await _broadcast(deps, "conversation_ai_toggled", "conversation.ai_toggled", updated)
     await _emit_notice(updated, "ai_on" if active else "ai_off", actor_name=actor_name)

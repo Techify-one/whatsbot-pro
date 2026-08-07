@@ -5,7 +5,7 @@ import { checkPhone, listConnectedChannels, sendMessage, getChannelSessionState,
 import { formatPhoneDisplay } from '../../utils/phone.js';
 import { highlightComposerMarkup, toWhatsAppMarkup } from '../../utils/formatWhatsApp.js';
 import { syncMirror } from '../../utils/composerMirror.js';
-import { TemplatePicker } from './TemplatePicker.js';
+import { TemplatePickerHost, templatePickerAvailable } from './TemplatePickerHost.js';
 import { useQuickReplies } from '../../hooks/useQuickReplies.js';
 import { avatarUrl } from './utils.js';
 import { DefaultAvatar } from './icons.js';
@@ -265,7 +265,11 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
 
   const canSendNormal = !!checkResult && !!channelId && message.trim().length > 0
     && !sending && freeTextAllowed && !sessionLoading;
-  const canPickTemplate = !!checkResult && !!channelId && templatesChannel && !sessionLoading;
+  // `templatePickerAvailable()`: sem tela de template registrada (plugin do canal
+  // desativado), o botão não pode prometer o que não abre — mesmo gate do ícone
+  // no compositor. Hoje é sempre verdadeiro, porque o core ainda traz o fallback.
+  const canPickTemplate = !!checkResult && !!channelId && templatesChannel
+    && templatePickerAvailable() && !sessionLoading;
 
   async function handleSendNormal() {
     if (!canSendNormal) return;
@@ -560,7 +564,7 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
       </div>
 
       ${showTemplatePicker && checkResult && channelId ? html`
-        <${TemplatePicker}
+        <${TemplatePickerHost}
           channelId=${channelId}
           phone=${checkResult.phone}
           onClose=${() => setShowTemplatePicker(false)}

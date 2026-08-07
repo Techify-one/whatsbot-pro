@@ -17,6 +17,26 @@ import { formatPhoneDisplay } from '../../utils/phone.js';
 
 const html = htm.bind(h);
 
+// ⚠️ ARQUIVO CONGELADO — FALLBACK TEMPORÁRIO (plano 92 · C1 → G1) ⚠️
+//
+// O dono desta tela agora é o PLUGIN:
+//     assets/plugin_examples/whatsapp_cloud/static/TemplatePicker.js
+// Esta cópia só continua aqui para não abrir uma janela sem envio de template
+// entre "core novo no ar" e "zip do plugin instalado". Ela é resolvida pelo
+// TemplatePickerHost apenas quando NENHUM plugin reivindica `template.picker`,
+// e some na fase G1.
+//
+// NÃO CORRIJA BUGS AQUI. As duas cópias já divergiram de propósito (a do plugin
+// tem favoritos, arquivar e busca por conteúdo — ~207 linhas a mais) e nada
+// detecta a divergência automaticamente: zero testes tocam este arquivo. Uma
+// correção feita aqui fica verde na suíte inteira e **não chega a nenhum
+// operador com o plugin ativo**, que é a instalação normal. O repo já tem o
+// precedente: duas famílias divergentes do formatador de telefone, consolidadas
+// no plano 23·R1 depois de uma delas errar o número BR de 12 dígitos.
+//
+// Exceção única: consertar quebra DO PRÓPRIO FALLBACK (ele deixar de renderizar
+// com o plugin desativado).
+//
 // ── Template picker (Cloud API, Frente C) ────────────────────────────────────
 // Lists the channel's templates (any status) with a category + status badge and,
 // on selecting an APPROVED one, builds a dynamic form from the template

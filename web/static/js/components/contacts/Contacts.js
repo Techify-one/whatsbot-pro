@@ -2,7 +2,11 @@ import { h } from 'preact';
 import { useState, useRef, useCallback, useEffect, useMemo } from 'preact/hooks';
 import htm from 'htm';
 import { useUrlState } from '../../hooks/useUrlState.js';
-import { readParams, writeParams, enumStr, str, bool, list, json } from '../../services/urlState.js';
+import { readParams, writeParams } from '../../services/urlState.js';
+import {
+  hasStoredUser, defaultAssignmentTab, buildHubUrlSchema, hubUrlHasParams,
+  shouldYieldAssignmentTab,
+} from '../../services/hubDefaults.js';
 import { ContactList, typingKey, rowKeyFor, operatorTypingFor } from './ContactList.js';
 import { ContactDetail } from './ContactDetail.js';
 import { ContactInfoPanel } from './ContactInfoPanel.js';
@@ -12,7 +16,7 @@ import { ChannelPickerModal } from './ChannelPickerModal.js';
 import { NewConversationModal } from './NewConversationModal.js';
 import { useSidebarResize } from './hooks/useSidebarResize.js';
 import { useConversationList } from './hooks/useConversationList.js';
-import { useConversationSelection } from './hooks/useConversationSelection.js';
+import { useConversationSelection, threadKeyOf } from './hooks/useConversationSelection.js';
 import { useConversationFilters } from './hooks/useConversationFilters.js';
 import { useConversationActions } from './hooks/useConversationActions.js';
 import { useBulkSelection } from './hooks/useBulkSelection.js';
@@ -25,22 +29,8 @@ const html = htm.bind(h);
 // Deep-link do estado da lista (Plano 24) — filtros/busca/ordenação/painel na
 // query-string legível. `adv` guarda só as cláusulas do filtro avançado (JSON),
 // omitido quando vazio. Serialize omite tudo que está no default → URL limpa.
-const HUB_URL_SCHEMA = [
-  enumStr('status', 'open'),        // open|closed|all
-  enumStr('assignment', 'all'),     // all|mine|unassigned
-  enumStr('sort', 'activity'),      // activity|oldest|unread
-  str('search', ''),
-  bool('archived'),
-  list('tags'),
-  str('panel', ''),                 // ''|contact|conversation
-  json('adv', { isDefault: (v) => !Array.isArray(v) || v.length === 0 }),
-];
-const HUB_URL_KEYS = HUB_URL_SCHEMA.map((f) => f.key);
-// A URL traz algum filtro do hub? (decide a precedência URL > preset salvo).
-const hubUrlHasParams = (search) => {
-  const p = new URLSearchParams(search || '');
-  return HUB_URL_KEYS.some((k) => p.has(k));
-};
+// O schema virou fábrica em services/hubDefaults.js (plano 88 · F1/F2): o default
+// de `assignment` depende de haver usuário logado.
 
 // ── Main Component (conversation hub container) ──────────────────────
 //
@@ -50,7 +40,7 @@ const hubUrlHasParams = (search) => {
 // together (in dependency order so every closure captures stable references) and
 // renders — it adds NO new behavior.
 //
-// ROUTE-OVERRIDE BOUNDARY (Q5, preserved): the `atendimentos` plugin claims the
+// ROUTE-OVERRIDE BOUNDARY (Q5, preserved): the `protocolos` plugin claims the
 // 'attendances' route via registry.overrideRoute, which is EXCLUSIVE/REPLACE
 // semantics (NOT compose) — it swaps the WHOLE rendered component for that tab.
 // This decomposition is purely INTERNAL to <Contacts/>: its export name + props
@@ -59,7 +49,7 @@ const hubUrlHasParams = (search) => {
 // (`sidebar.row.badges` in ContactList, `chat.header.banner` in ContactDetail)
 // and the `ui.conversation.selected` emit (in useConversationSelection) are the
 // additive seams that keep the attendances flow composing on top.
-export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, initialScrollMsgId = null, wsConnected, config, onConfigSave, onUnreadChange }) {
+export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, initialScrollMsgId = null, wsConnected, config, onConfigSave, onUnreadChange, renderGear = null }) {
   // Refs shared between hooks (owned here so a single instance is threaded into
   // both the selection loader and the WS handlers — same identity, no drift).
   const pageVisibleRef = useRef(!document.hidden);
@@ -128,9 +118,14 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     scrollToMsg, setScrollToMsg,
     contactData, setContactData,
     loadingDetail,
+    detailError, retryDetail,      // plano 85 A3
     loadingOlder, loadOlder,
+    // plano 99 — janela ancorada (rolar para os dois lados) + os caminhos de salto
+    loadingNewer, loadNewer, jumping,
+    jumpToMessage, jumpToDate, backToBottom,
     openPanel, setOpenPanel,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
+    anchoredWindowRef,
     openInfoAfterSelect,
     pendingWsMessages,
     isOpenRow, selectContact, reloadOpenThread,
@@ -197,12 +192,24 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   }, [openPanel, setOpenPanel, selectContact, selectedRef, selectedConvIdRef]);
 
   // ── Filters + saved presets + derived sidebar list ──────────────────
+  // plano 88 · F2 — a aba que o hub abre quando a URL não diz nada. Trocar de tela
+  // DESMONTA o hub e voltar é um pushState('/') sem query, então "no mount" é
+  // exatamente "toda vez que o operador volta de outra tela": o default precisa ser
+  // "Minhas" (degradando para "Todas" sem usuário logado — ver hubDefaults.js).
+  // Deps VAZIAS de propósito: a identidade é resolvida UMA vez por mount; um schema
+  // que mudasse no meio da vida do componente reescreveria a URL sem ninguém ter
+  // tocado em nada. Um só cálculo, compartilhado com o seed do hook de filtros (F3).
+  const defaultTab = useMemo(() => defaultAssignmentTab(hasStoredUser()), []);
+  const hubSchema = useMemo(() => buildHubUrlSchema(defaultTab), [defaultTab]);
   // Precedência (Plano 24 · D3): se a URL trouxer filtros, ela vence o preset
   // salvo no localStorage — o hook não auto-aplica o preset armazenado nesse caso.
-  const hasUrlFilters = useMemo(() => hubUrlHasParams(window.location.search), []);
+  const hasUrlFilters = useMemo(() => hubUrlHasParams(window.location.search, hubSchema), [hubSchema]);
   const filters = useConversationFilters({
     contacts, selected, selectedConvId, currentUserId, displayedRef,
     search,
+    // plano 88 · F3 — o MESMO valor do schema, para o 1º frame já nascer na aba certa
+    // (sem piscar "Todas" e sem disparar um fetch de lista que seria refeito).
+    defaultAssignmentTab: defaultTab,
     searching: !!search,
     showArchived,
     skipStoredPreset: hasUrlFilters,
@@ -231,7 +238,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // back/forward; reflete filtros/busca/ordenação/painel na query (replaceState,
   // sem poluir histórico). Serialize omite defaults → link limpo quando nada mexeu.
   useUrlState({
-    read: () => readParams(window.location.search, HUB_URL_SCHEMA),
+    read: () => readParams(window.location.search, hubSchema),
     apply: (s) => {
       setStatusFilter(s.status);
       setAssignmentTab(s.assignment);
@@ -253,7 +260,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
       panel: openPanel || '',
       // Descarta o id efêmero das cláusulas p/ a URL ficar estável.
       adv: (advFilters || []).map(({ id, ...rest }) => rest),
-    }, HUB_URL_SCHEMA),
+    }, hubSchema),
     deps: [statusFilter, assignmentTab, sortBy, search, showArchived, tagFilter, openPanel, advFilters],
   });
 
@@ -289,6 +296,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     setContactData, setSelected, setSelectedConvId,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     pendingWsMessages, isOpenRow, selected, contactData,
+    anchoredWindowRef,
     setGlobalTags,
     pageVisibleRef,
     reloadOpenThread,
@@ -304,9 +312,16 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     setCheckPhoneError(null);
   }, [handleSearchChange, setCheckPhoneError]);
 
-  const messages = contactData ? contactData.messages || [] : [];
-  const info = contactData ? contactData.info || {} : {};
-  const selectedKey = selectedConvId != null ? `conv:${selectedConvId}` : (selected ? `phone:${selected}` : null);
+  const selectedKey = threadKeyOf(selected, selectedConvId);
+  // plano 85 A4 — `contactData` carrega o carimbo (`_threadKey`) da thread de onde veio.
+  // Enquanto ele não casar com a seleção corrente os dados são da conversa ANTERIOR:
+  // nada deles pode ir para a tela (nem as bolhas, nem o nome/telefone do drawer). É a
+  // guarda que fecha o frame entre o clique e o efeito de carga — o efeito roda depois
+  // do paint, então sem isto sempre haveria um quadro exibindo a conversa errada.
+  const detailStale = selectedKey != null
+    && (!contactData || contactData._threadKey !== selectedKey);
+  const messages = (contactData && !detailStale) ? contactData.messages || [] : [];
+  const info = (contactData && !detailStale) ? contactData.info || {} : {};
   // Linha da conversa aberta: é ela que carrega `channel_provider`/`channel_name`
   // (só a query da LISTA traz o canal — o detalhe do contato não). O cabeçalho do
   // chat mostra o mesmo selo da sidebar a partir daqui, sem requisição nova.
@@ -323,6 +338,46 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     || (selectedChannelOpt && selectedChannelOpt.provider) || null;
   const headerChannelName = (selectedRow && selectedRow.channel_name)
     || (selectedChannelOpt && selectedChannelOpt.label) || null;
+
+  // plano 88 · F4 — A ABA CEDE: a conversa ABERTA que a aba de atribuição não consegue
+  // mostrar derruba a aba para "Todas". UMA regra, dois consumidores (o plano 89 · P1
+  // pedia justamente que não virassem duas mitigações parecidas em arquivos diferentes):
+  //   • a conversa que o operador acaba de INICIAR — ela nasce sem responsável (o único
+  //     carimbo automático é o `default_assignee_user_id` do INBOUND, por canal), então
+  //     em "Minhas" o chat abre mas a sidebar fica sem a linha: o servidor não a devolve
+  //     e o insert de WS é gateado de propósito (conversationRows.js `rowMatchesView`);
+  //   • o deep-link de uma conversa que é de outro atendente (o 89 fez o link SEMPRE
+  //     abrir; aqui a sidebar volta a mostrar o contexto dela).
+  // Trocar a aba não descarta nada do operador — ela é uma VIEW, e por isso já é
+  // excluída do spec de preset salvo (useConversationFilters.js "assignmentTab is
+  // intentionally excluded"). A decisão em si é pura e testada (hubDefaults.js).
+  //
+  // UMA decisão por thread aberta, tomada quando o detalhe ASSENTA (`_threadKey` já
+  // casa, sem carregamento em voo): reavaliar a cada mudança de `contactData` faria a
+  // aba ceder no instante em que o operador atribui a si mesmo uma conversa da fila
+  // "Não atribuídas" — isso é o fluxo normal daquela aba, não um contexto escondido.
+  const yieldDecidedRef = useRef(null);
+  useEffect(() => {
+    if (selectedKey == null) { yieldDecidedRef.current = null; return; }
+    if (yieldDecidedRef.current === selectedKey) return;
+    if (loadingDetail || detailStale) return;   // a evidência ainda não assentou
+    // Identidade em voo (`getMe()` é assíncrono): não CARIMBA a decisão, senão a
+    // primeira conversa aberta logo após o boot ficaria decidida com base em "não sei
+    // quem sou" e nunca seria reavaliada.
+    if (assignmentTab === 'mine' && currentUserId == null) return;
+    yieldDecidedRef.current = selectedKey;
+    const openRow = selectedConvId != null
+      ? contacts.find(c => c.conversation_id === selectedConvId)
+      : contacts.find(c => c.conversation_id == null && c.phone === selected);
+    if (shouldYieldAssignmentTab({
+      assignmentTab, currentUserId, hasOpenThread: true,
+      conversation: (contactData && contactData.conversation) || null,
+      row: openRow || null,
+    })) {
+      setAssignmentTab('all');
+    }
+  }, [selectedKey, loadingDetail, detailStale, contactData, contacts,
+      assignmentTab, currentUserId, selected, selectedConvId, setAssignmentTab]);
   const canReadContact = hasPermission(currentUser, 'contact.read');
 
   const autoReply = config ? config.auto_reply : false;
@@ -332,14 +387,22 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     }
   }, [onConfigSave]);
 
+  // A engrenagem do app vive na barra verde da sidebar (ao lado do botão de
+  // arquivar). Quando a sidebar não está na tela — recolhida pela divisória no
+  // desktop, ou substituída pelo chat no mobile — ela volta a ser o botão
+  // flutuante do canto superior direito, para o menu continuar acessível.
+  const sidebarVisible = isDesktop ? !sidebarHidden : !selectedKey;
+
   return html`
     <div class="flex flex-col lg:flex-row h-full">
+      ${renderGear && !sidebarVisible ? renderGear('floating') : null}
       <!-- Sidebar (largura arrastável no desktop; w-full no mobile) -->
       <div
-        class="shrink-0 border-r border-wa-border overflow-hidden ${isResizing ? '' : 'transition-all duration-300'} ${sidebarHidden ? 'lg:border-r-0' : ''} ${selected ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}"
+        class="shrink-0 border-r border-wa-border overflow-hidden ${isResizing ? '' : 'transition-all duration-300'} ${sidebarHidden ? 'lg:border-r-0' : ''} ${selectedKey ? 'hidden lg:flex lg:flex-col' : 'flex flex-col w-full'}"
         style=${isDesktop ? `width:${sidebarHidden ? 0 : sidebarWidth}px` : ''}
       >
         <${ContactList}
+          gearMenu=${renderGear ? renderGear('inline') : null}
           contacts=${displayedContacts}
           loading=${loading}
           loadingMore=${loadingMore}
@@ -420,9 +483,29 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
         <span class="text-wa-secondary text-[11px] pointer-events-none">${sidebarHidden ? '›' : '‹'}</span>
       </div>
       <!-- Chat panel -->
-      <div class="flex-1 min-w-0 min-h-0 ${!selected ? 'hidden lg:flex' : 'flex'} relative">
+      <!-- plano 89 F4 — a visibilidade segue a CHAVE da thread (conversa-primeiro), não o
+           telefone: um deep-link resolvido por id abre com o telefone nulo, e a condição
+           antiga escondia o chat (e o card de erro) abaixo do breakpoint lg. -->
+      <div class="flex-1 min-w-0 min-h-0 ${!selectedKey ? 'hidden lg:flex' : 'flex'} relative">
         <div class="w-full h-full flex flex-col">
-          ${loadingDetail
+          ${detailError && selectedKey
+            ? html`<div class="flex flex-col items-center justify-center gap-3 h-full bg-wa-panel px-6 text-center">
+                <div class="text-[15px] text-wa-text">Não foi possível abrir esta conversa</div>
+                <div class="text-[13px] text-wa-secondary max-w-md">${detailError}</div>
+                <div class="mt-1 flex items-center gap-2">
+                  <button
+                    class="px-4 py-2 rounded-lg bg-wa-teal text-white text-[13px] hover:opacity-90 transition-opacity"
+                    onClick=${retryDetail}
+                  >Tentar de novo</button>
+                  <!-- Saída no mobile: com a sidebar oculta (selectedKey setado), este card
+                       era um beco sem saída — o "voltar" do ContactDetail não renderiza aqui. -->
+                  <button
+                    class="lg:hidden px-4 py-2 rounded-lg border border-wa-border text-wa-text text-[13px] hover:bg-wa-hover transition-colors"
+                    onClick=${() => selectContact(null)}
+                  >Voltar</button>
+                </div>
+              </div>`
+          : (loadingDetail || detailStale)
             ? html`<div class="flex items-center justify-center h-full bg-wa-panel text-wa-secondary animate-pulse-slow text-[14px]">Carregando...</div>`
             : html`<${ContactDetail}
                 phone=${selected}
@@ -432,17 +515,17 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 messages=${messages}
                 setContactData=${setContactData}
                 info=${info}
-                contact=${contactData}
+                contact=${detailStale ? null : contactData}
                 channelProvider=${headerChannelProvider}
                 channelName=${headerChannelName}
                 showChannel=${showChannel}
                 onAvatarClick=${canReadContact ? () => selected && setOpenPanel('contact') : null}
                 onOpenConversationInfo=${() => selected && setOpenPanel('conversation')}
+                gearFloating=${!!renderGear && !sidebarVisible}
                 currentUser=${currentUser}
                 contactTyping=${selected && typingState[typingKey({ conversationId: selectedConvId, channelId: selectedChannelId, phone: selected })] || null}
                 aiResponding=${selected && !!aiRespondingState[typingKey({ channelId: selectedChannelId, phone: selected })]}
                 operatorTyping=${selected ? operatorTypingFor(operatorTypingState, { conversation_id: selectedConvId, channel_id: selectedChannelId, phone: selected }) : null}
-                globalTags=${globalTags}
                 groupParticipantsChanged=${groupParticipantsChanged}
                 scrollToMsg=${scrollToMsg}
                 onScrolledToMsg=${() => setScrollToMsg(null)}
@@ -450,6 +533,14 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
                 loadOlder=${loadOlder}
                 loadingOlder=${loadingOlder}
                 hasMore=${contactData && contactData.has_more}
+                loadNewer=${loadNewer}
+                loadingNewer=${loadingNewer}
+                hasMoreNewer=${!!(contactData && !detailStale && contactData.has_more_newer)}
+                jumping=${jumping}
+                onJumpToMessage=${jumpToMessage}
+                onJumpToDate=${jumpToDate}
+                onBackToBottom=${backToBottom}
+                newWhileAnchored=${(contactData && contactData._newWhileAnchored) || 0}
                 droppedFiles=${droppedFiles}
                 onDroppedFilesConsumed=${() => setDroppedFiles(null)}
               />`

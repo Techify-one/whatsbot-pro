@@ -203,6 +203,7 @@ def register_routes(app, deps):
                 # overrides. Empty string = plugin contributes no frontend extension.
                 "frontend_extends": loaded.manifest.frontend_extends,
                 "frontend_api_version": loaded.manifest.frontend_api_version,
+                "plugin_services_version": loaded.manifest.plugin_services_version,
             })
         return _ok({"plugins": out})
 

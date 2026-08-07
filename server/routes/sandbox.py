@@ -203,7 +203,8 @@ def register_routes(app, deps):
             await astamp_execution_channel(
                 contact, channel_repo.primary_channel_id() or "default",
                 channel_label="Sandbox")
-            contact.add_message("user", caption, media_type="image", media_path=rel_path)
+            contact.add_message("user", caption, media_type="image", media_path=rel_path,
+                                media_caption=caption or None)
             await _broadcast_user_message(phone, caption, media_type="image", media_path=rel_path)
 
             description = ""
@@ -330,7 +331,10 @@ def register_routes(app, deps):
             await astamp_execution_channel(
                 contact, channel_repo.primary_channel_id() or "default",
                 channel_label="Sandbox")
-            contact.add_message("user", content, media_type="document", media_path=rel_path)
+            # plano 87: o ``content`` do sandbox já embute "[Documento recebido: …]";
+            # a legenda crua vai na coluna própria (vazia = documento sem legenda).
+            contact.add_message("user", content, media_type="document", media_path=rel_path,
+                                media_caption=caption.strip() or None)
             await _broadcast_user_message(phone, content,
                                           media_type="document", media_path=rel_path)
 
@@ -396,7 +400,8 @@ def register_routes(app, deps):
             await astamp_execution_channel(
                 contact, channel_repo.primary_channel_id() or "default",
                 channel_label="Sandbox")
-            contact.add_message("user", caption, media_type="video", media_path=rel_path)
+            contact.add_message("user", caption, media_type="video", media_path=rel_path,
+                                media_caption=caption or None)
             await _broadcast_user_message(phone, caption, media_type="video", media_path=rel_path)
 
             replies = await _sandbox_reply(phone)

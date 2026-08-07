@@ -320,6 +320,7 @@ def register_routes(app, deps):
                     # card in the thread (plano 75 F6): it carries id,
                     # contact_id, conversation_id and content.
                     failed_row = None
+                    failed_row_existed = False
                     if status in ("delivered", "read") and mid:
                         updated = await asyncio.to_thread(
                             message_repo.update_status_by_msg_id, mid, status)
@@ -348,17 +349,28 @@ def register_routes(app, deps):
                         # the row already 'failed' → None → no duplicate side effect.
                         failed_row = await asyncio.to_thread(
                             message_repo.mark_failed_by_msg_id, mid)
+                        failed_row_existed = failed_row is not None
                         if failed_row is None:
                             # ``None`` funde dois casos bem diferentes (docstring
                             # do repo). ``exists_by_msg_id`` os separa:
-                            if await asyncio.to_thread(
-                                    message_repo.exists_by_msg_id, mid):
-                                # Dedup legítimo: a linha existe e já está
-                                # 'failed' (reentrega da Meta) ou 'read'.
-                                logger.info(
-                                    "[Webhook %s] status=failed sem transição para "
-                                    "msg_id=%s (já 'failed' ou já lida)",
-                                    ev.channel_id, mid)
+                            failed_row_existed = await asyncio.to_thread(
+                                message_repo.exists_by_msg_id, mid)
+                            if failed_row_existed:
+                                # Fecha a corrida entre o primeiro UPDATE e este
+                                # SELECT: o writer pode ter inserido a row como
+                                # ``sent`` nesse intervalo. Um SEGUNDO UPDATE
+                                # condicional ganha essa transição; se continuar
+                                # None, aí sim era ``failed``/``read`` antes deste
+                                # receipt e portanto uma reentrega legítima.
+                                failed_row = await asyncio.to_thread(
+                                    message_repo.mark_failed_by_msg_id, mid)
+                                if failed_row is None:
+                                    logger.info(
+                                        "[Webhook %s] status=failed sem transição "
+                                        "para msg_id=%s (já 'failed' ou já lida)",
+                                        ev.channel_id, mid)
+                                else:
+                                    await _apply_failure(ev, failed_row, errors)
                             else:
                                 # Não existe linha NENHUMA: ou a mensagem ainda
                                 # não foi persistida (corrida com o writer do
@@ -390,12 +402,16 @@ def register_routes(app, deps):
                         # a failure we cannot match to a stored message is still a
                         # failure worth surfacing, and automation must not depend
                         # on the row being persisted yet (plano 75 F5).
-                        # ``is_new`` keeps its exact meaning: "the transition
-                        # happened in THIS pass" — the dedup guard for the routine
-                        # webhook redelivery. A retry that later matches the row
-                        # does NOT emit a second ``message.failed`` (a subscriber
-                        # would count the same failure twice); it only paints the
-                        # bubble + writes the single error card. Same reason
+                        # ``is_new`` keeps its historical meaning: "the transition
+                        # happened in THIS pass". ``is_redelivery`` is the sharper
+                        # snapshot subscribers need: False also covers a first
+                        # failure that arrived before the writer persisted its row,
+                        # while True means a row ALREADY existed at receipt time.
+                        # Carry the decision in the payload because the bus is
+                        # fire-and-forget; re-querying inside a handler has a TOCTOU
+                        # race with that writer. A retry that later matches the row
+                        # does NOT emit a second ``message.failed``; it only paints
+                        # the bubble + writes the single error card. Same reason
                         # ``conversation_id`` stays ``None`` when there is no row:
                         # guessing "the contact's latest conversation" could
                         # attach the failure to the WRONG one — subscribers that
@@ -409,6 +425,8 @@ def register_routes(app, deps):
                             "error_details": err["details"],
                             "conversation_id": (failed_row or {}).get("conversation_id"),
                             "is_new": failed_row is not None,
+                            "is_redelivery": bool(
+                                failed_row is None and failed_row_existed),
                             "ts": ev.ts or time.time(), "raw": ev.raw})
                     handled += 1
                 elif kind == "edited":
@@ -571,16 +589,20 @@ def register_routes(app, deps):
                     wa_id = extras.get("wa_id")
                     body = extras.get("body", "")
                     card_text = ev.text or ev.display_text or body
-                    # Resolve the EXISTING conversation only — never create one (P2).
-                    # get_latest_for_contact returns the most recent thread regardless
-                    # of status, and we attach WITHOUT set_status, so a closed
-                    # conversation stays closed.
+                    # Resolve the EXISTING conversation in the event's exact inbox —
+                    # never create one (P2), and never leak a system card into a
+                    # different channel that happens to share the same contact. We
+                    # attach WITHOUT set_status, so a closed conversation stays closed.
                     existing = await asyncio.to_thread(
                         contact_repo.get_by_phone, ev.chat_id)
                     conv = None
                     if existing:
-                        conv = await asyncio.to_thread(
-                            conversation_repo.get_latest_for_contact, existing["id"])
+                        inbox = await asyncio.to_thread(
+                            inbox_repo.get_by_channel, ev.channel_id)
+                        if inbox:
+                            conv = await asyncio.to_thread(
+                                conversation_repo.get_latest_for_contact_inbox,
+                                existing["id"], inbox["id"])
                     conv_id = conv["id"] if conv else None
                     if conv and card_text:
                         saved = await asyncio.to_thread(
@@ -644,33 +666,79 @@ def register_routes(app, deps):
         if not isinstance(raw, dict):
             raw = {}
 
-        # Signature verification (plano 46 · 01-A, D3) — opt-in per PROVIDER, never
-        # by name: the base ``Channel`` hook returns True, so GOWA/Telegram/Cloud are
-        # byte-identical to before. Meta providers override it and validate
-        # ``X-Hub-Signature-256`` over the RAW body with the channel's app_secret.
-        # Runs BEFORE the plugin filter and the debug buffers, so a forged payload
-        # never reaches a plugin nor is recorded. Answers 200 anyway (Meta retries a
-        # 4xx forever) but ingests NOTHING. Called INLINE on purpose: the hook's
-        # contract is fast + I/O-free (an HMAC), and this is EVERY inbound's hot
-        # path — a thread hop per message would cost more than the check itself.
-        # Resolved against the URL's channel (the GOWA device re-routing below only
-        # matters for GOWA, which never verifies).
-        inst = registry.get(channel_id) if registry is not None else None
-        if inst is not None:
-            try:
-                signature_ok = inst.verify_inbound_signature(body_bytes, request.headers)
-            except Exception:
-                logger.warning("verify_inbound_signature falhou em %s/%s — payload "
-                               "descartado", provider, channel_id, exc_info=True)
-                signature_ok = False
-            if not signature_ok:
-                logger.warning("Webhook inbound %s/%s REJEITADO: assinatura inválida",
-                               provider, channel_id)
-                return _ok({"status": "bad_signature"})
+        # GOWA sends all devices to one callback URL, traditionally
+        # ``/gowa/default``. The URL row may already have been archived or purged
+        # while live per-device channels still use that callback, so resolve the
+        # actual channel from the signed-in device envelope BEFORE validating the
+        # URL identity. When resolution is impossible, keep the URL id and let the
+        # normal fail-closed checks below decide.
+        if provider == "gowa":
+            nested = raw.get("payload")
+            nested = nested if isinstance(nested, dict) else {}
+            sess = raw.get("session_id") or nested.get("session_id")
+            djid = raw.get("device_id") or nested.get("device_id")
+            resolved = await asyncio.to_thread(
+                channel_repo.get_gowa_channel_for_device, sess, djid)
+            if (resolved and resolved != channel_id
+                    and registry is not None and registry.get(resolved) is not None):
+                logger.info("[Webhook gowa] inbound routed by device to channel %r "
+                            "(url=%r, session_id=%r, device_id=%r)",
+                            resolved, channel_id, sess, djid)
+                channel_id = resolved
 
-        # Plugin filter: full webhook payload before any parse (plano 13 Fase 0 —
-        # same hook the legacy /api/webhook handler offers, now for every provider).
-        raw = await apply_filter("filter.webhook.payload", raw, {})
+        # Resolve the URL identity BEFORE any plugin observes the body. An unknown
+        # channel or a provider/channel mismatch is not an authenticated webhook
+        # context and must not be able to trigger plugin side effects (plano 84).
+        row = await asyncio.to_thread(channel_repo.get, channel_id)
+        if row is None:
+            logger.warning("Webhook inbound for unknown channel %s/%s", provider, channel_id)
+            return _ok({"status": "ignored", "reason": "unknown_channel"})
+        if (row.get("provider") or "") != provider:
+            logger.warning("Webhook inbound provider mismatch: rota=%s canal=%s provider=%s",
+                           provider, channel_id, row.get("provider"))
+            return _ok({"status": "ignored", "reason": "provider_mismatch"})
+
+        # Signature verification (plano 46 · 01-A, D3) — opt-in per PROVIDER,
+        # never by name. Runs BEFORE plugin filters and debug buffers. Besides the
+        # atomic accept/authenticated verdict distinguishes a real cryptographic
+        # verification from a provider's legacy fail-open path; filters that cause
+        # external side effects can require the former. The hook runs in a worker:
+        # providers may resolve a mutable secret through their registry/DB before
+        # doing the HMAC, and no synchronous credential lookup may block the loop.
+        inst = registry.get(channel_id) if registry is not None else None
+        if inst is None:
+            logger.warning("Webhook inbound for inactive channel %s/%s", provider, channel_id)
+            return _ok({"status": "ignored", "reason": "inactive_channel"})
+        try:
+            verdict_hook = getattr(inst, "verify_inbound_signature_result", None)
+            if callable(verdict_hook):
+                signature_ok, signature_authenticated = await asyncio.to_thread(
+                    verdict_hook, body_bytes, request.headers)
+            else:  # instância legada/duck type: pode aceitar, nunca prova HMAC
+                signature_ok = await asyncio.to_thread(
+                    inst.verify_inbound_signature, body_bytes, request.headers)
+                signature_authenticated = False
+            signature_ok = bool(signature_ok)
+            signature_authenticated = bool(
+                signature_ok and signature_authenticated)
+        except Exception:
+            logger.warning("veredito de assinatura falhou em %s/%s — payload "
+                           "descartado", provider, channel_id, exc_info=True)
+            signature_ok = False
+            signature_authenticated = False
+        if not signature_ok:
+            logger.warning("Webhook inbound %s/%s REJEITADO: assinatura inválida",
+                           provider, channel_id)
+            return _ok({"status": "bad_signature"})
+
+        # Plugin filter: full webhook payload after route resolution + provider
+        # verification. ``ctx.extras`` is the provenance contract: consumers may
+        # require both the exact channel/provider and a cryptographic signature.
+        raw = await apply_filter("filter.webhook.payload", raw, {
+            "provider": provider,
+            "channel_id": channel_id,
+            "signature_authenticated": signature_authenticated,
+        })
         if raw is None:
             return _ok({"status": "filtered_out"})
 
@@ -685,34 +753,7 @@ def register_routes(app, deps):
             except Exception:
                 pass
 
-        # GOWA delivers every device's inbound to the SAME webhook URL (launched as
-        # .../gowa/default), so the URL's channel_id can't tell which number received
-        # the message. Resolve the real channel from the GOWA v8 envelope (top-level
-        # ``device_id`` = receiving JID, ``session_id`` = registered device string) so
-        # a 2nd GOWA number lands in its own inbox/conversation and replies go out its
-        # own device. Best-effort: only override when it maps to a DIFFERENT live
-        # channel; otherwise keep the URL channel (legacy behaviour) — never worse.
-        if provider == "gowa":
-            sess = raw.get("session_id") or (raw.get("payload") or {}).get("session_id")
-            djid = raw.get("device_id") or (raw.get("payload") or {}).get("device_id")
-            resolved = await asyncio.to_thread(
-                channel_repo.get_gowa_channel_for_device, sess, djid)
-            if (resolved and resolved != channel_id
-                    and registry is not None and registry.get(resolved) is not None):
-                logger.info("[Webhook gowa] inbound routed by device to channel %r "
-                            "(url=%r, session_id=%r, device_id=%r)",
-                            resolved, channel_id, sess, djid)
-                channel_id = resolved
-
-        row = channel_repo.get(channel_id)
-        if row is None:
-            # Unknown channel: ack 200 (avoid retries) but record nothing useful.
-            logger.warning("Webhook inbound for unknown channel %s/%s", provider, channel_id)
-            return _ok({"status": "ignored", "reason": "unknown_channel"})
-
         events = []
-        # Re-resolve: the GOWA device re-routing above may have changed channel_id.
-        inst = registry.get(channel_id) if registry is not None else None
         if inst is not None and hasattr(inst, "parse_inbound"):
             try:
                 # parse_inbound may do blocking I/O (GOWA resolves group name /

@@ -334,8 +334,10 @@ export default function CustomAttributesManager({ initialEntity }) {
 
       <div class="flex items-center gap-6 border-b border-wa-border mb-4">
         ${SCOPE_TABS.map(([scope, title]) => html`
-          <button key=${scope}
-            class="relative pb-2 text-[14px] transition-colors ${tab === scope ? 'text-wa-teal font-medium' : 'text-wa-secondary hover:text-wa-text'}"
+          <!-- Plano 106 · F4 (B6): sub-aba é navegação → <a href>. onClick inalterado. -->
+          <a key=${scope}
+            href=${entityPath('custom-attributes', { sub: scope })}
+            class="relative pb-2 text-[14px] transition-colors no-underline ${tab === scope ? 'text-wa-teal font-medium' : 'text-wa-secondary hover:text-wa-text'}"
             onClick=${() => {
               setTab(scope); setEditing(null); setError('');
               const p = entityPath('custom-attributes', { sub: scope });
@@ -346,7 +348,7 @@ export default function CustomAttributesManager({ initialEntity }) {
             }}>
             ${title}
             ${tab === scope ? html`<span class="absolute left-0 right-0 -bottom-px h-0.5 bg-wa-teal rounded-full"></span>` : null}
-          </button>
+          </a>
         `)}
       </div>
 

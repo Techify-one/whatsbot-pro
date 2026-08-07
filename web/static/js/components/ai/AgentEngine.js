@@ -126,8 +126,11 @@ export default function AgentEngine({ initialEntity, currentUser }) {
 
       <div class="flex gap-1 border-b border-wa-border mb-4 overflow-x-auto">
         ${allowedTabs.map(t => html`
-          <button key=${t.id}
-            class="px-4 py-2 text-[14px] -mb-px border-b-2 transition-colors whitespace-nowrap ${tab === t.id
+          <!-- Plano 106 · F4 (B6): sub-aba é navegação → <a href> (Ctrl/⌘, clique do
+               meio e botão direito de graça). O onClick abaixo fica inalterado. -->
+          <a key=${t.id}
+            href=${entityPath('ai', { sub: t.id })}
+            class="px-4 py-2 text-[14px] -mb-px border-b-2 transition-colors whitespace-nowrap no-underline ${tab === t.id
               ? 'border-wa-teal text-wa-teal font-medium'
               : 'border-transparent text-wa-secondary hover:text-wa-text'}"
             onClick=${() => {
@@ -139,7 +142,7 @@ export default function AgentEngine({ initialEntity, currentUser }) {
                 history.pushState(null, '', p);
                 window.dispatchEvent(new PopStateEvent('popstate'));
               }
-            }}>${t.label}</button>
+            }}>${t.label}</a>
         `)}
       </div>
 

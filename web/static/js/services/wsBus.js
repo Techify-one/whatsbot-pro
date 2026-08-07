@@ -3,7 +3,7 @@
 // Singleton WebSocket bus (Plano 23 · D4) — ONE shared connection for every
 // consumer, replacing the N independent sockets that `createWebSocket` opened
 // (one per `useWebSocket` mount: app.js, ContactList's useConversationWsEvents,
-// ConversationHeaderActions, Attendances, + plugins via plugins/api.js).
+// ConversationHeaderActions, + plugins via plugins/api.js).
 //
 // WHY: opening a socket per component multiplied the server's connection count
 // (and reconnect storms on a flaky link) while every socket received the SAME

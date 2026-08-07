@@ -13,7 +13,7 @@ import {
   isVisibleInSidebar, sortContactsBy, sortContacts, splitSort, combineSort,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
   convRowToSidebarRow, upsertConversationRow, distinctChannelCount,
-  rowMatchesView, specNeedsServer,
+  rowMatchesView, specNeedsServer, aiEffectivelyOn,
 } from './conversationRows.js';
 
 // ── buildRows ──────────────────────────────────────────────────────
@@ -754,4 +754,58 @@ test('specNeedsServer: spec nulo/indefinido/vazio → false (defensivo)', () => 
   assert.equal(specNeedsServer(null), false);
   assert.equal(specNeedsServer(undefined), false);
   assert.equal(specNeedsServer({}), false);
+});
+
+// ── aiEffectivelyOn (plano 96 · D4/I10) ────────────────────────────
+//
+// Espelho do gate do servidor. A matriz cobre os 6 estados que o selo podia
+// exibir errado: o bug era 14 conversas com dono humano + ai_active=1 marcadas
+// como "IA" verde estando mudas de fato.
+
+test('aiEffectivelyOn: conversa saudável (IA on, sem dono) → true', () => {
+  assert.equal(aiEffectivelyOn({ conv_ai_active: 1, assignee_user_id: null }), true);
+});
+
+test('aiEffectivelyOn: ai_active 0/false → false', () => {
+  assert.equal(aiEffectivelyOn({ conv_ai_active: 0 }), false);
+  assert.equal(aiEffectivelyOn({ conv_ai_active: false }), false);
+});
+
+test('aiEffectivelyOn: dono humano cala mesmo com ai_active=1 (o bug do selo)', () => {
+  assert.equal(aiEffectivelyOn({ conv_ai_active: 1, assignee_user_id: 7 }), false);
+});
+
+test('aiEffectivelyOn: D2 — agente vinculado NÃO devolve o verde ao dono humano', () => {
+  assert.equal(
+    aiEffectivelyOn({ conv_ai_active: 1, assignee_user_id: 7, active_agent_key: 'roteador' }),
+    false);
+});
+
+test('aiEffectivelyOn: agente vinculado sem dono humano → true (D5)', () => {
+  assert.equal(
+    aiEffectivelyOn({ conv_ai_active: 1, assignee_user_id: null, active_agent_key: 'roteador' }),
+    true);
+});
+
+test('aiEffectivelyOn: interruptor global desligado → false, seja qual for a linha', () => {
+  assert.equal(aiEffectivelyOn({ conv_ai_active: 1 }, { autoReply: false }), false);
+  assert.equal(aiEffectivelyOn({ conv_ai_active: 1, assignee_user_id: 7 }, { autoReply: false }), false);
+});
+
+test('aiEffectivelyOn: linha sem os campos (sandbox/payload antigo) → true, fail-open', () => {
+  assert.equal(aiEffectivelyOn({}), true);
+  assert.equal(aiEffectivelyOn(null), true);
+  assert.equal(aiEffectivelyOn(undefined), true);
+});
+
+test('filtro ai: usa o MESMO veredito do selo (P4) — dono humano cai em "off"', () => {
+  const row = { conv_ai_active: 1, assignee_user_id: 7 };
+  assert.equal(clauseMatches(row, { dim: 'ai', op: 'eq', value: 'off' }), true);
+  assert.equal(clauseMatches(row, { dim: 'ai', op: 'eq', value: 'on' }), false);
+});
+
+test('filtro ai: conversa sem dono continua em "on"', () => {
+  const row = { conv_ai_active: 1, assignee_user_id: null };
+  assert.equal(clauseMatches(row, { dim: 'ai', op: 'eq', value: 'on' }), true);
+  assert.equal(clauseMatches(row, { dim: 'ai', op: 'ne', value: 'on' }), false);
 });

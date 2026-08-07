@@ -217,6 +217,22 @@ html.dark .wa-chat-pattern {
   animation: wa-msg-flash 3s ease-out;
 }
 
+/* Termo buscado destacado DENTRO da bolha (plano 99 F2·4).
+   O `<mark>` do navegador vem com amarelo puro + preto fixos, ilegíveis sobre a
+   bolha verde do tema escuro — daí a cor própria. Âmbar translúcido funciona
+   sobre as três superfícies em que a bolha pode estar (entrada, saída e nota
+   privada) nos DOIS temas, e a cor do texto é herdada da bolha em vez de
+   fixada, então o contraste do tema continua valendo. */
+mark.wa-search-hit {
+  background-color: rgba(245, 158, 11, 0.42);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+html.dark mark.wa-search-hit {
+  background-color: rgba(251, 191, 36, 0.38);
+}
+
 /* ── Dark-mode fallback for raw Tailwind color utilities ──────────────────
    Core components use the themed wa-* palette, but plugin screens — including
    ones we don't control and ones added in the future — may use raw utilities
@@ -497,3 +513,30 @@ html.dark .wa-field:focus { box-shadow: inset 0 0 0 1px rgb(var(--wa-teal)); }
    Toast UI's height:100% resolves against a real height. */
 .wa-md-editor.wa-md-editor-nested,
 .wa-md-editor.wa-md-editor-nested .toastui-editor-defaultUI { height: 100%; }
+
+/* Itens que os plugins injetam no menu (⋮) da conversa — slot
+   `conversation.header.actions`, ver components/contacts/ConversationMenu.js.
+   O botão do plugin foi desenhado para a BARRA do cabeçalho (compacto, rótulo
+   escondido no mobile); dentro do menu ele tem de ocupar a linha inteira. É
+   estilizado de fora porque o markup pertence ao plugin — o core não edita
+   plugin, e o menu tem de funcionar com plugin que já está instalado.
+   O seletor é qualificado por elemento (`div.wa-conv-menu-item`) de propósito:
+   `.wa-conv-menu-item > *` empataria em especificidade com as utilitárias do
+   plugin (`.text-wa-secondary`, `.text-[12px]`) e o Tailwind — injetado em runtime,
+   depois desta folha — ganharia no desempate por ordem. */
+div.wa-conv-menu-item > * {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 16px;
+  border-radius: 0;
+  text-align: left;
+  font-size: 14px;
+  color: rgb(var(--wa-text));
+}
+div.wa-conv-menu-item > *:hover { background-color: rgb(var(--wa-hover)); }
+div.wa-conv-menu-item span { font-size: 14px; }
+/* O rótulo do plugin costuma vir `hidden sm:inline` (espaço curto na barra); na
+   linha do menu sobra espaço, e só o ícone seria indecifrável. */
+div.wa-conv-menu-item .hidden { display: inline; }

@@ -8,7 +8,9 @@ import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { listChannelAssignableUsers } from '../../services/api.js';
-import { aiDefaultsFrom, buildCreatePayload, initialConfigValues } from './constants.js';
+import {
+  aiDefaultsFrom, buildCreatePayload, initialConfigValues, validateCredentials,
+} from './constants.js';
 import { ConfigFields, CredentialFields, FormComponentLoader } from './DescriptorFields.js';
 import { AiSettingsFields } from './AiSettingsFields.js';
 import { AgentPicker } from './AgentPicker.js';
@@ -75,7 +77,12 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
   const requiredKeys = ((descriptor && descriptor.credential_fields) || [])
     .filter((f) => f.required).map((f) => f.key);
   const credsOk = requiredKeys.every((k) => (credValues[k] || '').toString().trim());
-  const canSave = !busy && !!descriptor && displayName.trim() && credsOk;
+  // Formato das credenciais preenchidas, dirigido pelo descriptor (plano 104 F3):
+  // um valor autopreenchido pelo navegador (senha do painel no "Proxy de saída")
+  // não chega a ser salvo. O servidor revalida — isto aqui é só o aviso na hora.
+  const credErrors = validateCredentials(descriptor, credValues);
+  const canSave = !busy && !!descriptor && displayName.trim() && credsOk
+    && !Object.keys(credErrors).length;
 
   function submit() {
     if (!canSave) return;
@@ -114,7 +121,7 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
           <${ConfigFields} fields=${descriptor.config_fields} values=${configValues}
             onChange=${setConfig} editMode=${false} busy=${busy} />
           <${CredentialFields} fields=${descriptor.credential_fields} values=${credValues}
-            onChange=${setCred} editMode=${false} busy=${busy} />
+            onChange=${setCred} editMode=${false} busy=${busy} errors=${credErrors} />
           ${descriptor.form_component ? html`
             <${FormComponentLoader} path=${descriptor.form_component}
               descriptor=${descriptor} mode="create"

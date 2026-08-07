@@ -1,0 +1,10 @@
+id: fake_provider
+name: Fake Provider Fixture
+version: 1.0.0
+whatsbot_api_version: ">=1.0,<2.0"
+description: Synthetic channel provider used by core integration tests.
+entry:
+  channels: channels
+permissions:
+  - channel.provider
+dependencies: []

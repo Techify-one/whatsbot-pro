@@ -69,6 +69,7 @@ const CLOUD = {
   provider: 'whatsapp_cloud', label: 'WhatsApp Cloud', color: 'blue',
   credential_fields: [
     { key: 'access_token', label: 'Access Token', type: 'secret', required: true },
+    { key: 'app_secret', label: 'App Secret (Meta)', type: 'secret', required: true },
     { key: 'phone_number_id', label: 'Phone Number ID', type: 'text', required: true },
     { key: 'waba_id', label: 'WABA ID', type: 'text', required: false },
     { key: 'verify_token', label: 'Verify Token', type: 'token_suggest', required: true },
@@ -128,10 +129,16 @@ test('aiDefaultsFrom: inherits provided global values', () => {
 
 // ── missingCredsFor ─────────────────────────────────────────────────────────
 test('missingCredsFor: reports required creds not present on the channel', () => {
+  // Operational health intentionally excludes app_secret: legacy Cloud rows
+  // remain connected/fail-open while the create descriptor requires migration.
   const req = { whatsapp_cloud: ['access_token', 'phone_number_id', 'verify_token'] };
   const ch = { provider: 'whatsapp_cloud', credentials: { access_token: 'x' } };
   assert.deepEqual(missingCredsFor(ch, req), ['phone_number_id', 'verify_token']);
-  const full = { provider: 'whatsapp_cloud', credentials: { access_token: 'a', phone_number_id: 'b', verify_token: 'c' } };
+  const legacy = { provider: 'whatsapp_cloud', credentials: {
+    access_token: 'a', phone_number_id: 'b', verify_token: 'c' } };
+  assert.deepEqual(missingCredsFor(legacy, req), []);
+  const full = { provider: 'whatsapp_cloud', credentials: {
+    access_token: 'a', app_secret: 's', phone_number_id: 'b', verify_token: 'c' } };
   assert.deepEqual(missingCredsFor(full, req), []);
   assert.deepEqual(missingCredsFor({ provider: 'gowa', credentials: {} }, req), []);
 });
@@ -207,9 +214,11 @@ test('buildCreatePayload: whatsapp_cloud includes only the non-empty creds', () 
   const p = buildCreatePayload({
     provider: 'whatsapp_cloud', displayName: 'Cloud', ai: { ...aiBase }, descriptor: CLOUD,
     configValues: {},
-    credValues: { access_token: 'tok', phone_number_id: '', waba_id: 'W1', verify_token: ' v ' },
+    credValues: { access_token: 'tok', app_secret: 'sec', phone_number_id: '',
+      waba_id: 'W1', verify_token: ' v ' },
   });
-  assert.deepEqual(p.credentials, { access_token: 'tok', waba_id: 'W1', verify_token: 'v' });
+  assert.deepEqual(p.credentials, {
+    access_token: 'tok', app_secret: 'sec', waba_id: 'W1', verify_token: 'v' });
   assert.equal(p.config.ai.ai_sequential_enabled, false);
 });
 
@@ -240,7 +249,8 @@ test('buildEditPayload: whatsapp_cloud sends only non-blank, non-masked creds ("
   const p = buildEditPayload({
     displayName: 'C', ai: { ...aiBase }, descriptor: CLOUD, channelConfig: {},
     configValues: {},
-    credValues: { access_token: '••••abcd', phone_number_id: 'PNID', waba_id: '', verify_token: '' },
+    credValues: { access_token: '••••abcd', app_secret: '••••wxyz',
+      phone_number_id: 'PNID', waba_id: '', verify_token: '' },
   });
   assert.deepEqual(p.credentials, { phone_number_id: 'PNID' });  // masked + blank skipped
 });
@@ -248,7 +258,8 @@ test('buildEditPayload: whatsapp_cloud sends only non-blank, non-masked creds ("
 test('buildEditPayload: all-blank/masked creds omit credentials', () => {
   const p = buildEditPayload({
     displayName: 'C', ai: { ...aiBase }, descriptor: CLOUD, channelConfig: {},
-    configValues: {}, credValues: { access_token: '••••abcd', phone_number_id: '', verify_token: '' },
+    configValues: {}, credValues: { access_token: '••••abcd', app_secret: '••••wxyz',
+      phone_number_id: '', verify_token: '' },
   });
   assert.equal(p.credentials, undefined);
 });

@@ -17,6 +17,9 @@ import { Slot } from '../../plugins/Slot.js';
 // lugar da última mensagem enquanto houver texto não enviado naquela conversa.
 import { getDraft } from '../../services/drafts.js';
 import { useDrafts } from '../../hooks/useDrafts.js';
+// Selo IA/IA OFF: o veredito EFETIVO (gate do servidor espelhado), não a coluna crua.
+import { aiEffectivelyOn } from '../../services/conversationRows.js';
+import { shouldOpenInNewTab } from '../../services/spaLink.js';
 
 const html = htm.bind(h);
 
@@ -210,7 +213,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
-  loadMore = null, loadingMore = false, hasMore = false }) {
+  loadMore = null, loadingMore = false, hasMore = false, gearMenu = null }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   // Rascunhos (services/drafts.js): re-renderiza quando o compositor — ou outra
   // aba do navegador — mexe no mapa, e resolve o texto de cada linha aqui. A
@@ -517,7 +520,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
       ` : html`
       <!-- Green header bar -->
       <div class="h-[59px] flex items-center justify-between px-4 ${headerBg} shrink-0 transition-colors">
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-1">
           <button
             onClick=${onToggleArchived}
             class="w-[40px] h-[40px] rounded-full flex items-center justify-center hover:bg-white/10 transition-colors ${showArchived ? 'bg-white/15' : ''}"
@@ -525,6 +528,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           >
             <span class="text-white"><${ArchiveIcon} /></span>
           </button>
+          <!-- Engrenagem (menu do app) à DIREITA do botão de arquivar. Vem pronta
+               do App shell (prop gearMenu) — a sidebar só a posiciona. -->
+          ${gearMenu}
         </div>
         <div class="flex items-center gap-2">
           ${wsConnected === false ? html`
@@ -640,7 +646,26 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
             : contacts.map(c => html`
                 <div
                   key=${rowKeyFor(c)}
-                  onClick=${() => selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id)}
+                  onClick=${(e) => {
+                    // Plano 106 · F5 (C1): a linha não pode virar <a> (é zona de drop
+                    // de arquivo, tem menu de contexto próprio e modo seleção). Nova
+                    // guia só quando há atendimento — linha sem conversa não tem URL —
+                    // e NUNCA em modo seleção, onde o clique alterna a seleção em massa.
+                    if (!selectionMode && c.conversation_id != null && shouldOpenInNewTab(e)) {
+                      window.open(`/conversations/${c.conversation_id}`, '_blank', 'noopener');
+                      return;
+                    }
+                    return selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id);
+                  }}
+                  onAuxClick=${(e) => {
+                    if (selectionMode || c.conversation_id == null || !shouldOpenInNewTab(e)) return;
+                    e.preventDefault();
+                    window.open(`/conversations/${c.conversation_id}`, '_blank', 'noopener');
+                  }}
+                  onMouseDown=${(e) => {
+                    // mata o auto-scroll do Chrome só onde o clique do meio faz algo
+                    if (e.button === 1 && !selectionMode && c.conversation_id != null) e.preventDefault();
+                  }}
                   onDragEnter=${dropEnabled ? (e) => { if (dragHasFiles(e)) { e.preventDefault(); setDragOverKey(rowKeyFor(c)); } } : null}
                   onDragOver=${dropEnabled ? (e) => {
                     if (!dragHasFiles(e)) return;
@@ -708,8 +733,11 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                           // sem este guard cairia no ramo verde, porque `conv_ai_active` vem
                           // NULL do banco e `_shape_contact_row` defaulta para true.
                           ? null
-                          : (!autoReply || c.conv_ai_active === 0 || c.conv_ai_active === false)
-                            ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle" title=${!autoReply ? 'IA desligada pelo interruptor global' : null}>IA OFF</span>`
+                          // plano 96 D4: o selo passou a espelhar o GATE (inclui "tem dono
+                          // humano"), não só `conv_ai_active` — 14 conversas apareciam verdes
+                          // estando mudas. Dois estados só (P3: nada de "IA pausada").
+                          : !aiEffectivelyOn(c, { autoReply })
+                            ? html`<span class="ml-[6px] text-[10px] font-semibold text-red-400 bg-red-500/15 rounded px-[5px] py-[1px] align-middle" title=${!autoReply ? 'IA desligada pelo interruptor global' : (c.assignee_user_id != null ? 'A conversa está com um atendente' : null)}>IA OFF</span>`
                             : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }
                       </span>

@@ -35,9 +35,12 @@
  */
 export const SYSTEM_CARD_VARIANTS = {
   // Operator private note — purple accent (kept; theme-specific intent color).
+  // `style` existe para o chip minimizado (nota LONGA — ver `isCollapsibleCard`)
+  // sair idêntico ao card expandido; o card expandido continua com o hex inline.
   private_note: {
     label: 'Mensagem privada', icon: 'lock', layout: 'inline',
     uppercaseLabel: true, showTime: true, useWaClasses: false,
+    style: 'background:#3b266b; color:#ede9fe; border:1px solid #7c3aed;',
   },
   // Private audio/image transcription — muted purple (kept).
   // Collapsible (plano 63): diagnostic noise, minimized to a 1-line chip by default.
@@ -97,6 +100,32 @@ export function isSystemCardRole(role) {
 export function isCollapsibleRole(role) {
   const v = SYSTEM_CARD_VARIANTS[role];
   return !!(v && v.collapsible);
+}
+
+/**
+ * A partir de quantos caracteres uma nota privada vira um card recolhível.
+ * Nota curta (o caso do operador escrevendo um lembrete) não ganha seta nenhuma.
+ */
+export const LONG_NOTE_CHARS = 180;
+
+/**
+ * Se ESTE card pode recolher — role + tamanho do conteúdo.
+ *
+ * Superconjunto de `isCollapsibleRole`: `transcription`/`tool_call` recolhem
+ * sempre (ruído diagnóstico), e `private_note` recolhe **só quando é longa**
+ * (> `LONG_NOTE_CHARS`). Nota longa costuma ser escrita por automação — um plugin
+ * de follow-up, por exemplo, registra numa nota a instrução INTEIRA mandada à IA
+ * — e ocupava a tela inteira; nota curta de humano continua exatamente como
+ * antes (D1).
+ *
+ * @param {string} role
+ * @param {string|null|undefined} content
+ * @returns {boolean}
+ */
+export function isCollapsibleCard(role, content) {
+  if (isCollapsibleRole(role)) return true;
+  if (role !== 'private_note') return false;
+  return String(content == null ? '' : content).trim().length > LONG_NOTE_CHARS;
 }
 
 /**
@@ -175,21 +204,88 @@ export function senderColor(isUser, isOperator) {
   return isUser ? '#1f7aec' : (isOperator ? '#b45309' : 'rgb(var(--wa-ai-label))');
 }
 
+// plano 87 — prefixos que o backend antepõe ao `content` de uma mídia quando a
+// IA transcreve/descreve/extrai (server/transcription.py `_MEDIA_PREFIX`). O
+// texto que vem DEPOIS deles pertence à IA, não ao cliente, e nunca pode ser
+// desenhado como se fosse a legenda. Só é consultado no caminho LEGADO (linha
+// anterior à coluna `media_caption`) — mensagem nova já traz a legenda pronta.
+const AI_CONTENT_PREFIXES = [
+  '[Descrição da imagem]',
+  '[Transcrição do áudio]',
+  '[Conteúdo do documento]',
+];
+
+// Placeholders que o backend grava quando a mídia não tem legenda nenhuma. Não
+// são texto do cliente — o balão já desenha a própria mídia.
+const MEDIA_PLACEHOLDERS = new Set([
+  '[Imagem enviada pelo contato]', '[Áudio recebido]', '[Áudio]', '[Vídeo]',
+]);
+
+/**
+ * A legenda que o CLIENTE escreveu junto da mídia — ou string vazia.
+ *
+ * Fonte única do "o que o humano digitou" para qualquer superfície que desenhe
+ * uma mensagem de mídia (balão, preview da sidebar, citação). Precedência:
+ *
+ * 1. `media_caption` (plano 87) — verbatim, gravado no INSERT. Caminho normal.
+ * 2. Linha LEGADA (sem a coluna): cai no `content` com dois cortes, ambos
+ *    ancorados em MARCADOR EXATO — nunca em posição:
+ *    - o bloco da IA vem ANTES (imagem/áudio): o content inteiro começa com o
+ *      prefixo ⇒ devolve vazio. Não se tenta fatiar por `\n` para resgatar a
+ *      legenda do fim: a descrição é markdown MULTILINHA, então o corte
+ *      acertaria por acidente e, ao errar, exporia texto da IA como se fosse do
+ *      cliente. Quem resolve esse legado é o backfill (Fase D), com gabarito.
+ *    - o bloco da IA vem DEPOIS (documento): corta em `\n<prefixo>`, que é
+ *      inequívoco — tudo antes é do cliente (podendo ser multilinha), tudo
+ *      depois é da IA.
+ *    Placeholders de mídia sem legenda também viram vazio.
+ *
+ * @param {{media_caption?:string|null, content?:string|null}} message
+ * @param {string} [displayContent] - content já tratado pelo chamador (ex.: com
+ *   o prefixo de remetente de grupo removido). Default: `message.content`.
+ * @returns {string}
+ */
+export function mediaCaptionOf(message, displayContent) {
+  if (!message) return '';
+  const own = message.media_caption;
+  if (typeof own === 'string' && own.trim()) return own;
+  let body = (displayContent !== undefined && displayContent !== null)
+    ? displayContent
+    : (message.content || '');
+  if (typeof body !== 'string' || !body) return '';
+  if (AI_CONTENT_PREFIXES.some((p) => body.startsWith(p))) return '';
+  for (const p of AI_CONTENT_PREFIXES) {
+    const at = body.indexOf('\n' + p);
+    if (at !== -1) body = body.slice(0, at);
+  }
+  body = body.trim();
+  if (!body || MEDIA_PLACEHOLDERS.has(body)) return '';
+  return body;
+}
+
 /**
  * The short text shown for a quoted message inside a reply, per media type.
  * Falls back to the message's own caption/content when present.
  *
- * @param {{media_type?:string, content?:string|null}} qmsg
+ * plano 87: a legenda vem de `mediaCaptionOf`, então o snippet de uma imagem
+ * transcrita mostra o que o cliente escreveu (ou o rótulo), nunca a descrição
+ * gerada pela IA — que antes vazava aqui via `content` cru.
+ *
+ * @param {{media_type?:string, content?:string|null, media_caption?:string|null}} qmsg
  * @param {string} text - already-stripped text (group prefix removed).
  * @returns {string}
  */
 export function quotedMediaText(qmsg, text) {
   const mt = qmsg && qmsg.media_type;
-  if (mt === 'image') return text || '📷 Foto';
+  if (mt === 'image') return mediaCaptionOf(qmsg, text) || '📷 Foto';
   if (mt === 'audio') return '🎤 Áudio';
-  if (mt === 'video') return text || '🎬 Vídeo';
+  if (mt === 'video') return mediaCaptionOf(qmsg, text) || '🎬 Vídeo';
   if (mt === 'sticker') return '🪧 Figurinha';
-  if (mt === 'document') return '📄 Documento';
+  // Documento sempre foi o rótulo fixo; a legenda só entra quando ela EXISTE de
+  // fato (coluna do plano 87). Não cair no `content` legado aqui de propósito:
+  // no GOWA ele é o rótulo composto "[Documento recebido: x.pdf]\n<legenda>",
+  // que ficaria pior que "📄 Documento".
+  if (mt === 'document') return (qmsg.media_caption || '').trim() || '📄 Documento';
   if (mt === 'location' || mt === 'live_location') return '📍 Localização';
   return text;
 }

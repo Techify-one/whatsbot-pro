@@ -27,6 +27,8 @@ import { samePhone } from '../../../utils/phone.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow, rowMatchesView, specNeedsServer } from '../../../services/conversationRows.js';
 import { typingKey } from '../ContactList.js';
+import { threadKeyOf } from './useConversationSelection.js';
+import { countNewWhileAnchored } from '../../../services/threadData.js';
 import { useWebSocket } from '../../../hooks/useWebSocket.js';
 
 // Papéis painel-only (cards que nunca vão ao WhatsApp — ver CLAUDE.md). Só
@@ -53,6 +55,9 @@ export function useConversationWsEvents(opts) {
     setContactData, setSelected, setSelectedConvId,
     selectedRef, selectedConvIdRef, selectedChannelIdRef,
     pendingWsMessages, isOpenRow, selected, contactData,
+    // Ref síncrona do selection-hook: também fica true enquanto o PRIMEIRO GET
+    // ancorado ainda está em voo (antes de contactData.has_more_newer existir).
+    anchoredWindowRef,
     // actions
     setGlobalTags,
     // container-shared ref (page visibility gates read + unread bumps)
@@ -110,22 +115,28 @@ export function useConversationWsEvents(opts) {
   // onWsConnect (heartbeat do wsBus detecta half-open).
   const openThreadMsgIdsRef = useRef(new Set());
   const openThreadResyncTimer = useRef(null);
+  const fallbackAnchoredRef = useRef(false);
+  fallbackAnchoredRef.current = !!(contactData && contactData.has_more_newer);
+  const openThreadAnchoredRef = anchoredWindowRef || fallbackAnchoredRef;
+  const anchoredEventKeysRef = useRef(new Set());
   useEffect(() => {
     const s = new Set();
     for (const m of (contactData && contactData.messages) || []) {
       if (m && m.msg_id) s.add(m.msg_id);
     }
     openThreadMsgIdsRef.current = s;
+    if (!openThreadAnchoredRef.current) anchoredEventKeysRef.current.clear();
   }, [contactData]);
 
   // Re-check DEBOUNCED: só recarrega se, após a folga, a thread aberta AINDA não tem
   // `lastMsgId` — o `new_message` autoritativo (plano 57 F1) normalmente chega ~ms
   // depois do upsert e o anexa, tornando isto um no-op. Evita um refetch por mensagem.
   const scheduleOpenThreadResync = useCallback((convId, lastMsgId) => {
-    if (!lastMsgId) return;
+    if (!lastMsgId || openThreadAnchoredRef.current) return;
     if (openThreadResyncTimer.current) clearTimeout(openThreadResyncTimer.current);
     openThreadResyncTimer.current = setTimeout(() => {
       if (selectedConvIdRef.current === convId
+          && !openThreadAnchoredRef.current
           && !openThreadMsgIdsRef.current.has(lastMsgId)
           && reloadOpenThreadRef.current) {
         reloadOpenThreadRef.current();
@@ -145,7 +156,9 @@ export function useConversationWsEvents(opts) {
   const onWsConnect = useCallback(() => {
     if (!wsConnectedOnceRef.current) { wsConnectedOnceRef.current = true; return; }
     scheduleListRefetch();
-    if (reloadOpenThreadRef.current) reloadOpenThreadRef.current();
+    if (!openThreadAnchoredRef.current && reloadOpenThreadRef.current) {
+      reloadOpenThreadRef.current();
+    }
   }, [scheduleListRefetch]);
 
   // Track page visibility — mark selected contact as read when tab becomes visible
@@ -153,7 +166,7 @@ export function useConversationWsEvents(opts) {
     const handler = () => {
       const visible = !document.hidden;
       pageVisibleRef.current = visible;
-      if (visible && selectedRef.current) {
+      if (visible && selectedRef.current && !openThreadAnchoredRef.current) {
         markAsRead(selectedRef.current);
         setContacts(prev => prev.map(c =>
           isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false } : c
@@ -237,7 +250,7 @@ export function useConversationWsEvents(opts) {
       // "1" em vez da contagem real. Em vez disso, agenda UM markAsRead (debounce) que
       // só dispara se eu ainda estiver na conversa — mantém a contagem correta para
       // conversas não abertas e zera a aberta sem corromper nada.
-      if (pageVisibleRef.current && isOpenRow(row)
+      if (pageVisibleRef.current && !openThreadAnchoredRef.current && isOpenRow(row)
           && ((row.unread_count || 0) > 0 || (row.unread_ai_count || 0) > 0)) {
         row.unread_count = 0;
         row.unread_ai_count = 0;
@@ -248,6 +261,7 @@ export function useConversationWsEvents(opts) {
           openReadSyncTimer.current = setTimeout(() => {
             // Só sincroniza se AINDA estou vendo esta mesma conversa e a aba visível.
             if (pageVisibleRef.current
+                && !openThreadAnchoredRef.current
                 && (selectedConvIdRef.current === _convId
                     || (_convId == null && selectedRef.current === _phone))) {
               markAsRead(_phone);
@@ -260,6 +274,7 @@ export function useConversationWsEvents(opts) {
       // t=0↔save), agenda o reload de fundo com re-check.
       if (row.conversation_id != null
           && selectedConvIdRef.current === row.conversation_id
+          && !openThreadAnchoredRef.current
           && row.last_message_msg_id
           && !openThreadMsgIdsRef.current.has(row.last_message_msg_id)) {
         scheduleOpenThreadResync(row.conversation_id, row.last_message_msg_id);
@@ -275,7 +290,8 @@ export function useConversationWsEvents(opts) {
       const targets = (data && data.mentioned_user_ids) || [];
       if (uid == null || !targets.includes(uid)) return;
       const convId = data.conversation_id;
-      if (convId != null && selectedConvIdRef.current === convId) return;  // já estou nela
+      if (convId != null && selectedConvIdRef.current === convId
+          && !openThreadAnchoredRef.current) return;  // já estou nela, na ponta recente
       setContacts(prev => prev.map(c =>
         c.conversation_id === convId ? { ...c, has_user_mention: true } : c));
       // plano 72 F7 — INSERT-GATE das Menções. Na aba Menções (serverMode) a lista vem
@@ -739,8 +755,15 @@ export function useConversationWsEvents(opts) {
     }
 
     if (belongsToOpen) {
+      const anchoredEventKey = message._id != null ? `db:${message._id}`
+        : (message.msg_id ? `msg:${message.msg_id}` : null);
       setContactData(prev => {
-        if (!prev) {
+        // plano 85 A4 — `prev` que ainda carrega o carimbo de OUTRA thread é a conversa
+        // anterior esperando ser substituída pela carga em voo: anexar a mensagem ali a
+        // perderia (o loader troca o objeto inteiro) além de sujar a thread errada. Trata
+        // igual a "detalhe ainda carregando" e vai para o buffer, que o loader drena.
+        const openKey = threadKeyOf(selectedRef.current, selectedConvIdRef.current);
+        if (!prev || (prev._threadKey && prev._threadKey !== openKey)) {
           // Detail still loading — buffer under the SAME key the loader will drain
           // (plano 57). Deep-link `/conversations/:id` (row not in the sidebar) has
           // `selected==null`, so the loader reads `conv:<id>` while this used to write
@@ -751,7 +774,21 @@ export function useConversationWsEvents(opts) {
           if (optimisticDupIndex(message, buf) === -1) {
             pendingWsMessages.current[bufKey] = [...buf, message];
           }
+          if (openThreadAnchoredRef.current && anchoredEventKey) {
+            anchoredEventKeysRef.current.add(anchoredEventKey);
+          }
           return prev;
+        }
+        // A intenção ancorada liga ANTES do GET terminar. Mesmo que `prev` ainda
+        // seja a página recente da mesma thread, nenhum evento pode ser colado ou
+        // reconciliado nela: apenas incrementa o contador que o loader carrega para
+        // a janela nova. Id/msg_id deduplicam o par t=0 + pós-save.
+        if (openThreadAnchoredRef.current) {
+          if (anchoredEventKey && anchoredEventKeysRef.current.has(anchoredEventKey)) {
+            return prev;
+          }
+          if (anchoredEventKey) anchoredEventKeysRef.current.add(anchoredEventKey);
+          return countNewWhileAnchored(prev);
         }
         // plano 57: an authoritative combined row (batch) collapses the individual
         // optimistic bubbles it superseded BEFORE we reconcile/append. Returns the
@@ -769,6 +806,10 @@ export function useConversationWsEvents(opts) {
               ...updated[byId],
               content: message.content != null ? message.content : updated[byId].content,
               status: message.status || updated[byId].status,
+              // plano 87: o `new_message` do t=0 (pré-save) não carrega a legenda;
+              // só o autoritativo pós-save carrega. Sem adotá-la aqui, a mídia com
+              // legenda ficava muda AO VIVO e só aparecia depois do F5.
+              ...(message.media_caption ? { media_caption: message.media_caption } : {}),
               _status: null,
             };
             return { ...prev, messages: updated };
@@ -792,6 +833,7 @@ export function useConversationWsEvents(opts) {
               ...(message.ts != null ? { ts: message.ts } : {}),
               ...(message.msg_id ? { msg_id: message.msg_id } : {}),
               ...(message.sent_by_name ? { sent_by_name: message.sent_by_name } : {}),
+              ...(message.media_caption ? { media_caption: message.media_caption } : {}),
               _status: null,
             };
             return { ...prev, messages: updated };
@@ -818,13 +860,23 @@ export function useConversationWsEvents(opts) {
           // Nothing to merge; but if `supersedes` removed bubbles, still commit `base`.
           return base === prev.messages ? prev : { ...prev, messages: base };
         }
+        // plano 99 F0d — JANELA ANCORADA: a thread aberta não termina na última
+        // mensagem (o operador saltou para o passado por busca, citação,
+        // deep-link ou "ir para data"). Anexar uma mensagem de agora ao fim
+        // desta janela colaria "hoje" logo depois de "3 de janeiro" e criaria um
+        // buraco silencioso no histórico. Em vez disso, só contamos — o botão
+        // flutuante "voltar ao fim" mostra "N novas" e recarrega a ponta.
+        if (prev.has_more_newer) {
+          return countNewWhileAnchored({ ...prev, messages: base });
+        }
         return {
           ...prev,
           messages: [...base, message],
           updated_at: message.ts,
         };
       });
-      if (message.role === 'user' && pageVisibleRef.current) markAsRead(phone);
+      if (message.role === 'user' && pageVisibleRef.current
+          && !openThreadAnchoredRef.current) markAsRead(phone);
       // An inbound (customer) message reopens the 24h free-text window — refresh
       // the compositor hint live so the operator isn't stuck on "fora da janela"
       // (WhatsApp Cloud) until a manual reload.

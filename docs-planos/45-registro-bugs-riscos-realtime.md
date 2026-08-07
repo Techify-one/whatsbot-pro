@@ -38,6 +38,8 @@ Cada achado tem um `verdict`: **CONFIRMED** (o cético confirmou com o código) 
 
 ### 1. Fan-out global do WebSocket vaza mensagens de TODAS as conversas para TODO operador — CONFIRMED
 
+> 📋 **Virou plano executável em 2026-07-28: [90 — escopo do WebSocket por canal](90-plano-escopo-do-websocket-por-canal.md)**, que também absorve o **#5** (sessão revogada — mesma infra de sweep). O **#6** (token na query string) fica **de fora**, com justificativa registrada lá. Re-auditado com o código de hoje: o achado continua exato, e a superfície **cresceu** de ~25 para **42 eventos** — inclusive o `conversation_upsert` (nome + telefone + preview do texto + etiquetas + atributos do contato), que nasceu **depois** deste registro. Medição em produção: o vazamento efetivo atinge ~599 conversas (4%) e 8 operadores. ⚠️ A correção sugerida abaixo ("no mínimo não incluir `content`/PII") foi **rejeitada** como mitigação barata no plano 90 (D9) — ela exige a mesma identidade no socket, quebra a serialização única e ainda deixa telefone e metadado vazando.
+
 - **Categoria:** privacidade / vazamento de escopo · **Local:** [server/state.py:68](../server/state.py#L68)
 - **Descrição:** a camada REST aplica escopo de inbox rigoroso (`server/authz.py` `visible_inbox_ids`/
   `can_access_inbox`; `_inbox_hidden` em `server/routes/conversations.py`). **O WebSocket não tem

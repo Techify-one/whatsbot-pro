@@ -169,8 +169,6 @@ def register_routes(app, deps):
         if not body_text:
             return _err("body_text é obrigatório.", status=400)
         category = (body.get("category") or "UTILITY").strip().upper()
-        if category not in tpl_svc.TEMPLATE_CATEGORIES:
-            return _err(f"category deve ser uma de {sorted(tpl_svc.TEMPLATE_CATEGORIES)}.", status=400)
         language = (body.get("language") or "pt_BR").strip() or "pt_BR"
         body_examples = body.get("body_examples")
         header_examples = body.get("header_examples")
@@ -178,18 +176,25 @@ def register_routes(app, deps):
             return _err("body_examples deve ser uma lista.", status=400)
         if header_examples is not None and not isinstance(header_examples, list):
             return _err("header_examples deve ser uma lista.", status=400)
-        header_format, header_handle, media_err = tpl_svc.normalize_header_media(
-            body.get("header_format"), body.get("header_handle"))
-        if media_err:
-            return _err(media_err, status=400)
-        buttons, btn_err = tpl_svc.normalize_buttons(body.get("buttons"))
-        if btn_err:
-            return _err(btn_err, status=400)
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
         if not tpl_svc.supports_templates(deps, channel_id):
             return _err("Este canal não suporta templates.", status=400)
+
+        # Regras de forma vêm do PROVIDER (plano 92 · F1) — ver o gêmeo
+        # conv-scoped em server/routes/conversations.py.
+        spec = tpl_svc.spec_for(deps, channel_id)
+        cat_err = tpl_svc.validate_category(spec, category)
+        if cat_err:
+            return _err(cat_err, status=400)
+        header_format, header_handle, media_err = tpl_svc.normalize_header_media(
+            spec, body.get("header_format"), body.get("header_handle"))
+        if media_err:
+            return _err(media_err, status=400)
+        buttons, btn_err = tpl_svc.normalize_buttons(spec, body.get("buttons"))
+        if btn_err:
+            return _err(btn_err, status=400)
         kind, data = await tpl_svc.create_template(
             deps, channel_id, name=name, category=category, language=language,
             body_text=body_text,
@@ -220,7 +225,8 @@ def register_routes(app, deps):
         if not tpl_svc.supports_templates(deps, channel_id):
             return _err("Este canal não suporta templates.", status=400)
         data_bytes = await file.read()
-        err = tpl_svc.validate_example_upload(file.content_type or "",
+        err = tpl_svc.validate_example_upload(tpl_svc.spec_for(deps, channel_id),
+                                              file.content_type or "",
                                               len(data_bytes or b""))
         if err:
             return _err(err, status=400)
@@ -267,9 +273,19 @@ def register_routes(app, deps):
 
         A provider is only offered when its backing plugin is enabled — i.e. its
         ``CHANNEL_PROVIDERS`` class is registered in the live ``ChannelRegistry``.
-        GOWA is core and always present. Gated by ``channel.manage``. Registered
-        before ``/{channel_id}`` so the literal path wins the match."""
-        denied = permission_denied(request, "channel.manage")
+        GOWA is core and always present. Registered before ``/{channel_id}`` so the
+        literal path wins the match.
+
+        Gated by ``conversation.reply``, not ``channel.manage`` (plano 85 B2): desde o
+        plano 76 H1 este é também o catálogo de APRESENTAÇÃO do hub — rótulo, cor e
+        tipo de contato de cada provider, lido pelo selo de canal de toda linha da
+        sidebar. Um operador sem permissão de GESTÃO de canais levava 403 e ficava com
+        os selos no fallback cinza. O payload é a auto-descrição da CLASSE do provider
+        (definição de campo: ``credential_fields``/``config_fields``), nunca valor de
+        credencial armazenado — segue o mesmo precedente de ``/connected`` e
+        ``/for-filter``, as outras rotas de operador desta tela. Escrita (criar, editar,
+        excluir canal) continua em ``channel.manage``."""
+        denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
         return _ok(await svc.providers(deps))
@@ -303,16 +319,24 @@ def register_routes(app, deps):
         if provider not in creatable:
             return _err(
                 f"provider deve ser um de: {', '.join(sorted(creatable))}.", 400)
-        # Anti zombie-channel (capability-driven): a credential-only provider with no
-        # connect step (Cloud/Telegram) is useless without its required credentials —
-        # reject the create up front. GOWA's required set is empty (QR flow).
+        # Creation policy comes from descriptor ``credential_fields[].required``.
+        # It normally includes every operational capability requirement, but may be
+        # stricter during a legacy migration (for example a new signing secret that
+        # old rows may temporarily omit without becoming zombie channels).
         submitted_creds = body.get("credentials") or {}
-        missing_creds = [k for k in svc.required_credentials(deps, provider)
+        missing_creds = [k for k in svc.creation_required_credentials(deps, provider)
                          if not str(submitted_creds.get(k) or "").strip()]
         if missing_creds:
             return _err(
                 f"Credenciais obrigatórias faltando para {provider}: "
                 f"{', '.join(missing_creds)}.", 400)
+        # Formato das credenciais (plano 104 F3): o provider declara
+        # ``credential_fields[].pattern``; o core só avalia — sem `if provider ==`.
+        # A mensagem cita o campo, NUNCA o valor (pode ser a senha que o
+        # navegador preencheu sozinho no campo de proxy).
+        fmt_errors = svc.credential_format_errors(deps, provider, submitted_creds)
+        if fmt_errors:
+            return _err(" ".join(fmt_errors[k] for k in sorted(fmt_errors)), 400)
         config = body.get("config")
         # The UI may nest gowa_device_id inside config; accept either spot.
         gowa_device_id = body.get("gowa_device_id")
@@ -352,6 +376,13 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
+        # Só o que foi SUBMETIDO é validado (plano 104 F3): campo em branco = "manter
+        # a atual", então uma row legada com credencial fora do formato nunca trava
+        # a edição de outro campo.
+        fmt_errors = svc.credential_format_errors(
+            deps, row.get("provider"), body.get("credentials") or {})
+        if fmt_errors:
+            return _err(" ".join(fmt_errors[k] for k in sorted(fmt_errors)), 400)
         try:
             return _ok(await svc.update(deps, row, body))
         except svc.DuplicateChannelError as e:

@@ -66,6 +66,42 @@ test('mediaPreviewLabel: plain text truncated to 80 chars', () => {
   assert.equal(mediaPreviewLabel({}), '');
 });
 
+// ── Plano 87 — a preview não pode mostrar texto gerado pela IA ──────
+
+test('mediaPreviewLabel: imagem descrita pela IA cai no rótulo, não vaza', () => {
+  const desc = '[Descrição da imagem]: duas janelas do WinBox\n**detalhe:**\nlinha';
+  // Antes do plano 87 isto devolvia "[Descrição da imagem]: duas janelas…".
+  assert.equal(mediaPreviewLabel({ media_type: 'image', content: desc }), '📷 Imagem');
+  // Com a legenda gravada, é ela que aparece.
+  assert.equal(
+    mediaPreviewLabel({ media_type: 'image', content: `${desc}\nolha o erro`,
+                        media_caption: 'olha o erro' }),
+    'olha o erro');
+  // Imagem sem descrição e sem legenda → rótulo.
+  assert.equal(mediaPreviewLabel({ media_type: 'image', content: '' }), '📷 Imagem');
+  // Imagem só com legenda (sem IA) → legenda, como antes.
+  assert.equal(mediaPreviewLabel({ media_type: 'image', content: 'minha foto' }), 'minha foto');
+});
+
+test('mediaPreviewLabel: documento não vaza a extração da IA', () => {
+  assert.equal(
+    mediaPreviewLabel({ media_type: 'document',
+                        content: '[Conteúdo do documento]: SICOOB\nR$ 898,30' }),
+    '📄 Documento');
+  assert.equal(
+    mediaPreviewLabel({ media_type: 'document',
+                        content: 'comprovante\n[Conteúdo do documento]: SICOOB' }),
+    'comprovante');
+});
+
+test('mediaPreviewLabel: áudio e vídeo inalterados', () => {
+  assert.equal(mediaPreviewLabel({ media_type: 'audio', content: '[Transcrição do áudio]: oi' }),
+               '🎤 Áudio');
+  // Vídeo não é reescrito pela IA — segue no caminho legado (content).
+  assert.equal(mediaPreviewLabel({ media_type: 'video', content: 'veja isso' }), 'veja isso');
+  assert.equal(mediaPreviewLabel({ media_type: 'video', content: '' }), '🎥 Vídeo');
+});
+
 test('mediaPreviewLabel: content-preferring media uses caption when present', () => {
   assert.equal(mediaPreviewLabel({ media_type: 'image', content: 'minha foto' }), 'minha foto');
   assert.equal(mediaPreviewLabel({ media_type: 'image' }), '📷 Imagem');

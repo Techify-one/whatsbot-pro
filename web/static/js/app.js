@@ -12,7 +12,13 @@
 import { h, render } from 'preact';
 import htm from 'htm';
 import { AuthGate } from './components/shell/AuthGate.js';
+import { initPublicIp } from './services/publicIp.js';
 
 const html = htm.bind(h);
+
+// Descoberta do IP público do navegador (plano 86) — fire-and-forget, ANTES do
+// primeiro render para encurtar a janela em que as primeiras ações ainda gravam
+// o IP de rede na auditoria. Nunca bloqueia o boot nem lança.
+initPublicIp();
 
 render(html`<${AuthGate} />`, document.getElementById('app'));

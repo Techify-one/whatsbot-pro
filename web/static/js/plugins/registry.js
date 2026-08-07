@@ -28,7 +28,7 @@
 //     • chat.header.banner  — ctx {conv, conversationId, phone,  (ContactDetail,
 //                                   channelId, contact}           below the header)
 //     • conversation.header.actions, conversation.info.panel,
-//       attendances.toolbar, gear.menu.items                     (pre-existing)
+//       gear.menu.items, app.overlay                            (pre-existing)
 //     • ai.settings.sections — ctx {}                            (AI settings tab,
 //                                   at the bottom of "Configurações")
 //     • channel.card.rows   — ctx {channel, descriptor}          (ChannelCard, no
@@ -65,7 +65,17 @@
 //   ROUTE OVERRIDE (overrideRoute/getRouteOverride) — EXCLUSIVE: first registrant
 //   wins, later claims are LOGGED + ignored (never silent). Decision Q5: keep
 //   override (replace) semantics — do NOT compose. D2/D3 must preserve the
-//   'attendances' claim. Used by the `atendimentos` plugin.
+//   'attendances' claim. Used by the `protocolos` plugin.
+//
+//   COMPONENT OVERRIDE (overrideComponent/getComponentOverride) — same EXCLUSIVE
+//   contract as the route override, but for a UI piece that is not a route. The
+//   core renders a HOST that resolves the override and falls back to its own
+//   component while one exists; no core code knows which plugin claimed what.
+//     • template.picker — ctx {conversationId, channelId, phone, onClose, onSent}
+//       O modal "Enviar template" (Plano 92 · B1). O formato de um template é
+//       ditado pela API do provedor, então o dono da tela é o plugin de canal —
+//       o `whatsapp_cloud` reivindica este nome. Sem plugin registrando, o core
+//       renderiza o próprio picker (fallback), byte-idêntico ao de sempre.
 //
 //   CLIENT EVENTS (emit/on) — fire-and-forget; a throwing handler is isolated.
 //     • ui.conversation.selected — {conversationId, phone, channelId}  (selectContact)
@@ -80,6 +90,7 @@
 const _filters = new Map();    // name  -> [{priority, pluginId, fn}]   (sorted asc)
 const _slots = new Map();      // name  -> [{priority, pluginId, component}] (sorted asc)
 const _routes = new Map();     // tabId -> {pluginId, component, opts}
+const _components = new Map(); // name  -> {pluginId, component}          (EXCLUSIVE)
 const _events = new Map();     // name  -> [{pluginId, fn}]
 const _subscribers = new Set();
 let _version = 0;
@@ -142,7 +153,7 @@ export function getSlot(name) { return _slots.get(name) || []; }
  * Claim a core route (`tabId`) and REPLACE its component. EXCLUSIVE contract
  * (Plano 23 · D1, decision Q5 = keep override/replace, do NOT change to compose):
  * the first registrant wins; any later claim for the same `tabId` is logged and
- * ignored (anti-conflict policy — never fails silently). The `atendimentos`
+ * ignored (anti-conflict policy — never fails silently). The `protocolos`
  * plugin claims 'attendances'; D2/D3 must preserve this claim.
  */
 export function overrideRoute(tabId, component, opts = {}, pluginId = 'core') {
@@ -159,6 +170,36 @@ export function overrideRoute(tabId, component, opts = {}, pluginId = 'core') {
   bump();
 }
 export function getRouteOverride(tabId) { return _routes.get(tabId) || null; }
+
+// ── Component overrides (exclusive) ─────────────────────────────────────────
+/**
+ * Claim a named core COMPONENT and replace it. Same EXCLUSIVE contract as
+ * `overrideRoute` (first registrant wins; later claims are logged and ignored),
+ * but for a UI piece that is not a route — a modal, a panel, a form.
+ *
+ * Motivation (Plano 92 · B1): a provider plugin owns a piece of UI whose shape
+ * is dictated by that provider's API, so the core must not carry its vocabulary.
+ * The core renders a HOST that resolves the override and falls back to its own
+ * component while one still exists. Nothing here knows a provider name.
+ *
+ * Registered names:
+ *   • 'template.picker' — ctx {conversationId, channelId, phone, onClose, onSent}
+ *     The "Enviar template" modal. Claimed by `whatsapp_cloud`.
+ */
+export function overrideComponent(name, component, pluginId = 'core') {
+  if (typeof component !== 'function') return;
+  const existing = _components.get(name);
+  if (existing) {
+    // Exclusive ownership: first registrant wins. Never fail silently.
+    console.warn(
+      `[plugins] component "${name}" already overridden by "${existing.pluginId}"; ignoring "${pluginId}"`,
+    );
+    return;
+  }
+  _components.set(name, { pluginId, component });
+  bump();
+}
+export function getComponentOverride(name) { return _components.get(name) || null; }
 
 // ── Events (fire-and-forget) ─────────────────────────────────────────────────
 export function on(name, fn, pluginId = 'core') {
@@ -179,6 +220,7 @@ export function reset() {
   _filters.clear();
   _slots.clear();
   _routes.clear();
+  _components.clear();
   _events.clear();
   bump();
 }
@@ -193,6 +235,9 @@ export function inventory() {
     slots: byPlugin(_slots),
     routes: Object.fromEntries(
       [..._routes.entries()].map(([k, v]) => [k, v.pluginId]),
+    ),
+    components: Object.fromEntries(
+      [..._components.entries()].map(([k, v]) => [k, v.pluginId]),
     ),
   };
 }

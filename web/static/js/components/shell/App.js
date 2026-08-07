@@ -10,7 +10,11 @@ import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { PluginModalHost } from '../../plugins/ModalHost.js';
 import { Slot } from '../../plugins/Slot.js';
-import { buildPluginApi, isFrontendApiCompatible } from '../../plugins/api.js';
+import {
+  buildPluginApi,
+  isFrontendApiCompatible,
+  isPluginServicesCompatible,
+} from '../../plugins/api.js';
 import { reset as resetRegistry, subscribe as subscribeRegistry, inventory as registryInventory, getRouteOverride } from '../../plugins/registry.js';
 import { SetupWizard } from '../SetupWizard.js';
 import { LowBalanceModal } from '../LowBalanceModal.js';
@@ -20,8 +24,10 @@ import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import { authHeaders, getUnreadCount } from '../../services/api.js';
 import { shouldNotifyNewMessage } from '../../services/conversationRows.js';
+import { isModifiedClick, spaLinkTarget } from '../../services/spaLink.js';
 import * as soundEngine from '../../utils/soundEngine.js';
 import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
+import { hasPermission } from '../../utils/permissions.js';
 import { GearMenu } from './GearMenu.js';
 import { ScreenRouter } from './ScreenRouter.js';
 import { Toaster } from './Toaster.js';
@@ -59,11 +65,15 @@ async function loadPluginExtensions(plugins) {
       console.warn(`[plugins] ${p.id}: frontend_api_version "${p.frontend_api_version}" incompatible — skipping extends`);
       continue;
     }
+    if (!isPluginServicesCompatible(p.plugin_services_version)) {
+      console.warn(`[plugins] ${p.id}: plugin_services_version "${p.plugin_services_version}" incompatible — skipping extends`);
+      continue;
+    }
     try {
       const mod = await import(p.frontend_extends);
       const register = mod && (mod.default || mod.register);
       if (typeof register === 'function') {
-        await register(buildPluginApi(p.id));
+        await register(buildPluginApi(p.id, p.plugin_services_version));
       } else {
         console.warn(`[plugins] ${p.id}: extends module has no default export (register fn)`);
       }
@@ -85,10 +95,9 @@ export function App({ onLogout, hasPassword, currentUser }) {
   // overrides) so route-override resolution and <Slot>s re-render once the async
   // extends modules register (they load after first paint).
   const [extVersion, setExtVersion] = useState(0);
-  // True once the plugin frontend-extension modules have finished loading (or the
-  // manifest fetch failed). Gates the `attendances → contacts` fallback in
-  // ScreenRouter so a hard reload doesn't bounce to the home page during the async
-  // window before a route-override (e.g. protocolos) has registered.
+  // True once frontend extension modules have finished loading (or the manifest
+  // request failed). It prevents an override-only route from rendering its
+  // fallback during the asynchronous registration window.
   const [extensionsLoaded, setExtensionsLoaded] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);  // self-service password modal (plano 47)
   const [tab, setTabState] = useState(() => tabFromPath([]));
@@ -138,7 +147,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
     fetch('/api/plugins/manifest', { headers: authHeaders() })
       .then(r => r.json())
       .then(res => {
-        if (!res || !res.ok) { setExtensionsLoaded(true); return; }  // no plugins → fallback applies
+        if (!res || !res.ok) { setExtensionsLoaded(true); return; }
         const plugins = res.data.plugins || [];
         const screens = plugins.flatMap(p =>
           (p.screens || [])
@@ -147,13 +156,11 @@ export function App({ onLogout, hasPassword, currentUser }) {
         );
         setPluginScreens(screens);
         // Load plugin frontend-extension modules (filters / UI slots / route overrides).
-        // Only after they register (or fail) do we let ScreenRouter treat a missing
-        // route-override as "plugin disabled" (see extensionsLoaded gating).
         loadPluginExtensions(plugins).finally(() => setExtensionsLoaded(true));
         // Re-evaluate tab now that we know about plugin paths.
         setTabState(tabFromPath(screens));
       })
-      .catch(() => { setExtensionsLoaded(true); /* fetch failed → fallback applies */ });
+      .catch(() => { setExtensionsLoaded(true); /* plugin extensions are optional */ });
   }, []);
 
   // Re-render when the extension registry mutates (extends modules register after
@@ -192,6 +199,61 @@ export function App({ onLogout, hasPassword, currentUser }) {
     return () => {
       window.removeEventListener('dragover', swallow);
       window.removeEventListener('drop', swallow);
+    };
+  }, []);
+
+  // Plano 106 · F2 — interceptor delegado de links internos. Qualquer <a href="/…">
+  // do painel — do core OU de um plugin, SEM o plugin fazer nada — passa a navegar
+  // por SPA no clique simples e a ser entregue ao navegador no clique modificado
+  // (Ctrl/⌘ = nova guia, Shift = nova janela, Alt = baixar). É o que remove a
+  // necessidade de repetir o guard do GearMenu em cada ponto de navegação.
+  //
+  // É um listener de BUBBLING no document, então roda DEPOIS dos onClick dos
+  // componentes: quem já chamou preventDefault (ex.: copyDeepLink) continua
+  // vencendo. Quem decide se a âncora é nossa é o predicado puro spaLinkTarget —
+  // link externo, target, download, mailto:/tel: e data-no-spa saem intactos.
+  useEffect(() => {
+    // Base = a URL COMPLETA (não só o origin): além de comparar o host, resolve
+    // corretamente um href relativo que uma tela de plugin venha a usar.
+    function targetFor(el) {
+      const a = el && el.closest ? el.closest('a[href]') : null;
+      if (!a) return null;
+      return spaLinkTarget({
+        href: a.getAttribute('href'),
+        target: a.getAttribute('target'),
+        // hasAttribute, NÃO a.download: a propriedade devolve '' tanto para
+        // ausente quanto para `<a download>` sem valor, e não distingue os dois.
+        download: a.hasAttribute('download'),
+        dataset: a.dataset,
+      }, window.location.href);
+    }
+
+    function onClick(e) {
+      if (isModifiedClick(e) || e.defaultPrevented) return;
+      const target = targetFor(e.target);
+      if (!target) return;
+      e.preventDefault();
+      const here = window.location.pathname + window.location.search + window.location.hash;
+      // Um clique = um passo no "voltar": não empilha quando já estamos no destino
+      // (o call site pode ter empurrado a URL antes de o evento borbulhar até aqui).
+      if (here !== target.path) history.pushState(null, '', target.path);
+      // pushState não dispara popstate; é este par que todo call site já usa e que
+      // o efeito de rota abaixo escuta.
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+
+    // Clique do meio: o Chrome inicia o auto-scroll no mousedown. Cancelar só ele
+    // (button === 1) sobre link interno deixa o navegador abrir a guia no auxclick.
+    function onMouseDown(e) {
+      if (e.button !== 1 || e.defaultPrevented) return;
+      if (targetFor(e.target)) e.preventDefault();
+    }
+
+    document.addEventListener('click', onClick);
+    document.addEventListener('mousedown', onMouseDown);
+    return () => {
+      document.removeEventListener('click', onClick);
+      document.removeEventListener('mousedown', onMouseDown);
     };
   }, []);
 
@@ -451,17 +513,39 @@ export function App({ onLogout, hasPassword, currentUser }) {
 
   // The full prop bundle the chat hub (Contacts) receives — same keys/values as
   // the pre-decomposition inline element (ScreenRouter spreads it).
+  // A engrenagem é UMA só (mesmo componente, mesmas ações/permissões): no hub de
+  // conversas ela mora DENTRO da barra verde da sidebar, ao lado do botão de
+  // arquivar; nas demais telas continua flutuando no canto superior direito. O
+  // hub recebe uma FÁBRICA (`renderGear`) em vez de um elemento pronto porque ele
+  // é quem sabe se a sidebar está na tela — quando ela é recolhida (desktop) ou
+  // cede lugar ao chat (mobile), ele volta a pintar a versão flutuante para o
+  // menu nunca ficar inalcançável.
+  const gearProps = {
+    tab, onTabChange: setTab, pluginScreens, hasPassword, onLogout,
+    accountUrl: config && config.account_url, currentUser,
+    onChangePassword: () => setShowChangePassword(true),
+  };
+  const renderGear = (variant) => html`<${GearMenu} ...${gearProps} variant=${variant} />`;
+  // O flutuante só é suprimido quando o hub NATIVO de conversas é o que está na
+  // tela — ou seja, quando a sidebar (que hospeda a engrenagem inline) de fato
+  // renderiza. Plugin que reivindica a rota 'contacts' ou usuário sem
+  // `conversation.read` continuam vendo o botão flutuante; sem esse guard a
+  // engrenagem sumiria e o menu ficaria inalcançável.
+  const showsInlineGear = tab === 'contacts' && !activeRouteOverride
+    && hasPermission(currentUser, 'conversation.read');
+
   const contactsProps = {
     newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged,
     contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, groupParticipantsChanged,
     initialContactId, initialConversationId, initialScrollMsgId, conversationCreated,
     wsConnected, config, onConfigSave: save, onUnreadChange: refreshUnreadCount,
+    renderGear,
   };
 
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} onChangePassword=${() => setShowChangePassword(true)} />
+      ${showsInlineGear ? null : renderGear('floating')}
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         <${ScreenRouter}

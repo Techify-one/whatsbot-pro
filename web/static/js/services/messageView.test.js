@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SYSTEM_CARD_VARIANTS, isSystemCardRole, senderColor, quotedMediaText,
-  isCollapsibleRole, collapsedPreview, cardStateKey,
+  isCollapsibleRole, collapsedPreview, cardStateKey, mediaCaptionOf,
 } from './messageView.js';
 
 test('isSystemCardRole: all panel-only roles recognized', () => {
@@ -60,6 +60,84 @@ test('quotedMediaText: per media type', () => {
 test('quotedMediaText: plain text passthrough', () => {
   assert.equal(quotedMediaText({}, 'hello'), 'hello');
   assert.equal(quotedMediaText({ media_type: 'poll' }, 'Enquete X'), 'Enquete X');
+});
+
+// ── Plano 87 — legenda da mídia ─────────────────────────────────────
+
+const IMG_DESC = '[Descrição da imagem]: duas janelas do WinBox abertas\n'
+  + '**Janela principal:**\n* linha de detalhe';
+
+test('mediaCaptionOf: a coluna media_caption vence tudo', () => {
+  assert.equal(
+    mediaCaptionOf({ media_caption: 'olha esse erro', content: `${IMG_DESC}\nolha esse erro` }),
+    'olha esse erro');
+  // Mesmo quando o content é só a descrição da IA (linha sem legenda que
+  // depois ganhou a coluna), a coluna manda.
+  assert.equal(mediaCaptionOf({ media_caption: 'legenda', content: IMG_DESC }), 'legenda');
+});
+
+test('mediaCaptionOf: legado com descrição da IA no INÍCIO esconde tudo', () => {
+  // O bug do plano 87: a legenda está no FIM de um markdown multilinha e NÃO
+  // pode ser resgatada por corte posicional — melhor esconder do que expor a
+  // descrição da IA como se fosse texto do cliente.
+  assert.equal(mediaCaptionOf({ content: `${IMG_DESC}\nto pingando do roteador` }), '');
+  assert.equal(mediaCaptionOf({ content: IMG_DESC }), '');
+  assert.equal(mediaCaptionOf({ content: '[Transcrição do áudio]: olá' }), '');
+});
+
+test('mediaCaptionOf: legado com bloco da IA no FIM corta no marcador', () => {
+  // Formato de DOCUMENTO (texto primeiro, prefixo depois) — era daqui que a
+  // extração da IA vazava para dentro do balão.
+  assert.equal(
+    mediaCaptionOf({ content: 'segue o comprovante\n[Conteúdo do documento]: SICOOB\nR$ 898,30' }),
+    'segue o comprovante');
+  // Legenda multilinha do cliente é preservada inteira.
+  assert.equal(
+    mediaCaptionOf({ content: 'linha um\nlinha dois\n[Conteúdo do documento]: dump' }),
+    'linha um\nlinha dois');
+  // Documento SEM legenda: sobra só o bloco da IA ⇒ nada.
+  assert.equal(mediaCaptionOf({ content: '[Conteúdo do documento]: dump' }), '');
+});
+
+test('mediaCaptionOf: placeholders não são legenda', () => {
+  for (const p of ['[Imagem enviada pelo contato]', '[Áudio recebido]', '[Áudio]', '[Vídeo]']) {
+    assert.equal(mediaCaptionOf({ content: p }), '', p);
+  }
+  assert.equal(mediaCaptionOf({ content: '' }), '');
+  assert.equal(mediaCaptionOf(null), '');
+});
+
+test('mediaCaptionOf: legenda simples passa intacta', () => {
+  assert.equal(mediaCaptionOf({ content: 'veja o vídeo' }), 'veja o vídeo');
+  // displayContent (prefixo de grupo já removido) tem precedência sobre content.
+  assert.equal(mediaCaptionOf({ content: '[Ana]: oi' }, 'oi'), 'oi');
+});
+
+// Regressão pega pela revisão adversarial: só GOWA/sandbox/envio-do-operador
+// compõem "[Documento recebido: …]". Em Cloud/Telegram/Meta o content é a
+// legenda PURA, e numa linha legada (media_caption NULL) devolver vazio apagaria
+// ~200 legendas reais em produção — o próprio bug do plano 87, ao contrário.
+test('mediaCaptionOf: documento SEM rótulo mantém a legenda legada', () => {
+  assert.equal(mediaCaptionOf({ content: 'segue o comprovante assinado' }),
+               'segue o comprovante assinado');
+  // …e continua escondendo quando o que sobra é só texto da IA.
+  assert.equal(mediaCaptionOf({ content: '[Conteúdo do documento]: dump do PDF' }), '');
+  // Legenda + extração, sem rótulo (caminho Cloud): fica só a legenda.
+  assert.equal(
+    mediaCaptionOf({ content: 'segue o comprovante\n[Conteúdo do documento]: dump' }),
+    'segue o comprovante');
+});
+
+test('quotedMediaText: citação não vaza a descrição da IA (plano 87)', () => {
+  // Antes: o snippet mostrava "[Descrição da imagem]: duas janelas do WinBox…".
+  assert.equal(quotedMediaText({ media_type: 'image', content: IMG_DESC }, IMG_DESC), '📷 Foto');
+  assert.equal(
+    quotedMediaText({ media_type: 'image', media_caption: 'olha o erro' }, IMG_DESC),
+    'olha o erro');
+  // Documento: rótulo fixo no legado, legenda quando a coluna existe.
+  assert.equal(quotedMediaText({ media_type: 'document' }, 'qualquer'), '📄 Documento');
+  assert.equal(
+    quotedMediaText({ media_type: 'document', media_caption: 'contrato' }, 'x'), 'contrato');
 });
 
 // ── Plano 63 — collapsible cards ───────────────────────────────────

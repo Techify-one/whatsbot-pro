@@ -102,6 +102,9 @@ def enriched_columns(include_private_note: bool = False,
         last_msg_subq(messages.c.role, excluded).label("last_msg_role"),
         last_msg_subq(messages.c.ts, excluded).label("last_msg_ts"),
         last_msg_subq(messages.c.media_type, excluded).label("last_msg_media_type"),
+        # plano 87: a legenda do cliente, para a preview mostrar o que ele
+        # escreveu em vez do "[Descrição da imagem]: …" gerado pela IA.
+        last_msg_subq(messages.c.media_caption, excluded).label("last_msg_media_caption"),
         last_msg_subq(messages.c.status, excluded).label("last_msg_status"),
         last_msg_subq(messages.c.msg_id, excluded).label("last_msg_id"),
         unread_subq.label("unread_count"),
@@ -122,7 +125,8 @@ def finalize_conv(row) -> dict:
     """Shape a raw enriched row into the dict the sidebar/list consumes."""
     d = dict(row)
     d["last_message"] = media_preview(d.get("last_msg_content"),
-                                      d.get("last_msg_media_type"))
+                                      d.get("last_msg_media_type"),
+                                      d.get("last_msg_media_caption"))
     d["last_message_role"] = d.get("last_msg_role") or ""
     d["last_message_ts"] = d.get("last_msg_ts") or 0
     d["last_message_status"] = d.get("last_msg_status") or ""

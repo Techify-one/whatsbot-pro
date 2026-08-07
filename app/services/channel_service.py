@@ -179,8 +179,10 @@ def required_credentials(deps, provider: str) -> list[str]:
 
     Probes a throwaway instance (pure constructor) to read
     ``ChannelCapabilities.required_credentials``. Best-effort → ``[]`` on any
-    failure, so a probe issue never spuriously blocks creation. Never branches on
-    provider name (the knowledge lives in each provider).
+    failure, so a probe issue never spuriously marks a live channel as unhealthy.
+    New-channel validation is intentionally handled by
+    :func:`creation_required_credentials`. Never branches on provider name (the
+    knowledge lives in each provider).
     """
     registry = getattr(deps, "channel_registry", None)
     if registry is None:
@@ -195,6 +197,76 @@ def required_credentials(deps, provider: str) -> list[str]:
         return list(getattr(caps, "required_credentials", ()) or ())
     except Exception:
         return []
+
+
+def creation_required_credentials(deps, provider: str) -> list[str]:
+    """Credential keys mandatory when creating a NEW channel.
+
+    Creation policy already lives in the provider descriptor's
+    ``credential_fields[].required`` flag.  It is intentionally distinct from
+    :func:`required_credentials`, which describes ongoing operational health for
+    existing rows and feeds the panel's zombie-channel warning.  Usually the two
+    sets coincide; a provider can use a stricter creation policy during a legacy
+    migration without falsely marking old, compatible rows as disconnected.
+    """
+    try:
+        desc = provider_descriptor(deps, provider)
+        return [
+            str(field.get("key"))
+            for field in desc.get("credential_fields") or []
+            if field.get("key") and field.get("required")
+        ]
+    except Exception:
+        # Keep the historical best-effort behavior for a broken provider probe.
+        return []
+
+
+def credential_format_errors(deps, provider: str, submitted_creds: dict) -> dict:
+    """Erros de FORMATO das credenciais submetidas (plano 104 F3).
+
+    Genérico e dirigido pelo descriptor: o provider declara
+    ``credential_fields[].pattern`` (regex) + ``pattern_error`` (mensagem PT-BR)
+    e o core apenas AVALIA — sem ``if provider ==``, mesmo padrão do
+    ``required``/``MediaLimits``. Provider que não declara ``pattern`` continua
+    exatamente como antes (dict vazio).
+
+    O servidor não confia no cliente: esta é a mesma checagem que o formulário já
+    faz em ``validateCredentials`` (constants.js), com o MESMO contrato — regex
+    ancorada (casamento inteiro), sem diferenciar maiúsculas/minúsculas, valor
+    vazio e placeholder mascarado nunca validados (na edição, vazio = "manter a
+    atual", então uma row legada com valor inválido nunca trava a edição de
+    outro campo), regex quebrada = campo passa (fail-open).
+
+    ⚠️ A mensagem cita SÓ o campo, nunca o valor recusado — ele pode ser a senha
+    que o navegador preencheu sozinho, e vazaria em log/resposta.
+
+    :returns: ``{credential_key: mensagem}`` — vazio quando tudo passa.
+    """
+    creds = submitted_creds or {}
+    if not creds:
+        return {}
+    try:
+        desc = provider_descriptor(deps, provider)
+    except Exception:  # noqa: BLE001 — provider quebrado não bloqueia o save
+        return {}
+    out: dict[str, str] = {}
+    for field in desc.get("credential_fields") or []:
+        pattern = field.get("pattern")
+        key = field.get("key")
+        if not pattern or not key or key not in creds:
+            continue
+        value = str(creds.get(key) or "").strip()
+        if not value or value.startswith("••••"):
+            continue
+        try:
+            ok = re.fullmatch(pattern, value, re.IGNORECASE) is not None
+        except re.error:
+            logger.warning("provider %s: pattern inválido em %s", provider, key)
+            continue
+        if not ok:
+            out[key] = str(field.get("pattern_error")
+                           or f'Valor inválido para "{field.get("label") or key}".')
+    return out
 
 
 def register_live(deps, cid: str, provider: str, row: dict | None = None) -> None:
@@ -445,8 +517,12 @@ def provider_descriptor(deps, provider: str) -> dict:
 
 
 async def providers(deps) -> dict:
-    """Available providers as full descriptors (plano 33) + a flat required-
-    credentials map (kept for the create-form gate + back-compat).
+    """Available providers as full descriptors (plano 33) + operational creds.
+
+    ``credential_fields[].required`` drives NEW-channel form/create validation.
+    The flat ``required_credentials`` map is intentionally the ongoing health
+    contract consumed by ``ChannelCard``; keeping those meanings separate lets a
+    provider tighten new creation without labelling compatible legacy rows dead.
 
     Offer = every provider currently REGISTERED in the live registry (its backing
     plugin is enabled). ``ALLOWED_PROVIDERS`` is no longer the source of the offer
@@ -456,7 +532,7 @@ async def providers(deps) -> dict:
     names = sorted(registry.providers()) if registry is not None else []
     descriptors = [provider_descriptor(deps, p) for p in names]
     required = {
-        d["provider"]: [f["key"] for f in d["credential_fields"] if f.get("required")]
+        d["provider"]: required_credentials(deps, d["provider"])
         for d in descriptors
     }
     return {"providers": descriptors, "required_credentials": required}
@@ -586,14 +662,20 @@ async def set_members(deps, row: dict, user_ids: list[int]) -> dict:
     previous = await asyncio.to_thread(inbox_member_repo.member_ids, inbox["id"])
     members = await asyncio.to_thread(
         inbox_member_repo.set_members, inbox["id"], user_ids)
-    await _emit_channel_event(deps, "channel.members_changed", {
-        "channel_id": channel_id,
-        "provider": row.get("provider"),
-        "inbox_id": inbox["id"],
-        "ts": time.time(),
-        "_audit_before": {"member_ids": sorted(previous or [])},
-        "_audit_after": {"member_ids": sorted(members or [])},
-    })
+    before, after = sorted(previous or []), sorted(members or [])
+    # Só emite (e portanto só audita) quando a lista de membros REALMENTE mudou.
+    # O form de edição do canal faz PUT /members em todo salvamento — sem esta
+    # guarda, desligar a IA do canal gerava uma linha `channel.members_update`
+    # com antes == depois na trilha.
+    if before != after:
+        await _emit_channel_event(deps, "channel.members_changed", {
+            "channel_id": channel_id,
+            "provider": row.get("provider"),
+            "inbox_id": inbox["id"],
+            "ts": time.time(),
+            "_audit_before": {"member_ids": before},
+            "_audit_after": {"member_ids": after},
+        })
     return {"inbox_id": inbox["id"], "member_ids": members}
 
 
