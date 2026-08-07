@@ -286,6 +286,6 @@ tabela: a ação nova aparece no filtro **assim que a primeira linha for gravada
 | Config + operação (exemplo completo) | `storages/plugins/protocolos/routes.py` |
 | Ator `ai` + on-behalf-of | `storages/plugins/melhorias/internal_routes.py` |
 | Ação única de alto impacto | `storages/plugins/vendas_ia/routes.py` → `/seed` |
-| Plugin de canal (`channel:<id>`) | `assets/plugin_examples/telegram/routes.py`, `.../whatsapp_cloud/routes.py` |
-| Config global de plugin de canal | `assets/plugin_examples/gowa/routes.py` → `/alert-settings` |
-| Segredo revelado (exceção ao GET) | `assets/plugin_examples/website/routes.py` → `/reveal-hmac` |
+| Plugin de canal (`channel:<id>`) | `storages/plugins/telegram/routes.py`, `.../whatsapp_cloud/routes.py` |
+| Config global de plugin de canal | [assets/plugin_examples/gowa/routes.py](../assets/plugin_examples/gowa/routes.py) → `/alert-settings` |
+| Segredo revelado (exceção ao GET) | `storages/plugins/website/routes.py` → `/reveal-hmac` |
