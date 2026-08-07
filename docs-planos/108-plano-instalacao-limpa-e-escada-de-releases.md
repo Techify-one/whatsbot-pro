@@ -1,6 +1,6 @@
 # Plano 108 — Instalação limpa para cliente: podar o espelho de plugins, tirar dados de produção da árvore e publicar a escada de 6 releases
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-08-07 · **Escopo:** grande (zero linha de core alterada; 178 arquivos removidos, 5 call sites de teste migrados, 6 releases publicadas)
+> **Status:** ✅ **EXECUTADO** (2026-08-07) — `origin/main` em `76a732b`, 6 releases no ar (`v0.2.0`…`v0.7.0`), só a `v0.7.0` como *Latest*. Pendências abertas: **P2 (licença)** e o commit do repositório de plugins. · **Data:** 2026-08-07 · **Escopo:** grande (zero linha de core alterada; 178 arquivos removidos, 5 call sites de teste migrados, 6 releases publicadas)
 > **Origem:** pedido do usuário — levar `developer` (estável) para `main` e publicar release nova num repositório **público**, em degraus, "para não pegar muita gente de surpresa". Durante a investigação o escopo cresceu: o `developer` carrega **PII de clientes reais** e o espelho `assets/plugin_examples/` publica a fonte de 9 plugins cuja casa declarada é o repositório privado. **Método:** 3 workflows de investigação (32 sub-agentes) com verificação adversarial, mais leitura em 1ª mão e medição direta de cada afirmação (`git merge-base`, `diff -rq`, `grep -c`, `wc -l`).
 > O objetivo final é uma **instalação limpa para o cliente**: core + canal GOWA, e o resto puxado sob demanda de uma loja de plugins. A poda **não é amputação de funcionalidade** — é o modelo de distribuição pretendido.
 >
@@ -436,11 +436,16 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** `git diff main developer` vazio.
 
 #### Status de execução — Fase 8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07) — `origin/main` em `76a732b`
+- **O que foi feito:** `developer` → `main`, merge comum, sem lista de exclusão e sem `git rm` posterior, como o plano previa. `origin/main` saiu de `2bb942e` para `76a732b`.
+- **Como foi feito / decisões:**
+  - ⚠️ **O plano não previu um segundo autor.** Entre a publicação da branch de teste e o merge, a Luisa publicou `f0e9473` no `origin/developer` (menu **⋮** do cabeçalho da conversa + engrenagem na sidebar). O meu `developer` local havia divergido: **push rejeitado por não-fast-forward**. Integrado com **merge de verdade** (`d8873be`) — nunca `rebase`, que reescreveria commits já publicados na `release/instalacao-limpa`.
+  - **Conflito `modify/delete` em `assets/plugin_examples/protocolos/static/`** (`extends.js`, `resolve_form.js`): o commit dela editava dois arquivos que a F4 apagou. Resolvido **a favor da poda** — o espelho do `protocolos` não volta. O trabalho dela **não se perdeu**: o patch foi extraído e portado para `whatsbot-pro-plugins/plugins/protocolos/src/static/` (ver "Problemas / pendências").
+  - Ao portar, apareceu uma divergência real entre o espelho e a fonte publicada: a 1.28.0 já busca o protocolo dentro de `protoShortcut`, mas **só quando existe algum campo marcado "Mostrar ao resolver"**. Reaproveitar cegamente esse valor acoplaria o atalho a uma configuração que não tem nada a ver com ele, então o porte reaproveita quando existe e busca por conta própria quando não.
+  - **3 referências mortas** a `assets/plugin_examples/<id>` sobreviveram à F5/F6 (2 em [docs/PLUGINS_AUDITAVEIS.md](../docs/PLUGINS_AUDITAVEIS.md), 1 num comentário de [TemplatePicker.js](../web/static/js/components/contacts/TemplatePicker.js)). Corrigidas em `9b59b49` — apontam para `storages/plugins/<id>`, e só o `gowa` mantém o link para `assets/`.
+- **Problemas / pendências:** o porte do atalho "Ver protocolo" está **na árvore de `whatsbot-pro-plugins`, não commitado** — junto com o teste do `trackify` (F3) e `scripts/js/`. Aguarda decisão do dono do projeto, porque mexe num plugin que roda em produção.
+- **Verificação:** `git diff main developer` **vazio** (critério de "Pronto quando"). `assets/plugin_examples/` só com `gowa`; **0** arquivos de PII rastreados; nenhuma referência a caminho podado fora de `docs-planos/`. Sintaxe dos 9 arquivos JS do merge conferida com `node --input-type=module --check`.
+  **Suítes:** frontend `node --test` **538/538**. Core `pytest`: **654 testes coletados em 79 arquivos, 3 falhas, 4 skips** — `test_linear_chain_single_parent_reaches_all_revisions`, `test_no_unexpected_duplicate_sequence_prefixes` e `test_audit_matrix_is_complete`, as três já catalogadas na F7 como pré-existentes. O controle da F7 tinha **4**; a quarta (`legacy_gowa_plugin_lifecycle`) passou nesta rodada, coerente com a fragilidade de ordenação já registrada. **Nenhuma falha nova.**
 
 ---
 
@@ -520,11 +525,25 @@ WAVE 7  F11                                        🔴 publicar (rascunho → p
 **Pronto quando:** `gh release list` mostra 6, só a v0.7.0 marcada como Latest.
 
 #### Status de execução — Fase 11
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Concluída (2026-08-07) — 6 releases no ar, só a v0.7.0 como *Latest*
+- **O que foi feito:** as 6 criadas como rascunho, conferidas e promovidas em ordem crescente. `gh release list` devolve 6; `releases/latest` devolve `v0.7.0`.
+
+| Versão | Tag aponta para | Data do commit | Latest |
+|---|---|---|---|
+| v0.2.0 | `2cfbbb0` | 29/06 | não |
+| v0.3.0 | `a4e8ac1` | 02/07 | não |
+| v0.4.0 | `6c4dba4` | 14/07 | não |
+| v0.5.0 | `6e19290` | 16/07 | não |
+| v0.6.0 | `2bb942e` | 28/07 | não |
+| **v0.7.0** | **`76a732b`** | **07/08** | **sim** |
+
+- **Como foi feito / decisões:**
+  - ⚠️ **O alvo da v0.7.0 mudou: `76a732b` (HEAD da `main`), NÃO o `1f11809` da tabela da F9.** Medido antes de publicar: `1f11809` ainda carrega **9 arquivos de PII** e os **10 espelhos de plugin**. Uma release cria uma tag e um **tarball baixável**; apontá-la ali publicaria, num repositório **PÚBLICO** e num artefato de primeira classe, exatamente o que a F0 removeu — e ainda entregaria ao cliente um zip que contradiz a própria nota ("distribuído enxuto"). Os **5 alvos retroativos foram medidos e estão limpos** (`git ls-tree -r … | grep -c plano-merge-contatos-duplicados` = 0 nos cinco): a pasta de PII só existiu no `developer`, nunca na `main` — que é por isso que a F0 falava do `developer`.
+  - **`--target` exige SHA COMPLETO.** SHA abreviado leva `HTTP 422: Release.target_commitish is invalid`. O plano não registrava isso.
+  - `--latest=false` explícito nas 5 retroativas, `--latest` só na v0.7.0 — confirmado por `releases/latest`.
+  - A nota da v0.7.0 foi atualizada antes de publicar para cobrir o commit da Luisa (cabeçalho desafogado + engrenagem na sidebar) e a contagem virou 73 commits.
+- **Problemas / pendências:** **P2 (licença) continua aberta e agora está congelada em 6 releases.** O [README.md](../README.md) diz "Projeto de código aberto. Livre para uso pessoal e comercial." e **não existe arquivo `LICENSE`** — sem ele o padrão jurídico é *todos os direitos reservados*, o oposto do que o texto promete. Acrescentar o `LICENSE` depois vale para o repositório inteiro e **não exige refazer tag nenhuma**, então isso não bloqueou a publicação; mas continua sendo a pendência mais visível de um repositório público.
+- **Verificação:** para cada uma das 6 tags, `git rev-parse <tag>^{commit}` + `git merge-base --is-ancestor <sha> main` — **as 6 apontam para commits da `main`**. Corpo de cada nota não-vazio (1.686 a 5.445 caracteres). `git ls-remote --tags origin` estava **vazio** antes de publicar (nenhuma tag órfã do plano 78 foi enviada junto).
 
 ---
 
