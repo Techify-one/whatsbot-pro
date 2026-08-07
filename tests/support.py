@@ -364,6 +364,19 @@ def _copy_plugin(
                 installed_root=REAL_INSTALLED_PLUGINS,
             )
         except PluginSourceNotFound as exc:
+            # Only ``gowa`` ships with the core repository. A core test asking for
+            # any other plugin is asking for something the core deliberately does
+            # NOT distribute, so it SKIPS — a clean clone must not be red for
+            # shipping exactly what it means to ship. Missing ``gowa`` is still a
+            # hard failure: that one is bundled and its absence is a real defect.
+            if plugin_id != "gowa":
+                import pytest
+
+                pytest.skip(
+                    f"plugin {plugin_id!r} não é distribuído com o core "
+                    f"(defina WHATSBOT_PLUGIN_SOURCE_ROOT para rodar este teste)",
+                    allow_module_level=True,
+                )
             raise ValueError(
                 f"build_test_app: unknown plugin {plugin_id!r} "
                 f"(not found in {', '.join(str(path) for path in exc.candidates)})"

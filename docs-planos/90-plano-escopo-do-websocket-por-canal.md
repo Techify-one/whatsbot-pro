@@ -1,7 +1,7 @@
 # Plano 90 — O WebSocket para de entregar conversa de canal que o operador não pode ver
 
 > **Status:** PLANEJAMENTO · **Data:** 2026-07-28 · **Escopo:** médio/grande (backend; zero migration)
-> **Origem:** achado **#1 🔴 CONFIRMED** do [registro 45](45-registro-bugs-riscos-realtime.md) (2026-07-09) e limitação **L1** da [avaliação 44](44-avaliacao-realtime-websocket-vs-chatwoot.md) — ambos são **registros de análise, não planos** ("nenhum código foi alterado"). Este é o plano executável. Reencontrado em 2026-07-28 durante a auditoria dos planos 88/89. **Método:** 4 agentes de inventário + síntese, leitura do código real (`arquivo:linha`), medição no banco de produção `whatsbot@10.8.100.5` via MCP vault, e verificação manual dos pontos estruturais.
+> **Origem:** achado **#1 🔴 CONFIRMED** do [registro 45](45-registro-bugs-riscos-realtime.md) (2026-07-09) e limitação **L1** da [avaliação 44](44-avaliacao-realtime-websocket-vs-chatwoot.md) — ambos são **registros de análise, não planos** ("nenhum código foi alterado"). Este é o plano executável. Reencontrado em 2026-07-28 durante a auditoria dos planos 88/89. **Método:** 4 agentes de inventário + síntese, leitura do código real (`arquivo:linha`), medição numa instância de produção real via MCP vault, e verificação manual dos pontos estruturais.
 > O REST aplica escopo de canal rigoroso ([authz.py:77-90](../server/authz.py#L77)); o WebSocket **não aplica nenhum**. `ConnectionManager.active` é uma `list[WebSocket]` sem identidade ([state.py:58](../server/state.py#L58)) e o `/ws` chega a **resolver o usuário do token e descartá-lo** (`kind, _user = …`, [websocket.py:27](../server/routes/websocket.py#L27)). Resultado: **42 eventos distintos** de **98 call sites** vão para todos os sockets logados — incluindo o texto integral de cada mensagem e a linha enriquecida da conversa (nome, telefone, preview, etiquetas, atributos do contato).
 >
 > **Como usar este plano**: ao executar cada fase, preencha o "Status de execução" dela ANTES de passar para a próxima — nunca avance deixando a anterior sem registro.
@@ -83,10 +83,10 @@ await ws_manager.connect(websocket)                                    # websock
 
 | Canal | Conversas | Quem NÃO é membro |
 |---|---|---|
-| Atendimento | 14.341 (95,6%) | ninguém |
-| RedesBrasil_bot | 570 | Mábia |
-| whatsapp_oficial_disparo | 47 | Mábia |
-| Avisos Curseduca | 25 | 7 dos 13 |
+| Atendimento (principal) | 14.341 (95,6%) | ninguém |
+| Telegram | 570 | 1 dos 13 |
+| WhatsApp oficial (disparo) | 47 | 1 dos 13 |
+| Avisos (integração externa) | 25 | 7 dos 13 |
 | Site | 4 | 12 dos 13 |
 
 5 dos 13 usuários são `admin` → veem tudo legitimamente (curto-circuito em [rbac_repo.py:76-77](../db/repositories/rbac_repo.py#L76)). O vazamento efetivo atinge **~599 conversas (4%)** e **8 operadores**.

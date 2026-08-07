@@ -847,9 +847,9 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 // not-yet-saved private_note.
                 const stateKey = cardStateKey(m, i);
                 const cardKey = m._localId || stateKey;
-                // Plano 63 F4: transcription/tool_call (e nota privada LONGA,
-                // ex.: a instrução que o `retornos` registra) are collapsed unless the
-                // user expanded THIS card. Derived in render (no effect) so there's
+                // Plano 63 F4: transcription/tool_call (e nota privada LONGA, ex.: a
+                // instrução que um plugin de automação registra) are collapsed unless
+                // the user expanded THIS card. Derived in render (no effect) so there's
                 // no flash/jump on open (G5); the card is controlled (G1).
                 const collapsed = isCollapsibleCard(m.role, m.content) && !expandedCards.has(stateKey);
                 return [dateSeparator, html`<${SystemMessageCard}

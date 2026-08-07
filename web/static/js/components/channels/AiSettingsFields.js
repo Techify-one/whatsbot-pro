@@ -43,7 +43,7 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
       </label>
 
       <!-- Atendente padrão para novas conversas (plano 71). SEMPRE visível — vale
-           mesmo com a IA do canal desligada (o consumidor Curseduca tem a IA off):
+           mesmo com a IA do canal desligada (o consumidor de integração externa tem a IA off):
            a conversa nova nasce atribuída a este humano e com a IA desligada. -->
       <div>
         <label class="block text-[12px] text-wa-secondary mb-1">Atendente padrão para novas conversas</label>

@@ -146,7 +146,7 @@ def test_channel_without_default_assignee_is_unchanged(build_app):
 # ── F4/F6 E2E: reuso preserva; reabertura "Não atribuída" reaplica (P2 revisado) ──
 
 def test_reuse_open_conversation_keeps_owner(build_app):
-    """Cenário Curseduca: uma 2ª dúvida do mesmo aluno chega com a conversa AINDA
+    """Cenário da plataforma externa: uma 2ª dúvida do mesmo aluno chega com a conversa AINDA
     ABERTA → ela é reusada (transition=None) e o dono persiste. O carimbo NÃO é
     reaplicado num reuse de conversa aberta (só no nascimento e na reabertura)."""
     built = build_app(["gowa"])
@@ -164,7 +164,7 @@ def test_reuse_open_conversation_keeps_owner(build_app):
 
 
 def test_reopen_reassigns_default_when_unassigned(build_app):
-    """P2 revisado (F6) — O FLUXO CURSEDUCA: a 1ª dúvida nasce atribuída ao atendente
+    """P2 revisado (F6) — O FLUXO DA PLATAFORMA EXTERNA: a 1ª dúvida nasce atribuída ao atendente
     padrão; o atendente fecha (o close limpa o dono, comportamento legado); a 2ª
     dúvida REABRE a mesma conversa, que voltaria "Não atribuída" — e agora é
     RE-ATRIBUÍDA ao atendente padrão do canal + IA off. É exatamente o caso que o
@@ -240,19 +240,19 @@ def test_bogus_assignee_value_coerces_to_none(build_app):
         assert conv["assignee_user_id"] is None, f"valor inválido {bogus!r} ⇒ sem dono"
 
 
-# ── Config REAL do Curseduca: master do canal OFF + atendente padrão ─────────
+# ── Config REAL de uma integração externa: master do canal OFF + atendente padrão ─────────
 
-def test_curseduca_config_channel_ai_off_plus_assignee(build_app):
-    """A config de produção do canal "Avisos Curseduca": master do canal
+def test_externa_config_channel_ai_off_plus_assignee(build_app):
+    """A config de produção dum canal de avisos de integração externa: master do canal
     (``ai_enabled``) DESLIGADO **e** atendente padrão setado. A conversa nasce
     atribuída ao humano + IA off + sem agente. (Regressão do placement do <select>:
     o campo tem de valer mesmo com a IA do canal desligada.)"""
     built = build_app(["gowa"])
     _set_global(built, True)
-    uid = _mk_user("p71_curseduca@test.com")
-    _mk_channel("p71_ch_curseduca", default_assignee_user_id=uid, ai_enabled=False)
+    uid = _mk_user("p71_externa@test.com")
+    _mk_channel("p71_ch_externa", default_assignee_user_id=uid, ai_enabled=False)
 
-    conv = _seed_conv(built.agent_handler, "5511971000050", "p71_ch_curseduca")
+    conv = _seed_conv(built.agent_handler, "5511971000050", "p71_ch_externa")
     assert conv["assignee_user_id"] == uid
     assert conv["ai_active"] == 0
     assert conv["active_agent_key"] is None

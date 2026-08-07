@@ -113,9 +113,10 @@ export const LONG_NOTE_CHARS = 180;
  *
  * Superconjunto de `isCollapsibleRole`: `transcription`/`tool_call` recolhem
  * sempre (ruído diagnóstico), e `private_note` recolhe **só quando é longa**
- * (> `LONG_NOTE_CHARS`). Nota longa costuma ser escrita por automação — ex.: o
- * plugin `retornos`, que registra a instrução INTEIRA mandada à IA — e ocupava
- * a tela inteira; nota curta de humano continua exatamente como antes (D1).
+ * (> `LONG_NOTE_CHARS`). Nota longa costuma ser escrita por automação — um plugin
+ * de follow-up, por exemplo, registra numa nota a instrução INTEIRA mandada à IA
+ * — e ocupava a tela inteira; nota curta de humano continua exatamente como
+ * antes (D1).
  *
  * @param {string} role
  * @param {string|null|undefined} content
