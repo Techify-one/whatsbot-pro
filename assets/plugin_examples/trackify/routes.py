@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from db.repositories import contact_repo
@@ -554,3 +554,29 @@ async def consent_status():
     campo no CDP (existe? está ativo? qual o tipo?)."""
     async with _http() as http:
         return {"ok": True, "data": await consent.status(http)}
+
+
+@router.post("/consent/retry", dependencies=[plugin_permission("manage")])
+async def consent_retry(body: dict):
+    """Reentrega UM clique que não chegou ao Trackify.
+
+    A gravação acontece na hora do clique e não tem fila: sem esta rota, um
+    pedido que falhou porque o CDP estava fora do ar, porque o modo seco estava
+    ligado, ou porque havia duplicata a mesclar, ficava perdido para sempre — a
+    única saída era pedir ao cliente que clicasse de novo.
+
+    Não recebe o valor a gravar: o que a ação escreve continua vindo da
+    configuração dela. Isto é um "tentar de novo", não uma escrita manual.
+    """
+    try:
+        contact_id = int(body.get("contact_id") or 0)
+    except (TypeError, ValueError):
+        contact_id = 0
+    action_id = str(body.get("action") or "").strip()
+    if not contact_id or not action_id:
+        raise HTTPException(status_code=422, detail="informe contact_id e action")
+
+    desfecho = await consent.write_now(contact_id, action_id)
+    audit("trackify", "consent.retry",
+          after={"contact_id": contact_id, "action": action_id, "outcome": desfecho})
+    return {"ok": True, "data": {"outcome": desfecho}}

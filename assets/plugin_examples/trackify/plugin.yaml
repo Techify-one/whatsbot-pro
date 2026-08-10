@@ -1,6 +1,6 @@
 id: trackify
 name: Trackify (Jornada do cliente)
-version: "3.1.0"
+version: "3.2.0"
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Mostra a JORNADA do contato no Trackify (o CDP do Nexus) sem sair do atendimento:

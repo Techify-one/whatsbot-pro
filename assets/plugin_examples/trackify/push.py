@@ -267,15 +267,52 @@ async def _linked_id(http, phone: str, contact: dict | None = None) -> str:
     cached = await asyncio.to_thread(_cache)
     if cached:
         return cached
+    tk_id, _motivo = await _resolver_agora(http, phone, contact)
+    return tk_id
+
+
+async def linked_id_ex(http, phone: str, contact: dict | None = None) -> tuple[str, str]:
+    """Como :func:`_linked_id`, mas **dizendo por que** não achou.
+
+    ``(tk_id, motivo)`` com ``motivo ∈ {"ok", "nenhum", "ambiguo", "erro_leitura"}``.
+
+    Existe porque os três "não achei" exigem consertos OPOSTOS — criar o
+    cadastro, mesclar duplicatas, ou apenas tentar de novo — e colapsá-los num
+    ``""`` deixava o operador sem saber qual era o caso. O cache continua sendo
+    a primeira parada: um vínculo já resolvido é ``ok`` sem tocar na rede.
+    """
+    import asyncio
+
+    if not phone:
+        return "", "nenhum"
+
+    def _cache() -> str:
+        with make_plugin_db() as conn:
+            row = conn.execute(text(
+                "SELECT trackify_contact_id, resolved_at FROM plugin_trackify_identity "
+                "WHERE phone = :p"), {"p": phone}).mappings().first()
+        if row and row["trackify_contact_id"] and (
+                _now() - float(row["resolved_at"] or 0) <= IDENTITY_TTL):
+            return str(row["trackify_contact_id"])
+        return ""
+
+    cached = await asyncio.to_thread(_cache)
+    if cached:
+        return cached, "ok"
     return await _resolver_agora(http, phone, contact)
 
 
-async def _resolver_agora(http, phone: str, contact: dict | None) -> str:
-    """Procura o cadastro no CDP e grava o vínculo. ``""`` quando não achou.
+async def _resolver_agora(http, phone: str, contact: dict | None) -> tuple[str, str]:
+    """Procura o cadastro no CDP e grava o vínculo. ``(tk_id, motivo)``.
 
-    Grava SÓ com acerto único. Mais de um cadastro casando é ambiguidade real
-    (medido: números com 2 cadastros) e escolher em silêncio colaria os dados de
-    uma pessoa no cadastro de outra.
+    Grava só com acerto único **dentro do identificador de maior prioridade** —
+    a regra mora em :func:`identity.pick_unique`, junto do porquê. Ambiguidade
+    real continua recusada: escolher em silêncio colaria os dados de uma pessoa
+    no cadastro de outra.
+
+    ``erro_leitura`` é separado de ``nenhum`` de propósito: um 429 do teto de
+    requisições, ou um 401 de escopo, viravam "este contato não existe no CDP" e
+    condenavam o pedido sem retry — o erro mais caro desta feature.
     """
     import asyncio
 
@@ -285,13 +322,15 @@ async def _resolver_agora(http, phone: str, contact: dict | None) -> str:
     try:
         c = contact or await asyncio.to_thread(contact_repo.get_by_phone, phone)
         if not c:
-            return ""
-        matches = await identity.resolve_mapped(
+            return "", "nenhum"
+        res = await identity.resolve_mapped_ex(
             http, phone=phone, extras=field_map.identifier_hints(c),
             contact_type=c.get("contact_type") or "whatsapp")
-        if len(matches) != 1:
-            return ""
-        m = matches[0]
+        if not res.ok:
+            return "", "erro_leitura"
+        m, motivo = identity.pick_unique(res.matches)
+        if m is None:
+            return "", motivo
         with make_plugin_db() as conn:
             conn.execute(text(
                 "INSERT INTO plugin_trackify_identity "
@@ -305,10 +344,10 @@ async def _resolver_agora(http, phone: str, contact: dict | None) -> str:
                 {"p": phone, "cid": m.contact_id, "slug": m.slug,
                  "val": m.exact_value, "ts": _now()})
         logger.info("trackify: contato %s vinculado por '%s'", phone, m.slug)
-        return str(m.contact_id)
+        return str(m.contact_id), "ok"
     except Exception:  # noqa: BLE001 — sem vínculo o contato só fica fora do escopo
         logger.debug("trackify: falha ao resolver identidade sob demanda", exc_info=True)
-        return ""
+        return "", "erro_leitura"
 
 
 # ── Fila ─────────────────────────────────────────────────────────────────

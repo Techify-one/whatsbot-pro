@@ -37,6 +37,11 @@ DEFAULTS: dict = {
     "consent_field_slug": "optout_marketing",
     "consent_optout_value": "sim",
     "consent_optout_payload": "PARAR_PROMOS",
+    # Cadastro automático no CDP (espelho de settings.Settings). Nasce LIGADO:
+    # sem ele o descadastro de quem ainda não está no Trackify é registrado e
+    # descartado, que era o bug que motivou a feature.
+    "cdp_autocadastro_enabled": True,
+    "cdp_autocadastro_dry_run": False,
     # Não declarada em settings.py de propósito (segredo, ver docstring de lá).
     # É a ÚNICA credencial do plugin: vale para ler, escrever e ingerir, conforme
     # os escopos concedidos na tela do Trackify.

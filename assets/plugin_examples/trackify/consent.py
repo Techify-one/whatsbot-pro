@@ -31,7 +31,7 @@ from sqlalchemy import text
 
 from plugins.context import audit, make_plugin_db
 
-from . import _config, actions, consent_match, field_map, push, writer
+from . import _config, actions, consent_match, enroll, field_map, push, writer
 from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.consent")
@@ -337,17 +337,37 @@ async def _write_once(client, contact_id: int, action_id: str) -> tuple[str, str
     # com acerto ÚNICO" e o "nunca cria contato no CDP" já vivem lá. Uma segunda
     # cópia divergiria e passaria a colar consentimento no cadastro errado.
     try:
-        tk_id = await push._linked_id(client, str(contact.get("phone") or ""), contact)
+        tk_id, porque = await push.linked_id_ex(
+            client, str(contact.get("phone") or ""), contact)
     except Exception as e:  # noqa: BLE001
         return "read_failed", f"resolução de identidade falhou: {type(e).__name__}", True
 
-    if not tk_id:
-        # Sem vínculo não há o que gravar, e tentar de novo daqui a 8s não vai
-        # criar um. Fica registrado para o operador vincular ou marcar à mão.
-        motivo = ("contato não vinculado a um cadastro no Trackify — vincule ou "
-                  "marque o descadastro à mão no CDP")
+    if not tk_id and porque == "erro_leitura":
+        # NÃO é "este contato não existe": é "não consegui perguntar" (429 do
+        # teto, chave sem escopo, rede). Retentar é exatamente o certo, e era o
+        # que a versão anterior não fazia — o pedido morria como se o contato
+        # não existisse.
+        motivo = "não foi possível consultar a identidade no Trackify"
         await asyncio.to_thread(_record_error, contact_id, action_id, motivo)
-        return "unlinked", motivo, False
+        return "read_failed", motivo, True
+
+    if not tk_id and porque == "ambiguo":
+        # Dois cadastros casando pelo MESMO identificador de topo. Não
+        # escolhemos: gravar no errado cola o consentimento de uma pessoa na
+        # ficha de outra, e isso não tem desfazer (contato do CDP só tem soft
+        # delete). O operador mescla no Trackify e reprocessa.
+        motivo = await enroll.describe_ambiguity(client, contact)
+        await asyncio.to_thread(_record_error, contact_id, action_id, motivo)
+        return "ambiguous", motivo, False
+
+    if not tk_id:
+        # Zero casamentos: o contato simplesmente não existe no CDP. Cadastrar
+        # aqui é o que faz o descadastro de um cliente novo valer alguma coisa —
+        # antes o pedido dele era registrado e descartado.
+        tk_id, motivo = await enroll.create_for_contact(client, contact)
+        if not tk_id:
+            await asyncio.to_thread(_record_error, contact_id, action_id, motivo)
+            return "unlinked", motivo, False
 
     # O que a ação grava. `None` = configuração pela metade (campo ou valor em
     # branco): registrar o motivo é melhor que um PUT que apagaria o campo.
@@ -475,10 +495,14 @@ def pending_errors(limit: int = 20) -> list[dict]:
     try:
         with make_plugin_db() as conn:
             rows = conn.execute(text(
-                "SELECT contact_id, action, last_error, last_attempt_at, clicked_at "
-                "FROM plugin_trackify_consent_state "
-                "WHERE COALESCE(last_error, '') <> '' AND written_at IS NULL "
-                "ORDER BY updated_at DESC LIMIT :lim"),
+                "SELECT s.contact_id, s.action, s.last_error, s.last_attempt_at, "
+                "       s.clicked_at, s.clicks, "
+                "       COALESCE(c.name, '') AS contact_name, "
+                "       COALESCE(c.phone, '') AS contact_phone "
+                "  FROM plugin_trackify_consent_state s "
+                "  LEFT JOIN contacts c ON c.id = s.contact_id "
+                " WHERE COALESCE(s.last_error, '') <> '' AND s.written_at IS NULL "
+                " ORDER BY s.updated_at DESC LIMIT :lim"),
                 {"lim": max(1, min(int(limit or 20), 100))}).mappings().all()
     except Exception:  # noqa: BLE001
         return []
@@ -586,6 +610,11 @@ async def status(client) -> dict:
             "code_conflicts": sorted(c for c, ids in snap.conflicts.items()
                                      if acao.id in ids),
             "config_errors": acao.errors(),
+            # Os cliques que não chegaram ao CDP, com o motivo de cada um. A
+            # tela SEMPRE leu esta chave; até aqui o servidor agrupava os erros
+            # em `por_acao` e não os enviava, então o painel de diagnóstico
+            # nunca renderizava e o operador via "o clique sumiu" sem motivo.
+            "errors": por_acao.get(acao.id, []),
             # Guarda cruzada com a aba "Campos do contato": o mesmo slug mapeado
             # dos dois lados ligaria o ``pull``, que traria o valor antigo do CDP
             # e poderia DESFAZER o que esta ação grava.

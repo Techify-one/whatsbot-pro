@@ -209,6 +209,26 @@ async def changelog(client, *, since: float = 0.0, since_id: str = "",
 
 # ── Escrita ──────────────────────────────────────────────────────────────
 
+async def create_contact(client, field_values: dict, *, status: str = "lead") -> Result:
+    """Cria um cadastro no CDP com ``{slug: valor}``. ``data.id`` traz o id novo.
+
+    Só é chamada quando a resolução de identidade voltou **zero** casamentos —
+    nunca em cima de ambiguidade. O 409 do outro lado (``validateUniqueness``) é
+    a rede de segurança final: se outro cadastro já é dono de um dos
+    identificadores, nada é criado e quem chama resolve de novo em vez de forkar.
+
+    Contato no Trackify tem **apenas soft delete**: um cadastro criado por engano
+    fica lá para sempre. Por isso quem chama filtra antes (grupo, id de sessão do
+    widget, tipo de contato fora do escopo) e por isso existe o modo seco.
+    """
+    valores = {str(k): str(v) for k, v in (field_values or {}).items() if str(v or "").strip()}
+    if not valores:
+        return Result(BLOCKED, error="sem identificador para criar o cadastro")
+    return await _request(client, "POST", "/contacts",
+                          json={"status": status, "fieldValues": valores},
+                          timeout=WRITE_TIMEOUT)
+
+
 async def put_contact(client, trackify_contact_id: str, field_values: dict) -> Result:
     """Grava ``{slug: valor}``. ``""`` APAGA o campo, chave omitida não é tocada.
 

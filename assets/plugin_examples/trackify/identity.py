@@ -96,14 +96,28 @@ def candidates_for(slug: str, value: str | None) -> list[str]:
 
 # ── Consulta (rede) ──────────────────────────────────────────────────────
 
-async def resolve_candidates(http, candidatos: dict) -> list[Match]:
+@dataclass(frozen=True)
+class Resolution:
+    """Resultado de uma consulta de identidade.
+
+    ``ok=False`` significa "não consegui PERGUNTAR" (429, 401, rede, resposta
+    ilegível) — que é diferente de ``ok=True`` com ``matches=[]``, "perguntei e
+    este contato não existe no CDP". Colapsar os dois num ``[]`` foi o que fazia
+    um 429 condenar um descadastro para sempre.
+    """
+
+    ok: bool
+    matches: list[Match]
+    error: str = ""
+
+
+async def resolve_candidates_ex(http, candidatos: dict) -> Resolution:
     """Resolve ``{slug: valor}`` numa chamada só, na prioridade do CDP.
 
     Manda TODOS os identificadores de uma vez em vez de um por vez: com SQL local
     cada tentativa custava 0,085 ms, mas agora cada uma seria uma ida à rede. O
     servidor devolve os casamentos já ordenados por prioridade e com um contato
-    por linha, que é a mesma semântica do laço antigo — parar no primeiro
-    identificador que achar alguém.
+    por linha; quem transforma essa lista numa decisão é :func:`pick_unique`.
     """
     payload: dict[str, list[str]] = {}
     for slug, valor in (candidatos or {}).items():
@@ -111,22 +125,70 @@ async def resolve_candidates(http, candidatos: dict) -> list[Match]:
         if cands:
             payload[slug] = cands
     if not payload:
-        return []
+        # Não há o que perguntar: é uma resposta legítima de "não existe", não
+        # uma falha de leitura.
+        return Resolution(True, [])
 
     res = await tk_client.resolve(http, payload)
     if not res.ok:
         logger.debug("trackify: resolve recusado (%s)", res.error)
-        return []
+        return Resolution(False, [], res.error or "resolve recusado")
 
     matches = _matches_from(res.data)
     if matches:
-        return matches
+        return Resolution(True, matches)
 
     # Nada no exato: repete pedindo o fallback tolerante a máscara. Só aqui —
     # é caminho frio dos dois lados (medido: 6 de 10.910 valores de `whatsapp`
     # têm caractere fora de [0-9+]).
     res = await tk_client.resolve(http, payload, digits_fallback=True)
-    return _matches_from(res.data) if res.ok else []
+    if not res.ok:
+        return Resolution(False, [], res.error or "resolve recusado")
+    return Resolution(True, _matches_from(res.data))
+
+
+async def resolve_candidates(http, candidatos: dict) -> list[Match]:
+    """Compatibilidade: só os casamentos, sem o motivo. Prefira o ``_ex``."""
+    return (await resolve_candidates_ex(http, candidatos)).matches
+
+
+def pick_unique(matches: list[Match]) -> tuple[Match | None, str]:
+    """O cadastro a usar, ou o motivo de não haver um. PURO, sem rede.
+
+    Devolve ``(Match|None, motivo)`` com ``motivo ∈ {"ok", "nenhum", "ambiguo"}``.
+
+    ⚠️ **O empate só conta dentro do identificador de MAIOR prioridade.** A regra
+    anterior era ``len(matches) != 1`` — "qualquer segundo casamento é
+    ambiguidade" — e ela discordava de duas fontes ao mesmo tempo:
+
+    * do docstring de :func:`resolve_candidates` logo acima ("parar no primeiro
+      identificador que achar alguém");
+    * do **próprio CDP**, cuja ingestão percorre os identificadores em ordem de
+      prioridade e para no primeiro que acha dono (``pipeline.ts``), e cujo
+      ``/contacts/resolve`` já devolve a lista ordenada por
+      ``identifier_priority`` com um contato por linha (``contacts.service.ts``).
+
+    O efeito medido: um contato cujo e-mail (prioridade 10) apontava para UM
+    cadastro, mas cujo CPF (prioridade 30) estava duplicado em dois, era tratado
+    como ambíguo e o descadastro dele nunca era gravado — embora o CDP e o
+    WhatsBot concordassem sobre quem ele era. Duplicata num identificador FRACO
+    não pode anular a resposta do identificador FORTE.
+
+    Ambiguidade de verdade — dois cadastros distintos casando pelo MESMO
+    identificador de topo — continua sendo recusada: escolher em silêncio
+    colaria o consentimento de uma pessoa no cadastro de outra.
+    """
+    if not matches:
+        return None, "nenhum"
+
+    topo = matches[0]
+    # A lista já vem ordenada por prioridade; comparamos pelo slug porque é o que
+    # identifica o identificador, e não pelo número (que pode vir nulo dos dois
+    # lados e faria dois campos sem prioridade parecerem o mesmo).
+    empatados = {m.contact_id for m in matches if m.slug == topo.slug}
+    if len(empatados) > 1:
+        return None, "ambiguo"
+    return topo, "ok"
 
 
 def _matches_from(data) -> list[Match]:
@@ -146,15 +208,9 @@ def _matches_from(data) -> list[Match]:
     return out
 
 
-async def resolve_mapped(http, *, phone: str | None, extras: dict | None = None,
-                         contact_type: str = "whatsapp") -> list[Match]:
-    """Tenta o TELEFONE e todo campo conectado que seja identificador no CDP.
-
-    ``extras`` é ``{slug_no_trackify: valor_no_whatsbot}``, montado a partir dos
-    mapeamentos ativos (ver ``field_map.identifier_hints``). Assim, conectar um
-    campo na tela passa a valer também para ENCONTRAR o cadastro, e não só para
-    copiar o valor depois — que era a pergunta natural de quem configura.
-    """
+def mapped_candidates(*, phone: str | None, extras: dict | None = None,
+                      contact_type: str = "whatsapp") -> dict[str, str]:
+    """``{slug: valor}`` a consultar: o telefone e os campos conectados. PURO."""
     candidatos: dict[str, str] = {}
     for slug, valor in (extras or {}).items():
         if slug and str(valor or "").strip():
@@ -165,8 +221,28 @@ async def resolve_mapped(http, *, phone: str | None, extras: dict | None = None,
         candidatos.setdefault(SLUG_TELEGRAM, (phone or "").strip())
     elif phone:
         candidatos.setdefault(SLUG_WHATSAPP, phone.strip())
+    return candidatos
 
-    return await resolve_candidates(http, candidatos)
+
+async def resolve_mapped_ex(http, *, phone: str | None, extras: dict | None = None,
+                            contact_type: str = "whatsapp") -> Resolution:
+    """Tenta o TELEFONE e todo campo conectado que seja identificador no CDP.
+
+    ``extras`` é ``{slug_no_trackify: valor_no_whatsbot}``, montado a partir dos
+    mapeamentos ativos (ver ``field_map.identifier_hints``). Assim, conectar um
+    campo na tela passa a valer também para ENCONTRAR o cadastro, e não só para
+    copiar o valor depois — que era a pergunta natural de quem configura.
+    """
+    return await resolve_candidates_ex(
+        http, mapped_candidates(phone=phone, extras=extras,
+                                contact_type=contact_type))
+
+
+async def resolve_mapped(http, *, phone: str | None, extras: dict | None = None,
+                         contact_type: str = "whatsapp") -> list[Match]:
+    """Compatibilidade: só os casamentos. Prefira :func:`resolve_mapped_ex`."""
+    return (await resolve_mapped_ex(http, phone=phone, extras=extras,
+                                    contact_type=contact_type)).matches
 
 
 async def resolve(http, *, phone: str | None = None, email: str | None = None,

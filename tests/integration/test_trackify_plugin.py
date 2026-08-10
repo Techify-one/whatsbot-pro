@@ -2612,8 +2612,9 @@ def test_sincronizacao_vincula_o_contato_sob_demanda(plugin_app, monkeypatch):
                      {"p": "5511922222222"})
 
     async def _achou(http, **k):
-        return [identity.Match("uuid-novo", "cpf", "05622438101", "variant")]
-    monkeypatch.setattr(identity, "resolve_mapped", _achou)
+        return identity.Resolution(True, [
+            identity.Match("uuid-novo", "cpf", "05622438101", "variant")])
+    monkeypatch.setattr(identity, "resolve_mapped_ex", _achou)
     _cdp_tem(monkeypatch, push)
 
     plano = _run(push.plan_for_contact(_FakeHttp(), int(c["id"])))
@@ -2636,12 +2637,115 @@ def test_vinculo_ambiguo_nunca_e_escolhido_em_silencio(plugin_app, monkeypatch):
     from db.repositories import contact_repo
     c = contact_repo.get_or_create("5511933333333")
     async def _ambiguo(http, **k):
-        return [identity.Match("uuid-a", "cpf", "1", "variant"),
-                identity.Match("uuid-b", "cpf", "1", "variant")]
-    monkeypatch.setattr(identity, "resolve_mapped", _ambiguo)
+        return identity.Resolution(True, [
+            identity.Match("uuid-a", "cpf", "1", "variant"),
+            identity.Match("uuid-b", "cpf", "1", "variant")])
+    monkeypatch.setattr(identity, "resolve_mapped_ex", _ambiguo)
 
     plano = _run(push.plan_for_contact(_FakeHttp(), int(c["id"])))
     assert "não vinculado" in plano.skip
+
+
+def test_duplicata_em_identificador_fraco_nao_anula_o_forte(plugin_app, monkeypatch):
+    """O bug relatado, com os dados medidos em produção.
+
+    O contato tinha e-mail (prioridade 10) apontando para UM cadastro e CPF
+    (prioridade 30) duplicado em dois. A regra anterior — "qualquer segundo
+    casamento é ambiguidade" — desistia, e o descadastro dele nunca era gravado,
+    embora o CDP e o WhatsBot concordassem sobre quem ele era. O CDP resolve
+    identidade parando no primeiro identificador que acha dono; aqui é igual.
+    """
+    built = plugin_app("trackify", settings_overrides=_field_sync_on())
+    push = _load("push")
+    identity = _load("identity")
+    _mapeia(built.client, "cpf", "cpf")
+
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5564934674521")
+
+    async def _misto(http, **k):
+        return identity.Resolution(True, [
+            identity.Match("uuid-email", "email", "t@e.com", "variant"),
+            identity.Match("uuid-cpf-a", "cpf", "71148138137", "variant"),
+            identity.Match("uuid-cpf-b", "cpf", "71148138137", "variant"),
+        ])
+    monkeypatch.setattr(identity, "resolve_mapped_ex", _misto)
+    _cdp_tem(monkeypatch, push)
+
+    tk_id, motivo = _run(push.linked_id_ex(_FakeHttp(), "5564934674521", dict(c)))
+    assert (tk_id, motivo) == ("uuid-email", "ok")
+
+
+def test_falha_de_leitura_nao_e_confundida_com_contato_inexistente(plugin_app,
+                                                                   monkeypatch):
+    """Um 429 do teto de requisições virava "não achei" e condenava o pedido."""
+    plugin_app("trackify", settings_overrides=_field_sync_on())
+    push, identity = _load("push"), _load("identity")
+
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5511944444444")
+
+    async def _recusado(http, **k):
+        return identity.Resolution(False, [], "limite de requisições")
+    monkeypatch.setattr(identity, "resolve_mapped_ex", _recusado)
+
+    tk_id, motivo = _run(push.linked_id_ex(_FakeHttp(), "5511944444444", dict(c)))
+    assert (tk_id, motivo) == ("", "erro_leitura")
+
+
+def test_cadastro_automatico_nunca_cria_a_partir_de_lixo(plugin_app, monkeypatch):
+    """Contato no Trackify tem só exclusão lógica: o que for criado fica lá.
+
+    Grupo, id de sessão do widget do site e tipo de contato fora do escopo do
+    espelho nunca podem virar cadastro — a elegibilidade é a MESMA do espelho de
+    eventos, de propósito.
+    """
+    plugin_app("trackify", settings_overrides=_consent_on())
+    enroll = _load("enroll")
+
+    async def _nunca(client, field_values, **k):
+        raise AssertionError(f"não podia criar cadastro com {field_values}")
+    monkeypatch.setattr(_load("client"), "create_contact", _nunca)
+
+    recusados = [
+        {"phone": "120363012345678@g.us", "is_group": 1, "contact_type": "whatsapp"},
+        {"phone": "wsess_f0qD7g7e3TmKcZwG", "is_group": 0, "contact_type": "whatsapp"},
+        {"phone": "5511955555555", "is_group": 0, "contact_type": "website"},
+        {"phone": "", "is_group": 0, "contact_type": "whatsapp"},
+    ]
+    for contato in recusados:
+        tk_id, motivo = _run(enroll.create_for_contact(_FakeHttp(), contato))
+        assert tk_id == "", f"criou cadastro para {contato}"
+        assert motivo, "recusa sem motivo não aparece na tela"
+
+
+def test_status_devolve_os_cliques_que_nao_chegaram(plugin_app, monkeypatch):
+    """A tela SEMPRE leu `acao.errors`; o servidor agrupava os erros e não os
+    enviava. O painel de diagnóstico nunca renderizava, e o operador via o
+    clique sumir sem motivo — que é o que torna esta feature indepurável."""
+    plugin_app("trackify", settings_overrides=_consent_on(
+        **{"plugin.trackify.consent_dry_run": False}))
+    consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
+    consent.reset_for_tests()
+
+    cid = _marcar(consent, monkeypatch, "5511900000914", _canal("consent_cloud_g"))
+    _linkado(monkeypatch, push, "", motivo="nenhum")
+
+    async def _recusa(http, contact):
+        return "", "motivo que o operador precisa ler"
+    monkeypatch.setattr(enroll, "create_for_contact", _recusa)
+    _run(consent._write_once(_FakeHttp(), cid, OPTOUT))
+
+    async def _campos(client):
+        return _load("client").Result("ok", 200, data=[])
+    monkeypatch.setattr(_load("client"), "custom_fields", _campos)
+
+    data = _run(consent.status(_FakeHttp()))
+    linha = next(a for a in data["actions"] if a["id"] == OPTOUT)
+    erro = next(e for e in linha["errors"] if int(e["contact_id"]) == cid)
+    assert erro["last_error"] == "motivo que o operador precisa ler"
+    # Sem telefone/nome a tabela mostraria só "#12" e o operador não saberia de quem é.
+    assert erro["contact_phone"] == "5511900000914"
 
 
 def test_candidatos_incluem_a_forma_nacional_sem_o_codigo_do_pais(phone):
@@ -2955,10 +3059,18 @@ def _grava_fake(monkeypatch, consent):
     return gravados
 
 
-def _linkado(monkeypatch, push, tk_id="uuid-cdp-consent"):
+def _linkado(monkeypatch, push, tk_id="uuid-cdp-consent", motivo=None):
+    """Fixa o vínculo do contato no CDP.
+
+    ``motivo`` só importa quando ``tk_id`` é vazio: é ele que diz se o contato
+    não existe (``nenhum``), se há duplicata a mesclar (``ambiguo``) ou se a
+    consulta falhou (``erro_leitura``) — três desfechos com consertos opostos.
+    """
+    porque = motivo or ("ok" if tk_id else "nenhum")
+
     async def _fake(client, phone, contact=None):
-        return tk_id
-    monkeypatch.setattr(push, "_linked_id", _fake)
+        return tk_id, porque
+    monkeypatch.setattr(push, "linked_id_ex", _fake)
 
 
 def test_migracao_004_apaga_as_tabelas_de_adivinhacao(plugin_app):
@@ -3383,28 +3495,105 @@ def test_estado_ja_gravado_nao_gasta_uma_chamada(plugin_app, monkeypatch):
     assert client.calls == []
 
 
-def test_contato_nao_vinculado_nao_e_retentado_e_nunca_cria_cadastro(plugin_app,
-                                                                     monkeypatch):
-    """Sem vínculo não há onde gravar, e tentar de novo em 8s não vai criar um.
+def test_contato_sem_cadastro_no_cdp_e_criado_antes_de_gravar(plugin_app, monkeypatch):
+    """Zero casamentos = o contato não existe no CDP. Antes o pedido dele era
+    registrado e DESCARTADO; agora o cadastro é criado e o descadastro grava.
 
-    Sem fila, este é o desfecho que MAIS aparece na prática — por isso vira erro
-    visível na aba com o texto do conserto, e não uma retentativa infinita.
+    É o caminho que faz o descadastro de um cliente novo valer alguma coisa —
+    quem clica "não quero mais receber" raramente já está no CRM.
     """
     plugin_app("trackify", settings_overrides=_consent_on(
         **{"plugin.trackify.consent_dry_run": False}))
-    consent, push = _load("consent"), _load("push")
+    consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
     consent.reset_for_tests()
 
     cid = _marcar(consent, monkeypatch, "5511900000909", _canal("consent_cloud_g"))
-    _linkado(monkeypatch, push, "")           # sem vínculo no CDP
+    _linkado(monkeypatch, push, "", motivo="nenhum")
+
+    criados = []
+
+    async def _cria(http, contact):
+        criados.append(contact.get("phone"))
+        return "uuid-recem-criado", ""
+    monkeypatch.setattr(enroll, "create_for_contact", _cria)
+
+    client = _FakeClient(_FakeResp(200, _cdp_contact(optout_marketing="sim")))
+    desfecho, _, repetir = _run(consent._write_once(client, cid, OPTOUT))
+
+    assert (desfecho, repetir) == ("sent", False)
+    assert criados == ["5511900000909"]
+    assert consent.get_state(cid, OPTOUT)["written_value"] == "sim"
+
+
+def test_cadastro_recusado_vira_erro_acionavel_e_nao_e_retentado(plugin_app,
+                                                                 monkeypatch):
+    """Quando nem o cadastro dá certo, o pedido vira erro VISÍVEL na aba com o
+    texto do conserto — não uma retentativa infinita contra o CRM do cliente."""
+    plugin_app("trackify", settings_overrides=_consent_on(
+        **{"plugin.trackify.consent_dry_run": False}))
+    consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
+    consent.reset_for_tests()
+
+    cid = _marcar(consent, monkeypatch, "5511900000911", _canal("consent_cloud_g"))
+    _linkado(monkeypatch, push, "", motivo="nenhum")
+
+    async def _recusa(http, contact):
+        return "", "não foi possível cadastrar no Trackify: sem telefone"
+    monkeypatch.setattr(enroll, "create_for_contact", _recusa)
 
     desfecho, _, repetir = _run(consent._write_once(_FakeHttp(), cid, OPTOUT))
     assert (desfecho, repetir) == ("unlinked", False)
 
     estado = consent.get_state(cid, OPTOUT)
-    assert "não vinculado" in estado["last_error"]
+    assert "cadastrar no Trackify" in estado["last_error"]
     assert estado["written_value"] is None
     assert any(int(r["contact_id"]) == cid for r in consent.pending_errors())
+
+
+def test_ambiguidade_no_cdp_nao_cria_um_terceiro_cadastro(plugin_app, monkeypatch):
+    """Duplicata no CDP precisa de MESCLAGEM, não de mais um cadastro.
+
+    Criar aqui produziria um terceiro duplicado em cima de dois que já esperam
+    conserto — e escolher um dos dois colaria o consentimento na ficha errada.
+    """
+    plugin_app("trackify", settings_overrides=_consent_on(
+        **{"plugin.trackify.consent_dry_run": False}))
+    consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
+    consent.reset_for_tests()
+
+    cid = _marcar(consent, monkeypatch, "5511900000912", _canal("consent_cloud_g"))
+    _linkado(monkeypatch, push, "", motivo="ambiguo")
+
+    async def _nunca(http, contact):
+        raise AssertionError("ambiguidade não pode virar cadastro novo")
+    monkeypatch.setattr(enroll, "create_for_contact", _nunca)
+
+    async def _descreve(http, contact):
+        return "mais de um cadastro no Trackify casa com este contato"
+    monkeypatch.setattr(enroll, "describe_ambiguity", _descreve)
+
+    desfecho, _, repetir = _run(consent._write_once(_FakeHttp(), cid, OPTOUT))
+    assert (desfecho, repetir) == ("ambiguous", False)
+    assert "mais de um cadastro" in consent.get_state(cid, OPTOUT)["last_error"]
+
+
+def test_falha_de_leitura_da_identidade_e_retentada(plugin_app, monkeypatch):
+    """429 do teto de requisições e 401 de escopo NÃO são "este contato não
+    existe". Antes viravam ``unlinked`` permanente e condenavam o pedido."""
+    plugin_app("trackify", settings_overrides=_consent_on(
+        **{"plugin.trackify.consent_dry_run": False}))
+    consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
+    consent.reset_for_tests()
+
+    cid = _marcar(consent, monkeypatch, "5511900000913", _canal("consent_cloud_g"))
+    _linkado(monkeypatch, push, "", motivo="erro_leitura")
+
+    async def _nunca(http, contact):
+        raise AssertionError("falha de leitura não pode virar cadastro novo")
+    monkeypatch.setattr(enroll, "create_for_contact", _nunca)
+
+    desfecho, _, repetir = _run(consent._write_once(_FakeHttp(), cid, OPTOUT))
+    assert (desfecho, repetir) == ("read_failed", True)
 
 
 def test_slug_ignorado_pelo_cdp_vira_erro_acionavel(plugin_app, monkeypatch):

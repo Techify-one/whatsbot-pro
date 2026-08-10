@@ -18,7 +18,7 @@ import time
 
 import httpx
 
-from . import _config, consent, dispatcher, pull, push, reconcile
+from . import _config, consent, dispatcher, enroll, pull, push, reconcile
 from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.lifecycle")
@@ -232,6 +232,36 @@ async def _reconcile_forever(client: httpx.AsyncClient) -> None:
         await asyncio.sleep(espera)
 
 
+async def _enroll_loop(ctx) -> None:
+    """Cadastra no CDP os contatos que ainda não têm cadastro lá.
+
+    Sobe com atraso maior que a conferência: é a task menos urgente das cinco (o
+    caminho quente do clique já cadastra sob demanda) e é a que mais tem trabalho
+    a fazer no primeiro boot, quando percorre a base inteira. Deixá-la disputar o
+    balde de 30/min logo no início atrasaria a sincronização que o operador está
+    olhando na tela.
+    """
+    await asyncio.sleep(180.0)
+    async with httpx.AsyncClient(timeout=tk_client.WRITE_TIMEOUT) as client:
+        while True:
+            resumo = {}
+            try:
+                resumo = await enroll.cycle(client)
+                if resumo.get("cadastrados"):
+                    logger.info("trackify: cadastro automático — %s criado(s), "
+                                "%s pulado(s), %s ambíguo(s)",
+                                resumo["cadastrados"], resumo["pulados"],
+                                resumo["ambiguos"])
+            except Exception:  # noqa: BLE001 — o laço NUNCA morre (ver docstring)
+                logger.warning("trackify: ciclo de cadastro automático falhou",
+                               exc_info=True)
+            cool = push.cooldown_remaining()
+            # Achou trabalho ⇒ volta logo (o backfill anda em passagens curtas);
+            # base em dia ⇒ espera um minuto, que é a cadência de "chegou contato
+            # novo" sem custo perceptível.
+            await asyncio.sleep(max(cool, TICK_BUSY if resumo.get("vistos") else 60.0))
+
+
 def _limpar_segredos_legados() -> None:
     """Apaga do banco a senha da conta de serviço e o DSN do CDP.
 
@@ -274,6 +304,8 @@ def setup(ctx) -> None:
         ctx.spawn_task("fieldpull", lambda: _pull_loop(ctx),
                        policy=RestartPolicy.PERMANENT)
         ctx.spawn_task("fieldreconcile", lambda: _reconcile_loop(ctx),
+                       policy=RestartPolicy.PERMANENT)
+        ctx.spawn_task("enroll", lambda: _enroll_loop(ctx),
                        policy=RestartPolicy.PERMANENT)
         # Não há task de consentimento: desde a 3.0.0 o clique é gravado direto
         # numa task própria disparada pelo handler (ver ``consent.write_now``).

@@ -82,7 +82,7 @@ function Geral({ status, settings, onSaveSettings, busy }) {
   return html`
     <${Card} title="Descadastro por botão"
       hint=${'Um clique de botão num canal de WhatsApp oficial vira uma ação no '
-             + 'cadastro do contato no Trackify. Nunca cria contato lá.'}>
+             + 'cadastro do contato no Trackify.'}>
 
       <${Toggle} checked=${settings.consent_enabled} disabled=${busy}
         label="Registrar ações de clique em botão"
@@ -93,6 +93,20 @@ function Geral({ status, settings, onSaveSettings, busy }) {
         label="Modo seco (não grava no Trackify)"
         hint="Deixe ligado até confirmar que os códigos combinados com o módulo Campanhas estão chegando."
         onChange=${(v) => onSaveSettings({ consent_dry_run: v })} />
+
+      <${Toggle} checked=${settings.cdp_autocadastro_enabled !== false} disabled=${busy}
+        label="Cadastrar automaticamente os contatos no Trackify"
+        hint=${'Sem isso, o descadastro de quem ainda não tem ficha no CDP é '
+               + 'registrado e descartado. Grupos e contatos sem telefone de '
+               + 'verdade nunca são criados; contato no Trackify não tem exclusão '
+               + 'definitiva.'}
+        onChange=${(v) => onSaveSettings({ cdp_autocadastro_enabled: v })} />
+
+      ${settings.cdp_autocadastro_enabled !== false && html`
+        <${Toggle} checked=${!!settings.cdp_autocadastro_dry_run} disabled=${busy}
+          label="Cadastro automático em modo seco (não cria no Trackify)"
+          hint="Registra o que seria criado, sem criar."
+          onChange=${(v) => onSaveSettings({ cdp_autocadastro_dry_run: v })} />`}
 
       ${status && canais.length === 0 && html`
         <${Alert} kind="warn">
@@ -125,8 +139,18 @@ function Geral({ status, settings, onSaveSettings, busy }) {
 
 // ── 2. Uma linha por AÇÃO, vinda do servidor ─────────────────────────────
 
-function AcaoCard({ acao, settings, onSaveSettings, busy }) {
+function AcaoCard({ acao, settings, onSaveSettings, onRetryClick, busy }) {
   const [draft, setDraft] = useState(null);
+  // Qual linha está sendo reentregue. Por contato, não um booleano global: a
+  // tabela costuma ter várias linhas e travar todas por causa de uma esconderia
+  // quais já foram tentadas.
+  const [tentando, setTentando] = useState(null);
+
+  const onRetry = useCallback(async (contactId, actionId) => {
+    setTentando(contactId);
+    try { await onRetryClick(contactId, actionId); }
+    finally { setTentando(null); }
+  }, [onRetryClick]);
 
   // Semente vinda das settings, não do status: o status DESCREVE os campos, o
   // valor é sempre do objeto de settings (fonte única).
@@ -229,8 +253,8 @@ function AcaoCard({ acao, settings, onSaveSettings, busy }) {
         <div class="rounded border border-wa-border p-2.5 space-y-2">
           <p class="text-xs text-wa-secondary">
             <strong class="text-wa-text">Cliques que não chegaram ao Trackify.</strong>
-            A gravação é feita na hora do clique e não é reprocessada sozinha —
-            estes precisam ser marcados à mão no CDP.
+            A gravação é feita na hora do clique e não é reprocessada sozinha.
+            Corrija o que o motivo aponta e use <em>Tentar de novo</em>.
           </p>
           <table class="w-full text-xs">
             <thead class="text-wa-secondary">
@@ -238,14 +262,28 @@ function AcaoCard({ acao, settings, onSaveSettings, busy }) {
                 <th class="text-left py-1">Contato</th>
                 <th class="text-left py-1">Motivo</th>
                 <th class="text-left py-1">Última tentativa</th>
+                <th class="text-right py-1"></th>
               </tr>
             </thead>
             <tbody>
               ${erros.map((r) => html`
                 <tr class="border-t border-wa-border">
-                  <td class="py-1 text-wa-text">#${r.contact_id}</td>
+                  <td class="py-1 text-wa-text">
+                    ${r.contact_name || `#${r.contact_id}`}
+                    ${r.contact_phone && html`
+                      <span class="block text-wa-secondary">${r.contact_phone}</span>`}
+                  </td>
                   <td class="py-1 text-wa-secondary">${r.last_error}</td>
                   <td class="py-1 text-wa-secondary">${fmtDate(r.last_attempt_at)}</td>
+                  <td class="py-1 text-right">
+                    <button type="button"
+                      class="rounded border border-wa-border px-2 py-0.5 text-wa-text
+                             hover:bg-wa-hover disabled:opacity-50"
+                      disabled=${busy || tentando === r.contact_id}
+                      onClick=${() => onRetry(r.contact_id, acao.id)}>
+                      ${tentando === r.contact_id ? 'Tentando…' : 'Tentar de novo'}
+                    </button>
+                  </td>
                 </tr>`)}
             </tbody>
           </table>
@@ -271,6 +309,13 @@ export default function Consent({ req, settings, onSaveSettings, busy }) {
     return r;
   }, [onSaveSettings, load]);
 
+  // Recarrega o status depois de reentregar: é o status que traz a lista de
+  // erros, e uma linha que sumiu dali é a confirmação de que a gravação passou.
+  const reentregar = useCallback(async (contactId, actionId) => {
+    await req('POST', '/consent/retry', { contact_id: contactId, action: actionId });
+    await load();
+  }, [req, load]);
+
   const acoes = (status && status.actions) || [];
 
   return html`
@@ -279,6 +324,6 @@ export default function Consent({ req, settings, onSaveSettings, busy }) {
         onSaveSettings=${salvarSettings} busy=${busy} />
       ${acoes.map((acao) => html`
         <${AcaoCard} key=${acao.id} acao=${acao} settings=${settings}
-          onSaveSettings=${salvarSettings} busy=${busy} />`)}
+          onSaveSettings=${salvarSettings} onRetryClick=${reentregar} busy=${busy} />`)}
     </div>`;
 }

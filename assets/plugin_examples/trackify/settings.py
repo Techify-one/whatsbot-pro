@@ -186,8 +186,30 @@ class Settings(BaseModel):
         description=(
             "Quando o contato toca o botão de descadastro de um template num "
             "canal de WhatsApp oficial, grava o valor de descadastro no cadastro "
-            "dele no Trackify. Vale para todos os canais oficiais, e só para "
-            "contatos já vinculados a um cadastro lá — nunca cria contato no CDP."
+            "dele no Trackify. Vale para todos os canais oficiais. Quando o "
+            "contato ainda não existe no CDP, o cadastro automático abaixo o cria "
+            "antes de gravar."
+        ),
+    )
+    cdp_autocadastro_enabled: bool = Field(
+        default=True,
+        title="Cadastrar automaticamente os contatos no Trackify",
+        description=(
+            "Todo contato novo do WhatsBot passa a ter cadastro no Trackify, "
+            "criado com o telefone em formato internacional (+55…). É o que faz o "
+            "descadastro de um cliente que ainda não estava no CDP valer alguma "
+            "coisa — antes o pedido dele era registrado e descartado. Grupos, "
+            "contatos sem telefone de verdade (widget do site) e tipos fora do "
+            "escopo do espelho nunca são criados. Contato no Trackify só tem "
+            "exclusão lógica: o que for criado aqui fica lá."
+        ),
+    )
+    cdp_autocadastro_dry_run: bool = Field(
+        default=False,
+        title="Cadastro automático em modo seco (não cria no Trackify)",
+        description=(
+            "Registra o que seria criado, sem criar. Útil para uma passagem de "
+            "conferência antes de soltar o cadastro automático numa base grande."
         ),
     )
     consent_dry_run: bool = Field(

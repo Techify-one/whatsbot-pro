@@ -333,13 +333,22 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
   const headerIsMedia = !!headerFormat && MEDIA_FORMATS.includes(headerFormat);
   const headerTextVars = (header && headerFormat === 'text') ? placeholders(header.text) : [];
   const bodyIdxs = body ? placeholders(body.text) : [];
-  // Dynamic URL buttons (a {{1}} suffix in the url) need a value at send time.
+  // Buttons Meta REQUIRES a parameter for, one entry each:
+  //   url       — a {{1}} suffix in the url;
+  //   copy_code — the coupon itself (max 15 chars). Sending the template with
+  //               the button but WITHOUT this component is rejected wholesale
+  //               with "(#131008) Required parameter is missing".
+  // A static url and a phone number take no parameter at all.
   const dynButtons = useMemo(() => {
     const out = [];
     const btns = (buttonsComp && buttonsComp.buttons) || [];
     btns.forEach((b, i) => {
       const t = (b.type || '').toLowerCase();
-      if (t === 'url' && /\{\{\d+\}\}/.test(b.url || '')) out.push({ index: i, text: b.text });
+      if (t === 'url' && /\{\{\d+\}\}/.test(b.url || '')) {
+        out.push({ index: i, text: b.text, subType: 'url', label: 'valor da URL' });
+      } else if (t === 'copy_code') {
+        out.push({ index: i, text: b.text, subType: 'copy_code', label: 'código do cupom', maxLength: 15 });
+      }
     });
     return out;
   }, [buttonsComp]);
@@ -378,9 +387,14 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
       });
     }
     for (const b of dynButtons) {
+      const valor = (buttonVars[b.index] || '').trim();
+      // The parameter shape is per sub_type: a copy_code button with
+      // {type:'text'} is rejected exactly like sending nothing.
+      const parameters = b.subType === 'copy_code'
+        ? [{ type: 'coupon_code', coupon_code: valor }]
+        : [{ type: 'text', text: valor }];
       components.push({
-        type: 'button', sub_type: 'url', index: String(b.index),
-        parameters: [{ type: 'text', text: (buttonVars[b.index] || '').trim() }],
+        type: 'button', sub_type: b.subType, index: String(b.index), parameters,
       });
     }
     return components;
@@ -633,11 +647,11 @@ export function TemplatePicker({ conversationId, channelId, phone, onClose, onSe
 
               ${dynButtons.length ? html`
                 <div class="space-y-3">
-                  <div class="text-wa-secondary text-[12px] font-medium">Botões dinâmicos</div>
+                  <div class="text-wa-secondary text-[12px] font-medium">Botões que exigem valor</div>
                   ${dynButtons.map(b => html`
                     <div key=${b.index}>
-                      <label class="text-wa-secondary text-[12px] block mb-1">Botão "${b.text || ('#' + b.index)}" — valor da URL</label>
-                      <input type="text" value=${buttonVars[b.index] || ''}
+                      <label class="text-wa-secondary text-[12px] block mb-1">Botão "${b.text || ('#' + b.index)}" — ${b.label}</label>
+                      <input type="text" value=${buttonVars[b.index] || ''} maxLength=${b.maxLength || null}
                         onInput=${(e) => setButtonVars(prev => ({ ...prev, [b.index]: e.target.value }))}
                         class="wa-field w-full text-[14px] rounded-[8px] px-3 py-2 border border-wa-border outline-none" />
                     </div>
