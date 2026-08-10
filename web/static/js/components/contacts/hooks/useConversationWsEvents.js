@@ -46,7 +46,7 @@ export function useConversationWsEvents(opts) {
   const {
     // WS event props
     newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged,
-    contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
+    convLabelsRegistry, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, conversationCreated,
     // list
     setContacts, contactsRef, fetchContacts, fetchContactsRef, searchRef, search, sortContacts,
@@ -60,6 +60,7 @@ export function useConversationWsEvents(opts) {
     anchoredWindowRef,
     // actions
     setGlobalTags,
+    setConvLabelRegistry,
     // container-shared ref (page visibility gates read + unread bumps)
     pageVisibleRef,
     // selection: background re-fetch of the OPEN thread (plano 33 F2)
@@ -531,6 +532,16 @@ export function useConversationWsEvents(opts) {
     if (!tagsChanged) return;
     setGlobalTags(tagsChanged);
   }, [tagsChanged]);
+
+  // Registro global das ETIQUETAS DE CONVERSA (outro operador criou/renomeou/
+  // excluiu). O payload é `{labels: [{id,name,color,position}]}` — dobra para o
+  // mapa {nome: {color}} que os chips/pickers consomem.
+  useEffect(() => {
+    if (!convLabelsRegistry || !setConvLabelRegistry) return;
+    const list = convLabelsRegistry.labels;
+    if (!Array.isArray(list)) return;
+    setConvLabelRegistry(Object.fromEntries(list.map(l => [l.name, { color: l.color }])));
+  }, [convLabelsRegistry]);
 
   // Handle real-time AI toggle (e.g. from transfer_to_human tool)
   useEffect(() => {

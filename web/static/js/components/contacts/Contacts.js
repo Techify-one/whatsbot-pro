@@ -49,7 +49,7 @@ const html = htm.bind(h);
 // (`sidebar.row.badges` in ContactList, `chat.header.banner` in ContactDetail)
 // and the `ui.conversation.selected` emit (in useConversationSelection) are the
 // additive seams that keep the attendances flow composing on top.
-export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, initialScrollMsgId = null, wsConnected, config, onConfigSave, onUnreadChange, renderGear = null }) {
+export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged, convLabelsRegistry, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus, messageAction, messageReaction, avatarUpdated, groupParticipantsChanged, conversationCreated, initialContactId, initialConversationId, initialScrollMsgId = null, wsConnected, config, onConfigSave, onUnreadChange, renderGear = null }) {
   // Refs shared between hooks (owned here so a single instance is threaded into
   // both the selection loader and the WS handlers — same identity, no drift).
   const pageVisibleRef = useRef(!document.hidden);
@@ -145,14 +145,16 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
     handleAssignConversation, handleAssignAgent, handleResolveConversation,
-    handleCreateTag, applyTagResults, resolveAssignee,
+    resolveAssignee,
+    convLabelRegistry, setConvLabelRegistry,
+    handleCreateConvLabel, applyConvLabelResults,
   } = actions;
 
   // ── Bulk selection mode ─────────────────────────────────────────────
   const bulk = useBulkSelection({
     contactsRef, displayedRef, showArchivedRef,
     setContacts, sortContacts, setContactData,
-    setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyTagResults,
+    setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyConvLabelResults,
     // plano 72 F5: refetch server-filtrado após bulk IA / bulk assign otimistas.
     reconcileAfterMembershipChange,
   });
@@ -289,7 +291,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // ── Real-time WS events (sidebar + open thread patches) ─────────────
   const { typingState, aiRespondingState, operatorTypingState, convAttrPatch } = useConversationWsEvents({
     newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged,
-    contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
+    convLabelsRegistry, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, conversationCreated,
     setContacts, contactsRef, fetchContacts, fetchContactsRef, searchRef, search, sortContacts,
     showArchivedRef,
@@ -298,6 +300,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     pendingWsMessages, isOpenRow, selected, contactData,
     anchoredWindowRef,
     setGlobalTags,
+    setConvLabelRegistry,
     pageVisibleRef,
     reloadOpenThread,
     currentUserId,
@@ -445,6 +448,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           showArchived=${showArchived}
           onToggleArchived=${handleToggleArchived}
           globalTags=${globalTags}
+          labelRegistry=${convLabelRegistry}
           onStartConversation=${handleStartConversation}
           onNewConversation=${() => setShowNewConversation(true)}
           checkingPhone=${checkingPhone}
@@ -458,7 +462,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           onExitSelection=${exitSelection}
           onToggleSelect=${toggleSelect}
           onSelectAll=${selectAllContacts}
-          onCreateTag=${handleCreateTag}
+          onCreateLabel=${handleCreateConvLabel}
           onClearSelection=${clearSelection}
           onDeselectAll=${deselectAll}
           onBulkAI=${handleBulkAI}
@@ -601,8 +605,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           phone=${ctxMenu.phone}
           conversationId=${ctxMenu.conversationId}
           aiEnabled=${ctxMenu.aiEnabled}
-          contactTags=${ctxMenu.tags}
-          globalTags=${globalTags}
+          convLabels=${ctxMenu.convLabels}
+          labelRegistry=${convLabelRegistry}
           isArchived=${ctxMenu.isArchived}
           isUnread=${ctxMenu.isUnread}
           isPinned=${ctxMenu.isPinned}
@@ -629,17 +633,16 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           }}
           onMarkUnread=${handleMarkUnread}
           onMarkRead=${handleMarkRead}
-          onTagsUpdate=${(phone, newTags) => {
-            setContacts(prev => prev.map(c => c.phone === phone ? { ...c, tags: newTags } : c));
-            setCtxMenu(prev => prev && prev.phone === phone ? { ...prev, tags: newTags } : prev);
-            if (phone === selectedRef.current) {
-              setContactData(prev => prev ? { ...prev, tags: newTags } : prev);
-            }
+          onLabelsUpdate=${(convId, newLabels) => {
+            applyConvLabelResults([{ conversationId: convId, labels: newLabels }]);
+            setCtxMenu(prev => (
+              prev && prev.conversationId === convId ? { ...prev, convLabels: newLabels } : prev
+            ));
           }}
           onArchive=${handleArchive}
           onPin=${handlePin}
           onDeleteConversation=${handleDeleteConversation}
-          onCreateTag=${handleCreateTag}
+          onCreateLabel=${handleCreateConvLabel}
           onClose=${() => setCtxMenu(null)}
         />
       ` : null}

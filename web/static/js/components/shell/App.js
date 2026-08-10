@@ -107,6 +107,8 @@ export function App({ onLogout, hasPassword, currentUser }) {
   const [aiTyping, setAiTyping] = useState(null);   // {phone, channel_id, active} — IA processando
   const [contactInfoUpdated, setContactInfoUpdated] = useState(null);
   const [tagsChanged, setTagsChanged] = useState(null);
+  // Catálogo global de ETIQUETAS DE CONVERSA (separado das tags de contato acima).
+  const [convLabelsRegistry, setConvLabelsRegistry] = useState(null);
   const [contactTagsUpdated, setContactTagsUpdated] = useState(null);
   const [contactAiToggled, setContactAiToggled] = useState(null);
   const [messagesRead, setMessagesRead] = useState(null);
@@ -298,6 +300,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
     onAiTyping: useCallback((data) => setAiTyping(data), []),
     onContactInfoUpdated: useCallback((data) => setContactInfoUpdated(data), []),
     onTagsChanged: useCallback((data) => setTagsChanged(data), []),
+    onConvLabelsRegistryChanged: useCallback((data) => setConvLabelsRegistry(data), []),
     onContactTagsUpdated: useCallback((data) => setContactTagsUpdated(data), []),
     onHumanTransferAlert: useCallback((data) => {
       // Per-channel alert (plano 21): the payload carries the channel's resolved
@@ -536,7 +539,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
 
   const contactsProps = {
     newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged,
-    contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
+    convLabelsRegistry, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, groupParticipantsChanged,
     initialContactId, initialConversationId, initialScrollMsgId, conversationCreated,
     wsConnected, config, onConfigSave: save, onUnreadChange: refreshUnreadCount,
