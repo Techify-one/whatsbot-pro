@@ -372,7 +372,7 @@ function SyncStatus({ data, onRefresh, busy }) {
       </div>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
         <div><div class="text-wa-secondary">Sincronização</div>
-          <div class="text-wa-text">${data.enabled ? (data.dry_run ? 'ligada (modo seco)' : 'ligada') : 'desligada'}</div></div>
+          <div class="text-wa-text">${data.enabled ? 'ligada' : 'desligada'}</div></div>
         <div><div class="text-wa-secondary">Leitura do Trackify</div>
           <div class="text-wa-text">${data.pull_enabled ? 'ligada' : 'desligada'}</div></div>
         <div><div class="text-wa-secondary">Última leitura</div>
@@ -432,48 +432,6 @@ function SyncStatus({ data, onRefresh, busy }) {
               </tbody>
             </table>
           </div>
-        </div>`}
-    </section>`;
-}
-
-// ── Simulação num contato ────────────────────────────────────────────────
-
-function Simular({ req, busy }) {
-  const [id, setId] = useState('');
-  const [out, setOut] = useState(null);
-
-  return html`
-    <section class="wa-panel border border-wa-border rounded p-4 space-y-2">
-      <h3 class="font-medium text-wa-text">Conferir num contato</h3>
-      <p class="text-xs text-wa-secondary">
-        Mostra o que seria escrito no Trackify para um contato específico, sem
-        gravar nada. Use antes de desligar o modo seco.
-      </p>
-      <div class="flex items-center gap-2">
-        <input class="wa-field px-2 py-1 rounded text-sm w-40" placeholder="ID do contato"
-          value=${id} onInput=${(e) => setId(e.target.value)} />
-        <button class="px-3 py-1 rounded border border-wa-border text-sm disabled:opacity-50"
-          disabled=${busy || !id} onClick=${async () => {
-            const r = await req('POST', '/field-sync/run', { contact_id: Number(id) });
-            setOut((r && r.data) || { skip: (r && r.error) || 'Falha.' });
-          }}>Simular</button>
-      </div>
-      ${out && html`
-        <div class="text-xs space-y-1">
-          ${out.skip
-            ? html`<p class="text-amber-500">${out.skip}</p>`
-            : html`
-              <p class="text-wa-secondary">Cadastro no Trackify:
-                <code>${out.trackify_contact_id}</code></p>
-              ${Object.keys(out.would_write || {}).length === 0
-                ? html`<p class="text-wa-teal">Nada a escrever: os dois lados já estão iguais.</p>`
-                : html`<ul class="list-disc ml-4 text-wa-text">
-                    ${Object.entries(out.would_write).map(([k, v]) => html`
-                      <li><code>${k}</code> ← ${v === '' ? html`<em>apagar</em>` : v}</li>`)}
-                  </ul>`}
-              ${(out.decisions || []).map((d) => html`
-                <p class="text-wa-secondary">${d.wb_key} ${DIR_GLYPH[d.direction]} ${d.tk_slug}:
-                  <strong>${d.action}</strong>${d.reason ? ` — ${d.reason}` : ''}</p>`)}`}
         </div>`}
     </section>`;
 }
@@ -547,16 +505,10 @@ export default function FieldSync({ req, settings, onSaveSettings, busy, canEdit
             onChange=${(e) => onSaveSettings({ field_sync_enabled: e.target.checked })} />
           Sincronizar campos do contato
         </label>
-        <label class="flex items-center gap-2 text-sm text-wa-text">
-          <input type="checkbox" checked=${!!s.field_sync_dry_run}
-            disabled=${!canEdit || busy || !s.field_sync_enabled}
-            onChange=${(e) => onSaveSettings({ field_sync_dry_run: e.target.checked })} />
-          Modo seco (calcula e registra, mas não grava no Trackify)
-        </label>
-        ${s.field_sync_enabled && !s.field_sync_dry_run && html`
+        ${s.field_sync_enabled && html`
           <div class="text-xs text-amber-500 border border-amber-500/40 rounded p-2">
-            Gravação real ligada. Toda escrita nossa também dispara as automações do
-            Trackify — confira primeiro com o modo seco.
+            <strong>Gravação real.</strong> Não há ensaio: toda escrita nossa dispara as
+            automações do Trackify.
           </div>`}
         <label class="flex items-center gap-2 text-sm text-wa-text">
           <input type="checkbox" checked=${!!s.field_sync_pull_enabled} disabled=${!canEdit || busy}
@@ -575,8 +527,6 @@ export default function FieldSync({ req, settings, onSaveSettings, busy, canEdit
         onRemove=${remove} onSave=${save} busy=${busy} canEdit=${canEdit} />
 
       ${flash && html`<p class="text-xs text-wa-teal">${flash}</p>`}
-
-      <${Simular} req=${req} busy=${busy} />
 
       <${SyncStatus} data=${status} busy=${busy}
         onRefresh=${async () => {

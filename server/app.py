@@ -41,6 +41,7 @@ from plugins.events import (
     register_plugin_filters,
     emit as emit_event,
 )
+from plugins import services as _plugin_services
 from server import balance_monitor
 from server.balance_monitor import set_runtime as _set_balance_runtime
 
@@ -168,6 +169,19 @@ def create_app(
             register_plugin_events(loaded.id, loaded.event_handlers)
         if loaded.filters:
             register_plugin_filters(loaded.id, loaded.filters)
+        # Plugin→plugin services (in-process). Registered HERE, in create_app, so
+        # the surface exists BEFORE the lifespan and before run_setup — which
+        # imposes one contract line on providers: a service op MUST NOT depend on
+        # state created in setup(); it answers DISABLED/ERROR until ready, never
+        # raises and never blocks.
+        if loaded.services:
+            _plugin_services.register_plugin_services(
+                loaded.id, loaded.services,
+                version=loaded.services_version,
+                allow=loaded.services_allow,
+            )
+        _plugin_services.register_plugin_uses(
+            loaded.id, getattr(loaded.manifest, "uses_services", ()))
         for provider_cls in getattr(loaded, "channel_providers", []):
             channel_registry.register_provider(provider_cls)
 
@@ -414,6 +428,11 @@ def create_app(
         state.stop_event.set()  # legacy compat: loops checking stop_event exit
         for loaded in list(registry.loaded.values()):
             await _lifecycle_manager.run_teardown(loaded.id)
+            # Unregister the service surface HERE and not in
+            # plugins.lifecycle._do_teardown: run_setup returns early when both
+            # setup_fn and teardown_fn are None, so a provider without
+            # entry.lifecycle would never be unregistered there.
+            _plugin_services.unregister_plugin(loaded.id)
         try:
             await supervisor.stop_all()  # cancel + await (fixes the old no-await gap)
         except Exception:

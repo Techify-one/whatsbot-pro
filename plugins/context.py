@@ -100,6 +100,15 @@ def set_runtime(ws_manager: Any, loop: asyncio.AbstractEventLoop) -> None:
     _runtime.loop = loop
 
 
+def get_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """The server event loop already wired by :func:`set_runtime`.
+
+    ``None`` in tests / before the lifespan runs. Read by ``plugins.services``
+    to bridge a synchronous caller onto an async service op.
+    """
+    return _runtime.loop
+
+
 def set_runtime_services(supervisor: Any, subprocess_service: Any) -> None:
     """Wire the task supervisor + subprocess service (plano 09 Fase 5)."""
     _runtime.supervisor = supervisor

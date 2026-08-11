@@ -73,14 +73,6 @@ class Settings(BaseModel):
             "fila só acumula erro."
         ),
     )
-    mirror_dry_run: bool = Field(
-        default=True,
-        title="Modo seco (não envia de verdade)",
-        description=(
-            "Enfileira e monta o envelope, mas NÃO posta. Serve para conferir o que "
-            "seria enviado antes de tocar no CDP de produção."
-        ),
-    )
     ingestion_url: str = Field(
         default="",
         title="URL de ingestão do Trackify",
@@ -126,14 +118,6 @@ class Settings(BaseModel):
             "Liga a sincronização dos campos mapeados na aba 'Campos do contato'. "
             "Exige a API key configurada. Só vale para contatos já "
             "vinculados a um cadastro no Trackify — nunca cria contato lá."
-        ),
-    )
-    field_sync_dry_run: bool = Field(
-        default=True,
-        title="Modo seco (não grava no Trackify)",
-        description=(
-            "Calcula o que seria escrito e registra, mas NÃO envia. Deixe ligado "
-            "até conferir o resultado num contato pelo botão 'Simular'."
         ),
     )
     field_sync_pull_enabled: bool = Field(
@@ -202,23 +186,6 @@ class Settings(BaseModel):
             "contatos sem telefone de verdade (widget do site) e tipos fora do "
             "escopo do espelho nunca são criados. Contato no Trackify só tem "
             "exclusão lógica: o que for criado aqui fica lá."
-        ),
-    )
-    cdp_autocadastro_dry_run: bool = Field(
-        default=False,
-        title="Cadastro automático em modo seco (não cria no Trackify)",
-        description=(
-            "Registra o que seria criado, sem criar. Útil para uma passagem de "
-            "conferência antes de soltar o cadastro automático numa base grande."
-        ),
-    )
-    consent_dry_run: bool = Field(
-        default=True,
-        title="Modo seco (não grava no Trackify)",
-        description=(
-            "Captura o clique e registra o que gravaria, mas NÃO envia. Deixe "
-            "ligado até conferir que o código combinado com o módulo Campanhas "
-            "está chegando de fato."
         ),
     )
     consent_optout_payload: str = Field(

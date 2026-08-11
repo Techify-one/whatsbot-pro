@@ -1,14 +1,13 @@
 """Assinaturas do barramento → fila de saída.
 
-Assinamos por STRING, sem importar nenhum outro plugin: se o ``protocolos``
-estiver ausente ou desativado, estes verbos simplesmente nunca chegam e o resto
-segue funcionando.
-
-``protocolos.*`` não está em ``KNOWN_EVENTS`` (o catálogo é o vocabulário do
-core), então o carregador loga um WARNING informativo por nome. É documentado
-como informativo-e-nunca-bloqueante — aceito de propósito. NÃO usar ``"*"``: isso
+Assinamos por STRING, sem importar nenhum outro plugin. NÃO usar ``"*"``: isso
 entregaria TODO evento do sistema a este plugin, incluindo o ``raw`` com base64
 de mídia de cada mensagem, para uns poucos eventos por dia.
+
+Os verbos ``protocolos.*`` saíram daqui: o plugin `protocolos` agora chama a API
+interna (``services.py``), que reusa os mesmos handlers de ``mirror``. Ele
+continua EMITINDO no barramento, como sinal de observabilidade para quem assina
+``"*"`` — o que deixou de existir é a assinatura deste plugin.
 
 ``message.received`` **é** assinado, por exceção justificada: o consentimento
 por clique em botão precisa do ``media_extras``, que só existe no evento (o core
@@ -50,14 +49,12 @@ EVENT_HANDLERS = {
     "conversation.created": mirror.on_conversation_created,
     "conversation.status_changed": mirror.on_conversation_status,
     "conversation.reopened": mirror.on_conversation_reopened,
-    # Protocolo (do plugin protocolos, via o patch do plano 94)
-    "protocolos.opened": mirror.on_protocolo_opened,
-    "protocolos.closed": mirror.on_protocolo_closed,
-    "protocolos.rated": mirror.on_protocolo_rated,
-    # Rótulos gravados no protocolo FORA do fechamento (o fechamento manda o
-    # snapshot completo; este manda o incremento, para o CDP não esperar dias
-    # por um protocolo que fica aberto).
-    "protocolos.fields_updated": mirror.on_protocolo_fields,
+    # ⚠️ Protocolo NÃO é mais assinado aqui. O plugin `protocolos` passou a
+    # CHAMAR a API interna (``services.track_protocolo_*``), que reusa
+    # exatamente estes mesmos handlers de ``mirror``. O dado no CDP é idêntico —
+    # o que mudou foi o caminho de ENTREGA (de assinatura para chamada direta).
+    # Bônus: sumiu o WARNING de "evento desconhecido" que as quatro assinaturas
+    # ``protocolos.*`` geravam a cada boot.
     # Contato
     "contact.updated": _fan(mirror.on_contact_updated, push.on_contact_updated),
     "contact.tagged": mirror.on_contact_tagged,

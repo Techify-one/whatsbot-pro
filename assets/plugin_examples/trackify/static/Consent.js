@@ -89,11 +89,6 @@ function Geral({ status, settings, onSaveSettings, busy }) {
         hint="Vale para todos os canais de WhatsApp oficial. GOWA, Telegram e teste nunca participam."
         onChange=${(v) => onSaveSettings({ consent_enabled: v })} />
 
-      <${Toggle} checked=${settings.consent_dry_run} disabled=${busy}
-        label="Modo seco (não grava no Trackify)"
-        hint="Deixe ligado até confirmar que os códigos combinados com o módulo Campanhas estão chegando."
-        onChange=${(v) => onSaveSettings({ consent_dry_run: v })} />
-
       <${Toggle} checked=${settings.cdp_autocadastro_enabled !== false} disabled=${busy}
         label="Cadastrar automaticamente os contatos no Trackify"
         hint=${'Sem isso, o descadastro de quem ainda não tem ficha no CDP é '
@@ -101,12 +96,6 @@ function Geral({ status, settings, onSaveSettings, busy }) {
                + 'verdade nunca são criados; contato no Trackify não tem exclusão '
                + 'definitiva.'}
         onChange=${(v) => onSaveSettings({ cdp_autocadastro_enabled: v })} />
-
-      ${settings.cdp_autocadastro_enabled !== false && html`
-        <${Toggle} checked=${!!settings.cdp_autocadastro_dry_run} disabled=${busy}
-          label="Cadastro automático em modo seco (não cria no Trackify)"
-          hint="Registra o que seria criado, sem criar."
-          onChange=${(v) => onSaveSettings({ cdp_autocadastro_dry_run: v })} />`}
 
       ${status && canais.length === 0 && html`
         <${Alert} kind="warn">

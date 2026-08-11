@@ -244,12 +244,6 @@ async def deliver_one(client: httpx.AsyncClient, row: dict, url: str,
                                 last_error=f"payload inválido: {type(e).__name__}")
         return "blocked"
 
-    if bool(_config.setting("mirror_dry_run", True)):
-        await asyncio.to_thread(_finish, row["id"], "sent", last_error="",
-                                last_http_status=0,
-                                trackify_contact_id="(modo seco)")
-        return "dry_run"
-
     # A ingestão aceita a API key do Trackify (escopo `ingest`) — é a MESMA
     # credencial da leitura e da escrita, e por isso o plugin guarda um segredo
     # só. A chave de canal (`X-Trackify-Key`, configurada em channels.config)

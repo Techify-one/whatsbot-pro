@@ -275,8 +275,7 @@ def test_elegibilidade(monkeypatch):
 # ── Com app: fila de saída ───────────────────────────────────────────────
 
 def _mirror_on(**extra):
-    base = {"plugin.trackify.mirror_enabled": True,
-            "plugin.trackify.mirror_dry_run": True}
+    base = {"plugin.trackify.mirror_enabled": True}
     base.update(extra)
     return base
 
@@ -720,7 +719,6 @@ def test_status_do_field_sync_responde_sem_configuracao(plugin_app):
                           "plugin.trackify.service_password": ""})
     d = built.client.get("/api/plugins/trackify/field-sync/status").json()["data"]
     assert d["enabled"] is False and d["credential_set"] is False
-    assert d["dry_run"] is True          # modo seco é o padrão, de propósito
     # Forma da resposta (não o conteúdo: as tabelas do plugin também são
     # compartilhadas pela suíte, e outro teste desta classe grava mapeamento).
     assert isinstance(d["mappings"], list) and isinstance(d["conflicts"], list)
@@ -1022,7 +1020,6 @@ def test_resolve_manda_identificadores_no_corpo(cliente):
 def _field_sync_on(**extra):
     base = {
         "plugin.trackify.field_sync_enabled": True,
-        "plugin.trackify.field_sync_dry_run": True,
         "plugin.trackify.sync_api_key": "tk_teste",
         "plugin.trackify.sync_api_base": "https://nexus.example/trackify/api/v1",
     }
@@ -1120,30 +1117,8 @@ def test_push_so_envia_o_que_diverge(plugin_app, monkeypatch):
     assert plano.field_values == {}
 
 
-def test_push_em_modo_seco_nao_chama_o_trackify(plugin_app, monkeypatch):
-    """Modo seco é o padrão de propósito: toda escrita nossa dispara automações
-    no Trackify, e a primeira execução sobre a base inteira não pode ser uma
-    surpresa."""
+def test_push_grava_e_carimba_o_par_sincronizado(plugin_app, monkeypatch):
     built = plugin_app("trackify", settings_overrides=_field_sync_on())
-    push = _load("push")
-    _mapeia(built.client, "cpf", "cpf")
-
-    from db.repositories import contact_repo, custom_attribute_repo
-    from db.tables import contacts as contacts_tbl
-    c = contact_repo.get_or_create("5511900000003")
-    custom_attribute_repo.set_values(contacts_tbl, int(c["id"]), {"cpf": "999"})
-    _liga_contato_ao_cdp("5511900000003", "uuid-cdp-3")
-    _cdp_tem(monkeypatch, push)
-
-    linha = _enfileira_e_reserva(push, int(c["id"]))
-    client = _FakeClient(_FakeResp(500, {}))     # qualquer chamada seria erro
-    assert _run(push.deliver_one(client, linha)) == "dry_run"
-    assert client.calls == []                    # NADA foi à rede
-
-
-def test_push_grava_e_carimba_quando_o_modo_seco_sai(plugin_app, monkeypatch):
-    built = plugin_app("trackify", settings_overrides=_field_sync_on(
-        **{"plugin.trackify.field_sync_dry_run": False}))
     push = _load("push")
     linha_map = _mapeia(built.client, "cpf", "cpf")
 
@@ -1174,8 +1149,7 @@ def test_push_grava_e_carimba_quando_o_modo_seco_sai(plugin_app, monkeypatch):
 def test_push_com_409_nao_retenta_e_marca_conflito(plugin_app, monkeypatch):
     """O 409 (outro cadastro é dono do e-mail) é a falha ESPERADA desta feature.
     Re-tentar oito vezes não muda nada — precisa de decisão humana."""
-    built = plugin_app("trackify", settings_overrides=_field_sync_on(
-        **{"plugin.trackify.field_sync_dry_run": False}))
+    built = plugin_app("trackify", settings_overrides=_field_sync_on())
     push = _load("push")
     linha_map = _mapeia(built.client, "email", "email")
 
@@ -1540,14 +1514,6 @@ def test_todas_as_rotas_novas_respondem_sem_configuracao(plugin_app):
 
     r = built.client.post("/api/plugins/trackify/api-key/test", json={})
     assert r.status_code == 200 and r.json()["data"]["ok"] is False
-
-    # Simular exige contato: uma varredura da base inteira não pode rodar dentro
-    # da requisição.
-    assert built.client.post("/api/plugins/trackify/field-sync/run",
-                             json={}).status_code == 400
-    r = built.client.post("/api/plugins/trackify/field-sync/run",
-                          json={"contact_id": 999999})
-    assert r.status_code == 200 and r.json()["data"]["skip"]
 
 
 def test_tela_de_configuracao_e_servida(plugin_app):
@@ -2218,11 +2184,11 @@ def test_a_tela_so_le_campos_que_a_rota_de_status_devolve():
     import re
     fonte = (_SRC / "routes.py").read_text(encoding="utf-8")
     bloco = fonte[fonte.index("async def field_sync_status"):]
-    bloco = bloco[:bloco.index("@router.post")]
+    bloco = bloco[:bloco.index("@router.")]
     devolvidos = set(re.findall(r'"(\w+)":', bloco))
 
     js = (_SRC / "static" / "FieldSync.js").read_text(encoding="utf-8")
-    corpo = js[js.index("function SyncStatus("):js.index("function Simular(")]
+    corpo = js[js.index("function SyncStatus("):js.index("// ── Raiz da aba")]
     lidos = set(re.findall(r"\bdata\.(\w+)", corpo))
 
     faltando = lidos - devolvidos
@@ -2723,8 +2689,7 @@ def test_status_devolve_os_cliques_que_nao_chegaram(plugin_app, monkeypatch):
     """A tela SEMPRE leu `acao.errors`; o servidor agrupava os erros e não os
     enviava. O painel de diagnóstico nunca renderizava, e o operador via o
     clique sumir sem motivo — que é o que torna esta feature indepurável."""
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
     consent.reset_for_tests()
 
@@ -3004,7 +2969,6 @@ OPTOUT = "optout"
 def _consent_on(**extra):
     base = {
         "plugin.trackify.consent_enabled": True,
-        "plugin.trackify.consent_dry_run": True,
         "plugin.trackify.consent_field_slug": "optout_marketing",
         "plugin.trackify.consent_optout_value": "sim",
         "plugin.trackify.consent_optout_payload": CODIGO,
@@ -3409,28 +3373,10 @@ def _marcar(consent, monkeypatch, phone, channel):
     return int(c["id"])
 
 
-def test_modo_seco_nao_chama_o_trackify(plugin_app, monkeypatch):
-    """Padrão de propósito: a primeira gravação no CRM do cliente não pode ser
-    uma surpresa."""
-    plugin_app("trackify", settings_overrides=_consent_on())
-    consent, push = _load("consent"), _load("push")
-    consent.reset_for_tests()
-
-    cid = _marcar(consent, monkeypatch, "5511900000906", _canal("consent_cloud_d"))
-    _linkado(monkeypatch, push)
-
-    client = _FakeClient(_FakeResp(500, {}))     # qualquer ida à rede seria erro
-    desfecho, _, repetir = _run(consent._write_once(client, cid, OPTOUT))
-    assert (desfecho, repetir) == ("dry_run", False)
-    assert client.calls == []
-    assert consent.get_state(cid, OPTOUT)["written_value"] is None
-
-
 def test_descadastro_grava_o_valor_que_bloqueia(plugin_app, monkeypatch):
     """O corpo do PUT é o contrato com o módulo Campanhas: um valor que BLOQUEIA
     (``sim``) no campo combinado."""
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
@@ -3456,8 +3402,7 @@ def test_novo_clique_reescreve_mesmo_com_o_valor_ja_gravado(plugin_app, monkeypa
     mais receber" e o plugin pular a escrita, em silêncio e para sempre. Foi o
     que aconteceu no primeiro teste de ponta a ponta.
     """
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
@@ -3479,8 +3424,7 @@ def test_novo_clique_reescreve_mesmo_com_o_valor_ja_gravado(plugin_app, monkeypa
 def test_estado_ja_gravado_nao_gasta_uma_chamada(plugin_app, monkeypatch):
     """Reentrega do MESMO clique é o caminho comum. Zero HTTP aqui é o que
     mantém o orçamento de 30/min por IP utilizável."""
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
@@ -3502,8 +3446,7 @@ def test_contato_sem_cadastro_no_cdp_e_criado_antes_de_gravar(plugin_app, monkey
     É o caminho que faz o descadastro de um cliente novo valer alguma coisa —
     quem clica "não quero mais receber" raramente já está no CRM.
     """
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
     consent.reset_for_tests()
 
@@ -3529,8 +3472,7 @@ def test_cadastro_recusado_vira_erro_acionavel_e_nao_e_retentado(plugin_app,
                                                                  monkeypatch):
     """Quando nem o cadastro dá certo, o pedido vira erro VISÍVEL na aba com o
     texto do conserto — não uma retentativa infinita contra o CRM do cliente."""
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
     consent.reset_for_tests()
 
@@ -3556,8 +3498,7 @@ def test_ambiguidade_no_cdp_nao_cria_um_terceiro_cadastro(plugin_app, monkeypatc
     Criar aqui produziria um terceiro duplicado em cima de dois que já esperam
     conserto — e escolher um dos dois colaria o consentimento na ficha errada.
     """
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
     consent.reset_for_tests()
 
@@ -3580,8 +3521,7 @@ def test_ambiguidade_no_cdp_nao_cria_um_terceiro_cadastro(plugin_app, monkeypatc
 def test_falha_de_leitura_da_identidade_e_retentada(plugin_app, monkeypatch):
     """429 do teto de requisições e 401 de escopo NÃO são "este contato não
     existe". Antes viravam ``unlinked`` permanente e condenavam o pedido."""
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push, enroll = _load("consent"), _load("push"), _load("enroll")
     consent.reset_for_tests()
 
@@ -3600,8 +3540,7 @@ def test_slug_ignorado_pelo_cdp_vira_erro_acionavel(plugin_app, monkeypatch):
     """A falha mais perigosa da feature: o Trackify pula slug desconhecido EM
     SILÊNCIO e devolve 200. Sem conferir a resposta, contaríamos como
     descadastrado alguém que continua na lista."""
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
@@ -3620,8 +3559,7 @@ def test_credencial_ruim_para_as_duas_sincronizacoes(plugin_app, monkeypatch):
     """A API key é UMA só. Parar as duas é o certo — e a tela mostra o motivo em
     vez de martelar o Nexus do cliente. Repetir não resolveria: chave inválida ou
     sem escopo não conserta sozinha."""
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push, cfg = _load("consent"), _load("push"), _load("_config")
     consent.reset_for_tests()
 
@@ -3645,8 +3583,7 @@ def test_falha_de_rede_e_retentada_e_desiste_com_registro(plugin_app, monkeypatc
     O teste trava o contrato dos dois lados: 5xx VALE repetir, e esgotadas as
     tentativas o pedido não some — fica em ``last_error`` para ser marcado à mão.
     """
-    plugin_app("trackify", settings_overrides=_consent_on(
-        **{"plugin.trackify.consent_dry_run": False}))
+    plugin_app("trackify", settings_overrides=_consent_on())
     consent, push = _load("consent"), _load("push")
     consent.reset_for_tests()
 
@@ -3825,3 +3762,448 @@ def test_rotas_de_regra_fila_e_template_nao_existem_mais(plugin_app):
         assert built.client.get(f"/api/plugins/trackify{path}").status_code == 404, path
     assert built.client.put("/api/plugins/trackify/consent/channels",
                             json={"channel_ids": []}).status_code == 404
+
+
+# ── 4.0.0: instalação nova, API interna e escopo do clique ───────────────
+
+
+def test_instalacao_nova_nao_escreve_no_trackify(plugin_app):
+    """Os interruptores nascem desligados e não há mais modo seco.
+
+    Com as quatro chaves secas fora do schema, o único freio de uma instalação
+    nova é o próprio ``*_enabled`` — e é ele que este teste fixa.
+    """
+    built = plugin_app("trackify")
+    from db.repositories import config_repo
+    config_repo.set_many({"plugin.trackify.mirror_enabled": False,
+                          "plugin.trackify.field_sync_enabled": False,
+                          "plugin.trackify.consent_enabled": False,
+                          "plugin.trackify.sync_api_key": ""})
+
+    values = built.client.get("/api/plugins/trackify/settings").json()["data"]["values"]
+    assert values["mirror_enabled"] is False
+    assert values["field_sync_enabled"] is False
+    assert values["consent_enabled"] is False
+    # As chaves secas saíram do schema: uma aba velha que ainda as mande recebe
+    # 200 com a chave descartada (extra="ignore"), não 422 — mas elas não voltam.
+    for chave in ("mirror_dry_run", "field_sync_dry_run", "consent_dry_run",
+                  "cdp_autocadastro_dry_run"):
+        assert chave not in values, chave
+
+    assert _load("enroll").ready() is False   # sem credencial não há o que tentar
+
+
+def test_field_sync_run_nao_existe_mais(plugin_app):
+    """O "Conferir num contato" era a única conferência pré-ativação e saiu
+    junto com os modos secos. Rota morta respondendo 200 faria uma tela antiga
+    parecer funcionar."""
+    built = plugin_app("trackify")
+    r = built.client.post("/api/plugins/trackify/field-sync/run",
+                          json={"contact_id": 1})
+    assert r.status_code == 404
+
+
+def test_services_export_shape():
+    """A superfície publicada: nomes estáveis e tudo chamável."""
+    services = _load("services")
+    assert services.SERVICES_VERSION == "1.0.0"
+    esperadas = {
+        "status", "track_event",
+        "track_protocolo_opened", "track_protocolo_closed",
+        "track_protocolo_rated", "track_protocolo_fields_updated",
+        "resolve_identity", "get_journey", "get_events", "get_purchases",
+        "get_subscriptions", "get_contact", "list_custom_fields",
+        "put_contact_fields", "enqueue_field_sync", "ensure_cdp_contact",
+        "consent_status", "apply_consent_action",
+    }
+    assert set(services.SERVICES) == esperadas
+    assert all(callable(fn) for fn in services.SERVICES.values())
+
+
+def test_services_e_folha_nenhum_modulo_do_plugin_o_importa():
+    """É o que mantém o plugin carregando num core anterior: um core sem a linha
+    ``services`` em ``_ENTRY_SPECS`` nunca importa este arquivo."""
+    import re
+    for arquivo in _SRC.glob("*.py"):
+        if arquivo.name == "services.py":
+            continue
+        fonte = arquivo.read_text(encoding="utf-8")
+        assert not re.search(r"^\s*from \. import .*\bservices\b", fonte, re.M), arquivo.name
+        assert not re.search(r"^\s*from \.services import", fonte, re.M), arquivo.name
+
+
+def test_nenhum_tipo_interno_vaza(plugin_app, monkeypatch):
+    """Todo payload que sai por uma op é JSON-serializável.
+
+    ``client.Result``, ``identity.Match``/``Resolution``, ``push.Plan`` e
+    ``actions.Plan`` ficam DENTRO do plugin — é isso que faz o contrato ser
+    estável para quem consome.
+    """
+    plugin_app("trackify", settings_overrides=_mirror_on(**_consent_on()))
+    services, journey, identity = _load("services"), _load("journey"), _load("identity")
+
+    async def _identidade(http, cid):
+        return {"contact_id": cid, "fields": []}
+    monkeypatch.setattr(journey, "fetch_identity", _identidade)
+
+    async def _timeline(http, cid, **kw):
+        return {"events": [], "total": 0, "limit": 25, "offset": 0}
+    monkeypatch.setattr(journey, "fetch_timeline", _timeline)
+
+    async def _compras(http, cid):
+        return {"products": [], "total_spent": "0,00"}
+    monkeypatch.setattr(journey, "fetch_purchases", _compras)
+
+    async def _assinaturas(http, cid, **kw):
+        return []
+    monkeypatch.setattr(journey, "fetch_subscriptions", _assinaturas)
+
+    async def _resolve(http, **kw):
+        return identity.Resolution(True, [identity.Match("uuid-x", "whatsapp",
+                                                         "5511900000001", "variant")])
+    monkeypatch.setattr(identity, "resolve_mapped_ex", _resolve)
+
+    saidas = [
+        _run(services.get_contact("uuid-x")),
+        _run(services.get_events("uuid-x")),
+        _run(services.get_purchases("uuid-x")),
+        _run(services.get_subscriptions("uuid-x")),
+        _run(services.resolve_identity(phone="5511900000001")),
+    ]
+    for data in saidas:
+        json.dumps(data)   # levanta se algum tipo interno tiver escapado
+
+
+def test_track_event_rejeita_kind_reservado(plugin_app):
+    """Um chamador reusando ``protocolo_closed`` colidiria no dedup do CDP com o
+    evento que o próprio trackify produz."""
+    plugin_app("trackify", settings_overrides=_mirror_on())
+    services = _load("services")
+    assert services.track_event("protocolo_closed", contact_id=1)["ok"] is False
+    assert services.track_event("KIND INVÁLIDO", contact_id=1)["ok"] is False
+
+
+def test_track_event_desligado_devolve_disabled(plugin_app):
+    """Espelho desligado é resposta LIMPA (``DISABLED``), nunca exceção."""
+    plugin_app("trackify", settings_overrides={
+        "plugin.trackify.mirror_enabled": False})
+    services = _load("services")
+    with pytest.raises(Exception) as exc:
+        services.track_event("meu_evento", contact_id=1)
+    assert type(exc.value).__name__ == "ServiceDisabled"
+
+
+def test_track_event_enfileira_e_deduplica(plugin_app):
+    plugin_app("trackify", settings_overrides=_mirror_on())
+    services = _load("services")
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5511900000801", contact_type="whatsapp")
+
+    r1 = services.track_event("meu_evento", contact_id=int(c["id"]),
+                              data={"a": 1}, external_key="k1", title="Meu evento")
+    r2 = services.track_event("meu_evento", contact_id=int(c["id"]),
+                              data={"a": 1}, external_key="k1", title="Meu evento")
+    assert r1 == {"ok": True, "queued": True, "kind": "meu_evento"}
+    assert r2["ok"] is True
+    # ⚠️ ``queued`` reflete "o INSERT rodou sem erro", não "criou linha":
+    # ``mirror.enqueue`` não olha o ``rowcount`` do ON CONFLICT DO NOTHING
+    # (divergência pré-existente com o docstring dele). A garantia REAL do dedup
+    # é a contagem de linhas abaixo.
+
+    from sqlalchemy import text as _t
+    from db.engine import get_engine
+    with get_engine().connect() as conn:
+        row = conn.execute(_t("SELECT payload FROM plugin_trackify_outbox "
+                              "WHERE kind = 'meu_evento'")).mappings().all()
+    assert len(row) == 1
+    # O título externo viaja: sem ele a timeline do CDP mostraria o slug cru.
+    assert json.loads(row[0]["payload"])["title"] == "Meu evento"
+
+
+def test_track_event_recusa_grupo(plugin_app):
+    """Contato no Trackify só tem exclusão suave: um JID de grupo viraria
+    linha-lixo permanente no CDP."""
+    plugin_app("trackify", settings_overrides=_mirror_on())
+    services = _load("services")
+    from db.repositories import contact_repo
+    g = contact_repo.get_or_create("120363000000000000@g.us",
+                                   contact_type="whatsapp")
+    contact_repo.update(int(g["id"]), is_group=1)
+    r = services.track_event("meu_evento", contact_id=int(g["id"]))
+    assert r["ok"] is False
+
+
+def test_protocolos_via_servico_produz_a_MESMA_linha_de_antes(plugin_app):
+    """A prova de que a migração F4 não mudou o dado no CDP.
+
+    Compara a linha da fila produzida por ``track_protocolo_closed(**payload)``
+    com a que o handler de barramento produzia com o MESMO payload: mesmo
+    ``external_id``, mesmo envelope.
+    """
+    plugin_app("trackify", settings_overrides=_mirror_on())
+    services, mirror = _load("services"), _load("mirror")
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5511900000802", contact_type="whatsapp")
+
+    payload = {"contact_id": int(c["id"]), "protocolo_id": 4242,
+               "conversation_id": 7, "closed_at": 1753900000.0,
+               "assignee_name": "Fulano", "reason": "resolvido",
+               "fields": {"motivo": "troca", "itens": ["a", "b"]}}
+
+    assert services.track_protocolo_closed(**payload) == {"ok": True, "queued": True}
+    eid = mirror.make_external_id("proto.4242.c1753900000")
+
+    from sqlalchemy import text as _t
+    from db.engine import get_engine
+    with get_engine().connect() as conn:
+        via_servico = conn.execute(
+            _t("SELECT external_id, kind, payload FROM plugin_trackify_outbox "
+               "WHERE external_id = :e"), {"e": eid}).mappings().first()
+        conn.execute(_t("DELETE FROM plugin_trackify_outbox WHERE external_id = :e"),
+                     {"e": eid})
+    assert via_servico is not None
+
+    # E agora pelo caminho de ANTES: o handler do barramento, mesmo payload.
+    with get_engine().begin() as conn:
+        conn.execute(_t("DELETE FROM plugin_trackify_outbox WHERE external_id = :e"),
+                     {"e": eid})
+    assert mirror.on_protocolo_closed(None, payload) is True
+    with get_engine().connect() as conn:
+        via_bus = conn.execute(
+            _t("SELECT external_id, kind, payload FROM plugin_trackify_outbox "
+               "WHERE external_id = :e"), {"e": eid}).mappings().first()
+
+    assert via_bus["external_id"] == via_servico["external_id"]
+    assert via_bus["kind"] == via_servico["kind"] == "protocolo_closed"
+    assert json.loads(via_bus["payload"]) == json.loads(via_servico["payload"])
+
+
+def test_get_journey_sem_credencial_devolve_disabled(plugin_app):
+    plugin_app("trackify", settings_overrides={"plugin.trackify.sync_api_key": ""})
+    services = _load("services")
+    with pytest.raises(Exception) as exc:
+        _run(services.get_journey(1))
+    assert type(exc.value).__name__ == "ServiceDisabled"
+
+
+def test_put_contact_fields_respeita_cooldown(plugin_app, monkeypatch):
+    """429 do CDP suspende a escrita — a op reporta ``throttled`` em vez de
+    insistir contra o limite do Nexus do cliente."""
+    plugin_app("trackify", settings_overrides=_field_sync_on())
+    services, push = _load("services"), _load("push")
+    monkeypatch.setattr(push, "cooldown_remaining", lambda: 42.0)
+
+    r = _run(services.put_contact_fields(trackify_contact_id="uuid-x",
+                                         values={"cpf": "1"}))
+    assert r["ok"] is False and r["verdict"] == "throttled"
+    assert r["retry_after"] == 42.0
+
+
+def test_services_nao_criam_rota_no_plugin(plugin_app):
+    """O requisito "sem expor a API pra fora": nada sob ``/api/plugins/`` casa
+    ``service`` ou ``rpc``."""
+    built = plugin_app("trackify")
+    suspeitas = [getattr(r, "path", "") for r in built.app.routes
+                 if "/api/plugins/" in getattr(r, "path", "")
+                 and ("service" in getattr(r, "path", "")
+                      or "rpc" in getattr(r, "path", ""))]
+    assert suspeitas == []
+
+
+def test_clique_em_botao_desconhecido_nao_toca_o_trackify(plugin_app, monkeypatch):
+    """O escopo do plano: do caminho de clique em botão, SÓ o descadastro fala
+    com o CDP. Um payload que não casa ação nenhuma é ignorado em silêncio —
+    zero linha na fila, zero chamada HTTP, zero estado de consentimento."""
+    plugin_app("trackify", settings_overrides=_mirror_on(**_consent_on()))
+    consent = _load("consent")
+    consent.reset_for_tests()
+    ch = _canal("consent_cloud_desconhecido")
+    _sem_gravar(monkeypatch, consent)
+
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create("5511900000803", contact_type="whatsapp")
+    consent.on_message_received(None, _clique(
+        ch, "5511900000803", payload="COMPRAR_AGORA", msg_id="wamid.desconhecido"))
+
+    from sqlalchemy import text as _t
+    from db.engine import get_engine
+    with get_engine().connect() as conn:
+        na_fila = conn.execute(
+            _t("SELECT COUNT(*) FROM plugin_trackify_outbox WHERE contact_id = :c"),
+            {"c": int(c["id"])}).scalar()
+        no_estado = conn.execute(
+            _t("SELECT COUNT(*) FROM plugin_trackify_consent_state "
+               "WHERE contact_id = :c"), {"c": int(c["id"])}).scalar()
+    assert (na_fila, no_estado) == (0, 0)
+    assert consent.get_state(int(c["id"]), OPTOUT) is None
+
+
+def _clicou_optout(consent, monkeypatch, phone, canal, *, msg_id="wamid.optout"):
+    from db.repositories import contact_repo
+    c = contact_repo.get_or_create(phone, contact_type="whatsapp")
+    _sem_gravar(monkeypatch, consent)
+    consent.on_message_received(None, _clique(canal, phone, msg_id=msg_id))
+    return int(c["id"])
+
+
+def _linhas_optout(contact_id: int) -> list:
+    from sqlalchemy import text as _t
+    from db.engine import get_engine
+    with get_engine().connect() as conn:
+        return conn.execute(
+            _t("SELECT external_id FROM plugin_trackify_outbox "
+               "WHERE kind = 'marketing_optout' AND contact_id = :c"),
+            {"c": contact_id}).mappings().all()
+
+
+def test_clique_de_descadastro_grava_campo_E_enfileira_evento(plugin_app, monkeypatch):
+    """O par positivo: o clique de descadastro faz as DUAS coisas.
+
+    O ``PUT`` continua sendo o mecanismo funcional (é ele que o Campanhas lê);
+    o evento é adicional e puramente de visibilidade na jornada.
+    """
+    plugin_app("trackify", settings_overrides=_mirror_on(**_consent_on()))
+    consent, push = _load("consent"), _load("push")
+    consent.reset_for_tests()
+    cid = _clicou_optout(consent, monkeypatch, "5511900000804",
+                         _canal("consent_cloud_ev1"))
+
+    assert len(_linhas_optout(cid)) == 1
+
+    # E o PUT acontece pelo caminho de sempre.
+    _linkado(monkeypatch, push, "uuid-cdp-ev1")
+    client = _FakeClient(_FakeResp(200, _cdp_contact(optout_marketing="sim")))
+    assert _run(consent._write_once(client, cid, OPTOUT))[0] == "sent"
+    assert client.calls[0]["method"] == "PUT"
+    assert client.calls[0]["json"] == {"fieldValues": {"optout_marketing": "sim"}}
+
+
+def test_evento_de_optout_deduplica_por_msg_id(plugin_app, monkeypatch):
+    """Reentrega do webhook colapsa em zero eventos novos."""
+    plugin_app("trackify", settings_overrides=_mirror_on(**_consent_on()))
+    consent = _load("consent")
+    consent.reset_for_tests()
+    ch = _canal("consent_cloud_ev2")
+    cid = _clicou_optout(consent, monkeypatch, "5511900000805", ch, msg_id="wamid.dup")
+    _clicou_optout(consent, monkeypatch, "5511900000805", ch, msg_id="wamid.dup")
+
+    assert len(_linhas_optout(cid)) == 1
+
+
+def test_optout_com_espelho_desligado_ainda_grava_o_campo(plugin_app, monkeypatch):
+    """``mirror_enabled`` é o interruptor mestre dos EVENTOS. Desligado, o
+    descadastro continua funcionando pelo PUT — só não aparece na jornada."""
+    plugin_app("trackify", settings_overrides=_consent_on(
+        **{"plugin.trackify.mirror_enabled": False}))
+    consent, push = _load("consent"), _load("push")
+    consent.reset_for_tests()
+    cid = _clicou_optout(consent, monkeypatch, "5511900000806",
+                         _canal("consent_cloud_ev3"), msg_id="wamid.semespelho")
+
+    assert _linhas_optout(cid) == []
+
+    _linkado(monkeypatch, push, "uuid-cdp-ev3")
+    client = _FakeClient(_FakeResp(200, _cdp_contact(optout_marketing="sim")))
+    assert _run(consent._write_once(client, cid, OPTOUT))[0] == "sent"
+
+
+def test_falha_no_put_nao_impede_o_evento(plugin_app, monkeypatch):
+    """O fato registrado é "o cliente clicou pedindo para sair" — aconteceu,
+    tenha o PUT chegado ou não."""
+    plugin_app("trackify", settings_overrides=_mirror_on(**_consent_on()))
+    consent, push = _load("consent"), _load("push")
+    consent.reset_for_tests()
+    cid = _clicou_optout(consent, monkeypatch, "5511900000807",
+                         _canal("consent_cloud_ev4"), msg_id="wamid.falha")
+
+    _linkado(monkeypatch, push, "uuid-cdp-ev4")
+    client = _FakeClient(_FakeResp(503, {}))
+    desfecho, _, repetir = _run(consent._write_once(client, cid, OPTOUT))
+    assert (desfecho, repetir) == ("retry", True)
+
+    # A linha na fila continua lá.
+    assert len(_linhas_optout(cid)) == 1
+
+
+def test_protocolos_consome_a_api_e_os_nomes_de_op_batem():
+    """O elo do F4: o `protocolos` chama ops que o `trackify` de fato publica.
+
+    O modo de falha real aqui é DRIFT de nome — renomear uma op do trackify (ou
+    um `kind` do protocolos) e o `services.call` passar a devolver `UNKNOWN_OP`
+    em silêncio, porque o seam nunca levanta. Este teste ancora os dois lados.
+    """
+    import re
+    from plugins.manifest import load_manifest
+
+    raiz = Path(__file__).resolve().parents[2]
+    protocolos = raiz / "assets" / "plugin_examples" / "protocolos"
+    logic = (protocolos / "logic.py").read_text(encoding="utf-8")
+
+    # 1) Import DEFENSIVO: import duro no topo = o plugin não carrega em core antigo.
+    assert re.search(r"try:\s*\n\s*from plugins import services as _services", logic)
+    assert "_services = None" in logic
+
+    # 2) O funil chama a op semântica, passando o MESMO payload do emit.
+    assert '_services.call("trackify", f"track_protocolo_{kind}"' in logic
+    assert '_as="protocolos"' in logic
+
+    # 3) O manifesto declara o consumo (fornece o range default de `_as`).
+    manifest = load_manifest(protocolos)
+    assert {"plugin": "trackify", "version": ">=1.0,<2.0"} in manifest.uses_services
+
+    # 4) Todo `kind` emitido tem op correspondente publicada pelo trackify.
+    kinds = set(re.findall(r'_emit_bus\("(\w+)"', logic))
+    kinds |= set(re.findall(r'kind="(\w+)"', logic)) & {
+        "opened", "closed", "rated", "fields_updated"}
+    assert kinds == {"opened", "closed", "rated", "fields_updated"}, kinds
+    publicadas = set(_load("services").SERVICES)
+    for kind in kinds:
+        assert f"track_protocolo_{kind}" in publicadas, kind
+
+
+def test_o_trackify_nao_assina_mais_protocolos_no_barramento():
+    """A entrega deixou de ser assinatura e virou chamada direta. Manter as duas
+    duplicaria o evento no CDP — o dedup por ``external_id`` seguraria, mas o
+    caminho seria ambíguo (e o WARNING de evento desconhecido voltaria)."""
+    events = _load("events")
+    assert not [n for n in events.EVENT_HANDLERS if n.startswith("protocolos.")]
+
+
+def test_boot_avisa_quando_o_modo_seco_virou_gravacao_real(plugin_app, caplog):
+    """A salvaguarda do upgrade: o fato tem de APARECER.
+
+    Uma instalação que estava ligada **e** em modo seco passa a gravar de verdade
+    no primeiro boot depois da 4.0.0. O aviso não muda estado nenhum (desligar
+    sozinho quebraria em silêncio quem já estava ao vivo) — só grita no log e
+    deixa uma linha na trilha, uma única vez.
+
+    ⚠️ ``lifecycle.setup`` NÃO roda sob ``plugin_app`` (o harness substitui o
+    lifespan por no-op), então é chamado na mão, como no teste do laço acima.
+    """
+    import logging
+    from types import SimpleNamespace
+
+    plugin_app("trackify", settings_overrides={
+        "plugin.trackify.mirror_enabled": True,
+        "plugin.trackify.mirror_dry_run": True,      # chave órfã, deixada no banco
+        "plugin.trackify.modo_seco_removido_em": "",  # ainda não avisado
+    })
+    lifecycle, consent = _load("lifecycle"), _load("consent")
+    consent.reset_for_tests()
+
+    from db.repositories import config_repo
+    try:
+        with caplog.at_level(logging.WARNING, logger="plugins.trackify.lifecycle"):
+            lifecycle.setup(SimpleNamespace(loop=None))
+        assert "AGORA GRAVA DE VERDADE" in caplog.text
+        assert "Espelho de eventos" in caplog.text
+        # Idempotente: a marca impede o aviso de repetir a cada boot.
+        assert config_repo.get("plugin.trackify.modo_seco_removido_em")
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="plugins.trackify.lifecycle"):
+            lifecycle.setup(SimpleNamespace(loop=None))
+        assert "AGORA GRAVA DE VERDADE" not in caplog.text
+    finally:
+        config_repo.set_many({"plugin.trackify.mirror_dry_run": "",
+                              "plugin.trackify.modo_seco_removido_em": ""})
+        consent.reset_for_tests()

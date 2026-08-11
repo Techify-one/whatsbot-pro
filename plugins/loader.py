@@ -60,6 +60,10 @@ class LoadedPlugin:
     teardown_fn: callable | None = None
     # Channel provider classes (plano 02 Fase 0): registered in the ChannelRegistry.
     channel_providers: list = dataclasses.field(default_factory=list)
+    # Plugin→plugin service surface (in-process, never HTTP — plugins.services).
+    services: dict[str, callable] = dataclasses.field(default_factory=dict)
+    services_version: str = "1.0"
+    services_allow: tuple = ()  # empty = any loaded plugin may call
 
     @property
     def id(self) -> str:
@@ -192,12 +196,14 @@ def _process_one(plugin_dir: Path, registry: PluginRegistry) -> None:
         registry.loaded[manifest.id] = loaded
         plugin_repo.set_load_error(manifest.id, None)
         logger.info(
-            "Plugin %s loaded (tools=%d prompts=%d events=%d filters=%d router=%s screens=%d)",
+            "Plugin %s loaded (tools=%d prompts=%d events=%d filters=%d "
+            "services=%d router=%s screens=%d)",
             manifest.id,
             len(loaded.tools),
             len(loaded.prompt_fragments),
             len(loaded.event_handlers),
             len(loaded.filters),
+            len(loaded.services),
             "yes" if loaded.router else "no",
             len(manifest.screens),
         )
@@ -274,6 +280,18 @@ def _entry_filters(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleTy
         validate_filters(manifest.id, getattr(mod, "FILTERS", None)))
 
 
+def _entry_services(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    # Validation lives in plugins.services — single source, same pattern as
+    # events/filters above. NEVER touches ``loaded.router``: the service surface
+    # is in-process only and must stay invisible to HTTP.
+    from plugins.services import validate_services
+    loaded.services.update(
+        validate_services(manifest.id, getattr(mod, "SERVICES", None)))
+    loaded.services_version = str(getattr(mod, "SERVICES_VERSION", "1.0"))
+    allow = getattr(mod, "SERVICES_ALLOW", None)
+    loaded.services_allow = tuple(allow) if allow else ()
+
+
 def _entry_routes(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
     loaded.router = getattr(mod, "router", None)
 
@@ -313,6 +331,10 @@ _ENTRY_SPECS: list[tuple[str, callable]] = [
     ("settings", _entry_settings),    # Settings (Pydantic BaseModel) — phase 6
     ("channels", _entry_channels),    # CHANNEL_PROVIDERS=[ChannelClass, ...] — plano 02
     ("lifecycle", _entry_lifecycle),  # setup(ctx)/teardown(ctx) — plano 09 Fase 1
+    # APPENDED at the end on purpose: the order above is the legacy load order and
+    # every position must stay put. A core without this row simply never consults
+    # ``entry.services`` — which is what keeps a provider loadable on an older core.
+    ("services", _entry_services),    # SERVICES={"op": callable, ...}
 ]
 
 

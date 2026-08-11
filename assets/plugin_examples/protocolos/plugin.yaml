@@ -1,6 +1,6 @@
 id: protocolos
 name: Protocolos
-version: 1.24.1
+version: 1.25.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Camada de protocolos sobre os atendimentos (estilo Chatwoot personalizado). MANTÉM o
@@ -60,6 +60,12 @@ entry:
   settings: settings  # toggles (enforce_backend, auto_link, mirror_custom_attributes)
   lifecycle: lifecycle  # varredura: devolve à IA as conversas cuja posse temporária venceu
 migrations: migrations
+# API interna que este plugin CONSOME (plugins.services, core >= 1.1). Fornece o
+# range default das chamadas feitas com ``_as="protocolos"``; o trackify ausente
+# ou desligado degrada limpo (UNAVAILABLE/DISABLED), nunca levanta.
+uses_services:
+  - plugin: trackify
+    version: ">=1.0,<2.0"
 # Override de rota + slot + popup beforeResolve vivem no extends.js (registrado 1x no boot).
 frontend_extends: /plugins/protocolos/static/extends.js
 frontend_api_version: "1.0"

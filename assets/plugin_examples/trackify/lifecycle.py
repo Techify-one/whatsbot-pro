@@ -18,6 +18,8 @@ import time
 
 import httpx
 
+from plugins.context import audit
+
 from . import _config, consent, dispatcher, enroll, pull, push, reconcile
 from . import client as tk_client
 
@@ -283,9 +285,57 @@ def _limpar_segredos_legados() -> None:
         logger.debug("trackify: falha ao limpar settings legadas", exc_info=True)
 
 
+# Chaves secas da 3.x. As linhas continuam no banco (inertes: ninguém as lê, e
+# ``GET /settings`` itera os DEFAULTS, então não reaparecem na UI). O par é
+# ``(função, chave_seca)``.
+_MODOS_SECOS = (
+    ("Espelho de eventos", "mirror_enabled", "mirror_dry_run"),
+    ("Sincronização de campos", "field_sync_enabled", "field_sync_dry_run"),
+    ("Descadastro por clique", "consent_enabled", "consent_dry_run"),
+    ("Cadastro automático no CDP", "cdp_autocadastro_enabled", "cdp_autocadastro_dry_run"),
+)
+
+_MARCA_AVISO = "modo_seco_removido_em"
+
+
+def _avisar_modo_seco_removido() -> None:
+    """Torna VISÍVEL que uma função que rodava em ensaio agora grava de verdade.
+
+    A 4.0.0 removeu os quatro modos secos. Uma instalação que estava, por
+    exemplo, com ``mirror_enabled=True`` **e** ``mirror_dry_run=True`` passa a
+    postar no Trackify de verdade neste boot — e contato no CDP só tem exclusão
+    suave. Não mudamos estado nenhum (desligar sozinho seria pior: quebraria em
+    silêncio quem já estava ao vivo); só gritamos no log e deixamos uma linha na
+    trilha. Idempotente pela marca ``modo_seco_removido_em``. Envolvido em
+    try/except que NUNCA derruba o boot.
+    """
+    try:
+        from db.repositories import config_repo
+        if (_config.setting(_MARCA_AVISO) or ""):
+            return
+        afetadas = [
+            rotulo for rotulo, chave_on, chave_seca in _MODOS_SECOS
+            if bool(_config.setting(chave_on, False)) and bool(_config.setting(chave_seca, False))
+        ]
+        config_repo.set(_config.PREFIX + _MARCA_AVISO, str(time.time()))
+        if not afetadas:
+            return
+        for rotulo in afetadas:
+            logger.warning(
+                "trackify: '%s' estava em modo seco e AGORA GRAVA DE VERDADE no "
+                "Trackify. O modo seco foi removido na 4.0.0 — desligue a função "
+                "se ainda não quiser gravar.", rotulo)
+        audit("trackify", "config.modo_seco_removido", actor_type="system",
+              after={"funcoes": afetadas})
+    except Exception:  # noqa: BLE001 — aviso nunca pode derrubar o boot
+        logger.debug("trackify: falha ao avisar sobre o modo seco removido",
+                     exc_info=True)
+
+
 def setup(ctx) -> None:
     """Sobe as tasks. Nunca derruba o boot: em harness de teste o supervisor não
     está cabeado e ``spawn_task`` levanta (padrão do protocolos)."""
+    _avisar_modo_seco_removido()
     _limpar_segredos_legados()
     # O handler de consentimento é síncrono e o core o despacha numa thread do
     # executor, onde não há laço. Sem esta referência a gravação não tem onde

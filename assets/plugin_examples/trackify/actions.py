@@ -12,8 +12,7 @@ adivinhando quais strings existiam. Ação nova aqui = uma dataclass; a aba se
 desenha sozinha a partir de ``/consent/status``.
 
 **Fronteira**: a ação declara O QUE gravar (:class:`Plan`); ``consent.py``
-decide COMO entregar (tentativas, dedupe por ``msg_id``, modo seco, mapa de
-veredito). ``consent_match`` nunca descobre que "ação" existe — ele devolve um
+decide COMO entregar (tentativas, dedupe por ``msg_id``, mapa de veredito). ``consent_match`` nunca descobre que "ação" existe — ele devolve um
 id opaco.
 
 Dependências: ``actions`` → ``_config``, ``consent_match``. Nunca o contrário —

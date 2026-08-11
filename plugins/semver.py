@@ -23,7 +23,12 @@ logger = logging.getLogger(__name__)
 # The running WhatsBot plugin API version. ``manifest.WHATSBOT_API_VERSION`` is
 # the canonical public name; it is kept in sync with this default so the two
 # modules never disagree.
-WHATSBOT_API_VERSION = "1.0.0"
+# 1.1.0: ADDITIVE — the plugin→plugin service seam (``entry.services`` +
+# ``uses_services``, see plugins/services.py). Every existing manifest declares
+# ``>=1.0,<2.0`` and stays compatible. ⚠️ A plugin that declares ``>=1.1`` FAILS
+# HARD on an older core (manifest raises ⇒ load_error), so only declare it when
+# the plugin is useless without services.
+WHATSBOT_API_VERSION = "1.1.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

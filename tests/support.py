@@ -81,6 +81,18 @@ class _PluginBusState:
 
 
 @dataclass(frozen=True)
+class _PluginServicesState:
+    """Shallow snapshot of the process-global plugin SERVICE registry.
+
+    Mandatory for the same reason as the bus snapshot: ``build_test_app`` boots
+    several apps in one process and the registry is process-global.
+    """
+
+    providers: dict[str, Any]
+    uses: dict[str, dict]
+
+
+@dataclass(frozen=True)
 class _PluginModulesState:
     modules: dict[str, Any]
     parent_attributes: dict[str, Any]
@@ -120,6 +132,25 @@ def _restore_plugin_bus(state: _PluginBusState) -> None:
     bus._core_sync_listeners[:] = state.core_sync_listeners
     bus._loop = state.loop
     bus._agent_handler = state.agent_handler
+
+
+def _snapshot_plugin_services() -> _PluginServicesState:
+    from plugins import services as svc
+
+    return _PluginServicesState(
+        providers=dict(svc._providers),
+        uses={pid: dict(ranges) for pid, ranges in svc._uses.items()},
+    )
+
+
+def _restore_plugin_services(state: _PluginServicesState) -> None:
+    """Restore one LIFO harness snapshot without replacing shared containers."""
+    from plugins import services as svc
+
+    svc._providers.clear()
+    svc._providers.update(state.providers)
+    svc._uses.clear()
+    svc._uses.update({pid: dict(ranges) for pid, ranges in state.uses.items()})
 
 
 def _snapshot_plugin_modules(plugin_ids: Iterable[str]) -> _PluginModulesState:
@@ -306,6 +337,9 @@ class BuiltApp:
         default_factory=dict, repr=False,
     )
     _plugin_bus_before: _PluginBusState | None = field(default=None, repr=False)
+    _plugin_services_before: _PluginServicesState | None = field(
+        default=None, repr=False,
+    )
     _plugin_modules_before: _PluginModulesState | None = field(default=None, repr=False)
     _group_mentions_before: _GroupMentionsState | None = field(default=None, repr=False)
     _tool_overrides_before: list[dict] = field(default_factory=list, repr=False)
@@ -325,6 +359,8 @@ class BuiltApp:
         finally:
             if self._plugin_bus_before is not None:
                 _restore_plugin_bus(self._plugin_bus_before)
+            if self._plugin_services_before is not None:
+                _restore_plugin_services(self._plugin_services_before)
             _restore_tool_overrides(self._tool_overrides_before)
             _restore_plugin_permissions(self._plugin_permissions_before)
             _restore_plugin_rows(self._plugin_rows_before)
@@ -445,6 +481,7 @@ def build_test_app(
     plugin_permissions_before = _snapshot_plugin_permissions(plugins)
     tool_overrides_before = _snapshot_tool_overrides()
     plugin_bus_before = _snapshot_plugin_bus()
+    plugin_services_before = _snapshot_plugin_services()
     plugin_modules_before = _snapshot_plugin_modules(plugins)
     group_mentions_before = _snapshot_group_mentions()
 
@@ -521,6 +558,7 @@ def build_test_app(
             _plugin_rows_before=plugin_rows_before,
             _plugin_permissions_before=plugin_permissions_before,
             _plugin_bus_before=plugin_bus_before,
+            _plugin_services_before=plugin_services_before,
             _plugin_modules_before=plugin_modules_before,
             _group_mentions_before=group_mentions_before,
             _tool_overrides_before=tool_overrides_before,
@@ -532,6 +570,7 @@ def build_test_app(
         finally:
             tmp.cleanup()
             _restore_plugin_bus(plugin_bus_before)
+            _restore_plugin_services(plugin_services_before)
             _restore_tool_overrides(tool_overrides_before)
             _restore_plugin_permissions(plugin_permissions_before)
             _restore_plugin_rows(plugin_rows_before)

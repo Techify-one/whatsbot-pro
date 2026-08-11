@@ -74,6 +74,12 @@ class PluginManifest:
     # Version range for ``api.services``. Legacy manifests predate this field and
     # therefore target the compatibility surface 1.x by default.
     plugin_services_version: str = "1.0"
+    # Plugin→plugin SERVICE surfaces this plugin CONSUMES (plugins.services).
+    # Shape after parsing: ``[{"plugin": str, "version": str}, ...]``. Supplies the
+    # default version range for ``services.call(..., _as=<this plugin>)``.
+    # ⚠️ Independent from ``plugin_services_version``, which is the FRONTEND
+    # ``api.services`` range and has nothing to do with this field.
+    uses_services: list[dict] = dataclasses.field(default_factory=list)
     raw: dict = dataclasses.field(default_factory=dict)
 
     def to_public_dict(self) -> dict:
@@ -212,6 +218,7 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
     frontend_extends = str(data.get("frontend_extends") or "")
     frontend_api_version = str(data.get("frontend_api_version") or "*")
     plugin_services_version = str(data.get("plugin_services_version") or "1.0")
+    uses_services = _parse_uses_services(data.get("uses_services"), pid)
 
     return PluginManifest(
         id=pid,
@@ -232,8 +239,42 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
         frontend_extends=frontend_extends,
         frontend_api_version=frontend_api_version,
         plugin_services_version=plugin_services_version,
+        uses_services=uses_services,
         raw=data,
     )
+
+
+def _parse_uses_services(raw: Any, pid: str) -> list[dict]:
+    """Parse + validate the optional ``uses_services:`` manifest block.
+
+    Returns ``[]`` when absent. Otherwise ``[{"plugin": str, "version": str},
+    ...]`` with ``version`` defaulting to ``"*"``. Mirrors :func:`_parse_rbac`:
+    a malformed entry is dropped with a WARNING and NEVER blocks the load — a
+    consumer whose declaration is wrong degrades to "no default range", not to
+    a plugin that fails to boot.
+    """
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        logger.warning("plugin %s: 'uses_services' must be a list, ignored", pid)
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            logger.warning(
+                "plugin %s: uses_services entry %r is not a mapping, skipped", pid, item)
+            continue
+        target = str(item.get("plugin") or "").strip()
+        if not _ID_RE.match(target):
+            logger.warning(
+                "plugin %s: invalid uses_services plugin id %r, skipped", pid, target)
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        out.append({"plugin": target, "version": str(item.get("version") or "*")})
+    return out
 
 
 def _parse_rbac(raw: Any, pid: str) -> dict:

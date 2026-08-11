@@ -84,7 +84,13 @@ entry:
   settings: settings    # omitir se não houver
   events: events        # omitir se não houver
   filters: filters      # omitir se não houver
+  services: services    # omitir se não houver — API INTERNA plugin→plugin
 migrations: migrations  # omitir se não houver
+# APIs internas de OUTROS plugins que este consome (omitir se não houver).
+# Fornece o range default de services.call(..., _as="<id>").
+# uses_services:
+#   - plugin: <outro_id>
+#     version: ">=1.0,<2.0"
 screens:
   - id: <screen-id>
     title: <Título>
@@ -116,6 +122,39 @@ dependencies: []
 Manifest legado sem o campo recebe a superfície de compatibilidade 1.x; plugin
 novo deve declarar 2.x e ainda feature-detectar funções opcionais. Range inválido
 ou incompatível faz o core pular o `frontend_extends` (fail-closed).
+
+⚠️ **`plugin_services_version` (frontend) ≠ `uses_services` (backend)** — nomes
+parecidos, superfícies sem relação nenhuma.
+
+**`entry.services` — API interna plugin→plugin** (ver CLAUDE.md §"API interna
+plugin→plugin"). O módulo exporta `SERVICES = {"op": callable, ...}` e,
+opcionalmente, `SERVICES_VERSION` (semver da SUA superfície, mora no código) e
+`SERVICES_ALLOW` (tupla de ids autorizados; vazio = qualquer plugin carregado).
+Três regras duras:
+
+1. **Nunca exponha isso por HTTP** — sem rota `/rpc`, sem `/service/{op}`. A
+   fronteira é "nada sai do processo".
+2. **`services.py` é FOLHA**: nenhum outro módulo do plugin o importa. É o que
+   mantém o plugin carregando num core anterior, que não conhece
+   `entry.services`. Helper compartilhado vai para um módulo vizinho.
+3. **Nenhuma op pode depender de estado criado no `setup()`** — o registro roda
+   em `create_app`, antes do lifespan. Uma op não pronta devolve
+   `ServiceDisabled` (→ envelope `DISABLED`), nunca levanta.
+
+Do lado CONSUMIDOR, o import é sempre defensivo (import duro no topo de um módulo
+que o loader importa = o plugin não carrega, falha muda no boot):
+
+```python
+try:
+    from plugins import services as _services   # core >= 1.1
+except Exception:
+    _services = None
+...
+if _services is not None:
+    res = _services.call("<provedor>", "<op>", _as="<meu_id>", **kwargs)
+    # res.ok / res.status ∈ ok|unavailable|unknown_op|incompatible|disabled|
+    #                       wrong_context|error — NUNCA levanta
+```
 
 **Onde fica a configuração (REGRA):** se o plugin tem opções configuráveis, elas
 vivem na aba de configuração DO PRÓPRIO plugin — `settings.py` (form auto-gerado)

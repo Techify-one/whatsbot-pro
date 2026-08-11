@@ -141,7 +141,8 @@ function Field({ label, hint, children }) {
 }
 
 /** Espelho de eventos (escrita). É a seção que estava faltando: sem ela não havia
- *  jeito de ligar/desligar o espelho nem o modo seco pela interface. */
+ *  jeito de ligar/desligar o espelho pela interface. Desde a 4.0.0 não existe
+ *  modo seco: ligar já posta de verdade, daí o aviso âmbar reforçado. */
 function MirrorSettings({ values, onSave, busy }) {
   const [v, setV] = useState(null);
   const [msg, setMsg] = useState('');
@@ -149,7 +150,6 @@ function MirrorSettings({ values, onSave, busy }) {
   if (!v) return null;
 
   const set = (k) => (val) => { setV({ ...v, [k]: val }); setMsg(''); };
-  const live = v.mirror_enabled && !v.mirror_dry_run;
 
   async function save(e) {
     e.preventDefault();
@@ -158,7 +158,6 @@ function MirrorSettings({ values, onSave, busy }) {
     const r = await onSave({
       ...values,
       mirror_enabled: !!v.mirror_enabled,
-      mirror_dry_run: !!v.mirror_dry_run,
       ingestion_url: String(v.ingestion_url || '').trim(),
       mirror_contact_types: String(v.mirror_contact_types || 'whatsapp').trim(),
       rate_per_min: clampNum('rate_per_min', v.rate_per_min),
@@ -174,16 +173,12 @@ function MirrorSettings({ values, onSave, busy }) {
         <${Toggle} checked=${v.mirror_enabled} onChange=${set('mirror_enabled')}
           label="Espelhar acontecimentos no Trackify"
           hint="Conversas, protocolos e contatos viram eventos no CDP. Exige o canal e os mapeamentos criados lá." />
-        <${Toggle} checked=${v.mirror_dry_run} onChange=${set('mirror_dry_run')}
-          disabled=${!v.mirror_enabled}
-          label="Modo seco (não envia de verdade)"
-          hint="Enfileira e monta o envelope, mas não posta. Confira a fila antes de tocar no CDP." />
-
-        ${live ? html`
+        ${v.mirror_enabled ? html`
           <p class="text-[12px] rounded-md px-3 py-2 bg-amber-500/15 text-amber-600 dark:text-amber-400">
-            Envio real ligado. Vale para <strong>toda</strong> conversa elegível — não dá para
-            limitar a um contato. Número que ainda não existe no Trackify vira cadastro novo lá,
-            e contato no CDP só sai por exclusão suave.
+            <strong>Envio real.</strong> Ligar já posta no Trackify — não há ensaio. Vale para
+            <strong>toda</strong> conversa elegível, não dá para limitar a um contato. Número que
+            ainda não existe no Trackify vira cadastro novo lá, e contato no CDP só sai por
+            exclusão suave.
           </p>` : null}
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -23,10 +23,10 @@ import logging
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from db.repositories import contact_repo
 from plugins.context import audit, plugin_permission
 
-from . import _config, actions, consent, dispatcher, field_map, identity, journey, push, sync_state
+from . import (_config, actions, consent, dispatcher, field_map, identity, journey,
+               status, sync_state)
 from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.routes")
@@ -62,31 +62,14 @@ def _err(msg: str, status: int = 400, data: dict | None = None):
     return JSONResponse(body, status_code=status)
 
 
-def _contact_scope(contact_id: int) -> dict | None:
-    """Telefone/e-mail/tipo do contato do WhatsBot — a única fonte de identidade.
-
-    Resolver no servidor (em vez de aceitar o telefone do cliente) é o que torna
-    a rota não-spoofável.
-    """
-    c = contact_repo.get(contact_id)
-    if not c:
-        return None
-    return {
-        "phone": c.get("phone") or "",
-        "email": (c.get("email") or "").strip(),
-        "name": c.get("name") or "",
-        "contact_type": c.get("contact_type") or "whatsapp",
-        "is_group": bool(c.get("is_group")),
-        # Campos conectados que são identificador no CDP — entram na busca ao
-        # lado do telefone.
-        "hints": field_map.identifier_hints(c),
-    }
-
-
 @router.get("/journey", dependencies=[plugin_permission("view")])
 async def get_journey(contact_id: int):
-    """Os 3 blocos da jornada do contato da conversa aberta."""
-    scope = await asyncio.to_thread(_contact_scope, contact_id)
+    """Os 3 blocos da jornada do contato da conversa aberta.
+
+    A resolução de identidade vive em ``identity.contact_scope`` — a rota e a op
+    de serviço ``get_journey`` compartilham uma resolução só.
+    """
+    scope = await asyncio.to_thread(identity.contact_scope, contact_id)
     if scope is None:
         return _err("Contato não encontrado.", 404)
     if scope["is_group"]:
@@ -447,7 +430,6 @@ async def field_sync_status():
         cur = sync_state.get_cursor("changelog")
         return {
             "enabled": bool(_config.setting("field_sync_enabled", False)),
-            "dry_run": bool(_config.setting("field_sync_dry_run", True)),
             "pull_enabled": bool(_config.setting("field_sync_pull_enabled", False)),
             "credential_set": _config.credential_set(),
             "blocked_reason": (_config.setting("sync_blocked_reason") or ""),
@@ -465,85 +447,15 @@ async def field_sync_status():
     return {"ok": True, "data": await asyncio.to_thread(_run)}
 
 
-@router.post("/field-sync/run", dependencies=[plugin_permission("manage")])
-async def field_sync_run(body: dict | None = None):
-    """Simula (ou dispara) a sincronização de UM contato.
-
-    Existe para o operador conferir num contato antes de soltar em cima de
-    milhares — é a diferença entre ousar ligar isto e não. Sem ``contact_id``
-    seria uma varredura da base inteira, que não pode rodar dentro da requisição
-    (estouraria o tempo e prenderia um worker), então isso é recusado aqui: quem
-    faz varredura é a task de conferência, no ritmo dela.
-    """
-    b = body or {}
-    contact_id = b.get("contact_id")
-    if not contact_id:
-        return _err("Informe o contato a simular.", 400)
-
-    async with _http() as http:
-        plano = await push.plan_for_contact(http, int(contact_id))
-
-    def _run():
-        return {
-            "contact_id": int(contact_id),
-            "linked": bool(plano.trackify_contact_id),
-            "trackify_contact_id": plano.trackify_contact_id,
-            "skip": plano.skip,
-            "would_write": plano.field_values,
-            "decisions": [
-                {"wb_key": d["map"]["wb_key"], "tk_slug": d["map"]["tk_slug"],
-                 "direction": d["map"]["direction"], "action": d["decision"].action,
-                 "reason": d["decision"].reason}
-                for d in plano.decisions
-            ],
-        }
-
-    data = await asyncio.to_thread(_run)
-    if b.get("apply") and not data["skip"]:
-        # Enfileira; quem entrega é o worker, que é onde mora o ritmo.
-        await asyncio.to_thread(push.enqueue, int(contact_id), "manual")
-        data["queued"] = True
-        audit("trackify", "field_sync.run", resource_id=str(contact_id))
-    return {"ok": True, "data": data}
-
-
 @router.get("/health", dependencies=[plugin_permission("view")])
 async def health():
     """Distingue "não configurado" de "inalcançável" de "schema mudou".
 
-    Sem isto, um schema alterado no Trackify viraria uma tela vazia sem
-    explicação — o erro tem que ser acionável, não um 500.
+    O veredito mora em ``status.build`` — a rota e a op de serviço ``status()``
+    compartilham uma leitura só.
     """
-    configured = await asyncio.to_thread(tk_client.is_configured)
-    reachable, message = False, "API key do Trackify não configurada."
-    escopos: list = []
-    if configured:
-        async with _http() as http:
-            res = await tk_client.whoami(http)
-        reachable = res.ok
-        if res.ok:
-            escopos = list((res.data or {}).get("scopes") or [])
-            message = ""
-        else:
-            message = res.error
-
-    # "Schema ok" virou "a chave tem os escopos de que o plugin precisa": o
-    # equivalente honesto agora que o plugin não conhece mais tabela nenhuma do
-    # CDP. Continua distinguindo "não configurado" de "inalcançável" de
-    # "alcançável mas não vai funcionar" — que é o ponto da rota.
-    faltando = [e for e in ("read", "contacts:write") if e not in escopos] if reachable else []
-    return {"ok": True, "data": {
-        "configured": configured,
-        "reachable": reachable,
-        "message": message,
-        "schema_ok": reachable and not faltando,
-        "schema_missing": faltando,
-        "scopes": escopos,
-        "base_url_set": bool(_config.nexus_base_url()),
-        "mirror_enabled": bool(_config.setting("mirror_enabled", False)),
-        "field_sync_enabled": bool(_config.setting("field_sync_enabled", False)),
-        "field_sync_credential_set": await asyncio.to_thread(_config.credential_set),
-    }}
+    async with _http() as http:
+        return {"ok": True, "data": await status.build(http)}
 
 
 # ── Consentimento de marketing por clique em botão ───────────────────────
@@ -561,9 +473,15 @@ async def consent_retry(body: dict):
     """Reentrega UM clique que não chegou ao Trackify.
 
     A gravação acontece na hora do clique e não tem fila: sem esta rota, um
-    pedido que falhou porque o CDP estava fora do ar, porque o modo seco estava
-    ligado, ou porque havia duplicata a mesclar, ficava perdido para sempre — a
-    única saída era pedir ao cliente que clicasse de novo.
+    pedido que falhou porque o CDP estava fora do ar, porque havia duplicata a
+    mesclar, ou porque foi **capturado por uma versão anterior em modo seco**,
+    ficava perdido para sempre — a única saída era pedir ao cliente que clicasse
+    de novo.
+
+    ⚠️ É por aqui que se recupera o que ficou preso no modo seco removido na
+    4.0.0: aqueles cliques ficaram com ``written_at`` NULL, continuam listados em
+    "Cliques que não chegaram ao Trackify" com o motivo ``[modo seco] gravaria
+    …``, e agora **Reprocessar grava de verdade**.
 
     Não recebe o valor a gravar: o que a ação escreve continua vindo da
     configuração dela. Isto é um "tentar de novo", não uma escrita manual.

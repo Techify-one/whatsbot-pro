@@ -298,3 +298,31 @@ def canonical_identity(*, phone: str | None, email: str | None = None,
         if wa:
             out[SLUG_WHATSAPP] = wa
     return out
+
+
+def contact_scope(contact_id: int) -> dict | None:
+    """Telefone/e-mail/tipo do contato do WhatsBot — a única fonte de identidade.
+
+    Resolver no servidor (em vez de aceitar o telefone do cliente) é o que torna
+    a rota ``/journey`` não-spoofável; a op de serviço ``get_journey`` usa
+    exatamente a mesma resolução, incluindo o guard de ``is_group`` do chamador e
+    os ``identifier_hints`` dos campos conectados.
+
+    Bloqueante (toca o banco do WhatsBot) — chame de ``asyncio.to_thread``.
+    """
+    from db.repositories import contact_repo
+    from . import field_map
+
+    c = contact_repo.get(contact_id)
+    if not c:
+        return None
+    return {
+        "phone": c.get("phone") or "",
+        "email": (c.get("email") or "").strip(),
+        "name": c.get("name") or "",
+        "contact_type": c.get("contact_type") or "whatsapp",
+        "is_group": bool(c.get("is_group")),
+        # Campos conectados que são identificador no CDP — entram na busca ao
+        # lado do telefone.
+        "hints": field_map.identifier_hints(c),
+    }

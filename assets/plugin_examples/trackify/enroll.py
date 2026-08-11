@@ -18,7 +18,8 @@ Duas entradas, um só caminho de criação:
 ⚠️ **Contato no Trackify tem apenas soft delete.** Um cadastro criado por engano
 fica no CRM do cliente para sempre. Por isso a elegibilidade é emprestada de
 ``mirror.eligible`` (mesma pergunta, mesma resposta: grupo não, id de sessão do
-widget não, tipo de contato fora do escopo não) e por isso existe o modo seco.
+widget não, tipo de contato fora do escopo não). **Não há ensaio**: ligar o
+cadastro automático já cria de verdade, na base inteira que for elegível.
 
 ⚠️ **Criar não é resolver ambiguidade.** Quando a consulta devolve mais de um
 cadastro no identificador de topo, este módulo não cria coisa nenhuma — criar ali
@@ -53,10 +54,6 @@ def enabled() -> bool:
     return bool(_config.setting("cdp_autocadastro_enabled", True))
 
 
-def dry_run() -> bool:
-    return bool(_config.setting("cdp_autocadastro_dry_run", False))
-
-
 def ready() -> bool:
     """Ligado e com credencial. Sem chave não há o que tentar."""
     return enabled() and tk_client.is_configured()
@@ -81,9 +78,6 @@ async def create_for_contact(http, contact: dict) -> tuple[str, str]:
         contact_type=(contact.get("contact_type") or "whatsapp").lower())
     if not ident:
         return "", "contato sem identificador válido para cadastrar no Trackify"
-
-    if dry_run():
-        return "", f"[modo seco] cadastraria no Trackify com {sorted(ident)}"
 
     res = await tk_client.create_contact(http, ident)
 

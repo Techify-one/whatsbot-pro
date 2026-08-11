@@ -40,6 +40,10 @@ KIND_CONTACT_UPDATED = "contact_updated"
 KIND_CONTACT_TAGGED = "contact_tagged"
 KIND_CONTACT_UNTAGGED = "contact_untagged"
 KIND_PROTO_FIELDS = "protocolo_fields_updated"
+# O clique no botão de descadastro do template. É o ÚNICO clique de botão que
+# vira linha aqui: o gate é o casamento com a ação de descadastro em
+# ``consent.py``; nenhum outro payload alcança este kind.
+KIND_MARKETING_OPTOUT = "marketing_optout"
 
 # Campos do cadastro do WhatsBot que viajam como DADO do evento. O e-mail também
 # viaja como IDENTIFICADOR (bloco `identity`), mas aqui ele aparece de novo para
@@ -65,6 +69,7 @@ TITLES = {
     KIND_CONTACT_TAGGED: "Etiqueta aplicada",
     KIND_CONTACT_UNTAGGED: "Etiqueta removida",
     KIND_PROTO_FIELDS: "Dados preenchidos no protocolo",
+    KIND_MARKETING_OPTOUT: "Cliente pediu para não receber promoções",
 }
 
 # Kinds descartáveis quando a fila passa do teto — o de menor valor no CDP.
@@ -164,10 +169,15 @@ def eligible(contact: dict | None) -> tuple[bool, str]:
 # ── Enfileiramento ───────────────────────────────────────────────────────
 
 def enqueue(kind: str, *, contact: dict, external_id: str, data: dict,
-            occurred_at: float | None = None) -> bool:
+            occurred_at: float | None = None, title: str | None = None) -> bool:
     """Grava UMA linha na fila. ``False`` quando foi descartado ou já existia.
 
     Nunca levanta: chamado de dentro de handler de evento, onde exceção some.
+
+    ``title`` é o rótulo humano da linha na timeline do CDP. Os kinds internos
+    caem em ``TITLES``; um ``kind`` vindo de fora (op ``track_event`` da API de
+    serviço) PRECISA passar o seu, senão renderiza como slug cru — exatamente o
+    problema que o comentário de ``TITLES`` documenta.
     """
     ok, why = eligible(contact)
     if not ok:
@@ -181,7 +191,7 @@ def enqueue(kind: str, *, contact: dict, external_id: str, data: dict,
         "install_id": install_id(),
         "kind": kind,
         "external_id": external_id,
-        "title": TITLES.get(kind, kind),
+        "title": (title or "").strip() or TITLES.get(kind, kind),
         "contact": {
             "name": (contact.get("name") or "").strip(),
             "email": (contact.get("email") or "").strip(),
@@ -231,6 +241,12 @@ def _contact_by_phone(ph: str) -> dict | None:
 
 
 # ── Handlers ─────────────────────────────────────────────────────────────
+#
+# Os ``on_protocolo_*`` devolvem ``bool`` (o resultado de ``enqueue``). O
+# barramento ignora retorno, então isso é retrocompatível — e é o que deixa a op
+# de serviço ``track_protocolo_*`` (services.py) reportar ``{"queued": …}``
+# reusando o MESMO handler, sem reimplementar a tradução para o vocabulário do
+# CDP em lugar nenhum.
 
 def on_conversation_created(ctx, payload: dict) -> None:
     if not _enabled():
@@ -276,13 +292,13 @@ def on_conversation_reopened(ctx, payload: dict) -> None:
                   "origem": payload.get("trigger") or "manual"})
 
 
-def on_protocolo_opened(ctx, payload: dict) -> None:
+def on_protocolo_opened(ctx, payload: dict) -> bool:
     if not _enabled():
-        return
+        return False
     c = (_contact_by_id(payload.get("contact_id"))
          or _contact_by_phone(payload.get("contact_phone") or ""))
     pid = payload.get("protocolo_id")
-    enqueue(KIND_PROTO_OPENED, contact=c or {},
+    return enqueue(KIND_PROTO_OPENED, contact=c or {},
             external_id=make_external_id(f"proto.{pid}"),
             occurred_at=payload.get("opened_at") or payload.get("ts"),
             data={"protocolo_id": pid,
@@ -291,9 +307,9 @@ def on_protocolo_opened(ctx, payload: dict) -> None:
                   "atendente": payload.get("opened_by_name")})
 
 
-def on_protocolo_closed(ctx, payload: dict) -> None:
+def on_protocolo_closed(ctx, payload: dict) -> bool:
     if not _enabled():
-        return
+        return False
     c = (_contact_by_id(payload.get("contact_id"))
          or _contact_by_phone(payload.get("contact_phone") or ""))
     pid = payload.get("protocolo_id")
@@ -313,16 +329,16 @@ def on_protocolo_closed(ctx, payload: dict) -> None:
             data[f"campo_{k}"] = str(v)
         elif isinstance(v, list) and v:
             data[f"campo_{k}"] = ", ".join(str(x) for x in v)
-    enqueue(KIND_PROTO_CLOSED, contact=c or {},
+    return enqueue(KIND_PROTO_CLOSED, contact=c or {},
             external_id=make_external_id(f"proto.{pid}.c{int(float(closed_at or 0))}"),
             occurred_at=closed_at, data=data)
 
 
-def on_protocolo_rated(ctx, payload: dict) -> None:
+def on_protocolo_rated(ctx, payload: dict) -> bool:
     if not _enabled():
-        return
+        return False
     c = _contact_by_id(payload.get("contact_id"))
-    enqueue(KIND_PROTO_RATED, contact=c or {},
+    return enqueue(KIND_PROTO_RATED, contact=c or {},
             external_id=make_external_id(f"aval.{payload.get('id_protocol')}"),
             occurred_at=payload.get("answered_at") or payload.get("ts"),
             data={"protocolo_id": payload.get("protocolo_id"),
@@ -413,7 +429,7 @@ def on_tool_after(ctx, payload: dict) -> None:
             data=_cadastro_data(c, "ia"))
 
 
-def on_protocolo_fields(ctx, payload: dict) -> None:
+def on_protocolo_fields(ctx, payload: dict) -> bool:
     """Rótulos gravados no protocolo FORA do fechamento.
 
     Sem isto, o que o atendente (ou a IA) preenche só chegava ao CDP quando o
@@ -422,7 +438,7 @@ def on_protocolo_fields(ctx, payload: dict) -> None:
     aqui vai o incremento.
     """
     if not _enabled():
-        return
+        return False
     c = (_contact_by_id(payload.get("contact_id"))
          or _contact_by_phone(payload.get("contact_phone") or ""))
     pid = payload.get("protocolo_id")
@@ -435,11 +451,11 @@ def on_protocolo_fields(ctx, payload: dict) -> None:
             data[f"campo_{k}"] = ", ".join(str(x) for x in v)
     # Sem nenhum rótulo preenchido não há fato a registrar.
     if len(data) <= 2:
-        return
+        return False
     # Endereçado pelo CONTEÚDO: salvar duas vezes os mesmos valores (o formulário
     # reenvia tudo a cada save) colapsa em zero eventos novos no CDP.
     stamp = _tags_hash([f"{k}={v}" for k, v in sorted(data.items())])
-    enqueue(KIND_PROTO_FIELDS, contact=c or {},
+    return enqueue(KIND_PROTO_FIELDS, contact=c or {},
             external_id=make_external_id(f"proto.{pid}.f{stamp}"),
             occurred_at=ts, data=data)
 

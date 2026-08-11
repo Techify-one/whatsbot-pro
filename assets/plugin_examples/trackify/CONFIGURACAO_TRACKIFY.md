@@ -129,12 +129,18 @@ o campo correspondente. Com ele, o dado chega e fica consultável mesmo antes do
 
 ## 5. Ordem de ativação (não pule)
 
+⚠️ **Desde a 4.0.0 não há ensaio.** Os modos secos foram removidos: ligar **Espelhar
+acontecimentos** já posta no Trackify de verdade, para toda conversa elegível, e contato no
+CDP só tem exclusão suave. A conferência que antes era feita em modo seco passa a ser feita
+**no próprio Trackify, antes de ligar**.
+
 1. API key criada (passo 0) e testada; canal + campos + mapeamentos criados.
-2. No WhatsBot: `URL de ingestão` = `https://SEU-NEXUS/trackify/api/v1/ingestion/whatsbot`.
-3. Ligue **Espelhar acontecimentos** deixando **Modo seco LIGADO**. A fila enche e nada é
-   postado — confira o envelope e os `external_id` em Plugins → Trackify → fila.
-4. Desligue o modo seco e observe o primeiro punhado em `Fila`. Confira no Trackify que os
-   eventos caíram **no contato certo**, não num contato novo.
+2. **Confira os mapeamentos no próprio Trackify** (Canal `whatsbot` → Mapeamentos): é o
+   passo que antes o modo seco cobria. Um mapeamento errado vira `422` depois.
+3. No WhatsBot: `URL de ingestão` = `https://SEU-NEXUS/trackify/api/v1/ingestion/whatsbot`.
+4. Ligue **Espelhar acontecimentos** e observe **imediatamente** o primeiro punhado em
+   `Fila`. Confira no Trackify que os eventos caíram **no contato certo**, não num contato
+   novo. Se algo estiver errado, desligue de novo — o que já foi postado fica lá.
 5. Só então deixe rodando.
 
 O passo 4 é o que pega erro de mapeamento: um `422` põe a linha em `blocked` com o motivo,
@@ -183,7 +189,8 @@ funcionar e não bloqueia ninguém.
 
 Campo e valor são pareados **1-para-1** e divergir neles **não quebra nada**: nenhum erro
 aparece e o disparo continua indo para quem pediu para sair. É a falha silenciosa mais
-provável desta integração — confira os dois antes de tirar o modo seco.
+provável desta integração — confira os dois **antes de ligar** (não há modo seco em que
+conferir depois).
 
 O **código** já não é uma chave única do outro lado. No Campanhas, cada botão de cada
 template da Meta tem o seu, digitado no próprio template. A regra é:
@@ -243,14 +250,28 @@ e acento **não importam** na comparação; emoji e pontuação, sim.
 2. Confira a lista de códigos, o par campo/valor (6.2) e o contrato do valor (6.1). Os
    códigos que a aba reconheceu aparecem como etiquetas abaixo do campo — se um que você
    digitou não estiver lá, ele está em conflito com outra ação.
-3. Ligue **Registrar ações de clique em botão** deixando o **modo seco LIGADO**.
-4. No Campanhas, dispare para um número de teste um template cujo botão de descadastro
-   leve um dos códigos da lista, e clique nele.
-5. Confira na ficha do contato no Trackify que **nada** foi gravado (modo seco) — e no
-   próprio painel, que o clique não caiu na lista de erros da aba.
-6. Desligue o modo seco, repita o clique e confira o campo na ficha do contato no
-   Trackify. Depois confirme no Campanhas que esse contato passa a ser **filtrado por
-   padrão** ao montar uma lista.
+3. Ligue **Registrar ações de clique em botão**. ⚠️ **A partir daqui grava de verdade** —
+   não há modo seco. Por isso o teste é feito com **um número de teste**, nunca com uma
+   campanha real.
+4. No Campanhas, dispare **para esse número de teste** um template cujo botão de
+   descadastro leve um dos códigos da lista, e clique nele.
+5. Confira: (a) o campo na ficha do contato no Trackify; (b) com o espelho de eventos
+   ligado, uma linha `marketing_optout` na fila e o evento na jornada do contato; (c) no
+   Campanhas, que esse contato passa a ser **filtrado por padrão** ao montar uma lista.
+6. Clique em **outro** botão do mesmo template e confirme que **nada** sai para o CDP: só
+   o clique de descadastro fala com o Trackify.
+
+**Recuperando o que ficou preso em modo seco.** Os cliques capturados por uma versão
+anterior em modo seco continuam listados em **"Cliques que não chegaram ao Trackify"**, com
+o motivo `[modo seco] gravaria …`. O botão **Reprocessar** agora **grava de verdade** — é o
+caminho de recuperação no dia da atualização.
+
+**O evento na jornada.** O clique de descadastro também vira um evento
+`marketing_optout` na timeline do contato (o campo continua sendo o mecanismo funcional; o
+evento é visibilidade). Ele viaja no mesmo envelope dos demais pelo canal já configurado em
+`URL de ingestão`, então os mapeamentos genéricos (`event_type`, `title`, `occurred_at`) já
+o cobrem. Os campos de `data` (`codigo`, `acao`, `campo`, `valor`) só viram campos
+personalizados de evento se você criar o mapeamento correspondente no Trackify.
 
 ### 6.6 Não mapeie o mesmo campo na aba "Campos do contato"
 

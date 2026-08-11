@@ -46,6 +46,13 @@ from db.tables import conversations as _conversations_tbl
 from db.tables import messages as _messages_tbl
 from server.pagination import CAP_LIST, PAGE_LIST, clamp_limit, clamp_offset
 
+# API interna plugin→plugin (core >= 1.1). Import DEFENSIVO: um raise no topo de
+# um módulo que o loader importa = o plugin não carrega, falha muda no boot.
+try:
+    from plugins import services as _services
+except Exception:  # noqa: BLE001 — core anterior: o recurso simplesmente não existe
+    _services = None
+
 logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "protocolos"
@@ -4630,7 +4637,7 @@ def _broadcast_changed(contact_id: int | None, protocolo_id: int | None,
 
 
 def _emit_bus(kind: str, **payload) -> None:
-    """Publica ``protocolos.<kind>`` no barramento de plugins.
+    """Publica ``protocolos.<kind>`` no barramento E entrega ao Trackify.
 
     Separado de :func:`_broadcast_changed` porque nem todo fato de negócio tem
     (ou pode ganhar) um broadcast de WS: a ABERTURA do protocolo acontece dentro
@@ -4639,9 +4646,33 @@ def _emit_bus(kind: str, **payload) -> None:
     abre protocolo). O bus é aditivo; o WS não.
 
     Falha no bus NUNCA pode derrubar a operação que chamou.
+
+    Duas coisas acontecem aqui, e são deliberadamente distintas:
+
+    1. **O emit continua.** O que foi trocado é o caminho de ENTREGA ao Trackify
+       (deixou de ser assinatura dele e virou chamada direta). O emit sobra como
+       sinal de observabilidade — plugins que assinam ``"*"`` (``debug_bus``,
+       ``event_logger``) continuam vendo o fato. Removê-lo quebraria esses
+       observadores em silêncio, sem ganho.
+    2. **A chamada é PÓS-COMMIT**, porque é onde ``_emit_bus`` já está.
+       ``mirror.enqueue`` do outro lado abre a própria transação, separada da do
+       ``protocolos``; chamar antes do commit criaria evento fantasma se o
+       ``protocolos`` fizesse rollback depois.
+
+    O ``protocolos`` NÃO aprende vocabulário do CDP: manda o mesmo dict de
+    sempre para uma op semântica, e a tradução (kind, external_id, achatamento
+    ``campo_<k>``, títulos) fica 100% dentro do trackify.
     """
+    body = {**payload, "ts": time.time()}
     try:
         from plugins.events import emit_with_filter_sync
-        emit_with_filter_sync(f"protocolos.{kind}", {**payload, "ts": time.time()})
+        emit_with_filter_sync(f"protocolos.{kind}", body)
     except Exception:
         logger.debug("protocolos: emit protocolos.%s falhou", kind, exc_info=True)
+
+    if _services is not None:
+        # Nunca levanta (o seam embrulha todo despacho) e o resultado é
+        # ignorado: o trackify ausente/desligado devolve UNAVAILABLE/DISABLED,
+        # que é uma degradação limpa, não um erro do protocolo.
+        _services.call("trackify", f"track_protocolo_{kind}",
+                       _as="protocolos", **body)

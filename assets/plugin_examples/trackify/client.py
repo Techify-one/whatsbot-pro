@@ -219,7 +219,8 @@ async def create_contact(client, field_values: dict, *, status: str = "lead") ->
 
     Contato no Trackify tem **apenas soft delete**: um cadastro criado por engano
     fica lá para sempre. Por isso quem chama filtra antes (grupo, id de sessão do
-    widget, tipo de contato fora do escopo) e por isso existe o modo seco.
+    widget, tipo de contato fora do escopo). **Não há ensaio**: o que for criado
+    aqui existe de verdade no CRM do cliente.
     """
     valores = {str(k): str(v) for k, v in (field_values or {}).items() if str(v or "").strip()}
     if not valores:

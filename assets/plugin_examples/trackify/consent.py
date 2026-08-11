@@ -31,7 +31,7 @@ from sqlalchemy import text
 
 from plugins.context import audit, make_plugin_db
 
-from . import _config, actions, consent_match, enroll, field_map, push, writer
+from . import _config, actions, consent_match, enroll, field_map, mirror, push, writer
 from . import client as tk_client
 
 logger = logging.getLogger("plugins.trackify.consent")
@@ -188,12 +188,58 @@ def on_message_received(ctx, payload: dict) -> None:
             return
 
         contact_id = int(contact["id"])
-        _record_state(contact_id, action_id, cand, channel_id,
-                      str(p.get("msg_id") or ""))
+        msg_id = str(p.get("msg_id") or "")
+        _record_state(contact_id, action_id, cand, channel_id, msg_id)
+        _enqueue_journey_event(contact, action_id, cand, msg_id, p)
         _spawn_write(contact_id, action_id)
     except Exception:  # noqa: BLE001 — handler de bus nunca derruba o pipeline
         logger.debug("trackify: falha ao processar clique de consentimento",
                      exc_info=True)
+
+
+def _enqueue_journey_event(contact: dict, action_id: str, cand: dict,
+                           msg_id: str, payload: dict) -> None:
+    """O clique de descadastro também vira EVENTO na jornada do contato.
+
+    Antes, o clique só gravava o campo (``PUT /contacts/{id}`` com o slug de
+    optout): o Campanhas passava a filtrar, mas a timeline do contato ficava
+    muda sobre o pedido. O ``PUT`` continua sendo o mecanismo funcional — isto
+    é adicional e puramente de visibilidade.
+
+    Cinco decisões:
+
+    1. **Enfileira no CASAMENTO, não no sucesso do PUT.** O fato registrado é "o
+       cliente clicou pedindo para sair", que aconteceu tenha o PUT chegado ou
+       não — e a fila tem retry/dedup que o PUT não tem. Timeline e campo
+       divergirem por um tempo é aceitável e observável; perder o registro do
+       pedido não é.
+    2. **Dedup pelo ``msg_id``** — o mesmo identificador que o dedupe da escrita
+       usa. Reentrega do webhook colapsa em zero eventos novos.
+    3. **Só a ação de descadastro enfileira.** O gate é o id da ação embutida,
+       não "qualquer ação casada": uma ação futura registrada em ``actions.py``
+       precisa optar explicitamente.
+    4. **Herda o gate e a elegibilidade do espelho** (``mirror.enqueue`` roda
+       ``mirror.eligible`` e o kind só entra com ``mirror_enabled`` ligado). Com
+       o espelho desligado o descadastro continua funcionando pelo PUT — só não
+       aparece na jornada.
+    5. **Não levanta.** ``mirror.enqueue`` já engole a própria exceção e a
+       chamada fica fora do caminho do PUT.
+    """
+    if action_id != actions.OPTOUT:
+        return
+    if not bool(_config.setting("mirror_enabled", False)):
+        return
+    ts = float(payload.get("ts") or _now())
+    mirror.enqueue(
+        mirror.KIND_MARKETING_OPTOUT, contact=contact,
+        external_id=mirror.make_external_id(
+            f"optout.{contact.get('id')}.{msg_id or int(ts)}"),
+        occurred_at=ts,
+        data={"codigo": (cand or {}).get("payload") or "",
+              "acao": action_id,
+              "campo": _config.consent_field_slug(),
+              "valor": _config.consent_optout_value(),
+              "conversation_id": payload.get("conversation_id")})
 
 
 def _spawn_write(contact_id: int, action_id: str) -> None:
@@ -392,12 +438,6 @@ async def _write_once(client, contact_id: int, action_id: str) -> tuple[str, str
             and str(estado.get("trackify_contact_id") or "") == tk_id):
         return "noop", "", False
 
-    if bool(_config.setting("consent_dry_run", True)):
-        await asyncio.to_thread(
-            _record_error, contact_id, action_id,
-            f"[modo seco] gravaria {plano.describe} no contato {tk_id}")
-        return "dry_run", "", False
-
     res = await writer.put_contact(client, tk_id, plano.field_values)
     return await asyncio.to_thread(_apply_result, contact_id, action_id, tk_id,
                                    plano.field_values, res, clique)
@@ -555,7 +595,6 @@ async def status(client) -> dict:
 
     out = {
         "enabled": snap.enabled,
-        "dry_run": bool(_config.setting("consent_dry_run", True)),
         "credential_set": snap.credential_set,
         "blocked_reason": (_config.setting("sync_blocked_reason") or "").strip(),
         "channels": await asyncio.to_thread(official_channels),

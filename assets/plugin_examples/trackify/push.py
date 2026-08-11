@@ -442,12 +442,6 @@ async def deliver_one(client, row: dict) -> str:
         await asyncio.to_thread(finish, row["id"], "sent")
         return "noop"
 
-    if bool(_config.setting("field_sync_dry_run", True)):
-        resumo = ", ".join(f"{k}={v!r}" for k, v in sorted(plan.field_values.items()))
-        await asyncio.to_thread(finish, row["id"], "sent",
-                                error=f"[modo seco] enviaria: {resumo}"[:500])
-        return "dry_run"
-
     if not tk_client.is_configured():
         # Sem credencial não é falha do item: não conta tentativa.
         await asyncio.to_thread(retry_later, row["id"], int(row["attempts"]),
