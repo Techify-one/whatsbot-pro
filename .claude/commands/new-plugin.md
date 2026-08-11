@@ -110,6 +110,15 @@ dependencies: []
 # frontend_extends: /plugins/<id>/static/extends.js
 # frontend_api_version: "1.0"
 # plugin_services_version: ">=2.0,<3.0"
+#
+# ⚠️ As DUAS sintaxes NÃO são a mesma. `whatsbot_api_version` é lido pelo parser
+# do backend (plugins/semver.py), que aceita SÓ comparadores — "1.1", "^1.1" e
+# "~1.1" são rejeitados e o plugin não carrega. Já `frontend_api_version` /
+# `plugin_services_version` são lidos pelo parser do JS, que aceita essas formas
+# e trata versão pura como compatibilidade por MAJOR. Não copie de um para o
+# outro. Mantenha ">=1.0,<2.0" (o plugin precisa instalar em produção rodando
+# core antigo) e só suba o piso se depender de um seam novo — veja
+# docs/PLUGIN_API_CHANGELOG.md.
 ```
 
 `plugin_services_version` negocia separadamente a allowlist `api.services`.
@@ -351,6 +360,7 @@ FILTERS = {
 | `filter.webhook.payload` | `dict` (body bruto de qualquer provider; `ctx.extras` traz provider/canal/assinatura) | webhook responde 200 sem processar |
 | `filter.message.before_save` | `dict` (mensagem tipada com `media_extras`) | mensagem ignorada |
 | `filter.message.outgoing` | `dict` (echo do celular do usuário) | echo ignorado |
+| `filter.message.notify` | `bool` (default `True`) | mensagem silenciosa (salva e exibida, sem badge/som) |
 | `filter.transcription.should_run` | `bool` (default `True`) | pula transcribe/describe (mesmo que `False`) |
 | `filter.transcription.result` | `str` (transcrição/descrição já gerada) | trata como vazia |
 | `filter.contact.tags` | `list[str]` (tags pretendidas) | mantém tags atuais |
@@ -367,6 +377,7 @@ FILTERS = {
 | `filter.conversation.before_status` | `dict` da mudança de status | aborta fechamento |
 | `filter.conversation.before_assign` | `dict` da atribuição | aborta atribuição |
 | `filter.conversation.clear_assignee_on_close` | `bool` | default seguro limpa assignee |
+| `filter.conversation.before_reopen` | `bool` (default `True`) | a mensagem não reabre a conversa fechada |
 | `filter.agent.resolve` | `AgentSpec` | mantém agente default |
 | `filter.conversation.assignment` | `dict` de destino | mantém atribuição default |
 

@@ -574,7 +574,7 @@ Falhando **qualquer um**, o comportamento de negócio vai inteiro para o plugin 
 
 **Casos que fixaram a regra:** plano 84 (o motor dos avisos da conta Meta cabe em `filter.webhook.payload`; o ramo por `kind` foi revertido, e ficou no core só o seam genérico de procedência/autenticação necessário para o filtro não confiar em uma rota pública); plano 76 · F9 (`MetaGraphChannel` desceu para dentro do plugin, e o Instagram carrega a **própria cópia** em vez de importar a do Messenger — *dois canais Meta, duas cópias, preço do zip autossuficiente*); plano 92 · B1 (o modal "Enviar template" virou do plugin via `overrideComponent`).
 
-⚠️ **"Não muda o core" ≠ "não depende do core".** Um plugin extraído continua importando `db.repositories`, `plugins.context`, `runtime.supervisor`, `server.message_errors` — e **nenhum desses é API declarada** (o `whatsbot_api_version` de todo plugin é `>=1.0,<2.0` contra um `WHATSBOT_API_VERSION` que nunca foi bumpado; o guard nunca rejeitou nada). Por isso **todo import além do mínimo é defensivo**: `try/except` que degrada em vez de quebrar. Import não-defensivo de módulo que mudou = o plugin **nem carrega**, falha muda no boot.
+⚠️ **"Não muda o core" ≠ "não depende do core".** Um plugin extraído continua importando `db.repositories`, `plugins.context`, `runtime.supervisor`, `server.message_errors` — e **nenhum desses é API declarada**. A superfície declarada (catálogos do bus, `plugins.context`, schema do manifest + `entry`, `channels.base`/`channels.events`, convenções de host) é a versionada por `WHATSBOT_API_VERSION` e travada por [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) — ver "Versionamento da API de plugins"; `db.repositories` e companhia ficam **de fora de propósito** (snapshotar a camada de dados inteira tornaria o número inútil por ruído). Até 2026-08-11 a constante esteve congelada em `1.0.0` e o guard nunca rejeitou nada; da `1.1.0` em diante ela anda, mas isso **não** promove esses módulos a API. Por isso **todo import além do mínimo continua defensivo**: `try/except` que degrada em vez de quebrar. Import não-defensivo de módulo que mudou = o plugin **nem carrega**, falha muda no boot.
 
 **Contrato do observador de `filter.webhook.payload`** (o gancho que torna plugin de canal viável fora do core — mesmo padrão em `janela_72h`, `debug_bus` e `whatsapp_cloud`):
 
@@ -633,7 +633,7 @@ O vocabulário da Meta que o core carregava (categorias, formatos de cabeçalho,
 
 - **`id`**: snake_case, regex `^[a-z][a-z0-9_]{0,31}$`. Vira o prefixo de tabela e o nome do pacote Python.
 - **Tabelas**: SEMPRE `plugin_<id>_<nome>`. O migrator rejeita o contrário com erro claro.
-- **`whatsbot_api_version`**: range semver no manifest (ex: `">=1.0,<2.0"`). Versão atual em `plugins/manifest.WHATSBOT_API_VERSION`.
+- **`whatsbot_api_version`**: range semver no manifest. **Use sempre comparadores** (`">=1.0,<2.0"`) — o parser do backend ([plugins/semver.py](plugins/semver.py)) REJEITA `"1.1"`, `"^1.1"`, `"~1.1"` e `"1"`, e range rejeitado significa plugin que **não carrega**; o do frontend aceita essas formas, então não copie a sintaxe de um campo para o outro. Versão atual em [plugins/semver.py](plugins/semver.py) (`plugins.manifest` é re-export) — ver "Versionamento da API de plugins".
 - **`plugin_services_version`**: obrigatório em plugin novo que declare `frontend_extends` (use `">=2.1,<3.0"` hoje, se depender do `subscribe`; `">=2.0,<3.0"` continua válido). Omissão significa legado 1.x; é independente de `frontend_api_version`.
 - **Tempo real**: `api.services.subscribe` / `wsBus`, **nunca** `new WebSocket('/ws')` — ver "Frontend dinâmico".
 - **Permissions**: declaradas no manifest mas **não enforced no MVP** — informativo apenas.
@@ -641,6 +641,33 @@ O vocabulário da Meta que o core carregava (categorias, formatos de cabeçalho,
 - **Settings**: chaves persistem com prefixo `plugin.<id>.`. Plugin nunca grava direto na tabela `config` sem esse prefixo.
 - **Cores / modo escuro**: a tela do plugin (`static/<id>.js`) DEVE ser legível no tema escuro. Use as classes semânticas `wa-*` (`bg-wa-bg`, `bg-wa-panel`, `text-wa-text`, `border-wa-border`, …) e `.wa-field` em inputs. Cores cruas (`bg-white`, `bg-green-50`, …) têm fallback no `custom.css`, mas hex inline e cores fora da lista coberta NÃO — teste com o modo escuro ligado. Ver "Tema e modo escuro (legibilidade)".
 - **Auditoria**: toda rota do plugin que MUDA configuração ou estado com dono chama `plugins.context.audit(...)`. Ver "Auditoria de plugins" abaixo e o guia [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md).
+
+### Versionamento da API de plugins (`WHATSBOT_API_VERSION`)
+
+**Versão atual: `1.1.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
+
+⚠️ **A constante ficou congelada em `1.0.0` por 93 dias** (2026-05-10 → 2026-08-11) enquanto a superfície crescia de 35 para 75 eventos e de 0 para 24 filtros. Consequência: o guard de compat nunca rejeitou nada e **nenhum plugin conseguia declarar de que core ele precisa** — o `whatsapp_cloud` teve de degradar fechado em runtime porque não tinha como exigir o `ctx.extras.signature_authenticated` do plano 84. A regra em prosa existia desde 2026-06-29 e foi violada 8 dias depois, em silêncio. Por isso a disciplina agora tem dente, não só texto.
+
+**Dentro da superfície versionada** (mudou ⇒ bump): os catálogos do bus (`KNOWN_EVENTS`, `KNOWN_FILTERS`, `EXPERIMENTAL_FILTERS`, `_LIFECYCLE_EVENTS`, `_DISPATCH_ONLY_KEYS`) e a semântica de cada filtro (tipo do valor, o que `None` faz, `ctx.extras`) · os símbolos públicos de [plugins/context.py](plugins/context.py) e os campos dos contextos · o schema do manifest, as regexes de validação e as 8 chaves de `_ENTRY_SPECS` **em ordem** · [channels/base.py](channels/base.py) + [channels/events.py](channels/events.py) · as convenções de host (prefixo `plugin_<id>_`, namespace `whatsbot_plugins.<id>`, mounts `/api/plugins/<id>` e `/plugins/<id>/static`, isenção `/public/`, prefixo `plugin.<id>.` de config, chave RBAC, `PLUGIN_ACTION_RE`, `TEARDOWN_TIMEOUT_SEC`).
+
+**Fora**: `db.repositories` e os demais módulos do core que plugins importam — são dependência real, **não API declarada**, e a proteção deles continua sendo o import defensivo (ver o aviso em "O que fica no core e o que vai pro plugin"); e o frontend, que tem números próprios (`FRONTEND_API_VERSION`, `PLUGIN_SERVICES_VERSION` em [web/static/js/plugins/api.js](web/static/js/plugins/api.js)) e falha de forma **assimétrica** — lá, incompatível pula o `frontend_extends`; aqui, incompatível faz o plugin **deixar de existir**. **Nunca sincronize os valores.** Seam que um plugin publica para outro (`filter.retornos.*`, `protocolos.*`) é versionado pelo `version` do plugin publicador.
+
+O teste de pertinência é mecânico: **está dentro se existe um snapshot que falha quando aquilo muda**. Querer mover algo para dentro custa escrever o snapshot.
+
+| Nível | Gatilho |
+|---|---|
+| **MAJOR** | remover/renomear nome de catálogo **com produtor vivo**; mudar o tipo do valor de um filtro ou a semântica do `None`; remover/renomear símbolo público, campo de dataclass, chave de `entry` ou convenção de host; tornar obrigatório campo opcional do manifest; tornar abstrato método de `Channel` que tinha default. **Derruba os 36 manifests do parque de uma vez** (todos declaram `">=1.0,<2.0"`), inclusive o `gowa` bundled — é tranche que republica os ZIPs com ordem de deploy, não decisão de commit |
+| **MINOR** | acrescentar nome ao catálogo (**no mesmo commit do call site**), símbolo, campo com default, chave de `entry`, capability, método com default; alargar `ctx.extras`; ampliar quando um evento existente é emitido |
+| **PATCH** | correção que não muda a forma; retirar nome de catálogo **sem produtor vivo** (exige varredura repo-wide + changelog + teste de WARNING) |
+
+Exceção: seam em `EXPERIMENTAL_FILTERS` pode sair sem MAJOR — o contrato em [plugins/events.py](plugins/events.py) já diz que ele pode se mover até se formar.
+
+**Fluxo quando o guard fica vermelho** (ele imprime estes 3 passos na falha):
+1. bump em [plugins/semver.py](plugins/semver.py);
+2. entrada no topo de `docs/PLUGIN_API_CHANGELOG.md` — o heading `## X.Y.Z — data` precisa ser o **primeiro** heading de versão do arquivo (o apêndice histórico usa `###` de propósito);
+3. `UPDATE_PLUGIN_API_SURFACE=1 venv/bin/python -m pytest tests/contracts/test_plugin_api_surface.py`.
+
+A regeneração **se recusa a rodar** enquanto a constante não tiver andado — é isso que torna a disciplina aplicável em vez de documentada. A env é deliberadamente separada do `UPDATE_GOLDENS` usado em massa nos goldens de caracterização, que varreria a superfície da API junto.
 
 ### Auditoria de plugins
 
@@ -736,6 +763,12 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | `channel.session_action` | POST `/api/channels/{id}/reconnect` \| `/logout` (só quando a ação de fato rodou — sentinelas `not_gowa`/`unavailable` não emitem) |
 | `channel.duplicate_refused` | sweep de identidade recusou um canal duplicado ([channel_identity.py](app/services/channel_identity.py)) — ator `system` |
 | `channel.status_changed` | leitura de status ao vivo. **Fora da auditoria de propósito** (é read, roda a cada poll) |
+| `conversation.pinned` | `conversation_service.pin` — fixar/desafixar a conversa |
+| `conversation.labeled` | PUT das etiquetas de UMA conversa (`{conversation_id, contact_id, labels, ts}`) |
+| `conversation_label.created` / `.updated` / `.deleted` | CRUD do registro GLOBAL de etiquetas (`/api/conversation-labels`) |
+| `custom_attribute.created` / `.updated` / `.deleted` | CRUD da definição de atributo customizado (`{definition, ts}`) |
+| `ai.config.changed` | qualquer save/rollback de agente, tool, variável ou prompt no motor de IA (`{kind, key, ts}`) — o cache do `dynamic_registry` já foi invalidado quando o evento sai |
+| `channel.system_event` | inbound de **SISTEMA** de um canal (plano 82) — o ÚNICO gancho de bus para o que não é mensagem. `{phone, channel_id, system_type, wa_id, body, conversation_id, ts, raw}` |
 | `app.startup` / `app.shutdown` | lifespan do server |
 
 Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo evento emitido (após os subscribers específicos). `ctx.event_name` traz o nome real.
@@ -747,6 +780,7 @@ Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo e
 | `filter.webhook.payload` | `/api/webhook/{provider}/{channel_id}` depois de resolver canal/provider e verificar assinatura, antes do parse | `dict` (body bruto de qualquer provider) | Webhook responde 200 sem processar | `provider, channel_id, signature_authenticated` |
 | `filter.message.before_save` | inbound depois do parse | `dict` (mensagem tipada com `raw`, inclui `media_extras`) | Mensagem ignorada (nem salva nem responde) | `phone` |
 | `filter.message.outgoing` | **NOVO** — antes de salvar/emitir um `message.sent` de echo (mensagem enviada do celular fora do app) | `dict` (mensagem tipada, `is_from_me=True`, `source="echo"`) | Echo ignorado (não salva nem emite) | `phone` |
+| `filter.message.notify` | ingest do inbound, antes de incrementar as não-lidas | `bool` (default `True`) | Mensagem SILENCIOSA — salva e exibida, mas sem badge de não-lida nem som | `phone, role, text` |
 | `filter.transcription.should_run` | **NOVO** — wrapper `_maybe_transcribe`, ANTES de chamar `transcribe_audio`/`describe_image` (cobre os 4 call sites) | `bool` (default `True`) | Pula a transcrição (mesmo efeito de `False`) | `phone, media_kind ∈ {audio,image}, media_path, is_group, group_jid, source ∈ {batch,echo,group_no_mention}` |
 | `filter.transcription.result` | **NOVO** — depois da chamada de transcribe/describe, antes de a string ser usada | `str` | Trata como se a transcrição fosse vazia | igual ao `should_run` + `model` |
 | ~~`filter.media.unknown`~~ | 🚫 **INEXISTENTE** — o nome legado foi retirado de `KNOWN_FILTERS` no plano 100 porque não havia produtor desde o refactor do webhook. Registrar esse nome agora gera WARNING de filtro desconhecido. **Não há como um plugin reivindicar um media type novo**; o provider deve normalizar o payload em `Channel.parse_inbound()` para um `InboundEvent.kind` suportado | — | — | — |
@@ -765,6 +799,7 @@ Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo e
 | `filter.conversation.before_status` | antes de fechar a conversa | `dict {conversation_id, new_status}` | Aborta o fechamento | `user_id` |
 | `filter.conversation.before_assign` | antes de atribuir/desatribuir | `dict {conversation_id, assignee_user_id}` | Aborta a atribuição | `user_id` |
 | `filter.conversation.clear_assignee_on_close` | **NOVO (plano 67)** — `conversation_service.set_status` no fechamento, DEPOIS do `before_status` | `bool` (default `True` = limpar o atendente humano) | `None`/ausente ⇒ default seguro (limpa) | `conversation_id, user_id` |
+| `filter.conversation.before_reopen` | 4 call sites: inbound e envio do operador (texto e mídia), antes de reabrir uma conversa fechada | `bool` (default `True`) | A mensagem NÃO reabre a conversa — aparece normalmente e a conversa segue resolvida | `phone, role, text` |
 | `filter.agent.resolve` | depois de resolver o `AgentSpec` do turno | `AgentSpec` | Mantém o agente default | `phone, contact_id, channel_id` |
 | `filter.conversation.assignment` | destino proposto pela tool `transfer_to_human` | `dict` de atribuição | Mantém a atribuição default | `phone` e contexto da tool |
 
@@ -855,7 +890,7 @@ O webhook detecta os tipos abaixo e os converte em `parsed_msg` (`media_type` + 
 
 🚫 **Registrar um media type NOVO não é possível hoje.** O antigo `filter.media.unknown` foi retirado de `KNOWN_FILTERS` no plano 100 porque não tinha call site; quem ainda o registra recebe WARNING em vez de falhar em silêncio. O dispatch de inbound continua fechado (12 `kind` literais, sem `else` e sem log de "kind não reconhecido"), então o provider deve converter o payload para um kind suportado dentro do próprio `parse_inbound`.
 
-Regra de versão do catálogo: remover/renomear um filtro **com produtor vivo** exige MAJOR em `WHATSBOT_API_VERSION`. Retirar um nome apenas documentado, sem `apply_filter` no core suportado, é correção do catálogo (nenhum comportamento executável deixa de existir), mas exige varredura, documentação e teste de WARNING como o caso acima.
+Regra de versão do catálogo — caso particular da regra geral em "Versionamento da API de plugins": remover/renomear um filtro **com produtor vivo** exige MAJOR em `WHATSBOT_API_VERSION` (que hoje derrubaria os 36 manifests do parque de uma vez). Retirar um nome apenas documentado, sem `apply_filter` no core suportado, é PATCH — nenhum comportamento executável deixa de existir —, mas exige varredura, entrada em [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md) e teste de WARNING como o caso acima. **Acrescentar** nome é MINOR, no MESMO commit do call site — travado por `test_bus_catalogue_matches_producers`, que compara o catálogo com os produtores reais nas duas direções.
 
 ### Criar um plugin novo
 

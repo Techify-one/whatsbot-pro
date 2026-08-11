@@ -20,10 +20,23 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# The running WhatsBot plugin API version. ``manifest.WHATSBOT_API_VERSION`` is
-# the canonical public name; it is kept in sync with this default so the two
-# modules never disagree.
-WHATSBOT_API_VERSION = "1.0.0"
+# The running WhatsBot plugin API version — FONTE ÚNICA.
+# ``manifest.WHATSBOT_API_VERSION`` é re-export por valor, então os dois módulos
+# nunca discordam (travado por ``test_manifest_reexport_stays_in_sync``).
+#
+# Toda mudança na superfície declarada da API de plugins bumpa este número, e o
+# número nunca viaja sem a prosa: a entrada correspondente vai em
+# ``docs/PLUGIN_API_CHANGELOG.md``. O que conta como MAJOR/MINOR/PATCH está lá e
+# no CLAUDE.md ("Versionamento da API de plugins"); quem faz valer é
+# ``tests/contracts/test_plugin_api_surface.py``, que compara a superfície viva
+# com ``tests/goldens/plugin_api_surface.json`` e SE RECUSA a regenerar o
+# snapshot enquanto esta constante não tiver andado.
+#
+# ⚠️ MAJOR é tranche, não decisão de commit: os 36 manifests do parque declaram
+# ``">=1.0,<2.0"``, então um ``2.0.0`` faria TODOS deixarem de carregar de uma
+# vez (o loader retorna antes de registrar o plugin) — inclusive o ``gowa``
+# bundled, que é o único canal auto-instalado.
+WHATSBOT_API_VERSION = "1.1.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")
