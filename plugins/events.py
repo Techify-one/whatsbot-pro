@@ -77,6 +77,10 @@ KNOWN_EVENTS: set[str] = {
     "channel.created", "channel.deleted", "channel.restored",
     "channel.members_changed", "channel.session_action",
     "channel.duplicate_refused",
+    # Inbound de SISTEMA de um canal (plano 82) — o ÚNICO gancho de bus para o
+    # que não é mensagem (``channels/events.py``). Produtor:
+    # ``server/routes/channel_webhook.py``.
+    "channel.system_event",
     # Connection / lifecycle
     "connection.changed",
     "app.startup", "app.shutdown",
@@ -100,6 +104,22 @@ KNOWN_EVENTS: set[str] = {
     "conversation.reopened", "conversation.unassigned",
     "conversation.transferred_to_human", "conversation.agent_changed",
     "conversation.attribute_set", "conversation.ai_takeover",
+    # Fixar/desafixar a conversa (``conversation_service.pin``).
+    "conversation.pinned",
+    # Etiquetas de CONVERSA (``server/routes/conversation_labels.py``):
+    # ``conversation.labeled`` é a atribuição de UMA conversa; os três
+    # ``conversation_label.*`` são o CRUD do registro GLOBAL de etiquetas.
+    "conversation.labeled",
+    "conversation_label.created", "conversation_label.updated",
+    "conversation_label.deleted",
+    # CRUD da definição de atributo customizado
+    # (``server/routes/custom_attributes.py``).
+    "custom_attribute.created", "custom_attribute.updated",
+    "custom_attribute.deleted",
+    # Motor de IA config-in-DB — save/rollback de agente, tool, variável ou
+    # prompt (``server/routes/ai_engine.py``). O cache do ``dynamic_registry``
+    # já foi invalidado quando o evento sai.
+    "ai.config.changed",
     "config.changed",
     "tool_override.changed",
     "execution.started", "execution.ended",
@@ -137,6 +157,10 @@ KNOWN_FILTERS: set[str] = {
     # Inbound webhook / message ingest
     "filter.webhook.payload",
     "filter.message.before_save", "filter.message.outgoing",
+    # ``filter.message.notify`` — bool (default True). False/None ⇒ mensagem
+    # SILENCIOSA: salva e exibida normalmente, mas sem incrementar não-lidas
+    # (nem badge, nem som). Produtor: ``app/services/message_ingest_service.py``.
+    "filter.message.notify",
     # Transcription / media. There is deliberately no generic "unknown media"
     # seam: providers must normalize inbound payloads to a supported InboundEvent
     # kind in ``Channel.parse_inbound``.  The old ``filter.media.unknown`` name
@@ -168,6 +192,11 @@ KNOWN_FILTERS: set[str] = {
     # in ``conversation_service.set_status`` on a close (default True = clear the
     # human assignee; a plugin returns False to KEEP the attendant assigned).
     "filter.conversation.clear_assignee_on_close",
+    # ``filter.conversation.before_reopen`` — bool (default True). False/None ⇒ a
+    # mensagem NÃO reabre uma conversa fechada: ela é salva e aparece normalmente,
+    # a conversa segue resolvida. 4 call sites (inbound + envio do operador,
+    # texto e mídia).
+    "filter.conversation.before_reopen",
     # Plano 23 Fase B5 — agent-turn seams (§4.2, experimental — may change while
     # the attendance plugin firms up):
     # ``filter.agent.resolve``: swap the resolved AgentSpec for a turn

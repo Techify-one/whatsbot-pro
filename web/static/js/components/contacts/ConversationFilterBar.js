@@ -293,9 +293,13 @@ export function ConversationFilterBar({
       onRemove: () => onStatusChange('open'),
     });
   }
+  // "do contato" é explícito de propósito: a linha da sidebar mostra as etiquetas da
+  // CONVERSA, e este funil (hoje só restaurável por filtro salvo antigo) casa contra
+  // as tags do CONTATO. Sem o qualificador, o operador filtraria por uma coisa e veria
+  // outra. O filtro avançado já nomeia as duas dimensões separadamente.
   (tagFilter || []).forEach(t => filterChips.push({
     key: `tag:${t}`,
-    label: `Etiqueta: ${t}`,
+    label: `Etiqueta do contato: ${t}`,
     onRemove: () => onTagFilterChange((tagFilter || []).filter(x => x !== t)),
   }));
   (advFilters || []).forEach(cl => {

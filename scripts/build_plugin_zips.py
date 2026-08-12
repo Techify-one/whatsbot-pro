@@ -41,6 +41,10 @@ if str(REPO_ROOT) not in sys.path:
 from plugins.manifest import load_manifest  # noqa: E402
 
 
+# Só o ``gowa`` mora aqui — é o único plugin bundled. Para empacotar qualquer
+# outro, aponte ``--source`` para o ``plugins/`` do repositório de plugins (cada
+# entrada é ``<id>/src``), ou use o ``scripts/build_plugins.py`` de lá, que já
+# conhece esse layout e valida o ZIP contra a fonte.
 DEFAULT_SOURCE_DIR = REPO_ROOT / "assets" / "plugin_examples"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "assets" / "channel_plugins"
 

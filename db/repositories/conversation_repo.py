@@ -360,7 +360,7 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     momentos (P2 revisado 2026-07-21): (1) no nascimento — carimba a conversa nova
     (CREATE, event ``created``); (2) na REABERTURA — quando uma conversa fechada
     reabre "Não atribuída" (``assignee_user_id IS NULL``), reaplica o dono + IA off,
-    NUNCA sobrescrevendo uma atribuição existente. Cobre o fluxo Curseduca (a 2ª
+    NUNCA sobrescrevendo uma atribuição existente. Cobre o fluxo da plataforma externa (a 2ª
     dúvida do aluno reabre a mesma conversa que o fechamento deixou órfã). O reuse de
     uma conversa JÁ ABERTA não é tocado (respeita o estado vivo). ``None`` (default)
     ⇒ nunca carimba (fila "Não atribuídas"), byte-idêntico ao legado. O ramo
@@ -385,7 +385,7 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
         reopened = set_status(conv["id"], "open")
         # plano 71 (P2 revisado, 2026-07-21): se a conversa REABRIU "Não atribuída"
         # e o canal tem atendente padrão, aplica-o de novo (assignee + IA off + sem
-        # agente) — espelha o estado de nascimento. Cobre o fluxo Curseduca: a 1ª
+        # agente) — espelha o estado de nascimento. Cobre o fluxo da plataforma externa: a 1ª
         # dúvida do aluno nasce atribuída ao Atendente X; ele fecha; a 2ª dúvida reabre
         # a MESMA conversa (que o close deixou órfã) e ela precisa voltar pro
         # Atendente X. NUNCA sobrescreve uma atribuição existente (só quando NULL), então

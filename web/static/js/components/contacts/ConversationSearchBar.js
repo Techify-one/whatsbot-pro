@@ -1,10 +1,14 @@
 // Barra de busca DENTRO da conversa — plano 99 · F2.
 //
 // Ela SUBSTITUI o header do chat enquanto está aberta, em vez de espremer mais um
-// ícone ali (o header é `h-[59px]` com `pr-[56px]` e já carrega nome, selo de
-// canal, etiquetas, ações de conversa e o botão de informações). É também o que o
+// ícone ali (o header tem `pr-[56px]` e já carrega nome, selo de canal,
+// etiquetas, ações de conversa e o botão de informações). É também o que o
 // WhatsApp faz — e mantém intactos os pontos de extensão de plugin do chat, que
 // ficam abaixo do header.
+//
+// ⚠️ `tall` espelha a altura do header que ela substitui (`h-[68px]` quando o
+// selo do canal ocupa a linha de cima do nome, `h-[59px]` sem ele). Divergir aqui
+// desloca a conversa alguns pixels a cada abrir/fechar da busca.
 //
 // ⚠️ O `pr-[56px]` do container NÃO é enfeite: o botão flutuante da engrenagem
 // fica por cima do canto superior direito do painel, e o header normal reserva
@@ -71,7 +75,7 @@ const CalendarIcon = () => html`
  */
 export function ConversationSearchBar({ conversationId, term, onTermChange, onJump,
                                         onPickDate, onBackToBottom, onClose,
-                                        refTs = null }) {
+                                        refTs = null, tall = false }) {
   const [matches, setMatches] = useState([]);
   const [total, setTotal] = useState(0);
   const [index, setIndex] = useState(-1);
@@ -201,7 +205,7 @@ export function ConversationSearchBar({ conversationId, term, onTermChange, onJu
     : (term || '').trim() ? 'nenhuma' : '';
 
   return html`
-    <div class="h-[59px] flex items-center gap-2 pl-3 pr-[56px] bg-wa-panel border-b border-wa-border shrink-0 relative">
+    <div class="${tall ? 'h-[68px]' : 'h-[59px]'} flex items-center gap-2 pl-3 pr-[56px] bg-wa-panel border-b border-wa-border shrink-0 relative">
       <button type="button" onClick=${onClose} title="Fechar busca"
         class="shrink-0 text-wa-icon hover:text-wa-text p-[6px] rounded-full hover:bg-wa-hover transition-colors">
         <${CloseIcon} />

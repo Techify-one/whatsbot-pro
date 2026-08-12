@@ -323,8 +323,10 @@ export default function UsersManager({ initialEntity }) {
     <div>
       <div class="flex gap-1 border-b border-wa-border mb-4 overflow-x-auto">
         ${SUBTABS.map(t => html`
-          <button key=${t.id}
-            class="px-4 py-2 text-[14px] -mb-px border-b-2 transition-colors whitespace-nowrap ${view === t.id
+          <!-- Plano 106 · F4 (B6): sub-aba é navegação → <a href>. onClick inalterado. -->
+          <a key=${t.id}
+            href=${t.id === 'roles' ? entityPath('users', { sub: 'roles' }) : basePath('users')}
+            class="px-4 py-2 text-[14px] -mb-px border-b-2 transition-colors whitespace-nowrap no-underline ${view === t.id
               ? 'border-wa-teal text-wa-teal font-medium'
               : 'border-transparent text-wa-secondary hover:text-wa-text'}"
             onClick=${() => {
@@ -334,7 +336,7 @@ export default function UsersManager({ initialEntity }) {
                 history.pushState(null, '', p);
                 window.dispatchEvent(new PopStateEvent('popstate'));
               }
-            }}>${t.label}</button>
+            }}>${t.label}</a>
         `)}
       </div>
 

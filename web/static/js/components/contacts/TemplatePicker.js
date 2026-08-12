@@ -19,8 +19,8 @@ const html = htm.bind(h);
 
 // ⚠️ ARQUIVO CONGELADO — FALLBACK TEMPORÁRIO (plano 92 · C1 → G1) ⚠️
 //
-// O dono desta tela agora é o PLUGIN:
-//     assets/plugin_examples/whatsapp_cloud/static/TemplatePicker.js
+// O dono desta tela agora é o PLUGIN `whatsapp_cloud` (fonte no repositório de
+// plugins; instalado em storages/plugins/whatsapp_cloud/static/TemplatePicker.js).
 // Esta cópia só continua aqui para não abrir uma janela sem envio de template
 // entre "core novo no ar" e "zip do plugin instalado". Ela é resolvida pelo
 // TemplatePickerHost apenas quando NENHUM plugin reivindica `template.picker`,

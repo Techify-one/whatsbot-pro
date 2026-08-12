@@ -156,12 +156,27 @@ def load_plugin_package(
     ``__init__.py`` are loaded as namespace packages without modifying their
     source tree.
     """
-    plugin_dir = resolve_plugin_source(
-        plugin_id,
-        examples_root=examples_root,
-        installed_root=installed_root,
-        external_root=external_root,
-    )
+    try:
+        plugin_dir = resolve_plugin_source(
+            plugin_id,
+            examples_root=examples_root,
+            installed_root=installed_root,
+            external_root=external_root,
+        )
+    except PluginSourceNotFound:
+        # Same contract as ``tests.support.build_test_app``: the core ships only
+        # ``gowa``, so a test that needs another plugin's source SKIPS instead of
+        # failing. In the plugins repository the source is always present, so this
+        # branch never fires there.
+        if plugin_id == "gowa":
+            raise
+        import pytest
+
+        pytest.skip(
+            f"plugin {plugin_id!r} não é distribuído com o core "
+            f"(defina WHATSBOT_PLUGIN_SOURCE_ROOT para rodar este teste)",
+            allow_module_level=True,
+        )
     existing = sys.modules.get(package_name)
     if existing is not None:
         if not _existing_package_matches(existing, plugin_dir):
@@ -243,3 +258,41 @@ def loaded_plugin_module(plugin_id: str, module_name: str) -> ModuleType:
             f"plugin {plugin_id!r} before patching its runtime module"
         )
     return module
+
+
+def plugin_source_available(plugin_id: str) -> bool:
+    """True when ``plugin_id`` can be resolved from any supported source tree.
+
+    Only ``gowa`` ships with the core repository; every other plugin lives in the
+    plugins repository and reaches this checkout through
+    ``WHATSBOT_PLUGIN_SOURCE_ROOT`` or an installed copy. Core tests that assert
+    PROVIDER-SPECIFIC behaviour must skip when the source is absent instead of
+    failing — otherwise a clean clone is red for shipping exactly what it means
+    to ship.
+    """
+    try:
+        resolve_plugin_source(plugin_id)
+    except (PluginSourceNotFound, ValueError):
+        return False
+    return True
+
+
+def skip_without_plugin(*plugin_ids: str):
+    """A ``pytest.mark.skipif`` that fires when any of ``plugin_ids`` is missing.
+
+    Use as a module-level ``pytestmark`` in a core test that needs a plugin the
+    core does not ship::
+
+        pytestmark = skip_without_plugin("whatsapp_cloud")
+    """
+    import pytest
+
+    missing = [pid for pid in plugin_ids if not plugin_source_available(pid)]
+    return pytest.mark.skipif(
+        bool(missing),
+        reason=(
+            "plugin não distribuído com o core: "
+            + ", ".join(missing or plugin_ids)
+            + " (defina WHATSBOT_PLUGIN_SOURCE_ROOT para rodar)"
+        ),
+    )

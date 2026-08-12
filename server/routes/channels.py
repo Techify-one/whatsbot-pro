@@ -330,6 +330,13 @@ def register_routes(app, deps):
             return _err(
                 f"Credenciais obrigatórias faltando para {provider}: "
                 f"{', '.join(missing_creds)}.", 400)
+        # Formato das credenciais (plano 104 F3): o provider declara
+        # ``credential_fields[].pattern``; o core só avalia — sem `if provider ==`.
+        # A mensagem cita o campo, NUNCA o valor (pode ser a senha que o
+        # navegador preencheu sozinho no campo de proxy).
+        fmt_errors = svc.credential_format_errors(deps, provider, submitted_creds)
+        if fmt_errors:
+            return _err(" ".join(fmt_errors[k] for k in sorted(fmt_errors)), 400)
         config = body.get("config")
         # The UI may nest gowa_device_id inside config; accept either spot.
         gowa_device_id = body.get("gowa_device_id")
@@ -369,6 +376,13 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(channel_repo.get, channel_id)
         if row is None:
             return _err("Canal não encontrado.", 404)
+        # Só o que foi SUBMETIDO é validado (plano 104 F3): campo em branco = "manter
+        # a atual", então uma row legada com credencial fora do formato nunca trava
+        # a edição de outro campo.
+        fmt_errors = svc.credential_format_errors(
+            deps, row.get("provider"), body.get("credentials") or {})
+        if fmt_errors:
+            return _err(" ".join(fmt_errors[k] for k in sorted(fmt_errors)), 400)
         try:
             return _ok(await svc.update(deps, row, body))
         except svc.DuplicateChannelError as e:

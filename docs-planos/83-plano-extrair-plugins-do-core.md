@@ -462,7 +462,7 @@ Contraste com o `gowa`: `plugins/bootstrap.py:127-173` compara semver e substitu
 > import-only desde o plano 33: o `git pull` entrega a **fonte** em `assets/`, e **nada copia
 > de lá para `storages/`**.
 >
-> **Prova em produção:** a instância Redes Brasil roda um core cujo `assets/` tem telegram
+> **Prova em produção:** uma instância real roda um core cujo `assets/` tem telegram
 > 1.3.1 / website 1.1.1 / whatsapp_cloud 1.10.1, enquanto a **instalação** roda 1.2.2 / 1.0.1
 > / 1.9.0.
 >

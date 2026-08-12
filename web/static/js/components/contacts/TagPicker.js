@@ -10,20 +10,25 @@ export const TAG_COLORS = [
   '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280',
 ];
 
-// Reusable searchable tag list with inline "create tag". Shared by the contact
-// context menu (right-click) and the bulk-selection menu.
+// Reusable searchable list with inline "create". Hoje só os menus da SIDEBAR o
+// usam (clique direito + seleção em massa), ambos sobre as etiquetas de CONVERSA.
+// O registro vem do caller, então o componente serve qualquer catálogo — as tags
+// de contato têm UI própria no painel "Dados do contato".
 //
-//  - globalTags:  { name: { color } } — every existing tag.
-//  - isActive(name): bool — drives the checkbox state (assigned to the contact /
-//                    to all selected conversations).
-//  - onToggle(name): apply/remove the tag.
-//  - onCreateTag(name, color): create a NEW global tag; returns a truthy promise on
-//                    success. The freshly created tag is then applied via onToggle.
-export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClearAll = null, onCreatingChange = null }) {
+//  - globalTags:  { name: { color } } — the registry being picked from.
+//  - isActive(name): bool — drives the checkbox state (aplicada à conversa /
+//                    a todas as conversas selecionadas).
+//  - onToggle(name): apply/remove.
+//  - onCreateTag(name, color): create a NEW entry in that registry; returns a truthy
+//                    promise on success. The fresh entry is then applied via onToggle.
+//  - noun/nounPlural: PT-BR wording, so the same picker reads "tag" for contacts and
+//                    "etiqueta" for conversations without a second component.
+export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClearAll = null, onCreatingChange = null, noun = 'tag', nounPlural = 'tags' }) {
   const [search, setSearch] = useState('');
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newColor, setNewColor] = useState(TAG_COLORS[0]);
+  const [createError, setCreateError] = useState(null);
 
   // Let the host know when the inline "create tag" form is open. In the context-menu
   // flyout the form pops up away from the pointer, so the host pins the flyout open
@@ -42,6 +47,7 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClear
   async function doCreate(name) {
     const n = (name || '').trim();
     if (!n) return;
+    setCreateError(null);
     const ok = await onCreateTag(n, newColor);
     if (ok) {
       if (!isActive(n)) onToggle(n);
@@ -49,7 +55,12 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClear
       setNewName('');
       setNewColor(TAG_COLORS[0]);
       setSearch('');
+      return;
     }
+    // Criar exige a permissão de GERENCIAR o catálogo, que é distinta da de aplicar
+    // (o menu é liberado pela de aplicar). Sem este aviso o botão não fazia nada e
+    // parecia travado — o nome duplicado cai no mesmo caminho.
+    setCreateError(`Não foi possível criar a ${noun}. Verifique se o nome já existe ou se você tem permissão para gerenciá-las.`);
   }
 
   return html`
@@ -60,7 +71,7 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClear
             type="text"
             value=${search}
             onInput=${(e) => setSearch(e.target.value)}
-            placeholder="Buscar tags"
+            placeholder=${`Buscar ${nounPlural}`}
             class="wa-field w-full text-[13px] rounded-md px-2 py-1.5 border border-wa-border outline-none"
           />
         </div>
@@ -86,10 +97,10 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClear
             `;
           })}
           ${entries.length === 0 && term ? html`
-            <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma tag encontrada</div>
+            <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma ${noun} encontrada</div>
           ` : null}
           ${entries.length === 0 && !term ? html`
-            <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma tag criada</div>
+            <div class="px-4 py-[8px] text-[13px] text-wa-secondary">Nenhuma ${noun} criada</div>
           ` : null}
         </div>
         ${(onClearAll && anyActive) ? html`
@@ -99,13 +110,13 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClear
             class="w-full text-left px-4 py-[8px] text-[13px] text-red-400 hover:bg-wa-hover transition-colors flex items-center gap-2 border-t border-wa-border"
           >
             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-            <span class="font-medium">Remover todas as tags</span>
+            <span class="font-medium">Remover todas as ${nounPlural}</span>
           </button>
         ` : null}
         ${(term && !hasExact) ? html`
           <button
             type="button"
-            onClick=${() => { setCreating(true); setNewName(term); }}
+            onClick=${() => { setCreateError(null); setCreating(true); setNewName(term); }}
             class="w-full text-left px-4 py-[8px] text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-2 border-t border-wa-border"
           >
             <${PlusIcon} />
@@ -114,11 +125,11 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClear
         ` : html`
           <button
             type="button"
-            onClick=${() => { setCreating(true); setNewName(''); }}
+            onClick=${() => { setCreateError(null); setCreating(true); setNewName(''); }}
             class="w-full text-left px-4 py-[8px] text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-2 border-t border-wa-border"
           >
             <${PlusIcon} />
-            <span class="text-wa-iconActive font-medium">Criar nova tag</span>
+            <span class="text-wa-iconActive font-medium">Criar nova ${noun}</span>
           </button>
         `}
       ` : html`
@@ -128,7 +139,7 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClear
             value=${newName}
             onInput=${(e) => setNewName(e.target.value)}
             onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); doCreate(newName); } }}
-            placeholder="Nome da tag"
+            placeholder=${`Nome da ${noun}`}
             class="w-full bg-wa-bg text-wa-text text-[13px] rounded-[6px] px-2.5 py-1.5 border border-wa-border outline-none placeholder-wa-secondary focus:border-wa-iconActive"
             autoFocus
           />
@@ -146,10 +157,13 @@ export function TagPicker({ globalTags, isActive, onToggle, onCreateTag, onClear
               `)}
             </div>
           </div>
+          ${createError ? html`
+            <div class="text-[12px] text-red-400 leading-snug">${createError}</div>
+          ` : null}
           <div class="flex gap-2">
             <button
               type="button"
-              onClick=${() => { setCreating(false); setNewName(''); }}
+              onClick=${() => { setCreateError(null); setCreating(false); setNewName(''); }}
               class="flex-1 text-[12px] text-wa-secondary py-1.5 rounded-[6px] hover:bg-wa-hover transition-colors"
             >Cancelar</button>
             <button

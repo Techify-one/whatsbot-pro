@@ -14,11 +14,19 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import {
   markAsRead, markAsUnread, markConversationRead, markConversationUnread,
   setConversationAi, deleteConversation, deleteContact,
-  archiveConversation, pinConversation, createTag, updateContactTags,
+  archiveConversation, pinConversation,
   getMe, getAssignableAgents, getUsers, getTags,
   getContactConversation, getConversation, assignConversation, assignAgent,
+  getConversationLabels, createConversationLabel,
 } from '../../../services/api.js';
 import { resolveConversation } from '../../../utils/resolveConversation.js';
+
+// GET /api/conversation-labels devolve uma LISTA ordenada; as superfícies que
+// consomem etiquetas (TagPicker, RowTags) falam o mapa {nome: {color}} das tags
+// de contato. Converte uma na outra num ponto só.
+function labelListToMap(list) {
+  return Object.fromEntries((list || []).map(l => [l.name, { color: l.color }]));
+}
 
 /**
  * @param {Object} opts
@@ -38,6 +46,11 @@ export function useConversationActions({
   reconcileAfterMembershipChange = () => {},
 }) {
   const [globalTags, setGlobalTags] = useState({});
+  // Registro global das ETIQUETAS DE CONVERSA (atendimento_labels) — catálogo
+  // próprio, separado das tags de contato acima. É o que alimenta o menu de
+  // etiquetas da sidebar (clique direito + seleção em massa) e os chips da linha.
+  // Mesma forma do globalTags ({nome: {color}}) para reaproveitar TagPicker/RowTags.
+  const [convLabelRegistry, setConvLabelRegistry] = useState({});
   // Identity + users for the "assign attendant" submenu (degrade gracefully on 403).
   const [currentUserId, setCurrentUserId] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);   // full user (permissions[]) for P48 hides
@@ -226,25 +239,30 @@ export function useConversationActions({
     }
   }, [patchCtxConv]);
 
-  // Create a new global tag and add it to the sidebar's tag map. Returns true on
-  // success so the caller (context menu / bulk menu) can then apply it.
-  const handleCreateTag = useCallback(async (name, color) => {
-    const res = await createTag(name, color);
-    if (res.ok) {
-      setGlobalTags(prev => ({ ...prev, [name]: { color } }));
+  // Create a new CONVERSATION label in the global registry — returns true so the
+  // caller (context menu / bulk menu) can then apply it to the conversation(s).
+  // Não há irmão para tags de CONTATO aqui: o único criador delas é o painel
+  // "Dados do contato", que fala com a API direto.
+  const handleCreateConvLabel = useCallback(async (name, color) => {
+    const res = await createConversationLabel(name, color);
+    if (res && res.ok) {
+      setConvLabelRegistry(prev => ({ ...prev, [name]: { color } }));
       return true;
     }
     return false;
   }, []);
 
-  // Apply a list of {phone, tags} results to the sidebar + open chat.
-  const applyTagResults = useCallback((results) => {
-    const map = Object.fromEntries(results.map(r => [r.phone, r.tags]));
-    setContacts(prev => prev.map(c => map[c.phone] ? { ...c, tags: map[c.phone] } : c));
-    if (map[selectedRef.current]) {
-      setContactData(prev => prev ? { ...prev, tags: map[selectedRef.current] } : prev);
-    }
-  }, [setContacts, setContactData, selectedRef]);
+  // Apply a list of {conversationId, labels} results to the sidebar. Etiquetas são
+  // por CONVERSA, então o patch mira conversation_id — duas conversas do mesmo
+  // número (canais distintos) permanecem independentes.
+  const applyConvLabelResults = useCallback((results) => {
+    const map = new Map(results.filter(r => r && r.conversationId != null)
+      .map(r => [r.conversationId, r.labels]));
+    if (!map.size) return;
+    setContacts(prev => prev.map(c => (
+      map.has(c.conversation_id) ? { ...c, conv_labels: map.get(c.conversation_id) } : c
+    )));
+  }, [setContacts]);
 
   // Resolve the assignee badge for a row (human name, or AI agent name).
   const resolveAssignee = useCallback((c) => {
@@ -263,6 +281,15 @@ export function useConversationActions({
   // Load global tags
   useEffect(() => {
     getTags().then(res => { if (res.ok) setGlobalTags(res.data); });
+  }, []);
+
+  // Load the conversation-label registry. The endpoint returns a LIST
+  // ([{id,name,color,position}]); fold it into the {name: {color}} shape the
+  // pickers/chips already speak. Best-effort — degrade to an empty catalog.
+  useEffect(() => {
+    getConversationLabels().then(res => {
+      if (res && res.ok && Array.isArray(res.data)) setConvLabelRegistry(labelListToMap(res.data));
+    }).catch(() => {});
   }, []);
 
   // Identity + assignable agents (plano 10) drive "Minhas" and the assignee label
@@ -317,6 +344,8 @@ export function useConversationActions({
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
     handleAssignConversation, handleAssignAgent, handleResolveConversation,
-    handleCreateTag, applyTagResults, resolveAssignee,
+    resolveAssignee,
+    convLabelRegistry, setConvLabelRegistry,
+    handleCreateConvLabel, applyConvLabelResults,
   };
 }

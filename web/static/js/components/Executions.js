@@ -8,6 +8,7 @@ import {
 import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, str, enumStr, int } from '../services/urlState.js';
 import { CopyLinkButton } from '../utils/copyDeepLink.js';
+import { shouldOpenInNewTab } from '../services/spaLink.js';
 
 const html = htm.bind(h);
 
@@ -1029,7 +1030,20 @@ export function Executions() {
               ${executions.map(ex => html`
                 <tr
                   key=${ex.id}
-                  onClick=${() => handleSelect(ex.id)}
+                  title="Ctrl/⌘+clique ou clique do meio abre em nova guia"
+                  onClick=${(e) => {
+                    // Plano 106 · F5 (C5): <a> não envolve <tr>, então a nova guia é
+                    // aberta na mão. window.open TEM de rodar dentro do gesto — nada
+                    // de await antes, ou o bloqueador de popup mata a guia.
+                    if (shouldOpenInNewTab(e)) { window.open(`/executions/${ex.id}`, '_blank', 'noopener'); return; }
+                    handleSelect(ex.id);
+                  }}
+                  onAuxClick=${(e) => {
+                    if (!shouldOpenInNewTab(e)) return;
+                    e.preventDefault();
+                    window.open(`/executions/${ex.id}`, '_blank', 'noopener');
+                  }}
+                  onMouseDown=${(e) => { if (e.button === 1) e.preventDefault(); /* mata o auto-scroll do Chrome */ }}
                   class="border-t border-wa-border hover:bg-wa-hover cursor-pointer transition-colors"
                 >
                   <td class="px-4 py-2.5 font-mono font-bold text-wa-text">${ex.id}</td>

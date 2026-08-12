@@ -80,6 +80,8 @@ permissions:
 dependencies: []            # httpx já está no core; adicione só o que faltar
 ```
 
+⚠️ **`whatsbot_api_version` usa COMPARADORES.** `"1.1"`, `"^1.1"` e `"~1.1"` são **rejeitados** pelo parser do backend ([plugins/semver.py](plugins/semver.py)) e o plugin não carrega — ao contrário do `frontend_api_version`, que aceita essas formas. Mantenha `">=1.0,<2.0"` (o canal precisa instalar em produção rodando core antigo) e só suba o piso se depender de um seam introduzido depois — veja [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md) para saber o que cada versão trouxe.
+
 ### channels.py (esqueleto — adapte ao provider)
 
 ```python

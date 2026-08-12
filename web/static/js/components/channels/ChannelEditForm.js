@@ -8,7 +8,9 @@ import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { updateChannel, getChannelMembers, setChannelMembers } from '../../services/api.js';
-import { parseChannelConfig, aiDefaultsFrom, buildEditPayload } from './constants.js';
+import {
+  parseChannelConfig, aiDefaultsFrom, buildEditPayload, validateCredentials,
+} from './constants.js';
 import { ConfigFields, CredentialFields, FormComponentLoader } from './DescriptorFields.js';
 import { EmbedSnippetBlock } from './notices.js';
 import { AiSettingsFields } from './AiSettingsFields.js';
@@ -78,8 +80,13 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
     return () => { alive = false; };
   }, [channel.id]);
 
+  // Formato das credenciais SUBMETIDAS (plano 104 F3). Campo em branco = "manter
+  // a atual" ⇒ nunca revalida o que já está no banco (row legada não trava).
+  const credErrors = validateCredentials(descriptor, credValues);
+  const hasCredErrors = Object.keys(credErrors).length > 0;
+
   async function save() {
-    if (busy || !displayName.trim()) return;
+    if (busy || !displayName.trim() || hasCredErrors) return;
     setBusy(true); setError('');
     const payload = buildEditPayload({
       displayName, ai, descriptor, channelConfig: channel.config, credValues, configValues,
@@ -145,7 +152,7 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
             <div class="border-t border-wa-border pt-3 flex flex-col gap-2">
               <div class="text-[12px] text-wa-secondary">Credenciais — deixe em branco para manter a atual.</div>
               <${CredentialFields} fields=${descriptor.credential_fields} values=${credValues}
-                onChange=${setCred} editMode=${true} busy=${busy} />
+                onChange=${setCred} editMode=${true} busy=${busy} errors=${credErrors} />
             </div>
           ` : null}
 
@@ -180,7 +187,7 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
             <button class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
               onClick=${onCancel} disabled=${busy}>Cancelar</button>
             <button class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
-              onClick=${save} disabled=${busy || loading || !displayName.trim()}>
+              onClick=${save} disabled=${busy || loading || !displayName.trim() || hasCredErrors}>
               ${busy ? 'Salvando…' : 'Salvar'}</button>
           </div>
         </div>

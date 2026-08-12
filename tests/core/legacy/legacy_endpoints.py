@@ -168,6 +168,31 @@ def section(title: str):
     print(f"{'-'*60}")
 
 
+skipped: list[str] = []
+
+
+def plugin_source_or_skip(plugin_id: str, what: str):
+    """Resolve a plugin source tree, or record a SKIP when it is not shipped here.
+
+    Only ``gowa`` is bundled with this repository; every other plugin lives in the
+    plugins repository (``WHATSBOT_PLUGIN_SOURCE_ROOT``) or in an installed tree.
+    Blocks below that assert PROVIDER-SPECIFIC behaviour resolve their source
+    through this helper, so a checkout without those plugins skips the block
+    instead of aborting the whole script at import time.
+
+    Returns the source directory, or ``None`` when the plugin is unavailable.
+    """
+    from tests.plugin_test_utils import PluginSourceNotFound, resolve_plugin_source
+    try:
+        return resolve_plugin_source(plugin_id)
+    except PluginSourceNotFound:
+        label = f"{plugin_id}: {what}"
+        if label not in skipped:
+            skipped.append(label)
+            print(f"  SKIP {label} — fonte do plugin ausente neste checkout")
+        return None
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  1. Health
 # ═══════════════════════════════════════════════════════════════════
@@ -680,19 +705,22 @@ import importlib.util as _ilu
 def _load_provider(_name, _path):
     _s = _ilu.spec_from_file_location(_name, _path)
     _m = _ilu.module_from_spec(_s); _s.loader.exec_module(_m); return _m
-_wac = _load_provider("wac_test", "assets/plugin_examples/whatsapp_cloud/channels.py")
-_cc = _wac.WhatsAppCloudChannel("c_test", credentials={
-    "access_token": "x", "phone_number_id": "y", "verify_token": "z"})
-# WhatsApp Cloud é o único canal sem apagar NEM editar (ambas as capabilities off).
-check("cap: Cloud revoke=False (hides Apagar)", _cc.capabilities.revoke is False)
-check("cap: Cloud edit_message=False (hides Editar)", _cc.capabilities.edit_message is False)
-# Telegram suporta apagar E editar (deleteMessage / editMessageText).
-_tg = _load_provider("tg_test", "assets/plugin_examples/telegram/channels.py")
-_tc = _tg.TelegramChannel("t_test", credentials={"bot_token": "123:abc"})
-check("cap: Telegram revoke=True", _tc.capabilities.revoke is True)
-check("cap: Telegram edit_message=True", _tc.capabilities.edit_message is True)
-check("cap: Telegram has edit_text override", "edit_text" in type(_tc).__dict__)
-check("cap: Telegram has revoke override", "revoke" in type(_tc).__dict__)
+_src_wac_caps = plugin_source_or_skip("whatsapp_cloud", "capabilities revoke/edit")
+_src_tg_caps = plugin_source_or_skip("telegram", "capabilities revoke/edit")
+if _src_wac_caps and _src_tg_caps:
+    _wac = _load_provider("wac_test", _src_wac_caps / "channels.py")
+    _cc = _wac.WhatsAppCloudChannel("c_test", credentials={
+        "access_token": "x", "phone_number_id": "y", "verify_token": "z"})
+    # WhatsApp Cloud é o único canal sem apagar NEM editar (ambas as capabilities off).
+    check("cap: Cloud revoke=False (hides Apagar)", _cc.capabilities.revoke is False)
+    check("cap: Cloud edit_message=False (hides Editar)", _cc.capabilities.edit_message is False)
+    # Telegram suporta apagar E editar (deleteMessage / editMessageText).
+    _tg = _load_provider("tg_test", _src_tg_caps / "channels.py")
+    _tc = _tg.TelegramChannel("t_test", credentials={"bot_token": "123:abc"})
+    check("cap: Telegram revoke=True", _tc.capabilities.revoke is True)
+    check("cap: Telegram edit_message=True", _tc.capabilities.edit_message is True)
+    check("cap: Telegram has edit_text override", "edit_text" in type(_tc).__dict__)
+    check("cap: Telegram has revoke override", "revoke" in type(_tc).__dict__)
 
 # Edit an outgoing (assistant) text message on the default (GOWA) channel -> 200
 message_repo.add(_del_cid, "assistant", "Texto original", msg_id="WAMID_EDIT_1", status="operator")
@@ -2549,872 +2577,874 @@ check("delete_plugin_permissions -> keys gone",
 _urepo.delete(_pu_id)  # cleanup the test user
 
 # ── Protocolos: Kanban Views (visualizações personalizadas) ──────────────
-section("Protocolos Kanban Views")
-import importlib.util as _ilu
-from plugins.manifest import load_manifest as _load_manifest, _parse_yaml as _parse_yaml
-from plugins.migrator import run_pending_migrations as _run_pending
-from tests.plugin_test_utils import resolve_plugin_source as _resolve_plugin_source
+_src_protocolos = plugin_source_or_skip("protocolos", "Kanban Views + atendimentos")
+if _src_protocolos:
+    section("Protocolos Kanban Views")
+    import importlib.util as _ilu
+    from plugins.manifest import load_manifest as _load_manifest, _parse_yaml as _parse_yaml
+    from plugins.migrator import run_pending_migrations as _run_pending
+    from tests.plugin_test_utils import resolve_plugin_source as _resolve_plugin_source
 
-_atd_dir = _resolve_plugin_source("protocolos")
+    _atd_dir = _src_protocolos
 
-# 1) Manifest declara a permissão nova manage_team_views (aparece no PermissionPicker).
-_atd_yaml = _parse_yaml((_atd_dir / "plugin.yaml").read_text(encoding="utf-8"))
-_atd_rbac = _parse_rbac(_atd_yaml.get("rbac"), "protocolos")
-check("protocolos rbac -> manage_team_views declarada",
-      any(p["key"] == "manage_team_views" for p in _atd_rbac.get("permissions", [])))
-check("protocolos rbac -> create_views declarada",
-      any(p["key"] == "create_views" for p in _atd_rbac.get("permissions", [])))
+    # 1) Manifest declara a permissão nova manage_team_views (aparece no PermissionPicker).
+    _atd_yaml = _parse_yaml((_atd_dir / "plugin.yaml").read_text(encoding="utf-8"))
+    _atd_rbac = _parse_rbac(_atd_yaml.get("rbac"), "protocolos")
+    check("protocolos rbac -> manage_team_views declarada",
+          any(p["key"] == "manage_team_views" for p in _atd_rbac.get("permissions", [])))
+    check("protocolos rbac -> create_views declarada",
+          any(p["key"] == "create_views" for p in _atd_rbac.get("permissions", [])))
 
-# 2) Aplica as migrations do plugin no DB de teste (cria plugin_protocolos_* incl. 006).
-_atd_manifest = _load_manifest(_atd_dir)
-_run_pending(_atd_manifest, _atd_dir)
-# Carrega o plugin como PACOTE (igual ao runtime, que registra `whatsbot_plugins.<id>`):
-# logic.py usa imports RELATIVOS (`from . import kanban_index`), que só resolvem dentro de
-# um pacote. O __path__ sintético aponta para a pasta do plugin.
-import importlib as _il
-import sys as _sys
-import types as _types
-_APKG = "protocolos_pkg_test"
-if _APKG not in _sys.modules:
-    _apkg = _types.ModuleType(_APKG)
-    _apkg.__path__ = [str(_atd_dir)]
-    _sys.modules[_APKG] = _apkg
-_alogic_spec = _ilu.spec_from_file_location(f"{_APKG}.logic", _atd_dir / "logic.py")
-_alogic = _ilu.module_from_spec(_alogic_spec)
-_sys.modules[f"{_APKG}.logic"] = _alogic   # antes do exec: o pacote precisa se auto-resolver
-_alogic_spec.loader.exec_module(_alogic)
+    # 2) Aplica as migrations do plugin no DB de teste (cria plugin_protocolos_* incl. 006).
+    _atd_manifest = _load_manifest(_atd_dir)
+    _run_pending(_atd_manifest, _atd_dir)
+    # Carrega o plugin como PACOTE (igual ao runtime, que registra `whatsbot_plugins.<id>`):
+    # logic.py usa imports RELATIVOS (`from . import kanban_index`), que só resolvem dentro de
+    # um pacote. O __path__ sintético aponta para a pasta do plugin.
+    import importlib as _il
+    import sys as _sys
+    import types as _types
+    _APKG = "protocolos_pkg_test"
+    if _APKG not in _sys.modules:
+        _apkg = _types.ModuleType(_APKG)
+        _apkg.__path__ = [str(_atd_dir)]
+        _sys.modules[_APKG] = _apkg
+    _alogic_spec = _ilu.spec_from_file_location(f"{_APKG}.logic", _atd_dir / "logic.py")
+    _alogic = _ilu.module_from_spec(_alogic_spec)
+    _sys.modules[f"{_APKG}.logic"] = _alogic   # antes do exec: o pacote precisa se auto-resolver
+    _alogic_spec.loader.exec_module(_alogic)
 
-# 2b) Seed 010: as abas padrão Status/Atendente agora são VIEWS REAIS (equipe, sem owner) —
-# editáveis/excluíveis como qualquer visualização criada pela interface. Roda antes do CRUD
-# abaixo, então só os 2 seeds existem (positions 0 e 1).
-_seeded = _alogic.list_kanban_views(user_id=None)
-_by_gb = {v["group_by"]: v for v in _seeded
-          if v.get("owner_user_id") is None and v.get("scope") == "team"}
-check("seed 010 -> view Status existe", "status" in _by_gb and _by_gb["status"]["name"] == "Status")
-check("seed 010 -> view Atendente existe",
-      "atendente" in _by_gb and _by_gb["atendente"]["name"] == "Atendente")
-check("seed 010 -> Status visível a todos (team legado)",
-      _alogic._view_visible(_by_gb["status"], 12345, set()) is True)
-check("seed 010 -> ordenadas primeiro por position",
-      _by_gb["status"]["position"] == 0 and _by_gb["atendente"]["position"] == 1)
-_su, _sue = _alogic.update_kanban_view(_by_gb["status"]["id"], name="Status renomeado")
-check("seed 010 -> Status editável", _sue is None and _su and _su.get("name") == "Status renomeado")
-_sd, _sde = _alogic.delete_kanban_view(_by_gb["atendente"]["id"])
-check("seed 010 -> Atendente excluível",
-      _sd and _sde is None and _alogic.get_kanban_view(_by_gb["atendente"]["id"]) is None)
+    # 2b) Seed 010: as abas padrão Status/Atendente agora são VIEWS REAIS (equipe, sem owner) —
+    # editáveis/excluíveis como qualquer visualização criada pela interface. Roda antes do CRUD
+    # abaixo, então só os 2 seeds existem (positions 0 e 1).
+    _seeded = _alogic.list_kanban_views(user_id=None)
+    _by_gb = {v["group_by"]: v for v in _seeded
+              if v.get("owner_user_id") is None and v.get("scope") == "team"}
+    check("seed 010 -> view Status existe", "status" in _by_gb and _by_gb["status"]["name"] == "Status")
+    check("seed 010 -> view Atendente existe",
+          "atendente" in _by_gb and _by_gb["atendente"]["name"] == "Atendente")
+    check("seed 010 -> Status visível a todos (team legado)",
+          _alogic._view_visible(_by_gb["status"], 12345, set()) is True)
+    check("seed 010 -> ordenadas primeiro por position",
+          _by_gb["status"]["position"] == 0 and _by_gb["atendente"]["position"] == 1)
+    _su, _sue = _alogic.update_kanban_view(_by_gb["status"]["id"], name="Status renomeado")
+    check("seed 010 -> Status editável", _sue is None and _su and _su.get("name") == "Status renomeado")
+    _sd, _sde = _alogic.delete_kanban_view(_by_gb["atendente"]["id"])
+    check("seed 010 -> Atendente excluível",
+          _sd and _sde is None and _alogic.get_kanban_view(_by_gb["atendente"]["id"]) is None)
 
-# 3) CRUD + validação. Agrupar por CAMPO DE PROTOCOLO (pfield) usa os field-defs do plugin
-# (defaults: motivo_abertura/resultado = select). Atributo de conversa NÃO agrupa mais.
-_v1, _e1 = _alogic.create_kanban_view(name="Por motivo", scope="personal", group_by="pfield",
-                                      group_field_scope="protocolo", group_attr_key="motivo_abertura",
-                                      filters={"status": "aberto"}, owner_user_id=101)
-check("create view pessoal (pfield) -> ok", _e1 is None and bool(_v1 and _v1.get("id")))
-check("create view -> filters round-trip dict", _v1 and _v1.get("filters") == {"status": "aberto"})
-check("pfield -> round-trip scope+key",
-      _v1.get("group_by") == "pfield" and _v1.get("group_field_scope") == "protocolo"
-      and _v1.get("group_attr_key") == "motivo_abertura")
-# favorite_filters: default None; create com lista faz round-trip; update com _UNSET preserva,
-# None limpa. Espelha o modelo de available_filters.
-check("create view -> favorite_filters default None", _v1.get("favorite_filters") is None)
-_vf, _evf = _alogic.create_kanban_view(name="Favoritos", scope="personal", group_by="status",
-                                       available_filters=["status", "atendente", "periodo"],
-                                       favorite_filters=["status", "periodo"], owner_user_id=101)
-check("create view -> favorite_filters round-trip",
-      _evf is None and _vf.get("favorite_filters") == ["status", "periodo"])
-_vf2, _evf2 = _alogic.update_kanban_view(_vf["id"], name="Favoritos v2")
-check("update sem favorite_filters -> preserva (_UNSET)",
-      _evf2 is None and _vf2.get("favorite_filters") == ["status", "periodo"])
-_vf3, _evf3 = _alogic.update_kanban_view(_vf["id"], favorite_filters=None)
-check("update favorite_filters=None -> limpa", _evf3 is None and _vf3.get("favorite_filters") is None)
-_alogic.delete_kanban_view(_vf["id"])
-_v2, _e2 = _alogic.create_kanban_view(name="Equipe vendas", scope="team", group_by="data",
-                                      group_date_mode="mes", owner_user_id=101)
-check("create view equipe -> ok", _e2 is None and bool(_v2 and _v2.get("id")))
-_, _ev_pf = _alogic.create_kanban_view(name="x", group_by="pfield",
-                                       group_field_scope="protocolo", group_attr_key="", owner_user_id=1)
-check("validação: pfield sem campo -> erro", _ev_pf is not None)
-_, _ev_pf2 = _alogic.create_kanban_view(name="x2", group_by="pfield",
-                                        group_field_scope="protocolo", group_attr_key="obs", owner_user_id=1)
-check("validação: pfield campo não-opção (obs) -> erro", _ev_pf2 is not None)
-_, _ev_date = _alogic.create_kanban_view(name="y", group_by="data", group_date_mode="bad", owner_user_id=1)
-check("validação: data mode inválido -> erro", _ev_date is not None)
+    # 3) CRUD + validação. Agrupar por CAMPO DE PROTOCOLO (pfield) usa os field-defs do plugin
+    # (defaults: motivo_abertura/resultado = select). Atributo de conversa NÃO agrupa mais.
+    _v1, _e1 = _alogic.create_kanban_view(name="Por motivo", scope="personal", group_by="pfield",
+                                          group_field_scope="protocolo", group_attr_key="motivo_abertura",
+                                          filters={"status": "aberto"}, owner_user_id=101)
+    check("create view pessoal (pfield) -> ok", _e1 is None and bool(_v1 and _v1.get("id")))
+    check("create view -> filters round-trip dict", _v1 and _v1.get("filters") == {"status": "aberto"})
+    check("pfield -> round-trip scope+key",
+          _v1.get("group_by") == "pfield" and _v1.get("group_field_scope") == "protocolo"
+          and _v1.get("group_attr_key") == "motivo_abertura")
+    # favorite_filters: default None; create com lista faz round-trip; update com _UNSET preserva,
+    # None limpa. Espelha o modelo de available_filters.
+    check("create view -> favorite_filters default None", _v1.get("favorite_filters") is None)
+    _vf, _evf = _alogic.create_kanban_view(name="Favoritos", scope="personal", group_by="status",
+                                           available_filters=["status", "atendente", "periodo"],
+                                           favorite_filters=["status", "periodo"], owner_user_id=101)
+    check("create view -> favorite_filters round-trip",
+          _evf is None and _vf.get("favorite_filters") == ["status", "periodo"])
+    _vf2, _evf2 = _alogic.update_kanban_view(_vf["id"], name="Favoritos v2")
+    check("update sem favorite_filters -> preserva (_UNSET)",
+          _evf2 is None and _vf2.get("favorite_filters") == ["status", "periodo"])
+    _vf3, _evf3 = _alogic.update_kanban_view(_vf["id"], favorite_filters=None)
+    check("update favorite_filters=None -> limpa", _evf3 is None and _vf3.get("favorite_filters") is None)
+    _alogic.delete_kanban_view(_vf["id"])
+    _v2, _e2 = _alogic.create_kanban_view(name="Equipe vendas", scope="team", group_by="data",
+                                          group_date_mode="mes", owner_user_id=101)
+    check("create view equipe -> ok", _e2 is None and bool(_v2 and _v2.get("id")))
+    _, _ev_pf = _alogic.create_kanban_view(name="x", group_by="pfield",
+                                           group_field_scope="protocolo", group_attr_key="", owner_user_id=1)
+    check("validação: pfield sem campo -> erro", _ev_pf is not None)
+    _, _ev_pf2 = _alogic.create_kanban_view(name="x2", group_by="pfield",
+                                            group_field_scope="protocolo", group_attr_key="obs", owner_user_id=1)
+    check("validação: pfield campo não-opção (obs) -> erro", _ev_pf2 is not None)
+    _, _ev_date = _alogic.create_kanban_view(name="y", group_by="data", group_date_mode="bad", owner_user_id=1)
+    check("validação: data mode inválido -> erro", _ev_date is not None)
 
-# 3b) Novos modos de data: "semana" e "personalizado" (janela de/até + granularidade).
-_vw, _ewk = _alogic.create_kanban_view(name="Por semana", scope="team", group_by="data",
-                                       group_date_mode="semana", owner_user_id=101)
-check("create view data 'semana' -> ok", _ewk is None and bool(_vw and _vw.get("id")))
-_vp, _epc = _alogic.create_kanban_view(name="Período custom", scope="team", group_by="data",
-                                       group_date_mode="personalizado", group_date_from="2026-06-01",
-                                       group_date_to="2026-06-30", group_date_grain="semana",
-                                       owner_user_id=101)
-check("create view data 'personalizado' -> ok", _epc is None and bool(_vp and _vp.get("id")))
-check("personalizado -> round-trip from/to/grain",
-      _vp and _vp.get("group_date_from") == "2026-06-01" and _vp.get("group_date_to") == "2026-06-30"
-      and _vp.get("group_date_grain") == "semana")
-_, _ep_range = _alogic.create_kanban_view(name="p-range", group_by="data",
-                                          group_date_mode="personalizado", group_date_from="2026-06-30",
-                                          group_date_to="2026-06-01", group_date_grain="dia", owner_user_id=1)
-check("validação: personalizado from > to -> erro", _ep_range is not None)
-_, _ep_grain = _alogic.create_kanban_view(name="p-grain", group_by="data",
-                                          group_date_mode="personalizado", group_date_from="2026-06-01",
-                                          group_date_to="2026-06-30", group_date_grain="ano", owner_user_id=1)
-check("validação: personalizado granularidade inválida -> erro", _ep_grain is not None)
-_, _ep_nodate = _alogic.create_kanban_view(name="p-nodate", group_by="data",
-                                           group_date_mode="personalizado", group_date_grain="dia", owner_user_id=1)
-check("validação: personalizado sem datas -> erro", _ep_nodate is not None)
-# Modo não-personalizado NÃO persiste janela (from/to/grain são limpos → NULL).
-_vn, _evn = _alogic.create_kanban_view(name="Só mês", scope="team", group_by="data",
-                                       group_date_mode="mes", group_date_from="2026-06-01",
-                                       group_date_to="2026-06-30", group_date_grain="dia", owner_user_id=101)
-check("modo não-personalizado -> janela ignorada (NULL)",
-      _evn is None and _vn and _vn.get("group_date_from") is None and _vn.get("group_date_grain") is None)
-# update de personalizado -> mês limpa a janela persistida.
-_vp2, _eup = _alogic.update_kanban_view(_vp["id"], group_date_mode="mes")
-check("update personalizado -> mês limpa janela",
-      _eup is None and _vp2 and _vp2.get("group_date_from") is None and _vp2.get("group_date_grain") is None)
+    # 3b) Novos modos de data: "semana" e "personalizado" (janela de/até + granularidade).
+    _vw, _ewk = _alogic.create_kanban_view(name="Por semana", scope="team", group_by="data",
+                                           group_date_mode="semana", owner_user_id=101)
+    check("create view data 'semana' -> ok", _ewk is None and bool(_vw and _vw.get("id")))
+    _vp, _epc = _alogic.create_kanban_view(name="Período custom", scope="team", group_by="data",
+                                           group_date_mode="personalizado", group_date_from="2026-06-01",
+                                           group_date_to="2026-06-30", group_date_grain="semana",
+                                           owner_user_id=101)
+    check("create view data 'personalizado' -> ok", _epc is None and bool(_vp and _vp.get("id")))
+    check("personalizado -> round-trip from/to/grain",
+          _vp and _vp.get("group_date_from") == "2026-06-01" and _vp.get("group_date_to") == "2026-06-30"
+          and _vp.get("group_date_grain") == "semana")
+    _, _ep_range = _alogic.create_kanban_view(name="p-range", group_by="data",
+                                              group_date_mode="personalizado", group_date_from="2026-06-30",
+                                              group_date_to="2026-06-01", group_date_grain="dia", owner_user_id=1)
+    check("validação: personalizado from > to -> erro", _ep_range is not None)
+    _, _ep_grain = _alogic.create_kanban_view(name="p-grain", group_by="data",
+                                              group_date_mode="personalizado", group_date_from="2026-06-01",
+                                              group_date_to="2026-06-30", group_date_grain="ano", owner_user_id=1)
+    check("validação: personalizado granularidade inválida -> erro", _ep_grain is not None)
+    _, _ep_nodate = _alogic.create_kanban_view(name="p-nodate", group_by="data",
+                                               group_date_mode="personalizado", group_date_grain="dia", owner_user_id=1)
+    check("validação: personalizado sem datas -> erro", _ep_nodate is not None)
+    # Modo não-personalizado NÃO persiste janela (from/to/grain são limpos → NULL).
+    _vn, _evn = _alogic.create_kanban_view(name="Só mês", scope="team", group_by="data",
+                                           group_date_mode="mes", group_date_from="2026-06-01",
+                                           group_date_to="2026-06-30", group_date_grain="dia", owner_user_id=101)
+    check("modo não-personalizado -> janela ignorada (NULL)",
+          _evn is None and _vn and _vn.get("group_date_from") is None and _vn.get("group_date_grain") is None)
+    # update de personalizado -> mês limpa a janela persistida.
+    _vp2, _eup = _alogic.update_kanban_view(_vp["id"], group_date_mode="mes")
+    check("update personalizado -> mês limpa janela",
+          _eup is None and _vp2 and _vp2.get("group_date_from") is None and _vp2.get("group_date_grain") is None)
 
-_, _ev_name = _alogic.create_kanban_view(name="   ", owner_user_id=1)
-check("validação: nome vazio -> erro", _ev_name is not None)
+    _, _ev_name = _alogic.create_kanban_view(name="   ", owner_user_id=1)
+    check("validação: nome vazio -> erro", _ev_name is not None)
 
-# 4) list_kanban_views: pessoal do user + TODAS as de equipe.
-_ids101 = {v["id"] for v in _alogic.list_kanban_views(user_id=101)}
-_ids999 = {v["id"] for v in _alogic.list_kanban_views(user_id=999)}
-check("list user 101 -> vê pessoal + equipe", {_v1["id"], _v2["id"]} <= _ids101)
-check("list user 999 -> vê equipe, NÃO vê pessoal de 101",
-      _v2["id"] in _ids999 and _v1["id"] not in _ids999)
+    # 4) list_kanban_views: pessoal do user + TODAS as de equipe.
+    _ids101 = {v["id"] for v in _alogic.list_kanban_views(user_id=101)}
+    _ids999 = {v["id"] for v in _alogic.list_kanban_views(user_id=999)}
+    check("list user 101 -> vê pessoal + equipe", {_v1["id"], _v2["id"]} <= _ids101)
+    check("list user 999 -> vê equipe, NÃO vê pessoal de 101",
+          _v2["id"] in _ids999 and _v1["id"] not in _ids999)
 
-# 5) update + delete.
-_vu, _eu = _alogic.update_kanban_view(_v1["id"], name="Por etapa v2")
-check("update view -> nome alterado", _eu is None and _vu and _vu.get("name") == "Por etapa v2")
-_okdel, _edel = _alogic.delete_kanban_view(_v1["id"])
-check("delete view -> ok e some", _okdel and _edel is None and _alogic.get_kanban_view(_v1["id"]) is None)
+    # 5) update + delete.
+    _vu, _eu = _alogic.update_kanban_view(_v1["id"], name="Por etapa v2")
+    check("update view -> nome alterado", _eu is None and _vu and _vu.get("name") == "Por etapa v2")
+    _okdel, _edel = _alogic.delete_kanban_view(_v1["id"])
+    check("delete view -> ok e some", _okdel and _edel is None and _alogic.get_kanban_view(_v1["id"]) is None)
 
-# 6) set_protocolo_field: erros + gravação num campo de opção do protocolo (drag do Kanban).
-_, _esa = _alogic.set_protocolo_field(99999, "protocolo", "motivo_abertura", "Dúvida")
-check("set_protocolo_field -> protocolo inexistente -> erro", _esa is not None)
-_, _esa2 = _alogic.set_protocolo_field(99999, "protocolo", "obs", "x")
-check("set_protocolo_field -> campo não-opção -> erro", _esa2 is not None)
-_proto_sf = _alogic.ensure_protocolo_for_contact(70001, phone="5511999990001", name="Cliente Teste")
-_pw, _pwe = _alogic.set_protocolo_field(_proto_sf["id"], "protocolo", "motivo_abertura", "Dúvida")
-check("set_protocolo_field -> grava valor de opção",
-      _pwe is None and _pw and (_pw.get("fields") or {}).get("motivo_abertura") == "Dúvida")
+    # 6) set_protocolo_field: erros + gravação num campo de opção do protocolo (drag do Kanban).
+    _, _esa = _alogic.set_protocolo_field(99999, "protocolo", "motivo_abertura", "Dúvida")
+    check("set_protocolo_field -> protocolo inexistente -> erro", _esa is not None)
+    _, _esa2 = _alogic.set_protocolo_field(99999, "protocolo", "obs", "x")
+    check("set_protocolo_field -> campo não-opção -> erro", _esa2 is not None)
+    _proto_sf = _alogic.ensure_protocolo_for_contact(70001, phone="5511999990001", name="Cliente Teste")
+    _pw, _pwe = _alogic.set_protocolo_field(_proto_sf["id"], "protocolo", "motivo_abertura", "Dúvida")
+    check("set_protocolo_field -> grava valor de opção",
+          _pwe is None and _pw and (_pw.get("fields") or {}).get("motivo_abertura") == "Dúvida")
 
-# 7) attr_filters namespaceados: pf:<scope>:<key> (campo de protocolo) + cattr:<key> (contato).
-_lf = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Dúvida"}, limit=50)
-check("list_protocolos(pf filter) -> acha o protocolo", any(a["id"] == _proto_sf["id"] for a in _lf["items"]))
-_lf2 = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Reclamação"}, limit=50)
-check("list_protocolos(pf filter) -> exclui valor diferente",
-      all(a["id"] != _proto_sf["id"] for a in _lf2["items"]))
-_lf3 = _alogic.list_protocolos(attr_filters={"cattr:qualquer": "x"}, limit=50)
-check("list_protocolos(cattr filter) -> envelope {items,total,has_more}",
-      isinstance(_lf3, dict) and isinstance(_lf3.get("items"), list)
-      and "total" in _lf3 and "has_more" in _lf3)
-# O filtro nativo "Atendente" passa a casar o EFETIVO (COALESCE) — é o que faz o protocolo
-# só-provisório aparecer ao filtrar pelo atendente que está com a conversa.
-_aw, _ap = _alogic._build_list_where(assignee_user_id=[7])
-check("filtro atendente -> COALESCE(definitivo, provisório) IN :auids",
-      any("COALESCE(assignee_user_id, provisional_assignee_user_id) IN :auids" in c for c in _aw)
-      and _ap.get("auids") == [7])
-# _row_matches_filter: cattr = substring case-insensitive (texto); pf = igualdade exata.
-check("cattr filter -> substring case-insensitive",
-      _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro Civil"}}, "cattr:profissao", "civil") is True
-      and _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro"}}, "cattr:profissao", "civil") is False)
-check("pf filter -> exato (não substring)",
-      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv") is False
-      and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolvido") is True)
-# pf de QUALQUER tipo: campo de OPÇÃO (em option_keys) casa EXATO; campo de TEXTO casa SUBSTRING.
-check("pf filter -> texto=substring, opção=exato (option_keys)",
-      _alogic._row_matches_filter({"fields": {"obs": "Cliente VIP retornou"}}, "pf:protocolo:obs", "vip", set()) is True
-      and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv",
-                                      {"protocolo:resultado"}) is False)
+    # 7) attr_filters namespaceados: pf:<scope>:<key> (campo de protocolo) + cattr:<key> (contato).
+    _lf = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Dúvida"}, limit=50)
+    check("list_protocolos(pf filter) -> acha o protocolo", any(a["id"] == _proto_sf["id"] for a in _lf["items"]))
+    _lf2 = _alogic.list_protocolos(attr_filters={"pf:protocolo:motivo_abertura": "Reclamação"}, limit=50)
+    check("list_protocolos(pf filter) -> exclui valor diferente",
+          all(a["id"] != _proto_sf["id"] for a in _lf2["items"]))
+    _lf3 = _alogic.list_protocolos(attr_filters={"cattr:qualquer": "x"}, limit=50)
+    check("list_protocolos(cattr filter) -> envelope {items,total,has_more}",
+          isinstance(_lf3, dict) and isinstance(_lf3.get("items"), list)
+          and "total" in _lf3 and "has_more" in _lf3)
+    # O filtro nativo "Atendente" passa a casar o EFETIVO (COALESCE) — é o que faz o protocolo
+    # só-provisório aparecer ao filtrar pelo atendente que está com a conversa.
+    _aw, _ap = _alogic._build_list_where(assignee_user_id=[7])
+    check("filtro atendente -> COALESCE(definitivo, provisório) IN :auids",
+          any("COALESCE(assignee_user_id, provisional_assignee_user_id) IN :auids" in c for c in _aw)
+          and _ap.get("auids") == [7])
+    # _row_matches_filter: cattr = substring case-insensitive (texto); pf = igualdade exata.
+    check("cattr filter -> substring case-insensitive",
+          _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro Civil"}}, "cattr:profissao", "civil") is True
+          and _alogic._row_matches_filter({"contact_attrs": {"profissao": "Engenheiro"}}, "cattr:profissao", "civil") is False)
+    check("pf filter -> exato (não substring)",
+          _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv") is False
+          and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolvido") is True)
+    # pf de QUALQUER tipo: campo de OPÇÃO (em option_keys) casa EXATO; campo de TEXTO casa SUBSTRING.
+    check("pf filter -> texto=substring, opção=exato (option_keys)",
+          _alogic._row_matches_filter({"fields": {"obs": "Cliente VIP retornou"}}, "pf:protocolo:obs", "vip", set()) is True
+          and _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado", "Resolv",
+                                          {"protocolo:resultado"}) is False)
 
-# 7a-canal) Filtro por CANAL: resolve o canal da conversa MAIS RECENTE do protocolo
-# (protocolo → vínculo plugin → core atendimentos → inboxes → channels) e casa por igualdade
-# EXATA de channel_id. Ramo puro de _row_matches_filter (sem DB):
-check("canal filter -> igualdade exata de channel_id",
-      _alogic._row_matches_filter({"channel_id": "canal_teste_filtro"}, "canal", "canal_teste_filtro") is True
-      and _alogic._row_matches_filter({"channel_id": "outro"}, "canal", "canal_teste_filtro") is False
-      and _alogic._row_matches_filter({"channel_id": ""}, "canal", "canal_teste_filtro") is False)
-# list_channels(): reaproveita channel_repo.list_all (não-arquivados), shape {id,name,provider}.
-from db.repositories import (channel_repo as _chan_repo, inbox_repo as _inbox_repo,
-                             contact_inbox_repo as _ci_repo)
-_chan_repo.create(id="canal_teste_filtro", provider="test", display_name="Canal Filtro Teste")
-_chrow = next((c for c in _alogic.list_channels() if c["id"] == "canal_teste_filtro"), None)
-check("list_channels -> shape {id,name,provider}",
-      _chrow is not None and _chrow.get("name") == "Canal Filtro Teste" and _chrow.get("provider") == "test")
-# Seed REAL do encadeamento (channel→inbox→contact→contact_inbox→conversation→vínculo) p/
-# exercitar o JOIN de _attach_channels de ponta a ponta.
-_cinbox = _inbox_repo.get_or_create_for_channel("canal_teste_filtro", name="Canal Filtro Teste")
-_cct = _alogic.contact_repo.get_or_create("5511777770001")
-_cci = _ci_repo.get_or_create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
-                              source_id="5511777770001@s.whatsapp.net")
-_cconv = _alogic.conversation_repo.create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
-                                          contact_inbox_id=_cci["id"], origin="manual")
-_cproto = _alogic.ensure_protocolo_for_contact(_cct["id"], phone="5511777770001", name="Cliente Canal")
-_alogic.ensure_open_cycle(_cconv["id"], _cct["id"], _cproto["id"])
-_lc = _alogic.list_protocolos(attr_filters={"canal": "canal_teste_filtro"}, limit=200)
-check("list_protocolos(canal filter) -> acha o protocolo do canal",
-      any(a["id"] == _cproto["id"] for a in _lc["items"]))
-_lc2 = _alogic.list_protocolos(attr_filters={"canal": "canal_inexistente"}, limit=200)
-check("list_protocolos(canal filter) -> exclui canal diferente",
-      all(a["id"] != _cproto["id"] for a in _lc2["items"]))
+    # 7a-canal) Filtro por CANAL: resolve o canal da conversa MAIS RECENTE do protocolo
+    # (protocolo → vínculo plugin → core atendimentos → inboxes → channels) e casa por igualdade
+    # EXATA de channel_id. Ramo puro de _row_matches_filter (sem DB):
+    check("canal filter -> igualdade exata de channel_id",
+          _alogic._row_matches_filter({"channel_id": "canal_teste_filtro"}, "canal", "canal_teste_filtro") is True
+          and _alogic._row_matches_filter({"channel_id": "outro"}, "canal", "canal_teste_filtro") is False
+          and _alogic._row_matches_filter({"channel_id": ""}, "canal", "canal_teste_filtro") is False)
+    # list_channels(): reaproveita channel_repo.list_all (não-arquivados), shape {id,name,provider}.
+    from db.repositories import (channel_repo as _chan_repo, inbox_repo as _inbox_repo,
+                                 contact_inbox_repo as _ci_repo)
+    _chan_repo.create(id="canal_teste_filtro", provider="test", display_name="Canal Filtro Teste")
+    _chrow = next((c for c in _alogic.list_channels() if c["id"] == "canal_teste_filtro"), None)
+    check("list_channels -> shape {id,name,provider}",
+          _chrow is not None and _chrow.get("name") == "Canal Filtro Teste" and _chrow.get("provider") == "test")
+    # Seed REAL do encadeamento (channel→inbox→contact→contact_inbox→conversation→vínculo) p/
+    # exercitar o JOIN de _attach_channels de ponta a ponta.
+    _cinbox = _inbox_repo.get_or_create_for_channel("canal_teste_filtro", name="Canal Filtro Teste")
+    _cct = _alogic.contact_repo.get_or_create("5511777770001")
+    _cci = _ci_repo.get_or_create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
+                                  source_id="5511777770001@s.whatsapp.net")
+    _cconv = _alogic.conversation_repo.create(inbox_id=_cinbox["id"], contact_id=_cct["id"],
+                                              contact_inbox_id=_cci["id"], origin="manual")
+    _cproto = _alogic.ensure_protocolo_for_contact(_cct["id"], phone="5511777770001", name="Cliente Canal")
+    _alogic.ensure_open_cycle(_cconv["id"], _cct["id"], _cproto["id"])
+    _lc = _alogic.list_protocolos(attr_filters={"canal": "canal_teste_filtro"}, limit=200)
+    check("list_protocolos(canal filter) -> acha o protocolo do canal",
+          any(a["id"] == _cproto["id"] for a in _lc["items"]))
+    _lc2 = _alogic.list_protocolos(attr_filters={"canal": "canal_inexistente"}, limit=200)
+    check("list_protocolos(canal filter) -> exclui canal diferente",
+          all(a["id"] != _cproto["id"] for a in _lc2["items"]))
 
-# 7c) BUSCA "Buscar cliente" (q → SQL) case- E acento-insensível (fix filtros protocolos).
-_proto_q = _alogic.ensure_protocolo_for_contact(70055, phone="5511960000055", name="João DA Silva")
-def _q_has(q):
-    return any(a["id"] == _proto_q["id"] for a in _alogic.list_protocolos(q=q, limit=200)["items"])
-check("q busca: 'joão' (exato) acha", _q_has("joão"))
-check("q busca: 'joao' (sem acento) acha", _q_has("joao"))          # acento-insensível
-check("q busca: 'JOAO' (maiúsc.) acha", _q_has("JOAO"))             # case-insensível (o bug)
-check("q busca: 'silva' (substring) acha", _q_has("silva"))
-check("q busca: 'da' (minúsc. do nome) acha", _q_has("da"))
-check("q busca: 'zzznaoexiste' NÃO acha", not _q_has("zzznaoexiste"))
+    # 7c) BUSCA "Buscar cliente" (q → SQL) case- E acento-insensível (fix filtros protocolos).
+    _proto_q = _alogic.ensure_protocolo_for_contact(70055, phone="5511960000055", name="João DA Silva")
+    def _q_has(q):
+        return any(a["id"] == _proto_q["id"] for a in _alogic.list_protocolos(q=q, limit=200)["items"])
+    check("q busca: 'joão' (exato) acha", _q_has("joão"))
+    check("q busca: 'joao' (sem acento) acha", _q_has("joao"))          # acento-insensível
+    check("q busca: 'JOAO' (maiúsc.) acha", _q_has("JOAO"))             # case-insensível (o bug)
+    check("q busca: 'silva' (substring) acha", _q_has("silva"))
+    check("q busca: 'da' (minúsc. do nome) acha", _q_has("da"))
+    check("q busca: 'zzznaoexiste' NÃO acha", not _q_has("zzznaoexiste"))
 
-# 7d) Paginação (plano 50): envelope {items,total,has_more}, caminhada de cursor sem
-# dup/gap, e teto (clamp_limit/clamp_offset). Isola um conjunto próprio via um token
-# único no nome (q → caminho normal com LIMIT/OFFSET + COUNT no SQL).
-_PGN = 57  # > PAGE_LIST (50) → força múltiplas páginas
-_pgn_ids = set()
-for _i in range(_PGN):
-    _pph = f"55119{_i:07d}"
-    _pc = _alogic.contact_repo.get_or_create(_pph)
-    _pp = _alogic.ensure_protocolo_for_contact(_pc["id"], phone=_pph, name=f"ZPGNTEST Cliente {_i}")
-    _pgn_ids.add(_pp["id"])
-_pg1 = _alogic.list_protocolos(q="ZPGNTEST", limit=20, offset=0)
-check("paginação: envelope {items,total,has_more}",
-      isinstance(_pg1, dict) and isinstance(_pg1.get("items"), list)
-      and isinstance(_pg1.get("total"), int) and isinstance(_pg1.get("has_more"), bool))
-check("paginação: total isola o conjunto (== _PGN) e >= len(items)",
-      _pg1["total"] == _PGN and _pg1["total"] >= len(_pg1["items"]))
-check("paginação: página respeita o limit", len(_pg1["items"]) <= 20)
-check("paginação: 1ª página tem has_more (57 > 20)", _pg1["has_more"] is True)
-check("paginação: has_more coerente com offset+len < total",
-      _pg1["has_more"] == (0 + len(_pg1["items"]) < _pg1["total"]))
-# Caminhada de cursor por offset: cobre TODOS os ZPGNTEST sem duplicar/pular.
-_seen, _off = [], 0
-while True:
-    _pg = _alogic.list_protocolos(q="ZPGNTEST", limit=20, offset=_off)
-    _seen.extend(a["id"] for a in _pg["items"])
-    if not _pg["has_more"] or not _pg["items"]:
-        break
-    _off += len(_pg["items"])
-check("paginação: cursor-walk cobre todo o conjunto sem gap",
-      set(_seen) == _pgn_ids and len(_seen) == len(set(_seen)))
-check("paginação: última página has_more=False", _pg["has_more"] is False)
-# Teto: limit exagerado é capado por CAP_LIST (200); negativos saneados (página não-vazia).
-_cap = _alogic.list_protocolos(limit=99999, offset=0)
-check("paginação: limit=99999 capado em <= 200", len(_cap["items"]) <= 200)
-_neg = _alogic.list_protocolos(q="ZPGNTEST", limit=-5, offset=-10)
-check("paginação: limit/offset negativos saneados (>=1 item, offset→0)",
-      len(_neg["items"]) >= 1 and _neg["total"] == _PGN)
+    # 7d) Paginação (plano 50): envelope {items,total,has_more}, caminhada de cursor sem
+    # dup/gap, e teto (clamp_limit/clamp_offset). Isola um conjunto próprio via um token
+    # único no nome (q → caminho normal com LIMIT/OFFSET + COUNT no SQL).
+    _PGN = 57  # > PAGE_LIST (50) → força múltiplas páginas
+    _pgn_ids = set()
+    for _i in range(_PGN):
+        _pph = f"55119{_i:07d}"
+        _pc = _alogic.contact_repo.get_or_create(_pph)
+        _pp = _alogic.ensure_protocolo_for_contact(_pc["id"], phone=_pph, name=f"ZPGNTEST Cliente {_i}")
+        _pgn_ids.add(_pp["id"])
+    _pg1 = _alogic.list_protocolos(q="ZPGNTEST", limit=20, offset=0)
+    check("paginação: envelope {items,total,has_more}",
+          isinstance(_pg1, dict) and isinstance(_pg1.get("items"), list)
+          and isinstance(_pg1.get("total"), int) and isinstance(_pg1.get("has_more"), bool))
+    check("paginação: total isola o conjunto (== _PGN) e >= len(items)",
+          _pg1["total"] == _PGN and _pg1["total"] >= len(_pg1["items"]))
+    check("paginação: página respeita o limit", len(_pg1["items"]) <= 20)
+    check("paginação: 1ª página tem has_more (57 > 20)", _pg1["has_more"] is True)
+    check("paginação: has_more coerente com offset+len < total",
+          _pg1["has_more"] == (0 + len(_pg1["items"]) < _pg1["total"]))
+    # Caminhada de cursor por offset: cobre TODOS os ZPGNTEST sem duplicar/pular.
+    _seen, _off = [], 0
+    while True:
+        _pg = _alogic.list_protocolos(q="ZPGNTEST", limit=20, offset=_off)
+        _seen.extend(a["id"] for a in _pg["items"])
+        if not _pg["has_more"] or not _pg["items"]:
+            break
+        _off += len(_pg["items"])
+    check("paginação: cursor-walk cobre todo o conjunto sem gap",
+          set(_seen) == _pgn_ids and len(_seen) == len(set(_seen)))
+    check("paginação: última página has_more=False", _pg["has_more"] is False)
+    # Teto: limit exagerado é capado por CAP_LIST (200); negativos saneados (página não-vazia).
+    _cap = _alogic.list_protocolos(limit=99999, offset=0)
+    check("paginação: limit=99999 capado em <= 200", len(_cap["items"]) <= 200)
+    _neg = _alogic.list_protocolos(q="ZPGNTEST", limit=-5, offset=-10)
+    check("paginação: limit/offset negativos saneados (>=1 item, offset→0)",
+          len(_neg["items"]) >= 1 and _neg["total"] == _PGN)
 
-# ── 7e) Kanban agrupado NO SERVIDOR: índice em cache + paginação POR COLUNA ──
-# O agrupamento saiu do navegador (grouping.py) e cada coluna pagina sozinha, então
-# nenhuma tela precisa baixar a coleção inteira para montar as colunas/contagens.
-_kanban = _il.import_module(f"{_APKG}.kanban_index")
-_grp = _il.import_module(f"{_APKG}.grouping")
-# A chave do cache do índice precisa enxergar o recorte dos filtros, senão trocar o filtro
-# serviria as colunas do filtro anterior.
-check("cache do índice -> chave sensível aos filtros",
-      len({_kanban._cache_key({"group_by": "status"}, f, 1, "America/Sao_Paulo")
-           for f in ({"nota": ["5"]}, {"nota": ["1"]}, {})}) == 3)
-_kanban.invalidate()
-_gf = {"q": "ZPGNTEST"}          # isola o conjunto criado em 7d
+    # ── 7e) Kanban agrupado NO SERVIDOR: índice em cache + paginação POR COLUNA ──
+    # O agrupamento saiu do navegador (grouping.py) e cada coluna pagina sozinha, então
+    # nenhuma tela precisa baixar a coleção inteira para montar as colunas/contagens.
+    _kanban = _il.import_module(f"{_APKG}.kanban_index")
+    _grp = _il.import_module(f"{_APKG}.grouping")
+    # A chave do cache do índice precisa enxergar o recorte dos filtros, senão trocar o filtro
+    # serviria as colunas do filtro anterior.
+    check("cache do índice -> chave sensível aos filtros",
+          len({_kanban._cache_key({"group_by": "status"}, f, 1, "America/Sao_Paulo")
+               for f in ({"nota": ["5"]}, {"nota": ["1"]}, {})}) == 3)
+    _kanban.invalidate()
+    _gf = {"q": "ZPGNTEST"}          # isola o conjunto criado em 7d
 
-# (a) Classificador PURO e determinístico (tz + "agora" fixos), um modo por vez.
-import datetime as _dtm
-_tzt = _grp.resolve_tz("America/Sao_Paulo")
-_nowt = _dtm.datetime(2026, 7, 17, 15, 0, 0, tzinfo=_tzt).timestamp()
-_t_today = _dtm.datetime(2026, 7, 17, 9, 0, 0, tzinfo=_tzt).timestamp()
-_t_yest = _dtm.datetime(2026, 7, 16, 9, 0, 0, tzinfo=_tzt).timestamp()
-_t_old = _dtm.datetime(2025, 1, 1, 9, 0, 0, tzinfo=_tzt).timestamp()
-_g_st = _grp.build_grouping({"group_by": "status"})
-check("grouping status -> colunas aberto/fechado e classificação",
-      [c["id"] for c in _g_st.static_columns()] == ["aberto", "fechado"]
-      and _g_st.column_id_of({"status": "fechado"}) == "fechado"
-      and _g_st.column_id_of({"status": "aberto"}) == "aberto")
-_g_at = _grp.build_grouping({"group_by": "atendente"}, users=[{"id": 7, "name": "Ana"}])
-check("grouping atendente -> u:<id>/__none__ + rótulo de usuário fora da lista",
-      _g_at.column_id_of({"assignee_user_id": 7}) == "u:7"
-      and _g_at.column_id_of({"assignee_user_id": None}) == "__none__"
-      and _g_at.label_for("u:99") == "Usuário #99")
-# Atendente EFETIVO (1.24.0): sem definitivo, cai no PROVISÓRIO (dono da conversa no core).
-check("grouping atendente -> efetivo = definitivo ?? provisório",
-      _g_at.column_id_of({"assignee_user_id": None, "provisional_assignee_user_id": 7}) == "u:7"
-      and _g_at.column_id_of({"assignee_user_id": 3, "provisional_assignee_user_id": 7}) == "u:3"
-      and _g_at.column_id_of({"assignee_user_id": None,
-                              "provisional_assignee_user_id": None}) == "__none__")
-_g_dt = _grp.build_grouping({"group_by": "data", "group_date_mode": "faixas"},
-                            now_epoch=_nowt, tz=_tzt)
-check("grouping data/faixas -> today/yesterday/older",
-      _g_dt.column_id_of({"opened_at": _t_today}) == "today"
-      and _g_dt.column_id_of({"opened_at": _t_yest}) == "yesterday"
-      and _g_dt.column_id_of({"opened_at": _t_old}) == "older")
-_g_dd = _grp.build_grouping({"group_by": "data", "group_date_mode": "dia"},
-                            now_epoch=_nowt, tz=_tzt)
-check("grouping data/dia -> bucket d:YYYY-MM-DD, sem data -> __nodate__",
-      _g_dd.column_id_of({"opened_at": _t_today}) == "d:2026-07-17"
-      and _g_dd.column_id_of({"opened_at": None}) == "__nodate__")
-check("grouping data/dia -> colunas dinâmicas desc + especial ao fim",
-      [c["id"] for c in _g_dd.build_dynamic_columns(
-          ["d:2026-07-16", "d:2026-07-17", "__nodate__"])]
-      == ["d:2026-07-17", "d:2026-07-16", "__nodate__"])
-_g_sem = _grp.build_grouping({"group_by": "data", "group_date_mode": "semana"},
-                             now_epoch=_nowt, tz=_tzt)
-_g_mes = _grp.build_grouping({"group_by": "data", "group_date_mode": "mes"},
-                             now_epoch=_nowt, tz=_tzt)
-check("grouping data/semana|mes -> chave da segunda-feira e do mês",
-      _g_sem.column_id_of({"opened_at": _t_today}) == "w:2026-07-13"
-      and _g_mes.column_id_of({"opened_at": _t_today}) == "m:2026-07")
-_g_pr = _grp.build_grouping(
-    {"group_by": "data", "group_date_mode": "personalizado", "group_date_grain": "dia",
-     "group_date_from": "2026-07-17", "group_date_to": "2026-07-17"},
-    now_epoch=_nowt, tz=_tzt)
-check("grouping data/personalizado -> dentro da janela vs __outofrange__",
-      _g_pr.column_id_of({"opened_at": _t_today}) == "d:2026-07-17"
-      and _g_pr.column_id_of({"opened_at": _t_yest}) == "__outofrange__")
-_g_pf = _grp.build_grouping(
-    {"group_by": "pfield", "group_field_scope": "protocolo", "group_attr_key": "motivo"},
-    option_def=lambda s, k: {"key": k, "options": ["Dúvida"], "label": "Motivo"})
-check("grouping pfield -> o:<valor>/__none__, lista pega o 1º, needs=extras",
-      _g_pf.column_id_of({"fields": {"motivo": "Dúvida"}}) == "o:Dúvida"
-      and _g_pf.column_id_of({"fields": {"motivo": ["Dúvida"]}}) == "o:Dúvida"
-      and _g_pf.column_id_of({"fields": {}}) == "__none__"
-      and "protocolo_extras" in _g_pf.needs)
-check("grouping pfield -> campo removido vira indisponível (1 coluna, só-leitura)",
-      _grp.build_grouping({"group_by": "pfield", "group_field_scope": "protocolo",
-                           "group_attr_key": "sumiu"}, option_def=lambda s, k: None).unavailable is True)
+    # (a) Classificador PURO e determinístico (tz + "agora" fixos), um modo por vez.
+    import datetime as _dtm
+    _tzt = _grp.resolve_tz("America/Sao_Paulo")
+    _nowt = _dtm.datetime(2026, 7, 17, 15, 0, 0, tzinfo=_tzt).timestamp()
+    _t_today = _dtm.datetime(2026, 7, 17, 9, 0, 0, tzinfo=_tzt).timestamp()
+    _t_yest = _dtm.datetime(2026, 7, 16, 9, 0, 0, tzinfo=_tzt).timestamp()
+    _t_old = _dtm.datetime(2025, 1, 1, 9, 0, 0, tzinfo=_tzt).timestamp()
+    _g_st = _grp.build_grouping({"group_by": "status"})
+    check("grouping status -> colunas aberto/fechado e classificação",
+          [c["id"] for c in _g_st.static_columns()] == ["aberto", "fechado"]
+          and _g_st.column_id_of({"status": "fechado"}) == "fechado"
+          and _g_st.column_id_of({"status": "aberto"}) == "aberto")
+    _g_at = _grp.build_grouping({"group_by": "atendente"}, users=[{"id": 7, "name": "Ana"}])
+    check("grouping atendente -> u:<id>/__none__ + rótulo de usuário fora da lista",
+          _g_at.column_id_of({"assignee_user_id": 7}) == "u:7"
+          and _g_at.column_id_of({"assignee_user_id": None}) == "__none__"
+          and _g_at.label_for("u:99") == "Usuário #99")
+    # Atendente EFETIVO (1.24.0): sem definitivo, cai no PROVISÓRIO (dono da conversa no core).
+    check("grouping atendente -> efetivo = definitivo ?? provisório",
+          _g_at.column_id_of({"assignee_user_id": None, "provisional_assignee_user_id": 7}) == "u:7"
+          and _g_at.column_id_of({"assignee_user_id": 3, "provisional_assignee_user_id": 7}) == "u:3"
+          and _g_at.column_id_of({"assignee_user_id": None,
+                                  "provisional_assignee_user_id": None}) == "__none__")
+    _g_dt = _grp.build_grouping({"group_by": "data", "group_date_mode": "faixas"},
+                                now_epoch=_nowt, tz=_tzt)
+    check("grouping data/faixas -> today/yesterday/older",
+          _g_dt.column_id_of({"opened_at": _t_today}) == "today"
+          and _g_dt.column_id_of({"opened_at": _t_yest}) == "yesterday"
+          and _g_dt.column_id_of({"opened_at": _t_old}) == "older")
+    _g_dd = _grp.build_grouping({"group_by": "data", "group_date_mode": "dia"},
+                                now_epoch=_nowt, tz=_tzt)
+    check("grouping data/dia -> bucket d:YYYY-MM-DD, sem data -> __nodate__",
+          _g_dd.column_id_of({"opened_at": _t_today}) == "d:2026-07-17"
+          and _g_dd.column_id_of({"opened_at": None}) == "__nodate__")
+    check("grouping data/dia -> colunas dinâmicas desc + especial ao fim",
+          [c["id"] for c in _g_dd.build_dynamic_columns(
+              ["d:2026-07-16", "d:2026-07-17", "__nodate__"])]
+          == ["d:2026-07-17", "d:2026-07-16", "__nodate__"])
+    _g_sem = _grp.build_grouping({"group_by": "data", "group_date_mode": "semana"},
+                                 now_epoch=_nowt, tz=_tzt)
+    _g_mes = _grp.build_grouping({"group_by": "data", "group_date_mode": "mes"},
+                                 now_epoch=_nowt, tz=_tzt)
+    check("grouping data/semana|mes -> chave da segunda-feira e do mês",
+          _g_sem.column_id_of({"opened_at": _t_today}) == "w:2026-07-13"
+          and _g_mes.column_id_of({"opened_at": _t_today}) == "m:2026-07")
+    _g_pr = _grp.build_grouping(
+        {"group_by": "data", "group_date_mode": "personalizado", "group_date_grain": "dia",
+         "group_date_from": "2026-07-17", "group_date_to": "2026-07-17"},
+        now_epoch=_nowt, tz=_tzt)
+    check("grouping data/personalizado -> dentro da janela vs __outofrange__",
+          _g_pr.column_id_of({"opened_at": _t_today}) == "d:2026-07-17"
+          and _g_pr.column_id_of({"opened_at": _t_yest}) == "__outofrange__")
+    _g_pf = _grp.build_grouping(
+        {"group_by": "pfield", "group_field_scope": "protocolo", "group_attr_key": "motivo"},
+        option_def=lambda s, k: {"key": k, "options": ["Dúvida"], "label": "Motivo"})
+    check("grouping pfield -> o:<valor>/__none__, lista pega o 1º, needs=extras",
+          _g_pf.column_id_of({"fields": {"motivo": "Dúvida"}}) == "o:Dúvida"
+          and _g_pf.column_id_of({"fields": {"motivo": ["Dúvida"]}}) == "o:Dúvida"
+          and _g_pf.column_id_of({"fields": {}}) == "__none__"
+          and "protocolo_extras" in _g_pf.needs)
+    check("grouping pfield -> campo removido vira indisponível (1 coluna, só-leitura)",
+          _grp.build_grouping({"group_by": "pfield", "group_field_scope": "protocolo",
+                               "group_attr_key": "sumiu"}, option_def=lambda s, k: None).unavailable is True)
 
-# (b) Índice: colunas + contagem EXATA por coluna (os ZPGNTEST nascem todos abertos).
-_idx = _kanban.build_index({"group_by": "status"}, _gf)
-_icols = {c["id"]: c["total"] for c in _idx["columns"]}
-check("índice status -> aberto == _PGN, fechado == 0",
-      _icols.get("aberto") == _PGN and _icols.get("fechado") == 0)
-check("índice -> soma das colunas == total filtrado, sem truncar",
-      sum(c["total"] for c in _idx["columns"]) == _PGN and _idx["truncated"] is False)
-check("índice -> ids da coluna sem duplicata",
-      len(_idx["column_ids"]["aberto"]) == _PGN
-      and set(_idx["column_ids"]["aberto"]) == _pgn_ids)
+    # (b) Índice: colunas + contagem EXATA por coluna (os ZPGNTEST nascem todos abertos).
+    _idx = _kanban.build_index({"group_by": "status"}, _gf)
+    _icols = {c["id"]: c["total"] for c in _idx["columns"]}
+    check("índice status -> aberto == _PGN, fechado == 0",
+          _icols.get("aberto") == _PGN and _icols.get("fechado") == 0)
+    check("índice -> soma das colunas == total filtrado, sem truncar",
+          sum(c["total"] for c in _idx["columns"]) == _PGN and _idx["truncated"] is False)
+    check("índice -> ids da coluna sem duplicata",
+          len(_idx["column_ids"]["aberto"]) == _PGN
+          and set(_idx["column_ids"]["aberto"]) == _pgn_ids)
 
-# (c) Paginação POR COLUNA: cursor-walk cobre a coluna sem dup/gap; teto respeitado.
-_seen_c, _offc = [], 0
-while True:
-    _pgc = _alogic.grouped_column_page({"group_by": "status"}, _gf, "aberto",
-                                       limit=20, offset=_offc)
-    _seen_c.extend(a["id"] for a in _pgc["items"])
-    if not _pgc["has_more"] or not _pgc["items"]:
-        break
-    _offc += len(_pgc["items"])
-check("coluna paginada -> cursor-walk cobre a coluna sem dup/gap",
-      len(_seen_c) == _PGN and len(set(_seen_c)) == _PGN and set(_seen_c) == _pgn_ids)
-check("coluna paginada -> total = tamanho da coluna e última página has_more=False",
-      _pgc["total"] == _PGN and _pgc["has_more"] is False)
-check("coluna paginada -> limit exagerado capado em <= 200",
-      len(_alogic.grouped_column_page({"group_by": "status"}, _gf, "aberto",
-                                      limit=99999)["items"]) <= 200)
-_pgz = _alogic.grouped_column_page({"group_by": "status"}, _gf, "fechado", limit=20)
-check("coluna vazia -> envelope zerado",
-      _pgz["items"] == [] and _pgz["total"] == 0 and _pgz["has_more"] is False)
-check("coluna inexistente -> envelope zerado (não estoura)",
-      _alogic.grouped_column_page({"group_by": "status"}, _gf, "nao_existe")["total"] == 0)
+    # (c) Paginação POR COLUNA: cursor-walk cobre a coluna sem dup/gap; teto respeitado.
+    _seen_c, _offc = [], 0
+    while True:
+        _pgc = _alogic.grouped_column_page({"group_by": "status"}, _gf, "aberto",
+                                           limit=20, offset=_offc)
+        _seen_c.extend(a["id"] for a in _pgc["items"])
+        if not _pgc["has_more"] or not _pgc["items"]:
+            break
+        _offc += len(_pgc["items"])
+    check("coluna paginada -> cursor-walk cobre a coluna sem dup/gap",
+          len(_seen_c) == _PGN and len(set(_seen_c)) == _PGN and set(_seen_c) == _pgn_ids)
+    check("coluna paginada -> total = tamanho da coluna e última página has_more=False",
+          _pgc["total"] == _PGN and _pgc["has_more"] is False)
+    check("coluna paginada -> limit exagerado capado em <= 200",
+          len(_alogic.grouped_column_page({"group_by": "status"}, _gf, "aberto",
+                                          limit=99999)["items"]) <= 200)
+    _pgz = _alogic.grouped_column_page({"group_by": "status"}, _gf, "fechado", limit=20)
+    check("coluna vazia -> envelope zerado",
+          _pgz["items"] == [] and _pgz["total"] == 0 and _pgz["has_more"] is False)
+    check("coluna inexistente -> envelope zerado (não estoura)",
+          _alogic.grouped_column_page({"group_by": "status"}, _gf, "nao_existe")["total"] == 0)
 
-# (d) grouped_columns (o que a rota serve) + agrupamento por atendente.
-_gcols = _alogic.grouped_columns({"group_by": "atendente"}, _gf)
-_nao = next((c for c in _gcols["columns"] if c["id"] == "__none__"), None)
-check("grouped_columns atendente -> 'Não atribuído' concentra os ZPGNTEST",
-      _nao is not None and _nao["total"] == _PGN)
-check("grouped_columns -> shape {columns,truncated,unavailable,read_only}",
-      all(k in _gcols for k in ("columns", "truncated", "unavailable", "read_only")))
+    # (d) grouped_columns (o que a rota serve) + agrupamento por atendente.
+    _gcols = _alogic.grouped_columns({"group_by": "atendente"}, _gf)
+    _nao = next((c for c in _gcols["columns"] if c["id"] == "__none__"), None)
+    check("grouped_columns atendente -> 'Não atribuído' concentra os ZPGNTEST",
+          _nao is not None and _nao["total"] == _PGN)
+    check("grouped_columns -> shape {columns,truncated,unavailable,read_only}",
+          all(k in _gcols for k in ("columns", "truncated", "unavailable", "read_only")))
 
-# (e) Cache/geração: o bump muda a chave ⇒ invalida em todas as réplicas.
-_ck1 = _kanban._cache_key({"group_by": "status"}, _gf, _kanban.generation(), "America/Sao_Paulo")
-_kanban.bump_generation()
-_ck2 = _kanban._cache_key({"group_by": "status"}, _gf, _kanban.generation(), "America/Sao_Paulo")
-check("geração -> bump muda a chave do cache (invalidação entre réplicas)", _ck1 != _ck2)
-check("q busca: por telefone (substring) acha", _q_has("960000055"))
-# Campo de OPÇÃO agora casa ignorando caixa E acento (antes: exato sensível).
-check("pf opção -> case-insensível",
-      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado",
-                                  "resolvido", {"protocolo:resultado"}) is True)
-check("pf opção -> acento-insensível",
-      _alogic._row_matches_filter({"fields": {"cidade": "São Paulo"}}, "pf:protocolo:cidade",
-                                  "sao paulo", {"protocolo:cidade"}) is True)
-check("pf opção -> ainda exclui valor diferente",
-      _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado",
-                                  "pendente", {"protocolo:resultado"}) is False)
-check("cattr -> acento-insensível",
-      _alogic._row_matches_filter({"contact_attrs": {"cidade": "São Paulo"}}, "cattr:cidade", "sao") is True)
+    # (e) Cache/geração: o bump muda a chave ⇒ invalida em todas as réplicas.
+    _ck1 = _kanban._cache_key({"group_by": "status"}, _gf, _kanban.generation(), "America/Sao_Paulo")
+    _kanban.bump_generation()
+    _ck2 = _kanban._cache_key({"group_by": "status"}, _gf, _kanban.generation(), "America/Sao_Paulo")
+    check("geração -> bump muda a chave do cache (invalidação entre réplicas)", _ck1 != _ck2)
+    check("q busca: por telefone (substring) acha", _q_has("960000055"))
+    # Campo de OPÇÃO agora casa ignorando caixa E acento (antes: exato sensível).
+    check("pf opção -> case-insensível",
+          _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado",
+                                      "resolvido", {"protocolo:resultado"}) is True)
+    check("pf opção -> acento-insensível",
+          _alogic._row_matches_filter({"fields": {"cidade": "São Paulo"}}, "pf:protocolo:cidade",
+                                      "sao paulo", {"protocolo:cidade"}) is True)
+    check("pf opção -> ainda exclui valor diferente",
+          _alogic._row_matches_filter({"fields": {"resultado": "Resolvido"}}, "pf:protocolo:resultado",
+                                      "pendente", {"protocolo:resultado"}) is False)
+    check("cattr -> acento-insensível",
+          _alogic._row_matches_filter({"contact_attrs": {"cidade": "São Paulo"}}, "cattr:cidade", "sao") is True)
 
-# 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
-_p0 = _alogic.get_user_view_pref(_v2["id"], 101)
-check("pref ausente -> default equipe",
-      _p0 == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
-_p1 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True,
-                                    personal_filters={"status": "fechado"})
-check("upsert pref -> retorna pessoal",
-      _p1 == {"use_personal": True, "personal_filters": {"status": "fechado"},
-              "personal_column_order": None})
-_p1r = _alogic.get_user_view_pref(_v2["id"], 101)
-check("pref persistida -> personal_filters round-trip",
-      _p1r["use_personal"] is True and _p1r["personal_filters"] == {"status": "fechado"})
-_p2 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=False)
-check("upsert parcial -> flip use_personal mantém filters",
-      _p2 == {"use_personal": False, "personal_filters": {"status": "fechado"},
-              "personal_column_order": None})
-_p999 = _alogic.get_user_view_pref(_v2["id"], 999)
-check("pref isolada por usuário", _p999 == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
-_alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True)
-_lv101 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=101)}
-_lv999 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=999)}
-check("list anexa pref do chamador 101",
-      _lv101.get(_v2["id"], {}).get("use_personal") is True)
-check("list anexa pref default p/ 999",
-      _lv999.get(_v2["id"]) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
-check("get_user_view_pref(uid=None) -> default equipe",
-      _alogic.get_user_view_pref(_v2["id"], None) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
-_vp, _evp = _alogic.create_kanban_view(name="Equipe tmp", scope="team",
-                                       group_by="status", owner_user_id=101)
-_alogic.upsert_user_view_pref(_vp["id"], 101, use_personal=True, personal_filters={"q": "x"})
-_alogic.delete_kanban_view(_vp["id"])
-check("delete_kanban_view -> prefs limpas",
-      _alogic.get_user_view_pref(_vp["id"], 101) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+    # 7b) Preferência POR-USUÁRIO (pessoal x equipe) por visualização. Usa _v2 (equipe) + user 101.
+    _p0 = _alogic.get_user_view_pref(_v2["id"], 101)
+    check("pref ausente -> default equipe",
+          _p0 == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+    _p1 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True,
+                                        personal_filters={"status": "fechado"})
+    check("upsert pref -> retorna pessoal",
+          _p1 == {"use_personal": True, "personal_filters": {"status": "fechado"},
+                  "personal_column_order": None})
+    _p1r = _alogic.get_user_view_pref(_v2["id"], 101)
+    check("pref persistida -> personal_filters round-trip",
+          _p1r["use_personal"] is True and _p1r["personal_filters"] == {"status": "fechado"})
+    _p2 = _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=False)
+    check("upsert parcial -> flip use_personal mantém filters",
+          _p2 == {"use_personal": False, "personal_filters": {"status": "fechado"},
+                  "personal_column_order": None})
+    _p999 = _alogic.get_user_view_pref(_v2["id"], 999)
+    check("pref isolada por usuário", _p999 == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+    _alogic.upsert_user_view_pref(_v2["id"], 101, use_personal=True)
+    _lv101 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=101)}
+    _lv999 = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=999)}
+    check("list anexa pref do chamador 101",
+          _lv101.get(_v2["id"], {}).get("use_personal") is True)
+    check("list anexa pref default p/ 999",
+          _lv999.get(_v2["id"]) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+    check("get_user_view_pref(uid=None) -> default equipe",
+          _alogic.get_user_view_pref(_v2["id"], None) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
+    _vp, _evp = _alogic.create_kanban_view(name="Equipe tmp", scope="team",
+                                           group_by="status", owner_user_id=101)
+    _alogic.upsert_user_view_pref(_vp["id"], 101, use_personal=True, personal_filters={"q": "x"})
+    _alogic.delete_kanban_view(_vp["id"])
+    check("delete_kanban_view -> prefs limpas",
+          _alogic.get_user_view_pref(_vp["id"], 101) == {"use_personal": False, "personal_filters": {}, "personal_column_order": None})
 
-# 7c) available_filters: quais TIPOS de filtro a aba expõe (metadado da view, decidido no editor).
-check("view sem available_filters -> None (todos)", _v2.get("available_filters") is None)
-_va, _eva = _alogic.create_kanban_view(name="Só status+curso", scope="team", group_by="status",
-                                       available_filters=["status", "cattr:curso"], owner_user_id=101)
-check("create available_filters -> round-trip lista",
-      _eva is None and _va.get("available_filters") == ["status", "cattr:curso"])
-_vau, _ = _alogic.update_kanban_view(_va["id"], name="Só status+curso v2")
-check("update sem available_filters -> mantém lista (sentinela)",
-      _vau.get("available_filters") == ["status", "cattr:curso"])
-_vau2, _ = _alogic.update_kanban_view(_va["id"], available_filters=["periodo"])
-check("update com available_filters -> troca lista", _vau2.get("available_filters") == ["periodo"])
-_vau3, _ = _alogic.update_kanban_view(_va["id"], available_filters=None)
-check("update available_filters=None -> None (todos)", _vau3.get("available_filters") is None)
-_alogic.delete_kanban_view(_va["id"])
+    # 7c) available_filters: quais TIPOS de filtro a aba expõe (metadado da view, decidido no editor).
+    check("view sem available_filters -> None (todos)", _v2.get("available_filters") is None)
+    _va, _eva = _alogic.create_kanban_view(name="Só status+curso", scope="team", group_by="status",
+                                           available_filters=["status", "cattr:curso"], owner_user_id=101)
+    check("create available_filters -> round-trip lista",
+          _eva is None and _va.get("available_filters") == ["status", "cattr:curso"])
+    _vau, _ = _alogic.update_kanban_view(_va["id"], name="Só status+curso v2")
+    check("update sem available_filters -> mantém lista (sentinela)",
+          _vau.get("available_filters") == ["status", "cattr:curso"])
+    _vau2, _ = _alogic.update_kanban_view(_va["id"], available_filters=["periodo"])
+    check("update com available_filters -> troca lista", _vau2.get("available_filters") == ["periodo"])
+    _vau3, _ = _alogic.update_kanban_view(_va["id"], available_filters=None)
+    check("update available_filters=None -> None (todos)", _vau3.get("available_filters") is None)
+    _alogic.delete_kanban_view(_va["id"])
 
-# 7c-bis) column_order (EQUIPE, na view) + personal_column_order (PESSOAL, na pref): ordem das
-# colunas do Kanban. Mesma mecânica de available_filters (sentinela _UNSET no update, [] limpa).
-_vco, _evco = _alogic.create_kanban_view(name="Ordem colunas", scope="team", group_by="status",
-                                         column_order=["fechado", "aberto"], owner_user_id=101)
-check("create column_order -> round-trip lista",
-      _evco is None and _vco.get("column_order") == ["fechado", "aberto"])
-_vsem, _ = _alogic.create_kanban_view(name="Sem ordem", scope="team", group_by="status",
-                                      owner_user_id=101)
-check("view sem column_order -> None (ordem padrão)", _vsem.get("column_order") is None)
-_alogic.delete_kanban_view(_vsem["id"])
-_vcou, _ = _alogic.update_kanban_view(_vco["id"], name="Ordem colunas v2")
-check("update sem column_order -> mantém lista (sentinela)",
-      _vcou.get("column_order") == ["fechado", "aberto"])
-_vcou2, _ = _alogic.update_kanban_view(_vco["id"], column_order=["aberto", "fechado"])
-check("update com column_order -> troca lista", _vcou2.get("column_order") == ["aberto", "fechado"])
-_vcou3, _ = _alogic.update_kanban_view(_vco["id"], column_order=[])
-check("update column_order=[] -> None (ordem padrão)", _vcou3.get("column_order") is None)
-# personal_column_order via my-pref (preferência do PRÓPRIO usuário, gated só por `view`).
-_alogic.upsert_user_view_pref(_vco["id"], 202, personal_column_order=["fechado", "aberto"])
-check("personal_column_order -> round-trip",
-      _alogic.get_user_view_pref(_vco["id"], 202).get("personal_column_order") == ["fechado", "aberto"])
-_lv_pco = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=202)}
-check("list anexa personal_column_order do chamador",
-      _lv_pco.get(_vco["id"], {}).get("personal_column_order") == ["fechado", "aberto"])
-_alogic.upsert_user_view_pref(_vco["id"], 202, use_personal=True)  # merge parcial
-check("merge parcial (só use_personal) -> personal_column_order preservado",
-      _alogic.get_user_view_pref(_vco["id"], 202).get("personal_column_order") == ["fechado", "aberto"])
-check("get_user_view_pref(uid=None) -> personal_column_order None",
-      _alogic.get_user_view_pref(_vco["id"], None).get("personal_column_order") is None)
-_alogic.delete_kanban_view(_vco["id"])
+    # 7c-bis) column_order (EQUIPE, na view) + personal_column_order (PESSOAL, na pref): ordem das
+    # colunas do Kanban. Mesma mecânica de available_filters (sentinela _UNSET no update, [] limpa).
+    _vco, _evco = _alogic.create_kanban_view(name="Ordem colunas", scope="team", group_by="status",
+                                             column_order=["fechado", "aberto"], owner_user_id=101)
+    check("create column_order -> round-trip lista",
+          _evco is None and _vco.get("column_order") == ["fechado", "aberto"])
+    _vsem, _ = _alogic.create_kanban_view(name="Sem ordem", scope="team", group_by="status",
+                                          owner_user_id=101)
+    check("view sem column_order -> None (ordem padrão)", _vsem.get("column_order") is None)
+    _alogic.delete_kanban_view(_vsem["id"])
+    _vcou, _ = _alogic.update_kanban_view(_vco["id"], name="Ordem colunas v2")
+    check("update sem column_order -> mantém lista (sentinela)",
+          _vcou.get("column_order") == ["fechado", "aberto"])
+    _vcou2, _ = _alogic.update_kanban_view(_vco["id"], column_order=["aberto", "fechado"])
+    check("update com column_order -> troca lista", _vcou2.get("column_order") == ["aberto", "fechado"])
+    _vcou3, _ = _alogic.update_kanban_view(_vco["id"], column_order=[])
+    check("update column_order=[] -> None (ordem padrão)", _vcou3.get("column_order") is None)
+    # personal_column_order via my-pref (preferência do PRÓPRIO usuário, gated só por `view`).
+    _alogic.upsert_user_view_pref(_vco["id"], 202, personal_column_order=["fechado", "aberto"])
+    check("personal_column_order -> round-trip",
+          _alogic.get_user_view_pref(_vco["id"], 202).get("personal_column_order") == ["fechado", "aberto"])
+    _lv_pco = {v["id"]: v.get("pref") for v in _alogic.list_kanban_views(user_id=202)}
+    check("list anexa personal_column_order do chamador",
+          _lv_pco.get(_vco["id"], {}).get("personal_column_order") == ["fechado", "aberto"])
+    _alogic.upsert_user_view_pref(_vco["id"], 202, use_personal=True)  # merge parcial
+    check("merge parcial (só use_personal) -> personal_column_order preservado",
+          _alogic.get_user_view_pref(_vco["id"], 202).get("personal_column_order") == ["fechado", "aberto"])
+    check("get_user_view_pref(uid=None) -> personal_column_order None",
+          _alogic.get_user_view_pref(_vco["id"], None).get("personal_column_order") is None)
+    _alogic.delete_kanban_view(_vco["id"])
 
-# 7d) ACL de visibilidade "Quem pode ver": grupos (roles) + usuários (incluir/excluir).
-_vacl, _eacl = _alogic.create_kanban_view(
-    name="Só atendentes", group_by="status",
-    visibility_roles=["atendente"], visibility_users_exclude=[500], owner_user_id=101)
-check("create ACL -> scope derivado team", _eacl is None and _vacl.get("scope") == "team")
-check("create ACL -> roles round-trip", _vacl.get("visibility_roles") == ["atendente"])
-check("create ACL -> exclude round-trip", _vacl.get("visibility_users_exclude") == [500])
-check("ACL: criador sempre vê", _alogic._view_visible(_vacl, 101, set()) is True)
-check("ACL: atendente (do grupo) vê", _alogic._view_visible(_vacl, 300, {"atendente"}) is True)
-check("ACL: atendente EXCLUÍDO não vê", _alogic._view_visible(_vacl, 500, {"atendente"}) is False)
-check("ACL: gestor (fora do grupo) não vê", _alogic._view_visible(_vacl, 300, {"gestor"}) is False)
-check("ACL: admin vê tudo", _alogic._view_visible(_vacl, 900, {"admin"}) is True)
-_vinc, _ = _alogic.create_kanban_view(name="Incluir fulano", group_by="status",
-                                      visibility_users_include=[700], owner_user_id=101)
-check("ACL: usuário incluído vê (sem papel)", _alogic._view_visible(_vinc, 700, set()) is True)
-check("ACL: não incluído/sem grupo não vê", _alogic._view_visible(_vinc, 701, set()) is False)
-_vp2, _ = _alogic.create_kanban_view(name="Priv", group_by="status", owner_user_id=101)
-check("sem ACL -> scope personal", _vp2.get("scope") == "personal")
-check("personal: outro não vê", _alogic._view_visible(_vp2, 800, {"atendente"}) is False)
-_ids_at = {v["id"] for v in _alogic.list_kanban_views(user_id=300, role_keys={"atendente"})}
-check("list(atendente) inclui view de atendentes", _vacl["id"] in _ids_at)
-_ids_ex = {v["id"] for v in _alogic.list_kanban_views(user_id=500, role_keys={"atendente"})}
-check("list(atendente excluído) não inclui", _vacl["id"] not in _ids_ex)
-_alogic.delete_kanban_view(_vacl["id"])
-_alogic.delete_kanban_view(_vinc["id"])
-_alogic.delete_kanban_view(_vp2["id"])
+    # 7d) ACL de visibilidade "Quem pode ver": grupos (roles) + usuários (incluir/excluir).
+    _vacl, _eacl = _alogic.create_kanban_view(
+        name="Só atendentes", group_by="status",
+        visibility_roles=["atendente"], visibility_users_exclude=[500], owner_user_id=101)
+    check("create ACL -> scope derivado team", _eacl is None and _vacl.get("scope") == "team")
+    check("create ACL -> roles round-trip", _vacl.get("visibility_roles") == ["atendente"])
+    check("create ACL -> exclude round-trip", _vacl.get("visibility_users_exclude") == [500])
+    check("ACL: criador sempre vê", _alogic._view_visible(_vacl, 101, set()) is True)
+    check("ACL: atendente (do grupo) vê", _alogic._view_visible(_vacl, 300, {"atendente"}) is True)
+    check("ACL: atendente EXCLUÍDO não vê", _alogic._view_visible(_vacl, 500, {"atendente"}) is False)
+    check("ACL: gestor (fora do grupo) não vê", _alogic._view_visible(_vacl, 300, {"gestor"}) is False)
+    check("ACL: admin vê tudo", _alogic._view_visible(_vacl, 900, {"admin"}) is True)
+    _vinc, _ = _alogic.create_kanban_view(name="Incluir fulano", group_by="status",
+                                          visibility_users_include=[700], owner_user_id=101)
+    check("ACL: usuário incluído vê (sem papel)", _alogic._view_visible(_vinc, 700, set()) is True)
+    check("ACL: não incluído/sem grupo não vê", _alogic._view_visible(_vinc, 701, set()) is False)
+    _vp2, _ = _alogic.create_kanban_view(name="Priv", group_by="status", owner_user_id=101)
+    check("sem ACL -> scope personal", _vp2.get("scope") == "personal")
+    check("personal: outro não vê", _alogic._view_visible(_vp2, 800, {"atendente"}) is False)
+    _ids_at = {v["id"] for v in _alogic.list_kanban_views(user_id=300, role_keys={"atendente"})}
+    check("list(atendente) inclui view de atendentes", _vacl["id"] in _ids_at)
+    _ids_ex = {v["id"] for v in _alogic.list_kanban_views(user_id=500, role_keys={"atendente"})}
+    check("list(atendente excluído) não inclui", _vacl["id"] not in _ids_ex)
+    _alogic.delete_kanban_view(_vacl["id"])
+    _alogic.delete_kanban_view(_vinc["id"])
+    _alogic.delete_kanban_view(_vp2["id"])
 
-# 8) Gate de EQUIPE (acheck) — o que a rota usa p/ criar/editar visualização de equipe.
-_rrepo.upsert_plugin_permission("plugin.protocolos.manage_team_views",
-                                "Criar/editar visualizações de EQUIPE no Kanban",
-                                "protocolos", "Protocolos")
-_tvu = _urepo.create(email="teamviews@test.com", name="TV",
-                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
-_tvu_id = _tvu["id"]
-_tv_req = _types.SimpleNamespace(
-    state=_types.SimpleNamespace(user={"id": _tvu_id}),
-    url=_types.SimpleNamespace(path="/api/plugins/protocolos/kanban-views"))
-check("manage_team_views -> user SEM perm negado",
-      _asyncio.run(_authz.acheck(_tv_req, "plugin.protocolos.manage_team_views")) is False)
-_urepo.set_custom_permissions(_tvu_id, ["plugin.protocolos.manage_team_views"])
-check("manage_team_views -> user COM perm permitido",
-      _asyncio.run(_authz.acheck(_tv_req, "plugin.protocolos.manage_team_views")) is True)
-_urepo.delete(_tvu_id)
-_rrepo.delete_plugin_permissions("protocolos")
+    # 8) Gate de EQUIPE (acheck) — o que a rota usa p/ criar/editar visualização de equipe.
+    _rrepo.upsert_plugin_permission("plugin.protocolos.manage_team_views",
+                                    "Criar/editar visualizações de EQUIPE no Kanban",
+                                    "protocolos", "Protocolos")
+    _tvu = _urepo.create(email="teamviews@test.com", name="TV",
+                         password_hash=_hpa("supersecret"), role_keys=["atendente"])
+    _tvu_id = _tvu["id"]
+    _tv_req = _types.SimpleNamespace(
+        state=_types.SimpleNamespace(user={"id": _tvu_id}),
+        url=_types.SimpleNamespace(path="/api/plugins/protocolos/kanban-views"))
+    check("manage_team_views -> user SEM perm negado",
+          _asyncio.run(_authz.acheck(_tv_req, "plugin.protocolos.manage_team_views")) is False)
+    _urepo.set_custom_permissions(_tvu_id, ["plugin.protocolos.manage_team_views"])
+    check("manage_team_views -> user COM perm permitido",
+          _asyncio.run(_authz.acheck(_tv_req, "plugin.protocolos.manage_team_views")) is True)
+    _urepo.delete(_tvu_id)
+    _rrepo.delete_plugin_permissions("protocolos")
 
-# 8b) Gate de CRIAÇÃO de visualizações (create_views) — a rota exige create_views OU
-# manage_team_views. Aqui validamos que a permissão está no catálogo RBAC (acheck).
-_rrepo.upsert_plugin_permission("plugin.protocolos.create_views",
-                                "Criar novas visualizações (agrupamentos) no Kanban",
-                                "protocolos", "Protocolos")
-_cvu = _urepo.create(email="createviews@test.com", name="CV",
-                     password_hash=_hpa("supersecret"), role_keys=["atendente"])
-_cvu_id = _cvu["id"]
-_cv_req = _types.SimpleNamespace(
-    state=_types.SimpleNamespace(user={"id": _cvu_id}),
-    url=_types.SimpleNamespace(path="/api/plugins/protocolos/kanban-views"))
-check("create_views -> user SEM perm negado",
-      _asyncio.run(_authz.acheck(_cv_req, "plugin.protocolos.create_views")) is False)
-_urepo.set_custom_permissions(_cvu_id, ["plugin.protocolos.create_views"])
-check("create_views -> user COM perm permitido",
-      _asyncio.run(_authz.acheck(_cv_req, "plugin.protocolos.create_views")) is True)
-_urepo.delete(_cvu_id)
-_rrepo.delete_plugin_permissions("protocolos")
+    # 8b) Gate de CRIAÇÃO de visualizações (create_views) — a rota exige create_views OU
+    # manage_team_views. Aqui validamos que a permissão está no catálogo RBAC (acheck).
+    _rrepo.upsert_plugin_permission("plugin.protocolos.create_views",
+                                    "Criar novas visualizações (agrupamentos) no Kanban",
+                                    "protocolos", "Protocolos")
+    _cvu = _urepo.create(email="createviews@test.com", name="CV",
+                         password_hash=_hpa("supersecret"), role_keys=["atendente"])
+    _cvu_id = _cvu["id"]
+    _cv_req = _types.SimpleNamespace(
+        state=_types.SimpleNamespace(user={"id": _cvu_id}),
+        url=_types.SimpleNamespace(path="/api/plugins/protocolos/kanban-views"))
+    check("create_views -> user SEM perm negado",
+          _asyncio.run(_authz.acheck(_cv_req, "plugin.protocolos.create_views")) is False)
+    _urepo.set_custom_permissions(_cvu_id, ["plugin.protocolos.create_views"])
+    check("create_views -> user COM perm permitido",
+          _asyncio.run(_authz.acheck(_cv_req, "plugin.protocolos.create_views")) is True)
+    _urepo.delete(_cvu_id)
+    _rrepo.delete_plugin_permissions("protocolos")
 
-# 9) Tipos de campo NOVOS: número, data, regex (text/textarea/number) e "caixa de seleção"
-# configurável única/múltipla. Testado direto na logic (scope protocolo não sincroniza core).
-_alogic.set_field_defs("protocolo", [
-    {"key": "idade", "label": "Idade", "type": "number"},
-    {"key": "nascimento", "label": "Nascimento", "type": "date"},
-    {"key": "cpf", "label": "CPF", "type": "text", "regex_pattern": r"^\d{11}$", "regex_cue": "11 dígitos"},
-    {"key": "cursos", "label": "Cursos", "type": "checkboxes", "options": ["A", "B", "C"], "multiple": True, "required": True},
-    {"key": "turno", "label": "Turno", "type": "checkboxes", "options": ["Manhã", "Tarde"], "multiple": False},
-])
-_pdefs = {d["key"]: d for d in _alogic.get_field_defs("protocolo")}
-check("field types -> número/data/checkboxes persistidos",
-      _pdefs.get("idade", {}).get("type") == "number"
-      and _pdefs.get("nascimento", {}).get("type") == "date"
-      and _pdefs.get("cursos", {}).get("type") == "checkboxes"
-      and _pdefs["cursos"].get("multiple") is True)
-check("field types -> regex_pattern/regex_cue persistidos",
-      _pdefs.get("cpf", {}).get("regex_pattern") == r"^\d{11}$"
-      and _pdefs["cpf"].get("regex_cue") == "11 dígitos")
-_, _en = _alogic.normalize_values("protocolo", {"idade": "abc", "cursos": ["A"]})
-check("número inválido -> erro", _en is not None and "número" in _en.lower())
-_cnv, _env = _alogic.normalize_values("protocolo", {"idade": "3,5", "cursos": ["A"]})
-check("número válido (vírgula) -> ok", _env is None)
-_, _ed = _alogic.normalize_values("protocolo", {"nascimento": "2020/01/01", "cursos": ["A"]})
-check("data inválida -> erro", _ed is not None)
-_cdv, _edv = _alogic.normalize_values("protocolo", {"nascimento": "2020-01-01", "cursos": ["A"]})
-check("data válida AAAA-MM-DD -> ok", _edv is None)
-_, _er = _alogic.normalize_values("protocolo", {"cpf": "123", "cursos": ["A"]})
-check("regex não casa -> erro com a dica", _er is not None and "11 dígitos" in _er)
-_, _erok = _alogic.normalize_values("protocolo", {"cpf": "12345678901", "cursos": ["A"]})
-check("regex casa -> ok", _erok is None)
-_cc, _ecc = _alogic.normalize_values("protocolo", {"cursos": ["A", "C"]})
-check("checkboxes múltiplo -> lista de opções", _ecc is None and _cc.get("cursos") == ["A", "C"])
-_, _eci = _alogic.normalize_values("protocolo", {"cursos": ["Z"]})
-check("checkboxes opção inválida -> erro", _eci is not None)
-_cs, _ecs = _alogic.normalize_values("protocolo", {"cursos": ["A"], "turno": ["Manhã", "Tarde"]})
-check("checkboxes single (multiple=False) -> corta p/ 1", _ecs is None and _cs.get("turno") == ["Manhã"])
-_, _ereq = _alogic.normalize_values("protocolo", {"cursos": []})
-check("checkboxes obrigatório vazio -> erro", _ereq is not None and "Cursos" in _ereq)
-check("_missing_required revalida tipo+required no fechamento",
-      _alogic._missing_required("protocolo", {"cursos": [], "obs": "", "atendente": 1}) is not None)
-check("_missing_required ok quando preenchido",
-      _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": "", "atendente": 1}) is None)
+    # 9) Tipos de campo NOVOS: número, data, regex (text/textarea/number) e "caixa de seleção"
+    # configurável única/múltipla. Testado direto na logic (scope protocolo não sincroniza core).
+    _alogic.set_field_defs("protocolo", [
+        {"key": "idade", "label": "Idade", "type": "number"},
+        {"key": "nascimento", "label": "Nascimento", "type": "date"},
+        {"key": "cpf", "label": "CPF", "type": "text", "regex_pattern": r"^\d{11}$", "regex_cue": "11 dígitos"},
+        {"key": "cursos", "label": "Cursos", "type": "checkboxes", "options": ["A", "B", "C"], "multiple": True, "required": True},
+        {"key": "turno", "label": "Turno", "type": "checkboxes", "options": ["Manhã", "Tarde"], "multiple": False},
+    ])
+    _pdefs = {d["key"]: d for d in _alogic.get_field_defs("protocolo")}
+    check("field types -> número/data/checkboxes persistidos",
+          _pdefs.get("idade", {}).get("type") == "number"
+          and _pdefs.get("nascimento", {}).get("type") == "date"
+          and _pdefs.get("cursos", {}).get("type") == "checkboxes"
+          and _pdefs["cursos"].get("multiple") is True)
+    check("field types -> regex_pattern/regex_cue persistidos",
+          _pdefs.get("cpf", {}).get("regex_pattern") == r"^\d{11}$"
+          and _pdefs["cpf"].get("regex_cue") == "11 dígitos")
+    _, _en = _alogic.normalize_values("protocolo", {"idade": "abc", "cursos": ["A"]})
+    check("número inválido -> erro", _en is not None and "número" in _en.lower())
+    _cnv, _env = _alogic.normalize_values("protocolo", {"idade": "3,5", "cursos": ["A"]})
+    check("número válido (vírgula) -> ok", _env is None)
+    _, _ed = _alogic.normalize_values("protocolo", {"nascimento": "2020/01/01", "cursos": ["A"]})
+    check("data inválida -> erro", _ed is not None)
+    _cdv, _edv = _alogic.normalize_values("protocolo", {"nascimento": "2020-01-01", "cursos": ["A"]})
+    check("data válida AAAA-MM-DD -> ok", _edv is None)
+    _, _er = _alogic.normalize_values("protocolo", {"cpf": "123", "cursos": ["A"]})
+    check("regex não casa -> erro com a dica", _er is not None and "11 dígitos" in _er)
+    _, _erok = _alogic.normalize_values("protocolo", {"cpf": "12345678901", "cursos": ["A"]})
+    check("regex casa -> ok", _erok is None)
+    _cc, _ecc = _alogic.normalize_values("protocolo", {"cursos": ["A", "C"]})
+    check("checkboxes múltiplo -> lista de opções", _ecc is None and _cc.get("cursos") == ["A", "C"])
+    _, _eci = _alogic.normalize_values("protocolo", {"cursos": ["Z"]})
+    check("checkboxes opção inválida -> erro", _eci is not None)
+    _cs, _ecs = _alogic.normalize_values("protocolo", {"cursos": ["A"], "turno": ["Manhã", "Tarde"]})
+    check("checkboxes single (multiple=False) -> corta p/ 1", _ecs is None and _cs.get("turno") == ["Manhã"])
+    _, _ereq = _alogic.normalize_values("protocolo", {"cursos": []})
+    check("checkboxes obrigatório vazio -> erro", _ereq is not None and "Cursos" in _ereq)
+    check("_missing_required revalida tipo+required no fechamento",
+          _alogic._missing_required("protocolo", {"cursos": [], "obs": "", "atendente": 1}) is not None)
+    check("_missing_required ok quando preenchido",
+          _alogic._missing_required("protocolo", {"cursos": ["A"], "obs": "", "atendente": 1}) is None)
 
-# 9a-bis) Atendente é rótulo FIXO + OBRIGATÓRIO nos 2 escopos, não-criável/removível como extra.
-for _sc in ("protocolo", "atendimento"):
-    _ats = [d for d in _alogic.get_field_defs(_sc) if d.get("type") == "atendente"]
-    check(f"atendente fixo -> existe exatamente 1 em '{_sc}'", len(_ats) == 1)
-    check(f"atendente fixo -> fixed+obrigatório em '{_sc}'",
-          _ats and _ats[0].get("fixed") is True and _ats[0].get("required") is True
-          and _ats[0].get("key") == "atendente")
-# Tentar CRIAR um campo atendente extra é ignorado (não vira extra; segue só o fixo).
-_atend_defs_before = _alogic.get_extra_defs("atendimento")  # p/ restaurar ao fim
-_alogic.set_field_defs("atendimento", [
-    {"key": "resp", "label": "Responsável", "type": "atendente"},
-    {"key": "obs", "label": "Observações", "type": "textarea"},
-])
-_at_after = [d for d in _alogic.get_field_defs("atendimento") if d.get("type") == "atendente"]
-check("criar atendente extra -> ignorado (segue 1 só, fixo)",
-      len(_at_after) == 1 and _at_after[0].get("fixed") is True)
-check("criar atendente extra -> não persistiu como extra",
-      all(d.get("type") != "atendente" for d in _alogic.get_extra_defs("atendimento")))
-# normalize_values NÃO exige atendente (coerção ok sem ele); o required é gate de fechamento.
-_cae, _eae = _alogic.normalize_values("atendimento", {"obs": "x"})
-check("normalize_values -> não bloqueia por atendente ausente", _eae is None)
-# _missing_required exige atendente (sem assignee -> erro; com -> ok).
-check("_missing_required atendimento -> sem atendente bloqueia",
-      _alogic._missing_required("atendimento", {"obs": "x"}) is not None)
-check("_missing_required atendimento -> com atendente ok",
-      _alogic._missing_required("atendimento", {"obs": "x", "atendente": 1}) is None)
-# Restaura os defs de atendimento como estavam antes deste bloco.
-_alogic.set_field_defs("atendimento", _atend_defs_before)
+    # 9a-bis) Atendente é rótulo FIXO + OBRIGATÓRIO nos 2 escopos, não-criável/removível como extra.
+    for _sc in ("protocolo", "atendimento"):
+        _ats = [d for d in _alogic.get_field_defs(_sc) if d.get("type") == "atendente"]
+        check(f"atendente fixo -> existe exatamente 1 em '{_sc}'", len(_ats) == 1)
+        check(f"atendente fixo -> fixed+obrigatório em '{_sc}'",
+              _ats and _ats[0].get("fixed") is True and _ats[0].get("required") is True
+              and _ats[0].get("key") == "atendente")
+    # Tentar CRIAR um campo atendente extra é ignorado (não vira extra; segue só o fixo).
+    _atend_defs_before = _alogic.get_extra_defs("atendimento")  # p/ restaurar ao fim
+    _alogic.set_field_defs("atendimento", [
+        {"key": "resp", "label": "Responsável", "type": "atendente"},
+        {"key": "obs", "label": "Observações", "type": "textarea"},
+    ])
+    _at_after = [d for d in _alogic.get_field_defs("atendimento") if d.get("type") == "atendente"]
+    check("criar atendente extra -> ignorado (segue 1 só, fixo)",
+          len(_at_after) == 1 and _at_after[0].get("fixed") is True)
+    check("criar atendente extra -> não persistiu como extra",
+          all(d.get("type") != "atendente" for d in _alogic.get_extra_defs("atendimento")))
+    # normalize_values NÃO exige atendente (coerção ok sem ele); o required é gate de fechamento.
+    _cae, _eae = _alogic.normalize_values("atendimento", {"obs": "x"})
+    check("normalize_values -> não bloqueia por atendente ausente", _eae is None)
+    # _missing_required exige atendente (sem assignee -> erro; com -> ok).
+    check("_missing_required atendimento -> sem atendente bloqueia",
+          _alogic._missing_required("atendimento", {"obs": "x"}) is not None)
+    check("_missing_required atendimento -> com atendente ok",
+          _alogic._missing_required("atendimento", {"obs": "x", "atendente": 1}) is None)
+    # Restaura os defs de atendimento como estavam antes deste bloco.
+    _alogic.set_field_defs("atendimento", _atend_defs_before)
 
-# 9b) "Lista de seleção" (type=select): `multiple` liga marcação de VÁRIAS → valor vira LISTA
-# (igual a checkboxes); single continua string. Radio saiu da UI (seed migrado p/ select).
-check("select múltiplo -> value_type list",
-      _alogic._extra_value_type({"type": "select", "multiple": True}) == "list")
-check("select single -> value_type string",
-      _alogic._extra_value_type({"type": "select"}) == "string")
-check("seed: nenhum campo default é radio (migrado p/ select)",
-      all(d.get("type") != "radio"
-          for defs in _alogic.DEFAULT_EXTRA_DEFS.values() for d in defs))
-_alogic.set_field_defs("protocolo", [
-    {"key": "origem", "label": "Origem", "type": "select", "options": ["Site", "Loja", "Telefone"]},
-    {"key": "motivos", "label": "Motivos", "type": "select", "options": ["A", "B", "C"], "multiple": True},
-])
-_psel = {d["key"]: d for d in _alogic.get_field_defs("protocolo")}
-check("select múltiplo -> multiple persistido", _psel.get("motivos", {}).get("multiple") is True)
-_cm, _ecm = _alogic.normalize_values("protocolo", {"motivos": ["A", "C"], "origem": "Site"})
-check("select múltiplo -> valor vira LISTA", _ecm is None and _cm.get("motivos") == ["A", "C"])
-check("select single -> valor string", _cm.get("origem") == "Site")
-_, _eminv = _alogic.normalize_values("protocolo", {"motivos": ["Z"]})
-check("select múltiplo -> opção inválida barrada", _eminv is not None)
-_alogic.set_field_defs("protocolo", [
-    {"key": "motivos", "label": "Motivos", "type": "select", "options": ["A", "B"],
-     "multiple": True, "required": True},
-])
-_, _emreq = _alogic.normalize_values("protocolo", {"motivos": []})
-check("select múltiplo obrigatório vazio -> erro", _emreq is not None and "Motivos" in _emreq)
-_cmr, _ecmr = _alogic.normalize_values("protocolo", {"motivos": ["A"]})
-check("select múltiplo obrigatório preenchido -> ok", _ecmr is None and _cmr.get("motivos") == ["A"])
-_alogic.set_field_defs("protocolo", [])  # limpa p/ não vazar estado a testes seguintes
+    # 9b) "Lista de seleção" (type=select): `multiple` liga marcação de VÁRIAS → valor vira LISTA
+    # (igual a checkboxes); single continua string. Radio saiu da UI (seed migrado p/ select).
+    check("select múltiplo -> value_type list",
+          _alogic._extra_value_type({"type": "select", "multiple": True}) == "list")
+    check("select single -> value_type string",
+          _alogic._extra_value_type({"type": "select"}) == "string")
+    check("seed: nenhum campo default é radio (migrado p/ select)",
+          all(d.get("type") != "radio"
+              for defs in _alogic.DEFAULT_EXTRA_DEFS.values() for d in defs))
+    _alogic.set_field_defs("protocolo", [
+        {"key": "origem", "label": "Origem", "type": "select", "options": ["Site", "Loja", "Telefone"]},
+        {"key": "motivos", "label": "Motivos", "type": "select", "options": ["A", "B", "C"], "multiple": True},
+    ])
+    _psel = {d["key"]: d for d in _alogic.get_field_defs("protocolo")}
+    check("select múltiplo -> multiple persistido", _psel.get("motivos", {}).get("multiple") is True)
+    _cm, _ecm = _alogic.normalize_values("protocolo", {"motivos": ["A", "C"], "origem": "Site"})
+    check("select múltiplo -> valor vira LISTA", _ecm is None and _cm.get("motivos") == ["A", "C"])
+    check("select single -> valor string", _cm.get("origem") == "Site")
+    _, _eminv = _alogic.normalize_values("protocolo", {"motivos": ["Z"]})
+    check("select múltiplo -> opção inválida barrada", _eminv is not None)
+    _alogic.set_field_defs("protocolo", [
+        {"key": "motivos", "label": "Motivos", "type": "select", "options": ["A", "B"],
+         "multiple": True, "required": True},
+    ])
+    _, _emreq = _alogic.normalize_values("protocolo", {"motivos": []})
+    check("select múltiplo obrigatório vazio -> erro", _emreq is not None and "Motivos" in _emreq)
+    _cmr, _ecmr = _alogic.normalize_values("protocolo", {"motivos": ["A"]})
+    check("select múltiplo obrigatório preenchido -> ok", _ecmr is None and _cmr.get("motivos") == ["A"])
+    _alogic.set_field_defs("protocolo", [])  # limpa p/ não vazar estado a testes seguintes
 
-# ── Protocolos: Ignorar abertura por regex (direção) + pular avaliação por atributos ──
-section("Protocolos Ignorar abertura / Pular avaliação")
+    # ── Protocolos: Ignorar abertura por regex (direção) + pular avaliação por atributos ──
+    section("Protocolos Ignorar abertura / Pular avaliação")
 
-class _CtxExtras:
-    def __init__(self, extras):
-        self.extras = extras
+    class _CtxExtras:
+        def __init__(self, extras):
+            self.extras = extras
 
-def _msgs(user_text):  # lista estilo OpenAI (última msg = trigger do contato)
-    return [{"role": "system", "content": "sp"}, {"role": "user", "content": user_text}]
+    def _msgs(user_text):  # lista estilo OpenAI (última msg = trigger do contato)
+        return [{"role": "system", "content": "sp"}, {"role": "user", "content": user_text}]
 
-# Feature 1 — regra "ignorar abertura" (config + matcher + before_reopen)
-_sk = _alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
-check("skip-open round-trip", _sk == {"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
-check("direção sent casa enviada", _alogic._skip_open_matches("PROT-9", "sent") is True)
-check("direção sent NÃO casa recebida", _alogic._skip_open_matches("PROT-9", "received") is False)
-# ENVIADA (operador) → before_reopen impede reabrir (mensagem ainda vai ao WhatsApp).
-check("before_reopen sent+casa -> False (não reabre)",
-      _alogic.before_reopen(_CtxExtras({"role": "assistant", "text": "PROT-1"}), True) is False)
-check("before_reopen user na direção sent -> não bloqueia",
-      _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-1"}), True) is True)
-# RECEBIDA (contato) → mensagem aparece (não dropa); só a resposta da IA é abortada via
-# suppress_ai_on_ignored (filter.llm.messages → None). Protocolo pulado em on_inbound.
-_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "received"})
-check("suppress_ai aborta IA p/ recebida que casa (received)",
-      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-2")) is None)
-check("suppress_ai deixa IA rodar p/ recebida que NÃO casa",
-      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("oi tudo bem")) == _msgs("oi tudo bem"))
-# notify_on_ignored: silencia (sem badge/som/alerta) a recebida que casa.
-check("notify_on_ignored: recebida que casa -> silenciosa (False)",
-      _alogic.notify_on_ignored(_CtxExtras({"text": "PROT-2"}), True) is False)
-check("notify_on_ignored: recebida que NÃO casa -> notifica (True)",
-      _alogic.notify_on_ignored(_CtxExtras({"text": "oi"}), True) is True)
-_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
-check("notify_on_ignored NÃO silencia quando direção só sent",
-      _alogic.notify_on_ignored(_CtxExtras({"text": "PROT-3"}), True) is True)
-check("suppress_ai NÃO aborta quando direção só sent",
-      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-3")) == _msgs("PROT-3"))
-_alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "both"})
-check("suppress_ai aborta na direção both",
-      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-4")) is None)
-check("both: before_reopen sent também bloqueia",
-      _alogic.before_reopen(_CtxExtras({"role": "assistant", "text": "PROT-4"}), True) is False)
-check("suppress_ai ignora value não-lista", _alogic.suppress_ai_on_ignored(_CtxExtras({}), "x") == "x")
-_alogic.set_skip_open_config({"enabled": False, "regex": r"PROT-\d", "direction": "both"})
-check("desligado -> suppress_ai deixa IA rodar",
-      _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-5")) == _msgs("PROT-5"))
-check("direção inválida cai em sent",
-      _alogic.set_skip_open_config({"enabled": True, "regex": "x", "direction": "zzz"})["direction"] == "sent")
-_alogic.set_skip_open_config({"enabled": True, "regex": "[bad", "direction": "both"})
-check("regex inválida -> False sem exceção", _alogic._skip_open_matches("qq", "sent") is False)
-_alogic.set_skip_open_config({"enabled": False, "regex": r"PROT-\d", "direction": "both"})
-check("desligado -> matcher False", _alogic._skip_open_matches("PROT-3", "sent") is False)
-check("desligado -> before_reopen mantém value",
-      _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-3"}), True) is True)
+    # Feature 1 — regra "ignorar abertura" (config + matcher + before_reopen)
+    _sk = _alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+    check("skip-open round-trip", _sk == {"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+    check("direção sent casa enviada", _alogic._skip_open_matches("PROT-9", "sent") is True)
+    check("direção sent NÃO casa recebida", _alogic._skip_open_matches("PROT-9", "received") is False)
+    # ENVIADA (operador) → before_reopen impede reabrir (mensagem ainda vai ao WhatsApp).
+    check("before_reopen sent+casa -> False (não reabre)",
+          _alogic.before_reopen(_CtxExtras({"role": "assistant", "text": "PROT-1"}), True) is False)
+    check("before_reopen user na direção sent -> não bloqueia",
+          _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-1"}), True) is True)
+    # RECEBIDA (contato) → mensagem aparece (não dropa); só a resposta da IA é abortada via
+    # suppress_ai_on_ignored (filter.llm.messages → None). Protocolo pulado em on_inbound.
+    _alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "received"})
+    check("suppress_ai aborta IA p/ recebida que casa (received)",
+          _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-2")) is None)
+    check("suppress_ai deixa IA rodar p/ recebida que NÃO casa",
+          _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("oi tudo bem")) == _msgs("oi tudo bem"))
+    # notify_on_ignored: silencia (sem badge/som/alerta) a recebida que casa.
+    check("notify_on_ignored: recebida que casa -> silenciosa (False)",
+          _alogic.notify_on_ignored(_CtxExtras({"text": "PROT-2"}), True) is False)
+    check("notify_on_ignored: recebida que NÃO casa -> notifica (True)",
+          _alogic.notify_on_ignored(_CtxExtras({"text": "oi"}), True) is True)
+    _alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "sent"})
+    check("notify_on_ignored NÃO silencia quando direção só sent",
+          _alogic.notify_on_ignored(_CtxExtras({"text": "PROT-3"}), True) is True)
+    check("suppress_ai NÃO aborta quando direção só sent",
+          _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-3")) == _msgs("PROT-3"))
+    _alogic.set_skip_open_config({"enabled": True, "regex": r"PROT-\d", "direction": "both"})
+    check("suppress_ai aborta na direção both",
+          _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-4")) is None)
+    check("both: before_reopen sent também bloqueia",
+          _alogic.before_reopen(_CtxExtras({"role": "assistant", "text": "PROT-4"}), True) is False)
+    check("suppress_ai ignora value não-lista", _alogic.suppress_ai_on_ignored(_CtxExtras({}), "x") == "x")
+    _alogic.set_skip_open_config({"enabled": False, "regex": r"PROT-\d", "direction": "both"})
+    check("desligado -> suppress_ai deixa IA rodar",
+          _alogic.suppress_ai_on_ignored(_CtxExtras({}), _msgs("PROT-5")) == _msgs("PROT-5"))
+    check("direção inválida cai em sent",
+          _alogic.set_skip_open_config({"enabled": True, "regex": "x", "direction": "zzz"})["direction"] == "sent")
+    _alogic.set_skip_open_config({"enabled": True, "regex": "[bad", "direction": "both"})
+    check("regex inválida -> False sem exceção", _alogic._skip_open_matches("qq", "sent") is False)
+    _alogic.set_skip_open_config({"enabled": False, "regex": r"PROT-\d", "direction": "both"})
+    check("desligado -> matcher False", _alogic._skip_open_matches("PROT-3", "sent") is False)
+    check("desligado -> before_reopen mantém value",
+          _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-3"}), True) is True)
 
-# Feature 2 — pular avaliação por atributos (contato + conversa)
-check("attr match string (case/trim)", _alogic._attr_value_matches("Não Possui", " não possui ") is True)
-check("attr match lista nativa", _alogic._attr_value_matches(["a", "não possui"], "não possui") is True)
-check("attr match multi vírgula", _alogic._attr_value_matches("a, não possui, b", "não possui") is True)
-check("attr no-match diferente", _alogic._attr_value_matches("possui", "não possui") is False)
-check("sanitize descarta scope inválido",
-      _alogic._sanitize_skip_attrs([{"key": "k", "scope": "x", "value": "v"}]) == [])
+    # Feature 2 — pular avaliação por atributos (contato + conversa)
+    check("attr match string (case/trim)", _alogic._attr_value_matches("Não Possui", " não possui ") is True)
+    check("attr match lista nativa", _alogic._attr_value_matches(["a", "não possui"], "não possui") is True)
+    check("attr match multi vírgula", _alogic._attr_value_matches("a, não possui, b", "não possui") is True)
+    check("attr no-match diferente", _alogic._attr_value_matches("possui", "não possui") is False)
+    check("sanitize descarta scope inválido",
+          _alogic._sanitize_skip_attrs([{"key": "k", "scope": "x", "value": "v"}]) == [])
 
-from db.repositories import custom_attribute_repo as _ca_repo
-from db.repositories import conversation_repo as _sk_conv_repo
-from db.tables import contacts as _contacts_tbl, conversations as _conv_tbl
-_skc = contact_repo.get_or_create("5511900000042")
-_skcid = _skc["id"]
-_ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "não possui"})
-_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
-                             "privado": {"title": "", "link": ""},
-                             "skip_attrs": [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}]})
-check("skip_attrs round-trip na protocol-config",
-      _alogic.get_protocol_config().get("skip_attrs")
-      == [{"key": "curso_de_interesse", "scope": "contact", "join": "any",
-           "conditions": [{"op": "eq", "value": "não possui"}], "value": "não possui"}])
-check("skip avaliação por atributo de CONTATO -> True",
-      _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is True)
-_ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "engenharia"})
-check("valor diferente -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is False)
-_skconv = _sk_conv_repo.resolve_for_contact(_skcid, "5511900000042@s.whatsapp.net")
-_ca_repo.set_values(_conv_tbl, _skconv["id"], {"origem": "spam"})
-_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
-                             "privado": {"title": "", "link": ""},
-                             "skip_attrs": [{"key": "origem", "scope": "conversation", "value": "spam"}]})
-check("skip avaliação por atributo de CONVERSA -> True",
-      _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is True)
-_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
-                             "privado": {"title": "", "link": ""}, "skip_attrs": []})
-check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is False)
+    from db.repositories import custom_attribute_repo as _ca_repo
+    from db.repositories import conversation_repo as _sk_conv_repo
+    from db.tables import contacts as _contacts_tbl, conversations as _conv_tbl
+    _skc = contact_repo.get_or_create("5511900000042")
+    _skcid = _skc["id"]
+    _ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "não possui"})
+    _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                                 "privado": {"title": "", "link": ""},
+                                 "skip_attrs": [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}]})
+    check("skip_attrs round-trip na protocol-config",
+          _alogic.get_protocol_config().get("skip_attrs")
+          == [{"key": "curso_de_interesse", "scope": "contact", "join": "any",
+               "conditions": [{"op": "eq", "value": "não possui"}], "value": "não possui"}])
+    check("skip avaliação por atributo de CONTATO -> True",
+          _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is True)
+    _ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "engenharia"})
+    check("valor diferente -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is False)
+    _skconv = _sk_conv_repo.resolve_for_contact(_skcid, "5511900000042@s.whatsapp.net")
+    _ca_repo.set_values(_conv_tbl, _skconv["id"], {"origem": "spam"})
+    _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                                 "privado": {"title": "", "link": ""},
+                                 "skip_attrs": [{"key": "origem", "scope": "conversation", "value": "spam"}]})
+    check("skip avaliação por atributo de CONVERSA -> True",
+          _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is True)
+    _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                                 "privado": {"title": "", "link": ""}, "skip_attrs": []})
+    check("sem regras -> não pula", _alogic._should_skip_evaluation({"contact_id": _skcid}, _skconv["id"]) is False)
 
-# Escopo "protocolo": a regra também aceita um RÓTULO da aba Protocolo (sistema de
-# campos próprio do plugin), lido de ``at["fields"]`` — não é atributo do core.
-check("sanitize aceita scope protocolo",
-      _alogic._sanitize_skip_attrs([{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
-      == [{"key": "resultado", "scope": "protocolo", "join": "any",
-           "conditions": [{"op": "eq", "value": "sem contato"}], "value": "sem contato"}])
-_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
-                             "privado": {"title": "", "link": ""},
-                             "skip_attrs": [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}]})
-check("skip avaliação por RÓTULO do protocolo -> True",
-      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": "Sem contato"}}, None) is True)
-check("rótulo do protocolo com outro valor -> não pula",
-      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": "vendeu"}}, None) is False)
-check("rótulo multi (checkboxes) casa por pertencimento",
-      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": ["x", "sem contato"]}}, None) is True)
-check("protocolo sem o rótulo preenchido -> não pula",
-      _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {}}, None) is False)
-_alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
-                             "privado": {"title": "", "link": ""}, "skip_attrs": []})
-_alogic.set_skip_open_config({"enabled": False, "regex": "", "direction": "sent"})  # limpa estado
+    # Escopo "protocolo": a regra também aceita um RÓTULO da aba Protocolo (sistema de
+    # campos próprio do plugin), lido de ``at["fields"]`` — não é atributo do core.
+    check("sanitize aceita scope protocolo",
+          _alogic._sanitize_skip_attrs([{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
+          == [{"key": "resultado", "scope": "protocolo", "join": "any",
+               "conditions": [{"op": "eq", "value": "sem contato"}], "value": "sem contato"}])
+    _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                                 "privado": {"title": "", "link": ""},
+                                 "skip_attrs": [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}]})
+    check("skip avaliação por RÓTULO do protocolo -> True",
+          _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": "Sem contato"}}, None) is True)
+    check("rótulo do protocolo com outro valor -> não pula",
+          _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": "vendeu"}}, None) is False)
+    check("rótulo multi (checkboxes) casa por pertencimento",
+          _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {"resultado": ["x", "sem contato"]}}, None) is True)
+    check("protocolo sem o rótulo preenchido -> não pula",
+          _alogic._should_skip_evaluation({"contact_id": _skcid, "fields": {}}, None) is False)
+    _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
+                                 "privado": {"title": "", "link": ""}, "skip_attrs": []})
+    _alogic.set_skip_open_config({"enabled": False, "regex": "", "direction": "sent"})  # limpa estado
 
-# Feature 3 — Resolver/Finalizar robusto a atendimento ÓRFÃO (ciclo sem conversa viva)
-from sqlalchemy import text as _sa_text
-from db.tables import messages as _msgs_t
-_rob_c = contact_repo.get_or_create("5511900000077")
-_rob_proto = _alogic.ensure_protocolo_for_contact(
-    _rob_c["id"], phone="5511900000077", name="Robustez")
-# atendente preenchido (rótulo fixo obrigatório) — replica o caso do print onde o protocolo
-# órfão já tinha atendente e finaliza sem pedir nada.
-with _get_engine().begin() as _rc:
-    _rc.execute(_sa_text("UPDATE plugin_protocolos_protocolos SET assignee_user_id=1, "
-                         "assignee_name='Admin' WHERE id=:i"), {"i": _rob_proto["id"]})
-# (a) ciclo ÓRFÃO (conversation_id inexistente no core) + required OK -> close auto-encerra
-#     o órfão e finaliza SEM travar com 'resolva-o antes'.
-_alogic._insert_cycle(999_000_111, _rob_c["id"], _rob_proto["id"])
-_rob_at, _rob_err = _alogic.close_protocolo(_rob_proto["id"], assignee_user_id=1, assignee_name="Admin")
-check("close: ciclo órfão NÃO bloqueia com 'resolva-o antes'",
-      not (_rob_err and "resolva-o antes" in _rob_err))
-check("close: protocolo órfão finaliza (status fechado)", _rob_err is None)
-check("close: ciclo órfão foi auto-encerrado",
-      _alogic._open_cycles_of_protocolo(_rob_proto["id"]) == [])
-# (a2) SEM required (sem atendente): retorna erro de obrigatório e NÃO deixa efeito colateral
-#      (o ciclo órfão continua ABERTO — validação ANTES de qualquer escrita).
-_rob_c2 = contact_repo.get_or_create("5511900000078")
-_rob_proto_nr = _alogic.ensure_protocolo_for_contact(
-    _rob_c2["id"], phone="5511900000078", name="Sem atendente")
-_alogic._insert_cycle(999_000_113, _rob_c2["id"], _rob_proto_nr["id"])
-_, _rob_err_nr = _alogic.close_protocolo(_rob_proto_nr["id"])  # sem assignee
-check("close sem required -> erro de obrigatório", bool(_rob_err_nr) and "brigat" in _rob_err_nr)
-check("close sem required -> ciclo órfão SEGUE aberto (sem efeito colateral)",
-      len(_alogic._open_cycles_of_protocolo(_rob_proto_nr["id"])) == 1)
-# (b) ciclo RESOLVÍVEL: conversa viva no core -> ainda bloqueia (comportamento inalterado).
-_rob_proto2 = _alogic.ensure_protocolo_for_contact(
-    _rob_c["id"], phone="5511900000077", name="Robustez")  # proto1 fechado -> novo protocolo aberto
-_rob_live = _sk_conv_repo.resolve_for_contact(_rob_c["id"], "5511900000077@s.whatsapp.net")
-_alogic._insert_cycle(_rob_live["id"], _rob_c["id"], _rob_proto2["id"])
-_, _rob_err2 = _alogic.close_protocolo(_rob_proto2["id"])
-check("close: ciclo com conversa viva ainda exige resolver antes",
-      bool(_rob_err2) and "resolva-o antes" in _rob_err2)
-check("close: conversa viva NÃO é encerrada (ciclo segue aberto)",
-      len(_alogic._open_cycles_of_protocolo(_rob_proto2["id"])) == 1)
-# (c) resolve_atendimento de conversa inexistente -> no-op gracioso (sem 'não encontrada').
-_res_link, _res_err = _alogic.resolve_atendimento(999_000_222, {})
-check("resolve_atendimento conversa inexistente -> gracioso (err None)", _res_err is None)
-# (d) _emit_proto_notice numa conversa deletada -> no-op limpo (sem exceção, sem row órfã).
-_alogic._emit_proto_notice("protocolo_closed", conversation_id=999_000_222, contact_id=_rob_c["id"])
-check("_emit_proto_notice em conversa inexistente -> não cria conversation_event",
-      _get_engine().connect().execute(_sa_select(_sa_func.count()).select_from(_msgs_t)
-          .where(_msgs_t.c.conversation_id == 999_000_222)).scalar() == 0)
-# (e) Opção B — avaliação PULADA em protocolo órfão (conversa do protocolo foi excluída).
-_orf_c = contact_repo.get_or_create("5511900000079")
-_orf_conv = _sk_conv_repo.resolve_for_contact(_orf_c["id"], "5511900000079@s.whatsapp.net")
-_orf_proto = _alogic.ensure_protocolo_for_contact(
-    _orf_c["id"], phone="5511900000079", name="Órfão aval")
-_alogic._insert_cycle(_orf_conv["id"], _orf_c["id"], _orf_proto["id"])
-check("_is_orphan_protocolo -> False com conversa viva",
-      _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is False)
-contact_repo.delete(_orf_c["id"])   # exclui contato -> cascade apaga a conversa -> protocolo órfão
-check("_is_orphan_protocolo -> True após conversa excluída",
-      _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is True)
-# send_protocol_on_close é best-effort e no harness get_deps()=None (sai cedo); a decisão
-# de pular está isolada em _is_orphan_protocolo (testada acima) — chamamos p/ garantir no-raise.
-_alogic.send_protocol_on_close(_alogic.get_protocolo(_orf_proto["id"]))
-check("send_protocol_on_close(órfão) não levanta", True)
+    # Feature 3 — Resolver/Finalizar robusto a atendimento ÓRFÃO (ciclo sem conversa viva)
+    from sqlalchemy import text as _sa_text
+    from db.tables import messages as _msgs_t
+    _rob_c = contact_repo.get_or_create("5511900000077")
+    _rob_proto = _alogic.ensure_protocolo_for_contact(
+        _rob_c["id"], phone="5511900000077", name="Robustez")
+    # atendente preenchido (rótulo fixo obrigatório) — replica o caso do print onde o protocolo
+    # órfão já tinha atendente e finaliza sem pedir nada.
+    with _get_engine().begin() as _rc:
+        _rc.execute(_sa_text("UPDATE plugin_protocolos_protocolos SET assignee_user_id=1, "
+                             "assignee_name='Admin' WHERE id=:i"), {"i": _rob_proto["id"]})
+    # (a) ciclo ÓRFÃO (conversation_id inexistente no core) + required OK -> close auto-encerra
+    #     o órfão e finaliza SEM travar com 'resolva-o antes'.
+    _alogic._insert_cycle(999_000_111, _rob_c["id"], _rob_proto["id"])
+    _rob_at, _rob_err = _alogic.close_protocolo(_rob_proto["id"], assignee_user_id=1, assignee_name="Admin")
+    check("close: ciclo órfão NÃO bloqueia com 'resolva-o antes'",
+          not (_rob_err and "resolva-o antes" in _rob_err))
+    check("close: protocolo órfão finaliza (status fechado)", _rob_err is None)
+    check("close: ciclo órfão foi auto-encerrado",
+          _alogic._open_cycles_of_protocolo(_rob_proto["id"]) == [])
+    # (a2) SEM required (sem atendente): retorna erro de obrigatório e NÃO deixa efeito colateral
+    #      (o ciclo órfão continua ABERTO — validação ANTES de qualquer escrita).
+    _rob_c2 = contact_repo.get_or_create("5511900000078")
+    _rob_proto_nr = _alogic.ensure_protocolo_for_contact(
+        _rob_c2["id"], phone="5511900000078", name="Sem atendente")
+    _alogic._insert_cycle(999_000_113, _rob_c2["id"], _rob_proto_nr["id"])
+    _, _rob_err_nr = _alogic.close_protocolo(_rob_proto_nr["id"])  # sem assignee
+    check("close sem required -> erro de obrigatório", bool(_rob_err_nr) and "brigat" in _rob_err_nr)
+    check("close sem required -> ciclo órfão SEGUE aberto (sem efeito colateral)",
+          len(_alogic._open_cycles_of_protocolo(_rob_proto_nr["id"])) == 1)
+    # (b) ciclo RESOLVÍVEL: conversa viva no core -> ainda bloqueia (comportamento inalterado).
+    _rob_proto2 = _alogic.ensure_protocolo_for_contact(
+        _rob_c["id"], phone="5511900000077", name="Robustez")  # proto1 fechado -> novo protocolo aberto
+    _rob_live = _sk_conv_repo.resolve_for_contact(_rob_c["id"], "5511900000077@s.whatsapp.net")
+    _alogic._insert_cycle(_rob_live["id"], _rob_c["id"], _rob_proto2["id"])
+    _, _rob_err2 = _alogic.close_protocolo(_rob_proto2["id"])
+    check("close: ciclo com conversa viva ainda exige resolver antes",
+          bool(_rob_err2) and "resolva-o antes" in _rob_err2)
+    check("close: conversa viva NÃO é encerrada (ciclo segue aberto)",
+          len(_alogic._open_cycles_of_protocolo(_rob_proto2["id"])) == 1)
+    # (c) resolve_atendimento de conversa inexistente -> no-op gracioso (sem 'não encontrada').
+    _res_link, _res_err = _alogic.resolve_atendimento(999_000_222, {})
+    check("resolve_atendimento conversa inexistente -> gracioso (err None)", _res_err is None)
+    # (d) _emit_proto_notice numa conversa deletada -> no-op limpo (sem exceção, sem row órfã).
+    _alogic._emit_proto_notice("protocolo_closed", conversation_id=999_000_222, contact_id=_rob_c["id"])
+    check("_emit_proto_notice em conversa inexistente -> não cria conversation_event",
+          _get_engine().connect().execute(_sa_select(_sa_func.count()).select_from(_msgs_t)
+              .where(_msgs_t.c.conversation_id == 999_000_222)).scalar() == 0)
+    # (e) Opção B — avaliação PULADA em protocolo órfão (conversa do protocolo foi excluída).
+    _orf_c = contact_repo.get_or_create("5511900000079")
+    _orf_conv = _sk_conv_repo.resolve_for_contact(_orf_c["id"], "5511900000079@s.whatsapp.net")
+    _orf_proto = _alogic.ensure_protocolo_for_contact(
+        _orf_c["id"], phone="5511900000079", name="Órfão aval")
+    _alogic._insert_cycle(_orf_conv["id"], _orf_c["id"], _orf_proto["id"])
+    check("_is_orphan_protocolo -> False com conversa viva",
+          _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is False)
+    contact_repo.delete(_orf_c["id"])   # exclui contato -> cascade apaga a conversa -> protocolo órfão
+    check("_is_orphan_protocolo -> True após conversa excluída",
+          _alogic._is_orphan_protocolo(_alogic.get_protocolo(_orf_proto["id"])) is True)
+    # send_protocol_on_close é best-effort e no harness get_deps()=None (sai cedo); a decisão
+    # de pular está isolada em _is_orphan_protocolo (testada acima) — chamamos p/ garantir no-raise.
+    _alogic.send_protocol_on_close(_alogic.get_protocolo(_orf_proto["id"]))
+    check("send_protocol_on_close(órfão) não levanta", True)
 
-# ── "Aberto por" (opener) no protocolo e nos atendimentos (ciclos) ──
-# _resolve_opener é puro: mapeia a origem do evento/ação para {kind,user_id,name}.
-check("_resolve_opener(inbound) -> Contato",
-      _alogic._resolve_opener("inbound") == {"kind": "contact", "user_id": None, "name": "Contato"})
-check("_resolve_opener(ai) -> IA",
-      _alogic._resolve_opener("ai") == {"kind": "ia", "user_id": None, "name": "IA"})
-check("_resolve_opener(agent) -> usa nome do current_user",
-      _alogic._resolve_opener("agent", None, user_id=7, name="Fulano")
-      == {"kind": "agent", "user_id": 7, "name": "Fulano"})
-check("_resolve_opener(operator) sem conversa -> Atendente (best-effort vazio)",
-      _alogic._resolve_opener("operator", None)["name"] == "Atendente")
-check("_resolve_opener(desconhecido) -> cai em Contato",
-      _alogic._resolve_opener("")["kind"] == "contact")
-# Criação real GRAVA o opener; get_protocolo devolve as colunas via dict(row).
-_op_c = contact_repo.get_or_create("5511900000090")
-_op_proto = _alogic.ensure_protocolo_for_contact(
-    _op_c["id"], phone="5511900000090", name="Opener Teste",
-    opener=_alogic._resolve_opener("inbound"))
-_op_row = _alogic.get_protocolo(_op_proto["id"])
-check("ensure_protocolo grava opened_by (Contato)",
-      _op_row.get("opened_by_kind") == "contact" and _op_row.get("opened_by_name") == "Contato")
-# O ciclo carrega SEU próprio opener (aqui simulamos abertura pela IA).
-_op_conv = _sk_conv_repo.resolve_for_contact(_op_c["id"], "5511900000090@s.whatsapp.net")
-_op_cyc = _alogic._insert_cycle(_op_conv["id"], _op_c["id"], _op_proto["id"],
-                                opener=_alogic._resolve_opener("ai"))
-check("_insert_cycle grava opened_by no ciclo (IA)", _op_cyc.get("opened_by_name") == "IA")
-# list_atendimentos (usado pelo popup) expõe opened_by_name na linha.
-_op_list = _alogic.list_atendimentos(_op_proto["id"])
-check("list_atendimentos -> opened_by_name na linha",
-      any(a.get("opened_by_name") == "IA" for a in _op_list))
-# Registro SEM opener (histórico antigo) fica com '' -> a UI mostra '—'.
-_op_c2 = contact_repo.get_or_create("5511900000091")
-_op_proto2 = _alogic.ensure_protocolo_for_contact(
-    _op_c2["id"], phone="5511900000091", name="Sem opener")
-check("ensure_protocolo sem opener -> opened_by_name vazio (histórico)",
-      _alogic.get_protocolo(_op_proto2["id"]).get("opened_by_name") == "")
+    # ── "Aberto por" (opener) no protocolo e nos atendimentos (ciclos) ──
+    # _resolve_opener é puro: mapeia a origem do evento/ação para {kind,user_id,name}.
+    check("_resolve_opener(inbound) -> Contato",
+          _alogic._resolve_opener("inbound") == {"kind": "contact", "user_id": None, "name": "Contato"})
+    check("_resolve_opener(ai) -> IA",
+          _alogic._resolve_opener("ai") == {"kind": "ia", "user_id": None, "name": "IA"})
+    check("_resolve_opener(agent) -> usa nome do current_user",
+          _alogic._resolve_opener("agent", None, user_id=7, name="Fulano")
+          == {"kind": "agent", "user_id": 7, "name": "Fulano"})
+    check("_resolve_opener(operator) sem conversa -> Atendente (best-effort vazio)",
+          _alogic._resolve_opener("operator", None)["name"] == "Atendente")
+    check("_resolve_opener(desconhecido) -> cai em Contato",
+          _alogic._resolve_opener("")["kind"] == "contact")
+    # Criação real GRAVA o opener; get_protocolo devolve as colunas via dict(row).
+    _op_c = contact_repo.get_or_create("5511900000090")
+    _op_proto = _alogic.ensure_protocolo_for_contact(
+        _op_c["id"], phone="5511900000090", name="Opener Teste",
+        opener=_alogic._resolve_opener("inbound"))
+    _op_row = _alogic.get_protocolo(_op_proto["id"])
+    check("ensure_protocolo grava opened_by (Contato)",
+          _op_row.get("opened_by_kind") == "contact" and _op_row.get("opened_by_name") == "Contato")
+    # O ciclo carrega SEU próprio opener (aqui simulamos abertura pela IA).
+    _op_conv = _sk_conv_repo.resolve_for_contact(_op_c["id"], "5511900000090@s.whatsapp.net")
+    _op_cyc = _alogic._insert_cycle(_op_conv["id"], _op_c["id"], _op_proto["id"],
+                                    opener=_alogic._resolve_opener("ai"))
+    check("_insert_cycle grava opened_by no ciclo (IA)", _op_cyc.get("opened_by_name") == "IA")
+    # list_atendimentos (usado pelo popup) expõe opened_by_name na linha.
+    _op_list = _alogic.list_atendimentos(_op_proto["id"])
+    check("list_atendimentos -> opened_by_name na linha",
+          any(a.get("opened_by_name") == "IA" for a in _op_list))
+    # Registro SEM opener (histórico antigo) fica com '' -> a UI mostra '—'.
+    _op_c2 = contact_repo.get_or_create("5511900000091")
+    _op_proto2 = _alogic.ensure_protocolo_for_contact(
+        _op_c2["id"], phone="5511900000091", name="Sem opener")
+    check("ensure_protocolo sem opener -> opened_by_name vazio (histórico)",
+          _alogic.get_protocolo(_op_proto2["id"]).get("opened_by_name") == "")
 
-# ── Religar IA ao fechar: setting (default ON) + helper best-effort ──
-check("get_reactivate_ai_on_close_setting -> default True",
-      _alogic.get_reactivate_ai_on_close_setting() is True)
-config_repo.set("plugin.protocolos.reactivate_ai_on_close", False)
-check("get_reactivate_ai_on_close_setting -> respeita override False",
-      _alogic.get_reactivate_ai_on_close_setting() is False)
-config_repo.set("plugin.protocolos.reactivate_ai_on_close", True)
-# Órfão: reactivate_ai_after_close pula (via _is_orphan_protocolo) e não levanta. No harness
-# get_deps()=None, então o caminho de religar propriamente é coberto pelo teste de core set_ai.
-_asyncio.run(_alogic.reactivate_ai_after_close(_alogic.get_protocolo(_orf_proto["id"])))
-check("reactivate_ai_after_close(órfão) não levanta", True)
+    # ── Religar IA ao fechar: setting (default ON) + helper best-effort ──
+    check("get_reactivate_ai_on_close_setting -> default True",
+          _alogic.get_reactivate_ai_on_close_setting() is True)
+    config_repo.set("plugin.protocolos.reactivate_ai_on_close", False)
+    check("get_reactivate_ai_on_close_setting -> respeita override False",
+          _alogic.get_reactivate_ai_on_close_setting() is False)
+    config_repo.set("plugin.protocolos.reactivate_ai_on_close", True)
+    # Órfão: reactivate_ai_after_close pula (via _is_orphan_protocolo) e não levanta. No harness
+    # get_deps()=None, então o caminho de religar propriamente é coberto pelo teste de core set_ai.
+    _asyncio.run(_alogic.reactivate_ai_after_close(_alogic.get_protocolo(_orf_proto["id"])))
+    check("reactivate_ai_after_close(órfão) não levanta", True)
 
 # ═══════════════════════════════════════════════════════════════════
 #  15h. Conversations (plano 01 Fase 1)
@@ -5117,140 +5147,142 @@ check("POST inbound -> evento ingerido (handled>=1)", r.json()["data"].get("hand
 # ═══════════════════════════════════════════════════════════════════
 #  19c. Telegram plugin (plano 13 Fase 3) — canal 100% sobre o ponto de extensão
 # ═══════════════════════════════════════════════════════════════════
-section("Telegram plugin (plano 13)")
+_src_tg_plugin = plugin_source_or_skip("telegram", "canal Telegram (seção 19c)")
+if _src_tg_plugin:
+    section("Telegram plugin (plano 13)")
 
-import importlib.util as _ilu
-_tg_path = PROJECT_ROOT / "assets" / "plugin_examples" / "telegram" / "channels.py"
-_tg_spec = _ilu.spec_from_file_location("tg_channels_test", str(_tg_path))
-_tg_mod = _ilu.module_from_spec(_tg_spec); _tg_spec.loader.exec_module(_tg_mod)
-_TelegramChannel = _tg_mod.TelegramChannel
+    import importlib.util as _ilu
+    _tg_path = _src_tg_plugin / "channels.py"
+    _tg_spec = _ilu.spec_from_file_location("tg_channels_test", str(_tg_path))
+    _tg_mod = _ilu.module_from_spec(_tg_spec); _tg_spec.loader.exec_module(_tg_mod)
+    _TelegramChannel = _tg_mod.TelegramChannel
 
-_tg = _TelegramChannel("tg_ch", credentials={"bot_token": "123:ABC"})
+    _tg = _TelegramChannel("tg_ch", credentials={"bot_token": "123:ABC"})
 
-# Capabilities dirigem o comportamento (sem if provider ==)
-check("telegram caps: sem QR, sem templates, grupos on, janela 0h",
-      (not _tg.capabilities.qr) and (not _tg.capabilities.templates)
-      and _tg.capabilities.groups and _tg.capabilities.session_window_hours == 0)
-check("telegram é um Channel registrável (CHANNEL_PROVIDERS)",
-      _tg_mod.CHANNEL_PROVIDERS == [_TelegramChannel])
+    # Capabilities dirigem o comportamento (sem if provider ==)
+    check("telegram caps: sem QR, sem templates, grupos on, janela 0h",
+          (not _tg.capabilities.qr) and (not _tg.capabilities.templates)
+          and _tg.capabilities.groups and _tg.capabilities.session_window_hours == 0)
+    check("telegram é um Channel registrável (CHANNEL_PROVIDERS)",
+          _tg_mod.CHANNEL_PROVIDERS == [_TelegramChannel])
 
-# parse_inbound: texto privado
-_ev = _tg.parse_inbound({"update_id": 1, "message": {
-    "message_id": 11, "date": 1700000000, "chat": {"id": 555, "type": "private"},
-    "from": {"id": 555, "first_name": "João", "last_name": "Silva"}, "text": "oi bot"}})[0]
-check("telegram parse: texto privado -> message", _ev.kind == "message" and _ev.text == "oi bot")
-check("telegram parse: chat_id/sender_id/nome resolvidos",
-      _ev.chat_id == "555" and _ev.sender_id == "555" and _ev.sender_name == "João Silva")
-check("telegram parse: external_msg_id + ts", _ev.external_msg_id == "11" and _ev.ts == 1700000000.0)
-check("telegram parse: privado não é grupo", _ev.is_group is False)
+    # parse_inbound: texto privado
+    _ev = _tg.parse_inbound({"update_id": 1, "message": {
+        "message_id": 11, "date": 1700000000, "chat": {"id": 555, "type": "private"},
+        "from": {"id": 555, "first_name": "João", "last_name": "Silva"}, "text": "oi bot"}})[0]
+    check("telegram parse: texto privado -> message", _ev.kind == "message" and _ev.text == "oi bot")
+    check("telegram parse: chat_id/sender_id/nome resolvidos",
+          _ev.chat_id == "555" and _ev.sender_id == "555" and _ev.sender_name == "João Silva")
+    check("telegram parse: external_msg_id + ts", _ev.external_msg_id == "11" and _ev.ts == 1700000000.0)
+    check("telegram parse: privado não é grupo", _ev.is_group is False)
 
-# foto com caption (media_id alimenta o download da pipeline; caption vira texto)
-_evp = _tg.parse_inbound({"message": {"message_id": 12, "date": 1, "chat": {"id": 5, "type": "private"},
-    "from": {"id": 5, "first_name": "J"}, "photo": [{"file_id": "small"}, {"file_id": "BIG"}], "caption": "olha"}})[0]
-check("telegram parse: foto -> image + maior file_id + caption como texto",
-      _evp.media_type == "image" and _evp.media_extras.get("media_id") == "BIG" and _evp.text == "olha")
+    # foto com caption (media_id alimenta o download da pipeline; caption vira texto)
+    _evp = _tg.parse_inbound({"message": {"message_id": 12, "date": 1, "chat": {"id": 5, "type": "private"},
+        "from": {"id": 5, "first_name": "J"}, "photo": [{"file_id": "small"}, {"file_id": "BIG"}], "caption": "olha"}})[0]
+    check("telegram parse: foto -> image + maior file_id + caption como texto",
+          _evp.media_type == "image" and _evp.media_extras.get("media_id") == "BIG" and _evp.text == "olha")
 
-# voz em grupo -> audio (transcrição roda na pipeline)
-_evv = _tg.parse_inbound({"message": {"message_id": 13, "date": 1, "chat": {"id": 9, "type": "supergroup", "title": "G"},
-    "from": {"id": 7, "username": "ze"}, "voice": {"file_id": "V", "duration": 5, "mime_type": "audio/ogg"}}})[0]
-check("telegram parse: voz -> audio + is_voice_note + grupo",
-      _evv.media_type == "audio" and _evv.media_extras.get("is_voice_note") and _evv.is_group)
+    # voz em grupo -> audio (transcrição roda na pipeline)
+    _evv = _tg.parse_inbound({"message": {"message_id": 13, "date": 1, "chat": {"id": 9, "type": "supergroup", "title": "G"},
+        "from": {"id": 7, "username": "ze"}, "voice": {"file_id": "V", "duration": 5, "mime_type": "audio/ogg"}}})[0]
+    check("telegram parse: voz -> audio + is_voice_note + grupo",
+          _evv.media_type == "audio" and _evv.media_extras.get("is_voice_note") and _evv.is_group)
 
-# localização: media_path geo: (NÃO tenta download)
-_evl = _tg.parse_inbound({"message": {"message_id": 14, "date": 1, "chat": {"id": 9, "type": "private"},
-    "from": {"id": 7}, "location": {"latitude": -23.5, "longitude": -46.6}}})[0]
-check("telegram parse: location -> geo media_path",
-      _evl.media_type == "location" and _evl.media_path == "geo:-23.5,-46.6")
+    # localização: media_path geo: (NÃO tenta download)
+    _evl = _tg.parse_inbound({"message": {"message_id": 14, "date": 1, "chat": {"id": 9, "type": "private"},
+        "from": {"id": 7}, "location": {"latitude": -23.5, "longitude": -46.6}}})[0]
+    check("telegram parse: location -> geo media_path",
+          _evl.media_type == "location" and _evl.media_path == "geo:-23.5,-46.6")
 
-# reação e updates ignorados
-_evr = _tg.parse_inbound({"message_reaction": {"message_id": 20, "date": 1, "chat": {"id": 9},
-    "user": {"id": 7}, "new_reaction": [{"type": "emoji", "emoji": "👍"}]}})[0]
-check("telegram parse: message_reaction -> reaction event",
-      _evr.kind == "reaction" and _evr.media_extras.get("emoji") == "👍"
-      and _evr.media_extras.get("reacted_message_id") == "20")
-check("telegram parse: update sem mensagem -> []", _tg.parse_inbound({"update_id": 99}) == [])
-check("telegram parse: raw não-dict -> []", _tg.parse_inbound(None) == [])
+    # reação e updates ignorados
+    _evr = _tg.parse_inbound({"message_reaction": {"message_id": 20, "date": 1, "chat": {"id": 9},
+        "user": {"id": 7}, "new_reaction": [{"type": "emoji", "emoji": "👍"}]}})[0]
+    check("telegram parse: message_reaction -> reaction event",
+          _evr.kind == "reaction" and _evr.media_extras.get("emoji") == "👍"
+          and _evr.media_extras.get("reacted_message_id") == "20")
+    check("telegram parse: update sem mensagem -> []", _tg.parse_inbound({"update_id": 99}) == [])
+    check("telegram parse: raw não-dict -> []", _tg.parse_inbound(None) == [])
 
-# Outbound/status sem rede: patch do _request
-_tg_calls = []
-def _tg_fake_request(method, payload=None, files=None, timeout=None):
-    _tg_calls.append((method, payload, files))
-    if method == "getMe":
-        return {"ok": True, "result": {"id": 1, "username": "meubot", "first_name": "Bot"}}
-    return {"ok": True, "result": {"message_id": 42}}
-_tg._request = _tg_fake_request
+    # Outbound/status sem rede: patch do _request
+    _tg_calls = []
+    def _tg_fake_request(method, payload=None, files=None, timeout=None):
+        _tg_calls.append((method, payload, files))
+        if method == "getMe":
+            return {"ok": True, "result": {"id": 1, "username": "meubot", "first_name": "Bot"}}
+        return {"ok": True, "result": {"message_id": 42}}
+    _tg._request = _tg_fake_request
 
-_tsr = _tg.send_text("555", "resposta", reply_to="11")
-check("telegram send_text -> ok + external_msg_id", _tsr.ok and _tsr.external_msg_id == "42")
-check("telegram send_text -> sendMessage + reply_parameters",
-      _tg_calls[-1][0] == "sendMessage"
-      and _tg_calls[-1][1].get("reply_parameters", {}).get("message_id") == 11)
+    _tsr = _tg.send_text("555", "resposta", reply_to="11")
+    check("telegram send_text -> ok + external_msg_id", _tsr.ok and _tsr.external_msg_id == "42")
+    check("telegram send_text -> sendMessage + reply_parameters",
+          _tg_calls[-1][0] == "sendMessage"
+          and _tg_calls[-1][1].get("reply_parameters", {}).get("message_id") == 11)
 
-_tst = _tg.status()
-check("telegram status -> conectado via getMe",
-      _tst["connected"] and _tst["logged_in"] and _tst.get("own_username") == "meubot")
+    _tst = _tg.status()
+    check("telegram status -> conectado via getMe",
+          _tst["connected"] and _tst["logged_in"] and _tst.get("own_username") == "meubot")
 
-_tg.react("555", "11", "❤️")
-check("telegram react -> setMessageReaction com emoji",
-      _tg_calls[-1][0] == "setMessageReaction"
-      and _tg_calls[-1][1]["reaction"][0]["emoji"] == "❤️")
+    _tg.react("555", "11", "❤️")
+    check("telegram react -> setMessageReaction com emoji",
+          _tg_calls[-1][0] == "setMessageReaction"
+          and _tg_calls[-1][1]["reaction"][0]["emoji"] == "❤️")
 
-_tsm = _tg.send_media("555", "image", "https://x/y.jpg", caption="cap")
-check("telegram send_media(url) -> sendPhoto com link no campo photo",
-      _tg_calls[-1][0] == "sendPhoto" and _tg_calls[-1][1].get("photo") == "https://x/y.jpg")
+    _tsm = _tg.send_media("555", "image", "https://x/y.jpg", caption="cap")
+    check("telegram send_media(url) -> sendPhoto com link no campo photo",
+          _tg_calls[-1][0] == "sendPhoto" and _tg_calls[-1][1].get("photo") == "https://x/y.jpg")
 
-# plano 64 — a zona "Arquivo" do drop tem de chegar como ARQUIVO no Telegram.
-# Sem `disable_content_type_detection`, o servidor do Telegram detecta o .mp4
-# e o exibe com player, tornando a zona indistinguível da de vídeo.
-_tg_mp4 = os.path.join(_tmpdir, "clipe_tg.mp4")
-with open(_tg_mp4, "wb") as _f:
-    _f.write(b"\x00\x00\x00\x18ftypmp42")
-_tg.send_media("555", "document", _tg_mp4, caption="cap", filename="clipe.mp4")
-check("telegram send_media(document) -> sendDocument",
-      _tg_calls[-1][0] == "sendDocument")
-check("telegram sendDocument -> desliga a detecção de tipo do servidor",
-      _tg_calls[-1][1].get("disable_content_type_detection") == "true")
-check("telegram sendDocument -> nome original preservado",
-      (_tg_calls[-1][2] or {}).get("document", (None,))[0] == "clipe.mp4")
+    # plano 64 — a zona "Arquivo" do drop tem de chegar como ARQUIVO no Telegram.
+    # Sem `disable_content_type_detection`, o servidor do Telegram detecta o .mp4
+    # e o exibe com player, tornando a zona indistinguível da de vídeo.
+    _tg_mp4 = os.path.join(_tmpdir, "clipe_tg.mp4")
+    with open(_tg_mp4, "wb") as _f:
+        _f.write(b"\x00\x00\x00\x18ftypmp42")
+    _tg.send_media("555", "document", _tg_mp4, caption="cap", filename="clipe.mp4")
+    check("telegram send_media(document) -> sendDocument",
+          _tg_calls[-1][0] == "sendDocument")
+    check("telegram sendDocument -> desliga a detecção de tipo do servidor",
+          _tg_calls[-1][1].get("disable_content_type_detection") == "true")
+    check("telegram sendDocument -> nome original preservado",
+          (_tg_calls[-1][2] or {}).get("document", (None,))[0] == "clipe.mp4")
 
-_tg.send_media("555", "video", _tg_mp4, caption="cap")
-check("telegram send_media(video) -> sendVideo (zona foto/vídeo intacta)",
-      _tg_calls[-1][0] == "sendVideo")
-check("telegram sendVideo -> NÃO manda o flag de documento",
-      "disable_content_type_detection" not in (_tg_calls[-1][1] or {}))
+    _tg.send_media("555", "video", _tg_mp4, caption="cap")
+    check("telegram send_media(video) -> sendVideo (zona foto/vídeo intacta)",
+          _tg_calls[-1][0] == "sendVideo")
+    check("telegram sendVideo -> NÃO manda o flag de documento",
+          "disable_content_type_detection" not in (_tg_calls[-1][1] or {}))
 
-# Token ausente -> erro limpo, sem rede (nunca derruba o core)
-_tg_noTok = _TelegramChannel("tg2")
-check("telegram sem token -> status missing_bot_token",
-      _tg_noTok.status().get("error") == "missing_bot_token")
-check("telegram sem token -> send_text not ok", not _tg_noTok.send_text("1", "x").ok)
+    # Token ausente -> erro limpo, sem rede (nunca derruba o core)
+    _tg_noTok = _TelegramChannel("tg2")
+    check("telegram sem token -> status missing_bot_token",
+          _tg_noTok.status().get("error") == "missing_bot_token")
+    check("telegram sem token -> send_text not ok", not _tg_noTok.send_text("1", "x").ok)
 
-# ── Runtime exposto ao contexto do plugin (plano 13 Fase 1.1) ──
-from plugins.context import (set_channel_runtime as _scr, get_channel_runtime as _gcr,
-                             PluginContext as _PluginCtx)
-from plugins.lifecycle import manager as _lcm11
-_prev_rt = _gcr()
-def _sentinel_ingest(ev):
-    return None
-_scr(_registry, _router, _sentinel_ingest)
-check("Fase 1.1: get_channel_runtime devolve o que foi wired",
-      _gcr() == (_registry, _router, _sentinel_ingest))
-check("Fase 1.1: PluginContext expõe os campos de canal",
-      all(hasattr(_PluginCtx("x"), a)
-          for a in ("channel_registry", "outbound_router", "ingest_event")))
-_ctx11 = _lcm11._ensure_context("telegram_rt_test", None, None)
-check("Fase 1.1: _ensure_context injeta channel_registry no ctx",
-      _ctx11.channel_registry is _registry)
-check("Fase 1.1: _ensure_context injeta outbound_router no ctx",
-      _ctx11.outbound_router is _router)
-check("Fase 1.1: _ensure_context injeta ingest_event no ctx",
-      _ctx11.ingest_event is _sentinel_ingest)
-_lcm11._contexts.pop("telegram_rt_test", None)
-_scr(*_prev_rt)  # restaura o estado anterior do runtime de canal
+    # ── Runtime exposto ao contexto do plugin (plano 13 Fase 1.1) ──
+    from plugins.context import (set_channel_runtime as _scr, get_channel_runtime as _gcr,
+                                 PluginContext as _PluginCtx)
+    from plugins.lifecycle import manager as _lcm11
+    _prev_rt = _gcr()
+    def _sentinel_ingest(ev):
+        return None
+    _scr(_registry, _router, _sentinel_ingest)
+    check("Fase 1.1: get_channel_runtime devolve o que foi wired",
+          _gcr() == (_registry, _router, _sentinel_ingest))
+    check("Fase 1.1: PluginContext expõe os campos de canal",
+          all(hasattr(_PluginCtx("x"), a)
+              for a in ("channel_registry", "outbound_router", "ingest_event")))
+    _ctx11 = _lcm11._ensure_context("telegram_rt_test", None, None)
+    check("Fase 1.1: _ensure_context injeta channel_registry no ctx",
+          _ctx11.channel_registry is _registry)
+    check("Fase 1.1: _ensure_context injeta outbound_router no ctx",
+          _ctx11.outbound_router is _router)
+    check("Fase 1.1: _ensure_context injeta ingest_event no ctx",
+          _ctx11.ingest_event is _sentinel_ingest)
+    _lcm11._contexts.pop("telegram_rt_test", None)
+    _scr(*_prev_rt)  # restaura o estado anterior do runtime de canal
 
-# ═══════════════════════════════════════════════════════════════════
-#  19d. GOWA atrás do contrato (plano 13 Fase 0) — parse_gowa_inbound + ingest
-# ═══════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════
+    #  19d. GOWA atrás do contrato (plano 13 Fase 0) — parse_gowa_inbound + ingest
+    # ═══════════════════════════════════════════════════════════════════
 section("GOWA contrato (plano 13)")
 
 from gowa.inbound import parse_gowa_inbound as _pgi
@@ -5330,21 +5362,23 @@ check("gowa parse: edited -> kind edited",
       and _ged.media_extras.get("original_message_id") == "e1")
 check("gowa parse: evento desconhecido -> []", _pgi({"event": "nope", "payload": {}}) == [])
 
-# Telegram: edited_message vira um evento "edited" (não uma msg nova).
-_tg_mod = _load_provider("tg_edit_test", "assets/plugin_examples/telegram/channels.py")
-_tg_ch = _tg_mod.TelegramChannel("t_edit", credentials={"bot_token": "1:x"})
-_tg_new = _tg_ch.parse_inbound({"message": {
-    "message_id": 55, "date": 1, "text": "original",
-    "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
-check("telegram parse: message normal -> kind message",
-      len(_tg_new) == 1 and _tg_new[0].kind == "message")
-_tg_ed = _tg_ch.parse_inbound({"edited_message": {
-    "message_id": 55, "date": 2, "text": "editado",
-    "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
-check("telegram parse: edited_message -> kind edited",
-      len(_tg_ed) == 1 and _tg_ed[0].kind == "edited"
-      and _tg_ed[0].text == "editado"
-      and _tg_ed[0].media_extras.get("original_message_id") == "55")
+_src_tg_edit = plugin_source_or_skip("telegram", "parse de edited_message")
+if _src_tg_edit:
+    # Telegram: edited_message vira um evento "edited" (não uma msg nova).
+    _tg_mod = _load_provider("tg_edit_test", _src_tg_edit / "channels.py")
+    _tg_ch = _tg_mod.TelegramChannel("t_edit", credentials={"bot_token": "1:x"})
+    _tg_new = _tg_ch.parse_inbound({"message": {
+        "message_id": 55, "date": 1, "text": "original",
+        "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
+    check("telegram parse: message normal -> kind message",
+          len(_tg_new) == 1 and _tg_new[0].kind == "message")
+    _tg_ed = _tg_ch.parse_inbound({"edited_message": {
+        "message_id": 55, "date": 2, "text": "editado",
+        "chat": {"id": 111, "type": "private"}, "from": {"id": 111, "first_name": "Cli"}}})
+    check("telegram parse: edited_message -> kind edited",
+          len(_tg_ed) == 1 and _tg_ed[0].kind == "edited"
+          and _tg_ed[0].text == "editado"
+          and _tg_ed[0].media_extras.get("original_message_id") == "55")
 
 # ── ingest_event honra os campos GOWA (via fake_ch, channel-agnostic) ──
 settings.set("message_batch_delay", 0)
@@ -5858,19 +5892,19 @@ def _last_export_ip():
     return max(rows, key=lambda x: x["id"])["ip_address"] if rows else None
 
 
-_XFF = {"X-Forwarded-For": "10.8.200.4"}   # a cadeia real da instância (só hop privado)
+_XFF = {"X-Forwarded-For": "10.99.0.4"}   # cadeia de exemplo (só hop privado)
 
 client.get("/api/audit/export?format=csv", headers={**_XFF, "X-Client-Public-IP": "200.1.2.3"})
 check("audit grava o IP público declarado pelo painel", _last_export_ip() == "200.1.2.3")
 
 client.get("/api/audit/export?format=csv", headers=_XFF)
-check("sem o cabeçalho -> IP de rede, idêntico a antes", _last_export_ip() == "10.8.200.4")
+check("sem o cabeçalho -> IP de rede, idêntico a antes", _last_export_ip() == "10.99.0.4")
 
 client.get("/api/audit/export?format=csv", headers={**_XFF, "X-Client-Public-IP": "192.168.0.7"})
-check("cabeçalho privado é ignorado -> IP de rede", _last_export_ip() == "10.8.200.4")
+check("cabeçalho privado é ignorado -> IP de rede", _last_export_ip() == "10.99.0.4")
 
 client.get("/api/audit/export?format=csv", headers={**_XFF, "X-Client-Public-IP": "nao-e-ip"})
-check("cabeçalho com lixo é ignorado -> IP de rede", _last_export_ip() == "10.8.200.4")
+check("cabeçalho com lixo é ignorado -> IP de rede", _last_export_ip() == "10.99.0.4")
 
 # D4: o bucket do rate-limit de login NÃO pode se mover com o cabeçalho — senão
 # bastaria variá-lo a cada tentativa para ganhar tentativas infinitas.
@@ -6584,248 +6618,8 @@ check("channel upload-example canal inexistente -> 404",
       client.post("/api/channels/nao_existe/templates/upload-example",
                   files={"file": ("foto.png", b"x", "image/png")}).status_code == 404)
 
-# ── WhatsAppCloudChannel.list_templates parsing (mock Graph API) ──
-section("WhatsApp Cloud — list_templates parsing (Frente C)")
-import importlib.util as _ilu
-_wac_spec = _ilu.spec_from_file_location(
-    "wac_under_test", "assets/plugin_examples/whatsapp_cloud/channels.py")
-_wac = _ilu.module_from_spec(_wac_spec)
-_wac_spec.loader.exec_module(_wac)
-
-
-class _Resp:
-    def __init__(self, status, payload):
-        self.status_code = status
-        self._p = payload
-        self.text = ""
-        self.content = b"{}"
-
-    def json(self):
-        return self._p
-
-
-class _FakeHttpClient:
-    def __init__(self, pages):
-        self._pages = pages
-        self._i = 0
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def get(self, url, headers=None, params=None):
-        p = self._pages[min(self._i, len(self._pages) - 1)]
-        self._i += 1
-        return p
-
-
-_pages = [
-    _Resp(200, {"data": [
-        {"name": "t1", "status": "APPROVED", "language": "pt_BR", "category": "MARKETING",
-         "components": [{"type": "BODY", "text": "Oi {{1}}"}]},
-        {"name": "t2_pending", "status": "PENDING", "language": "pt_BR"},
-    ], "paging": {"next": "https://graph/next-page"}}),
-    _Resp(200, {"data": [
-        {"name": "t3", "status": "APPROVED", "language": "en", "category": "UTILITY", "components": []},
-    ]}),
-]
-_orig_httpx_client = _wac.httpx.Client
-_wac.httpx.Client = lambda *a, **k: _FakeHttpClient(_pages)
-try:
-    _ch = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
-        "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
-    _tpls = _ch.list_templates()
-finally:
-    _wac.httpx.Client = _orig_httpx_client
-check("list_templates -> inclui todos os status (PENDING incluso)",
-      {t["name"] for t in _tpls} == {"t1", "t2_pending", "t3"})
-check("list_templates -> seguiu paginação (2 páginas)", len(_tpls) == 3)
-check("list_templates -> normaliza type p/ minúsculas",
-      _tpls[0]["components"][0]["type"] == "body")
-check("list_templates -> preserva status p/ badge",
-      next(t for t in _tpls if t["name"] == "t2_pending")["status"] == "PENDING")
-check("list_templates sem waba_id -> []",
-      _wac.WhatsAppCloudChannel("x", credentials={"access_token": "T"}).list_templates() == [])
-
-
-# ── WhatsAppCloudChannel.create_template / delete_template (mock Graph) ──
-class _FakeWriteClient:
-    def __init__(self, resp):
-        self.resp = resp
-        self.calls = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def post(self, url, headers=None, json=None):
-        self.calls.append(("post", url, json))
-        return self.resp
-
-    def delete(self, url, headers=None, params=None):
-        self.calls.append(("delete", url, params))
-        return self.resp
-
-
-_fwc = _FakeWriteClient(_Resp(200, {"id": "TPL123", "status": "PENDING", "category": "UTILITY"}))
-_wac.httpx.Client = lambda *a, **k: _fwc
-try:
-    _ch2 = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
-        "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
-    _cres = _ch2.create_template(
-        "pedido_ok", category="UTILITY", language="pt_BR",
-        body_text="Olá {{1}}, pedido {{2}} ok", header_text="Aviso {{1}}",
-        footer_text="Equipe", body_examples=["João", "123"], header_examples=["Promo"])
-finally:
-    _wac.httpx.Client = _orig_httpx_client
-check("create_template -> ok + id/status",
-      _cres.get("ok") and _cres.get("id") == "TPL123" and _cres.get("status") == "PENDING")
-_sent_payload = _fwc.calls[-1][2]
-check("create_template -> componentes HEADER/BODY/FOOTER uppercase",
-      [c["type"] for c in _sent_payload["components"]] == ["HEADER", "BODY", "FOOTER"])
-_body_comp = next(c for c in _sent_payload["components"] if c["type"] == "BODY")
-check("create_template -> body example aninhado [[...]]",
-      _body_comp["example"]["body_text"] == [["João", "123"]])
-_hdr_comp = next(c for c in _sent_payload["components"] if c["type"] == "HEADER")
-check("create_template -> header TEXT + example",
-      _hdr_comp["format"] == "TEXT" and _hdr_comp["example"]["header_text"] == ["Promo"])
-check("create_template -> payload name/category/language",
-      _sent_payload["name"] == "pedido_ok" and _sent_payload["category"] == "UTILITY"
-      and _sent_payload["language"] == "pt_BR")
-check("create_template sem waba_id -> ok=False",
-      _wac.WhatsAppCloudChannel("x", credentials={"access_token": "T"}).create_template(
-          "n", category="UTILITY", language="pt_BR", body_text="b").get("ok") is False)
-
-_fwc_del = _FakeWriteClient(_Resp(200, {"success": True}))
-_wac.httpx.Client = lambda *a, **k: _fwc_del
-try:
-    _ch3 = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
-        "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
-    _dres = _ch3.delete_template("pedido_ok")
-finally:
-    _wac.httpx.Client = _orig_httpx_client
-check("delete_template -> ok", _dres.get("ok") is True)
-check("delete_template -> chamou DELETE com name",
-      _fwc_del.calls[-1][0] == "delete" and _fwc_del.calls[-1][2] == {"name": "pedido_ok"})
-
-# ═══════════════════════════════════════════════════════════════════
-#  WhatsApp Cloud — media upload (P1) + janela 24h no envio (P3)
-# ═══════════════════════════════════════════════════════════════════
-section("WhatsApp Cloud — upload de mídia (P1) + gate janela 24h (P3)")
-
-# A local file written by the panel must be UPLOADED to /media and sent by id —
-# sending the local path as `link` is what produced (#100) not a valid URI.
-_media_tmp = os.path.join(_tmpdir, "outbox_img.png")
-with open(_media_tmp, "wb") as _mf:
-    _mf.write(b"\x89PNG\r\n\x1a\nFAKEDATA")
-
-
-class _FakeMediaClient:
-    def __init__(self):
-        self.upload_calls = []
-        self.msg_calls = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def post(self, url, headers=None, json=None, data=None, files=None):
-        if files is not None:                       # multipart upload to /media
-            self.upload_calls.append({"url": url, "data": data})
-            return _Resp(200, {"id": "MEDIA_XYZ"})
-        self.msg_calls.append({"url": url, "json": json})  # JSON message send
-        return _Resp(200, {"messages": [{"id": "wamid.OUT"}]})
-
-
-_fmc = _FakeMediaClient()
-_wac.httpx.Client = lambda *a, **k: _fmc
-try:
-    _chm = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
-        "access_token": "TOK", "phone_number_id": "PN"})
-    _mres = _chm.send_media("5511", "image", _media_tmp, caption="oi")
-finally:
-    _wac.httpx.Client = _orig_httpx_client
-check("send_media(local) -> ok + external id", _mres.ok and _mres.external_msg_id == "wamid.OUT")
-check("send_media(local) -> upload em /{phone_id}/media",
-      bool(_fmc.upload_calls) and _fmc.upload_calls[-1]["url"].endswith("/PN/media"))
-check("send_media(local) -> upload com messaging_product=whatsapp",
-      _fmc.upload_calls[-1]["data"].get("messaging_product") == "whatsapp")
-check("send_media(local) -> mensagem usa media id, não link",
-      _fmc.msg_calls[-1]["json"]["image"].get("id") == "MEDIA_XYZ"
-      and "link" not in _fmc.msg_calls[-1]["json"]["image"])
-check("send_media(local) -> caption preservado",
-      _fmc.msg_calls[-1]["json"]["image"].get("caption") == "oi")
-
-# A public URL is sent as link (no upload).
-_fmc2 = _FakeMediaClient()
-_wac.httpx.Client = lambda *a, **k: _fmc2
-try:
-    _chu = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
-        "access_token": "TOK", "phone_number_id": "PN"})
-    _chu.send_media("5511", "image", "https://pub.example/x.jpg")
-finally:
-    _wac.httpx.Client = _orig_httpx_client
-check("send_media(url pública) -> sem upload, usa link",
-      not _fmc2.upload_calls
-      and _fmc2.msg_calls[-1]["json"]["image"].get("link") == "https://pub.example/x.jpg")
-
-
-# Upload failure surfaces a clean SendResult error (never an invalid link).
-class _FailUploadClient(_FakeMediaClient):
-    def post(self, url, headers=None, json=None, data=None, files=None):
-        if files is not None:
-            return _Resp(400, {"error": {"message": "bad media"}})
-        return _Resp(200, {"messages": [{"id": "x"}]})
-
-
-_ffu = _FailUploadClient()
-_wac.httpx.Client = lambda *a, **k: _ffu
-try:
-    _chf = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
-        "access_token": "TOK", "phone_number_id": "PN"})
-    _fres = _chf.send_media("5511", "image", _media_tmp)
-finally:
-    _wac.httpx.Client = _orig_httpx_client
-check("send_media(local) upload falha -> ok=False media_upload_failed",
-      _fres.ok is False and _fres.error == "media_upload_failed")
-
-# ── 24h send gate on the operator routes (P3) ──
-from db.repositories import conversation_repo as _cr_gate
-_gate_conv = _cr_gate.get_with_channel(_tpl_conv["id"])  # cloud_test, window=24h
-_gate_phone = _gate_conv["contact_phone"]
-
-r = client.post(f"/api/contacts/{_gate_phone}/send",
-                json={"message": "fora da janela", "conversation_id": _tpl_conv["id"]})
-check("send (cloud sem inbound recente) -> 409 janela 24h", r.status_code == 409)
-check("send (cloud fora da janela) -> reason session_window_closed",
-      (r.json().get("data") or {}).get("reason") == "session_window_closed")
-
-# A recent inbound reopens the 24h window -> free text allowed again.
-_sn_msg_repo.add(_gate_conv["contact_id"], "user", "oi de novo",
-                 conversation_id=_tpl_conv["id"], ts=time.time())
-r = client.post(f"/api/contacts/{_gate_phone}/send",
-                json={"message": "agora vai", "conversation_id": _tpl_conv["id"]})
-check("send (cloud com inbound recente) -> 200 dentro da janela", r.status_code == 200)
-
-# GOWA (session_window_hours=0) is never gated.
-r = client.post("/api/contacts/5511999990001/send", json={"message": "gowa livre"})
-check("send (gowa) -> não bloqueado pela janela 24h", r.status_code == 200)
-
-# ═══════════════════════════════════════════════════════════════════
-#  Account-identity dedup (plano 32) — create/update 409 enforcement
-# ═══════════════════════════════════════════════════════════════════
-section("Account-identity dedup (plano 32)")
-
-# The cloud/telegram plugins are DISABLED in the hermetic test app, so their
-# provider classes aren't registered — register them into the live registry now
-# (as production does when they're enabled) to exercise the generic dedup
-# enforcement end to end. Appended at the very end so it can't affect earlier tests.
+# ── Carregador genérico de provider de plugin (usado pelos blocos guardados) ──
+# Fica FORA dos guards: os blocos que o chamam já resolveram a fonte do plugin.
 import importlib.util as _p32_ilu
 import sys as _p32_sys
 import types as _p32_types
@@ -6836,7 +6630,7 @@ def _p32_load_provider(prov, clsname):
     # ao runtime — necessário porque providers como facebook_messenger importam a
     # base RELATIVAMENTE (plano 76·F9: `from .meta_graph import …`). Harmless para
     # quem não usa import relativo (whatsapp_cloud/telegram).
-    plugin_dir = PROJECT_ROOT / "assets" / "plugin_examples" / prov
+    plugin_dir = plugin_source_or_skip(prov, "dedup plano 32")
     if "whatsbot_plugins" not in _p32_sys.modules:
         _parent = _p32_types.ModuleType("whatsbot_plugins")
         _parent.__path__ = []
@@ -6854,97 +6648,343 @@ def _p32_load_provider(prov, clsname):
     return getattr(m, clsname)
 
 
-_p32_reg = app.state.deps.channel_registry
-_p32_reg.register_provider(_p32_load_provider("whatsapp_cloud", "WhatsAppCloudChannel"))
-_p32_reg.register_provider(_p32_load_provider("telegram", "TelegramChannel"))
 
-# plano 33: os providers reais agora aparecem no endpoint com descriptor completo
-# (credential_fields + capabilities + post_create) — a base do form dinâmico.
-_pr33 = client.get("/api/channels/providers").json()["data"]
-_by33 = {d["provider"]: d for d in _pr33["providers"]}
-check("descriptor telegram registrado -> aparece com bot_token required",
-      "telegram" in _by33
-      and any(f["key"] == "bot_token" and f.get("required")
-              for f in _by33["telegram"]["credential_fields"])
-      and _by33["telegram"]["post_create"]["kind"] == "autoconfigure")
-check("descriptor whatsapp_cloud -> creds + templates + webhook_url pós-criação",
-      "whatsapp_cloud" in _by33
-      and {f["key"] for f in _by33["whatsapp_cloud"]["credential_fields"]}
-          >= {"access_token", "app_secret", "phone_number_id", "verify_token"}
-      and any(f["key"] == "app_secret" and f.get("required")
-              for f in _by33["whatsapp_cloud"]["credential_fields"])
-      and _by33["whatsapp_cloud"]["capabilities"]["templates"] is True
-      and _by33["whatsapp_cloud"]["post_create"]["kind"] == "webhook_url")
-check("required_credentials reflete saúde operacional, não migração de create",
-      set(_pr33["required_credentials"].get("whatsapp_cloud", []))
-      == {"access_token", "phone_number_id", "verify_token"})
-
-r = client.post("/api/channels", json={
-    "id": "p32_cloud_sem_secret", "provider": "whatsapp_cloud",
-    "display_name": "Cloud inseguro",
-    "credentials": {"access_token": "tokX", "phone_number_id": "PN_NO_SECRET",
-                    "verify_token": "vtX"}})
-check("cloud novo sem app_secret -> 400", r.status_code == 400)
-
-# whatsapp_cloud: two channels with the same phone_number_id -> 409
-_p32_cloud = {"access_token": "tokA", "app_secret": "secA",
-              "phone_number_id": "PN_DEDUP_1", "verify_token": "vtA"}
-r = client.post("/api/channels", json={
-    "id": "p32_cloud_a", "provider": "whatsapp_cloud", "display_name": "Cloud A",
-    "credentials": _p32_cloud})
-check("dedup: 1º cloud (phone_number_id novo) -> 200", r.status_code == 200)
-r = client.post("/api/channels", json={
-    "id": "p32_cloud_b", "provider": "whatsapp_cloud", "display_name": "Cloud B",
-    "credentials": {"access_token": "tokB", "app_secret": "secB",
-                    "phone_number_id": "PN_DEDUP_1", "verify_token": "vtB"}})
-check("dedup: 2º cloud mesmo phone_number_id -> 409", r.status_code == 409)
-
-# Different phone_number_id -> OK
-r = client.post("/api/channels", json={
-    "id": "p32_cloud_c", "provider": "whatsapp_cloud", "display_name": "Cloud C",
-    "credentials": {"access_token": "tokC", "app_secret": "secC",
-                    "phone_number_id": "PN_DEDUP_2", "verify_token": "vtC"}})
-check("dedup: cloud phone_number_id diferente -> 200", r.status_code == 200)
-
-# telegram: same bot_id (parsed from {bot_id}:{hash}) -> 409
-r = client.post("/api/channels", json={
-    "id": "p32_tg_a", "provider": "telegram", "display_name": "TG A",
-    "credentials": {"bot_token": "700700:AAA"}})
-check("dedup: 1º telegram (bot novo) -> 200", r.status_code == 200)
-r = client.post("/api/channels", json={
-    "id": "p32_tg_b", "provider": "telegram", "display_name": "TG B",
-    "credentials": {"bot_token": "700700:BBB"}})  # same bot_id 700700
-check("dedup: 2º telegram mesmo bot_id -> 409", r.status_code == 409)
-
-# Same numeric value across DIFFERENT providers/kinds is NOT a duplicate.
-r = client.post("/api/channels", json={
-    "id": "p32_cloud_num", "provider": "whatsapp_cloud", "display_name": "Cloud Num",
-    "credentials": {"access_token": "tokN", "app_secret": "secN",
-                    "phone_number_id": "700700", "verify_token": "vtN"}})
-check("dedup: mesmo valor em provider/kind diferente -> 200 (não é duplicata)",
-      r.status_code == 200)
-
-# PUT edit-to-collide: change Cloud C's phone_number_id to the one Cloud A owns -> 409
-r = client.put("/api/channels/p32_cloud_c",
-               json={"credentials": {"phone_number_id": "PN_DEDUP_1"}})
-check("dedup: PUT editar credencial para colidir -> 409", r.status_code == 409)
-
-# PUT an unrelated field (no credential change) -> not blocked
-r = client.put("/api/channels/p32_cloud_c", json={"display_name": "Cloud C renomeado"})
-check("dedup: PUT campo não-credencial -> 200", r.status_code == 200)
-
-# PUT to the channel's OWN identity is not a self-conflict
-r = client.put("/api/channels/p32_cloud_c",
-               json={"credentials": {"phone_number_id": "PN_DEDUP_2"}})
-check("dedup: PUT para a própria identidade -> 200", r.status_code == 200)
+_src_wac_tpl = plugin_source_or_skip("whatsapp_cloud", "templates, upload de mídia e dedup de conta")
+_src_tg_dedup = plugin_source_or_skip("telegram", "templates, upload de mídia e dedup de conta")
+if _src_wac_tpl and _src_tg_dedup:
+    # ── WhatsAppCloudChannel.list_templates parsing (mock Graph API) ──
+    section("WhatsApp Cloud — list_templates parsing (Frente C)")
+    import importlib.util as _ilu
+    _wac_spec = _ilu.spec_from_file_location(
+        "wac_under_test", _src_wac_tpl / "channels.py")
+    _wac = _ilu.module_from_spec(_wac_spec)
+    _wac_spec.loader.exec_module(_wac)
 
 
-# ── Menções em nota privada (colaboração estilo Chatwoot) ────────────────────────
-# @menção de atendente/time numa nota privada grava linhas em `mentions` (por-usuário),
-# emite `mention_created`, alimenta `has_user_mention` e a aba Menções. A partir do
-# bootstrap a suíte roda como admin (default header — plano 48 F0), então a nota é
-# autorada pelo admin; as peças por-usuário (has_user_mention, unread_count) são
-# checadas via repo com o user_id explícito (independem do current_user do request).
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._p = payload
+            self.text = ""
+            self.content = b"{}"
+
+        def json(self):
+            return self._p
+
+
+    class _FakeHttpClient:
+        def __init__(self, pages):
+            self._pages = pages
+            self._i = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, headers=None, params=None):
+            p = self._pages[min(self._i, len(self._pages) - 1)]
+            self._i += 1
+            return p
+
+
+    _pages = [
+        _Resp(200, {"data": [
+            {"name": "t1", "status": "APPROVED", "language": "pt_BR", "category": "MARKETING",
+             "components": [{"type": "BODY", "text": "Oi {{1}}"}]},
+            {"name": "t2_pending", "status": "PENDING", "language": "pt_BR"},
+        ], "paging": {"next": "https://graph/next-page"}}),
+        _Resp(200, {"data": [
+            {"name": "t3", "status": "APPROVED", "language": "en", "category": "UTILITY", "components": []},
+        ]}),
+    ]
+    _orig_httpx_client = _wac.httpx.Client
+    _wac.httpx.Client = lambda *a, **k: _FakeHttpClient(_pages)
+    try:
+        _ch = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+            "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
+        _tpls = _ch.list_templates()
+    finally:
+        _wac.httpx.Client = _orig_httpx_client
+    check("list_templates -> inclui todos os status (PENDING incluso)",
+          {t["name"] for t in _tpls} == {"t1", "t2_pending", "t3"})
+    check("list_templates -> seguiu paginação (2 páginas)", len(_tpls) == 3)
+    check("list_templates -> normaliza type p/ minúsculas",
+          _tpls[0]["components"][0]["type"] == "body")
+    check("list_templates -> preserva status p/ badge",
+          next(t for t in _tpls if t["name"] == "t2_pending")["status"] == "PENDING")
+    check("list_templates sem waba_id -> []",
+          _wac.WhatsAppCloudChannel("x", credentials={"access_token": "T"}).list_templates() == [])
+
+
+    # ── WhatsAppCloudChannel.create_template / delete_template (mock Graph) ──
+    class _FakeWriteClient:
+        def __init__(self, resp):
+            self.resp = resp
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            self.calls.append(("post", url, json))
+            return self.resp
+
+        def delete(self, url, headers=None, params=None):
+            self.calls.append(("delete", url, params))
+            return self.resp
+
+
+    _fwc = _FakeWriteClient(_Resp(200, {"id": "TPL123", "status": "PENDING", "category": "UTILITY"}))
+    _wac.httpx.Client = lambda *a, **k: _fwc
+    try:
+        _ch2 = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+            "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
+        _cres = _ch2.create_template(
+            "pedido_ok", category="UTILITY", language="pt_BR",
+            body_text="Olá {{1}}, pedido {{2}} ok", header_text="Aviso {{1}}",
+            footer_text="Equipe", body_examples=["João", "123"], header_examples=["Promo"])
+    finally:
+        _wac.httpx.Client = _orig_httpx_client
+    check("create_template -> ok + id/status",
+          _cres.get("ok") and _cres.get("id") == "TPL123" and _cres.get("status") == "PENDING")
+    _sent_payload = _fwc.calls[-1][2]
+    check("create_template -> componentes HEADER/BODY/FOOTER uppercase",
+          [c["type"] for c in _sent_payload["components"]] == ["HEADER", "BODY", "FOOTER"])
+    _body_comp = next(c for c in _sent_payload["components"] if c["type"] == "BODY")
+    check("create_template -> body example aninhado [[...]]",
+          _body_comp["example"]["body_text"] == [["João", "123"]])
+    _hdr_comp = next(c for c in _sent_payload["components"] if c["type"] == "HEADER")
+    check("create_template -> header TEXT + example",
+          _hdr_comp["format"] == "TEXT" and _hdr_comp["example"]["header_text"] == ["Promo"])
+    check("create_template -> payload name/category/language",
+          _sent_payload["name"] == "pedido_ok" and _sent_payload["category"] == "UTILITY"
+          and _sent_payload["language"] == "pt_BR")
+    check("create_template sem waba_id -> ok=False",
+          _wac.WhatsAppCloudChannel("x", credentials={"access_token": "T"}).create_template(
+              "n", category="UTILITY", language="pt_BR", body_text="b").get("ok") is False)
+
+    _fwc_del = _FakeWriteClient(_Resp(200, {"success": True}))
+    _wac.httpx.Client = lambda *a, **k: _fwc_del
+    try:
+        _ch3 = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+            "waba_id": "WABA1", "access_token": "TOK", "phone_number_id": "PN"})
+        _dres = _ch3.delete_template("pedido_ok")
+    finally:
+        _wac.httpx.Client = _orig_httpx_client
+    check("delete_template -> ok", _dres.get("ok") is True)
+    check("delete_template -> chamou DELETE com name",
+          _fwc_del.calls[-1][0] == "delete" and _fwc_del.calls[-1][2] == {"name": "pedido_ok"})
+
+    # ═══════════════════════════════════════════════════════════════════
+    #  WhatsApp Cloud — media upload (P1) + janela 24h no envio (P3)
+    # ═══════════════════════════════════════════════════════════════════
+    section("WhatsApp Cloud — upload de mídia (P1) + gate janela 24h (P3)")
+
+    # A local file written by the panel must be UPLOADED to /media and sent by id —
+    # sending the local path as `link` is what produced (#100) not a valid URI.
+    _media_tmp = os.path.join(_tmpdir, "outbox_img.png")
+    with open(_media_tmp, "wb") as _mf:
+        _mf.write(b"\x89PNG\r\n\x1a\nFAKEDATA")
+
+
+    class _FakeMediaClient:
+        def __init__(self):
+            self.upload_calls = []
+            self.msg_calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, headers=None, json=None, data=None, files=None):
+            if files is not None:                       # multipart upload to /media
+                self.upload_calls.append({"url": url, "data": data})
+                return _Resp(200, {"id": "MEDIA_XYZ"})
+            self.msg_calls.append({"url": url, "json": json})  # JSON message send
+            return _Resp(200, {"messages": [{"id": "wamid.OUT"}]})
+
+
+    _fmc = _FakeMediaClient()
+    _wac.httpx.Client = lambda *a, **k: _fmc
+    try:
+        _chm = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+            "access_token": "TOK", "phone_number_id": "PN"})
+        _mres = _chm.send_media("5511", "image", _media_tmp, caption="oi")
+    finally:
+        _wac.httpx.Client = _orig_httpx_client
+    check("send_media(local) -> ok + external id", _mres.ok and _mres.external_msg_id == "wamid.OUT")
+    check("send_media(local) -> upload em /{phone_id}/media",
+          bool(_fmc.upload_calls) and _fmc.upload_calls[-1]["url"].endswith("/PN/media"))
+    check("send_media(local) -> upload com messaging_product=whatsapp",
+          _fmc.upload_calls[-1]["data"].get("messaging_product") == "whatsapp")
+    check("send_media(local) -> mensagem usa media id, não link",
+          _fmc.msg_calls[-1]["json"]["image"].get("id") == "MEDIA_XYZ"
+          and "link" not in _fmc.msg_calls[-1]["json"]["image"])
+    check("send_media(local) -> caption preservado",
+          _fmc.msg_calls[-1]["json"]["image"].get("caption") == "oi")
+
+    # A public URL is sent as link (no upload).
+    _fmc2 = _FakeMediaClient()
+    _wac.httpx.Client = lambda *a, **k: _fmc2
+    try:
+        _chu = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+            "access_token": "TOK", "phone_number_id": "PN"})
+        _chu.send_media("5511", "image", "https://pub.example/x.jpg")
+    finally:
+        _wac.httpx.Client = _orig_httpx_client
+    check("send_media(url pública) -> sem upload, usa link",
+          not _fmc2.upload_calls
+          and _fmc2.msg_calls[-1]["json"]["image"].get("link") == "https://pub.example/x.jpg")
+
+
+    # Upload failure surfaces a clean SendResult error (never an invalid link).
+    class _FailUploadClient(_FakeMediaClient):
+        def post(self, url, headers=None, json=None, data=None, files=None):
+            if files is not None:
+                return _Resp(400, {"error": {"message": "bad media"}})
+            return _Resp(200, {"messages": [{"id": "x"}]})
+
+
+    _ffu = _FailUploadClient()
+    _wac.httpx.Client = lambda *a, **k: _ffu
+    try:
+        _chf = _wac.WhatsAppCloudChannel("cloud_unit", credentials={
+            "access_token": "TOK", "phone_number_id": "PN"})
+        _fres = _chf.send_media("5511", "image", _media_tmp)
+    finally:
+        _wac.httpx.Client = _orig_httpx_client
+    check("send_media(local) upload falha -> ok=False media_upload_failed",
+          _fres.ok is False and _fres.error == "media_upload_failed")
+
+    # ── 24h send gate on the operator routes (P3) ──
+    from db.repositories import conversation_repo as _cr_gate
+    _gate_conv = _cr_gate.get_with_channel(_tpl_conv["id"])  # cloud_test, window=24h
+    _gate_phone = _gate_conv["contact_phone"]
+
+    r = client.post(f"/api/contacts/{_gate_phone}/send",
+                    json={"message": "fora da janela", "conversation_id": _tpl_conv["id"]})
+    check("send (cloud sem inbound recente) -> 409 janela 24h", r.status_code == 409)
+    check("send (cloud fora da janela) -> reason session_window_closed",
+          (r.json().get("data") or {}).get("reason") == "session_window_closed")
+
+    # A recent inbound reopens the 24h window -> free text allowed again.
+    _sn_msg_repo.add(_gate_conv["contact_id"], "user", "oi de novo",
+                     conversation_id=_tpl_conv["id"], ts=time.time())
+    r = client.post(f"/api/contacts/{_gate_phone}/send",
+                    json={"message": "agora vai", "conversation_id": _tpl_conv["id"]})
+    check("send (cloud com inbound recente) -> 200 dentro da janela", r.status_code == 200)
+
+    # GOWA (session_window_hours=0) is never gated.
+    r = client.post("/api/contacts/5511999990001/send", json={"message": "gowa livre"})
+    check("send (gowa) -> não bloqueado pela janela 24h", r.status_code == 200)
+
+    # ═══════════════════════════════════════════════════════════════════
+    #  Account-identity dedup (plano 32) — create/update 409 enforcement
+    # ═══════════════════════════════════════════════════════════════════
+    section("Account-identity dedup (plano 32)")
+
+    # The cloud/telegram plugins are DISABLED in the hermetic test app, so their
+    # provider classes aren't registered — register them into the live registry now
+    # (as production does when they're enabled) to exercise the generic dedup
+    # enforcement end to end. Appended at the very end so it can't affect earlier tests.
+    _p32_reg = app.state.deps.channel_registry
+    _p32_reg.register_provider(_p32_load_provider("whatsapp_cloud", "WhatsAppCloudChannel"))
+    _p32_reg.register_provider(_p32_load_provider("telegram", "TelegramChannel"))
+
+    # plano 33: os providers reais agora aparecem no endpoint com descriptor completo
+    # (credential_fields + capabilities + post_create) — a base do form dinâmico.
+    _pr33 = client.get("/api/channels/providers").json()["data"]
+    _by33 = {d["provider"]: d for d in _pr33["providers"]}
+    check("descriptor telegram registrado -> aparece com bot_token required",
+          "telegram" in _by33
+          and any(f["key"] == "bot_token" and f.get("required")
+                  for f in _by33["telegram"]["credential_fields"])
+          and _by33["telegram"]["post_create"]["kind"] == "autoconfigure")
+    check("descriptor whatsapp_cloud -> creds + templates + webhook_url pós-criação",
+          "whatsapp_cloud" in _by33
+          and {f["key"] for f in _by33["whatsapp_cloud"]["credential_fields"]}
+              >= {"access_token", "app_secret", "phone_number_id", "verify_token"}
+          and any(f["key"] == "app_secret" and f.get("required")
+                  for f in _by33["whatsapp_cloud"]["credential_fields"])
+          and _by33["whatsapp_cloud"]["capabilities"]["templates"] is True
+          and _by33["whatsapp_cloud"]["post_create"]["kind"] == "webhook_url")
+    check("required_credentials reflete saúde operacional, não migração de create",
+          set(_pr33["required_credentials"].get("whatsapp_cloud", []))
+          == {"access_token", "phone_number_id", "verify_token"})
+
+    r = client.post("/api/channels", json={
+        "id": "p32_cloud_sem_secret", "provider": "whatsapp_cloud",
+        "display_name": "Cloud inseguro",
+        "credentials": {"access_token": "tokX", "phone_number_id": "PN_NO_SECRET",
+                        "verify_token": "vtX"}})
+    check("cloud novo sem app_secret -> 400", r.status_code == 400)
+
+    # whatsapp_cloud: two channels with the same phone_number_id -> 409
+    _p32_cloud = {"access_token": "tokA", "app_secret": "secA",
+                  "phone_number_id": "PN_DEDUP_1", "verify_token": "vtA"}
+    r = client.post("/api/channels", json={
+        "id": "p32_cloud_a", "provider": "whatsapp_cloud", "display_name": "Cloud A",
+        "credentials": _p32_cloud})
+    check("dedup: 1º cloud (phone_number_id novo) -> 200", r.status_code == 200)
+    r = client.post("/api/channels", json={
+        "id": "p32_cloud_b", "provider": "whatsapp_cloud", "display_name": "Cloud B",
+        "credentials": {"access_token": "tokB", "app_secret": "secB",
+                        "phone_number_id": "PN_DEDUP_1", "verify_token": "vtB"}})
+    check("dedup: 2º cloud mesmo phone_number_id -> 409", r.status_code == 409)
+
+    # Different phone_number_id -> OK
+    r = client.post("/api/channels", json={
+        "id": "p32_cloud_c", "provider": "whatsapp_cloud", "display_name": "Cloud C",
+        "credentials": {"access_token": "tokC", "app_secret": "secC",
+                        "phone_number_id": "PN_DEDUP_2", "verify_token": "vtC"}})
+    check("dedup: cloud phone_number_id diferente -> 200", r.status_code == 200)
+
+    # telegram: same bot_id (parsed from {bot_id}:{hash}) -> 409
+    r = client.post("/api/channels", json={
+        "id": "p32_tg_a", "provider": "telegram", "display_name": "TG A",
+        "credentials": {"bot_token": "700700:AAA"}})
+    check("dedup: 1º telegram (bot novo) -> 200", r.status_code == 200)
+    r = client.post("/api/channels", json={
+        "id": "p32_tg_b", "provider": "telegram", "display_name": "TG B",
+        "credentials": {"bot_token": "700700:BBB"}})  # same bot_id 700700
+    check("dedup: 2º telegram mesmo bot_id -> 409", r.status_code == 409)
+
+    # Same numeric value across DIFFERENT providers/kinds is NOT a duplicate.
+    r = client.post("/api/channels", json={
+        "id": "p32_cloud_num", "provider": "whatsapp_cloud", "display_name": "Cloud Num",
+        "credentials": {"access_token": "tokN", "app_secret": "secN",
+                        "phone_number_id": "700700", "verify_token": "vtN"}})
+    check("dedup: mesmo valor em provider/kind diferente -> 200 (não é duplicata)",
+          r.status_code == 200)
+
+    # PUT edit-to-collide: change Cloud C's phone_number_id to the one Cloud A owns -> 409
+    r = client.put("/api/channels/p32_cloud_c",
+                   json={"credentials": {"phone_number_id": "PN_DEDUP_1"}})
+    check("dedup: PUT editar credencial para colidir -> 409", r.status_code == 409)
+
+    # PUT an unrelated field (no credential change) -> not blocked
+    r = client.put("/api/channels/p32_cloud_c", json={"display_name": "Cloud C renomeado"})
+    check("dedup: PUT campo não-credencial -> 200", r.status_code == 200)
+
+    # PUT to the channel's OWN identity is not a self-conflict
+    r = client.put("/api/channels/p32_cloud_c",
+                   json={"credentials": {"phone_number_id": "PN_DEDUP_2"}})
+    check("dedup: PUT para a própria identidade -> 200", r.status_code == 200)
+
+
+    # ── Menções em nota privada (colaboração estilo Chatwoot) ────────────────────────
+    # @menção de atendente/time numa nota privada grava linhas em `mentions` (por-usuário),
+    # emite `mention_created`, alimenta `has_user_mention` e a aba Menções. A partir do
+    # bootstrap a suíte roda como admin (default header — plano 48 F0), então a nota é
+    # autorada pelo admin; as peças por-usuário (has_user_mention, unread_count) são
+    # checadas via repo com o user_id explícito (independem do current_user do request).
 section("Contacts — Private Note Mentions")
 from db.repositories import user_repo as _mrepo_users, mention_repo, inbox_member_repo, conversation_repo as _mrepo_conv
 
@@ -7082,35 +7122,40 @@ def _p76_creds(channel_id):
     return (client.get(f"/api/channels/{channel_id}").json()["data"] or {}).get("credentials", {})
 
 
-r = client.post("/api/channels", json={
-    "id": "p76_cloud", "provider": "whatsapp_cloud", "display_name": "Cloud P76",
-    "credentials": {"access_token": "EAAsegredoLongo1234",
-                    "app_secret": "appsecret_cloud_p76", "phone_number_id": "PN_P76",
-                    "waba_id": "WABA_P76", "verify_token": "vtok_p76"}})
-check("P76: cria canal cloud -> 200", r.status_code == 200)
-_c76 = _p76_creds("p76_cloud")
-check("P76: phone_number_id (type=text) em claro", _c76.get("phone_number_id") == "PN_P76")
-check("P76: waba_id (type=text) em claro", _c76.get("waba_id") == "WABA_P76")
-check("P76: access_token (type=secret) mascarado",
-      _c76.get("access_token", "").startswith("••••") and "segredo" not in _c76.get("access_token", ""))
-check("P76: app_secret (type=secret) mascarado",
-      _c76.get("app_secret", "").startswith("••••")
-      and "appsecret" not in _c76.get("app_secret", ""))
-check("P76: verify_token (token_suggest) mascarado",
-      _c76.get("verify_token", "").startswith("••••"))
+# Cloud e Messenger vêm da loja de plugins; o contrato genérico de mascaramento
+# continua coberto abaixo pelo provider fictício _P76GuardChannel.
+_src_p76_wac = plugin_source_or_skip("whatsapp_cloud", "mascaramento de credencial (plano 76)")
+_src_p76_fb = plugin_source_or_skip("facebook_messenger", "mascaramento de credencial (plano 76)")
+if _src_p76_wac and _src_p76_fb:
+    r = client.post("/api/channels", json={
+        "id": "p76_cloud", "provider": "whatsapp_cloud", "display_name": "Cloud P76",
+        "credentials": {"access_token": "EAAsegredoLongo1234",
+                        "app_secret": "appsecret_cloud_p76", "phone_number_id": "PN_P76",
+                        "waba_id": "WABA_P76", "verify_token": "vtok_p76"}})
+    check("P76: cria canal cloud -> 200", r.status_code == 200)
+    _c76 = _p76_creds("p76_cloud")
+    check("P76: phone_number_id (type=text) em claro", _c76.get("phone_number_id") == "PN_P76")
+    check("P76: waba_id (type=text) em claro", _c76.get("waba_id") == "WABA_P76")
+    check("P76: access_token (type=secret) mascarado",
+          _c76.get("access_token", "").startswith("••••") and "segredo" not in _c76.get("access_token", ""))
+    check("P76: app_secret (type=secret) mascarado",
+          _c76.get("app_secret", "").startswith("••••")
+          and "appsecret" not in _c76.get("app_secret", ""))
+    check("P76: verify_token (token_suggest) mascarado",
+          _c76.get("verify_token", "").startswith("••••"))
 
-# Messenger: page_id é identificador público (type=text); os dois segredos, não.
-_p76_fb = _p32_load_provider("facebook_messenger", "FacebookMessengerChannel")
-_p76_reg.register_provider(_p76_fb)
-r = client.post("/api/channels", json={
-    "id": "p76_fb", "provider": "facebook_messenger", "display_name": "Página P76",
-    "credentials": {"page_id": "PAGE_P76", "page_access_token": "EAApageSegredo987",
-                    "app_secret": "appsecret_p76", "verify_token": "vt_p76"}})
-check("P76: cria canal messenger -> 200", r.status_code == 200)
-_f76 = _p76_creds("p76_fb")
-check("P76: page_id (type=text) em claro", _f76.get("page_id") == "PAGE_P76")
-check("P76: page_access_token mascarado", _f76.get("page_access_token", "").startswith("••••"))
-check("P76: app_secret mascarado", _f76.get("app_secret", "").startswith("••••"))
+    # Messenger: page_id é identificador público (type=text); os dois segredos, não.
+    _p76_fb = _p32_load_provider("facebook_messenger", "FacebookMessengerChannel")
+    _p76_reg.register_provider(_p76_fb)
+    r = client.post("/api/channels", json={
+        "id": "p76_fb", "provider": "facebook_messenger", "display_name": "Página P76",
+        "credentials": {"page_id": "PAGE_P76", "page_access_token": "EAApageSegredo987",
+                        "app_secret": "appsecret_p76", "verify_token": "vt_p76"}})
+    check("P76: cria canal messenger -> 200", r.status_code == 200)
+    _f76 = _p76_creds("p76_fb")
+    check("P76: page_id (type=text) em claro", _f76.get("page_id") == "PAGE_P76")
+    check("P76: page_access_token mascarado", _f76.get("page_access_token", "").startswith("••••"))
+    check("P76: app_secret mascarado", _f76.get("app_secret", "").startswith("••••"))
 
 # Guarda de nome (F5 item 4): um provider fictício declara uma credencial
 # ``type: "text"`` cujo NOME cheira a segredo (api_token) — o core mascara mesmo
@@ -7156,8 +7201,13 @@ check("P76 guarda: api_token (type=text mas nome-segredo) MASCARADO",
       _g76.get("api_token", "").startswith("••••") and "segredo" not in _g76.get("api_token", ""))
 
 print(f"\n{'='*60}")
-print(f"  RESULTS: {passed} passed, {failed} failed")
+print(f"  RESULTS: {passed} passed, {failed} failed, {len(skipped)} blocks skipped")
 print(f"{'='*60}")
+
+if skipped:
+    print("\nBlocos pulados (plugin distribuído pela loja, fora deste repositório):")
+    for s in skipped:
+        print(f"  - {s}")
 
 if errors:
     print("\nFailed tests:")

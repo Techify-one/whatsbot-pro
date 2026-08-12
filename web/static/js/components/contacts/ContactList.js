@@ -19,6 +19,7 @@ import { getDraft } from '../../services/drafts.js';
 import { useDrafts } from '../../hooks/useDrafts.js';
 // Selo IA/IA OFF: o veredito EFETIVO (gate do servidor espelhado), não a coluna crua.
 import { aiEffectivelyOn } from '../../services/conversationRows.js';
+import { shouldOpenInNewTab } from '../../services/spaLink.js';
 
 const html = htm.bind(h);
 
@@ -207,12 +208,12 @@ function RowTags({ tags, globalTags, expanded, onToggle }) {
 
 // ── Contact List (WhatsApp Web sidebar) ──────────────────────────
 
-export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, operatorTypingState, showArchived, onToggleArchived, globalTags, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
-  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onDeselectAll, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateTag,
+export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, operatorTypingState, showArchived, onToggleArchived, globalTags, labelRegistry, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
+  selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onDeselectAll, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateLabel,
   currentUserId,
   statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
-  loadMore = null, loadingMore = false, hasMore = false }) {
+  loadMore = null, loadingMore = false, hasMore = false, gearMenu = null }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
   // Rascunhos (services/drafts.js): re-renderiza quando o compositor — ou outra
   // aba do navegador — mexe no mapa, e resolve o texto de cada linha aqui. A
@@ -269,8 +270,12 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
-  const allSelectedHaveTag = (name) =>
-    selectedContacts.length > 0 && selectedContacts.every(c => (c.tags || []).includes(name));
+  // Etiquetas são por CONVERSA: só as linhas COM atendimento contam para o estado
+  // do checkbox (as legadas sem conversa são puladas pela ação em massa).
+  const allSelectedHaveTag = (name) => {
+    const withConv = selectedContacts.filter(c => c.conversation_id != null);
+    return withConv.length > 0 && withConv.every(c => (c.conv_labels || []).includes(name));
+  };
   // Pin toggle: when every selected is already pinned, the action unpins all.
   const allSelectedPinned = selectedContacts.length > 0 && selectedContacts.every(c => c.is_pinned);
   // Bulk assign (attendant): mirror the single-conversation menu — the flyout reuses
@@ -373,7 +378,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
     setFlyoutLeft(side === 'left' ? Math.max(8, rect.left - FLYOUT_WIDTH) : rect.right);
     setFlyoutTop(rect.top + clampFlyoutOffset(rect.top, flyH, window.innerHeight));
     setFlyoutReady(true);
-  }, [openSub, globalTags, bulkAgentsUsers.length, bulkAgentsAi.length]);
+    // `labelRegistry` (não `globalTags`): é o catálogo de etiquetas que preenche o
+    // flyout de seleção em massa, logo é ele que muda a altura a re-medir.
+  }, [openSub, labelRegistry, bulkAgentsUsers.length, bulkAgentsAi.length]);
 
   return html`
     <div class="flex flex-col h-full bg-wa-bg">
@@ -447,19 +454,21 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                   class="w-full text-left px-4 py-[10px] text-[14px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${selCount === 0 ? 'opacity-40 cursor-not-allowed text-wa-secondary' : (openSub === 'tags' ? 'bg-wa-hover text-wa-text' : 'text-wa-text')}"
                 >
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
-                  Adicionar tags
+                  Adicionar etiquetas
                   <${SubArrow} />
                 </button>
                 ${(openSub === 'tags' && selCount > 0) ? html`
                   <div ref=${flyoutRef} class=${flyoutCls} style="left:${flyoutLeft}px;top:${flyoutTop}px">
                     <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
                       <${TagPicker}
-                        globalTags=${globalTags}
+                        globalTags=${labelRegistry}
                         isActive=${allSelectedHaveTag}
                         onToggle=${(name) => onBulkTag && onBulkTag(name)}
-                        onCreateTag=${onCreateTag}
-                        onClearAll=${() => { if (confirm(`Remover TODAS as tags de ${selCount} conversa(s) selecionada(s)?`)) onBulkRemoveAllTags && onBulkRemoveAllTags(); }}
+                        onCreateTag=${onCreateLabel}
+                        onClearAll=${() => { if (confirm(`Remover TODAS as etiquetas de ${selCount} conversa(s) selecionada(s)?`)) onBulkRemoveAllTags && onBulkRemoveAllTags(); }}
                         onCreatingChange=${setFlyoutPinned}
+                        noun="etiqueta"
+                        nounPlural="etiquetas"
                       />
                     </div>
                   </div>
@@ -519,7 +528,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
       ` : html`
       <!-- Green header bar -->
       <div class="h-[59px] flex items-center justify-between px-4 ${headerBg} shrink-0 transition-colors">
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-1">
           <button
             onClick=${onToggleArchived}
             class="w-[40px] h-[40px] rounded-full flex items-center justify-center hover:bg-white/10 transition-colors ${showArchived ? 'bg-white/15' : ''}"
@@ -527,6 +536,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           >
             <span class="text-white"><${ArchiveIcon} /></span>
           </button>
+          <!-- Engrenagem (menu do app) à DIREITA do botão de arquivar. Vem pronta
+               do App shell (prop gearMenu) — a sidebar só a posiciona. -->
+          ${gearMenu}
         </div>
         <div class="flex items-center gap-2">
           ${wsConnected === false ? html`
@@ -642,7 +654,26 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
             : contacts.map(c => html`
                 <div
                   key=${rowKeyFor(c)}
-                  onClick=${() => selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id)}
+                  onClick=${(e) => {
+                    // Plano 106 · F5 (C1): a linha não pode virar <a> (é zona de drop
+                    // de arquivo, tem menu de contexto próprio e modo seleção). Nova
+                    // guia só quando há atendimento — linha sem conversa não tem URL —
+                    // e NUNCA em modo seleção, onde o clique alterna a seleção em massa.
+                    if (!selectionMode && c.conversation_id != null && shouldOpenInNewTab(e)) {
+                      window.open(`/conversations/${c.conversation_id}`, '_blank', 'noopener');
+                      return;
+                    }
+                    return selectionMode ? onToggleSelect(rowKeyFor(c)) : onSelect(c, c.match_msg_id);
+                  }}
+                  onAuxClick=${(e) => {
+                    if (selectionMode || c.conversation_id == null || !shouldOpenInNewTab(e)) return;
+                    e.preventDefault();
+                    window.open(`/conversations/${c.conversation_id}`, '_blank', 'noopener');
+                  }}
+                  onMouseDown=${(e) => {
+                    // mata o auto-scroll do Chrome só onde o clique do meio faz algo
+                    if (e.button === 1 && !selectionMode && c.conversation_id != null) e.preventDefault();
+                  }}
                   onDragEnter=${dropEnabled ? (e) => { if (dragHasFiles(e)) { e.preventDefault(); setDragOverKey(rowKeyFor(c)); } } : null}
                   onDragOver=${dropEnabled ? (e) => {
                     if (!dragHasFiles(e)) return;
@@ -659,7 +690,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                     const files = e.dataTransfer && e.dataTransfer.files;
                     if (files && files.length) onDropFiles(c, files);
                   } : null}
-                  onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, conversationId: c.conversation_id ?? null, aiEnabled: c.ai_enabled !== false, tags: c.tags || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
+                  onContextMenu=${(e) => { if (selectionMode) return; e.preventDefault(); onContextMenu && onContextMenu({ x: e.clientX, y: e.clientY, phone: c.phone, conversationId: c.conversation_id ?? null, aiEnabled: c.ai_enabled !== false, convLabels: c.conv_labels || [], isArchived: !!c.is_archived, isUnread: (c.unread_count > 0 || c.unread_ai_count > 0), isPinned: !!c.is_pinned }); }}
                   class="wa-contact-row flex items-center pl-[13px] pr-[15px] cursor-pointer ${
                     dragOverKey === rowKeyFor(c) ? 'bg-wa-teal/25 outline outline-2 outline-wa-teal -outline-offset-2'
                       : (selectionMode && selectedSet.has(rowKeyFor(c))) ? 'bg-wa-selected'
@@ -725,9 +756,9 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                         <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
                       </span>
                     </div>
-                    ${(c.tags && c.tags.length > 0) ? html`<${RowTags}
-                      tags=${c.tags}
-                      globalTags=${globalTags}
+                    ${(c.conv_labels && c.conv_labels.length > 0) ? html`<${RowTags}
+                      tags=${c.conv_labels}
+                      globalTags=${labelRegistry}
                       expanded=${expandedTagRows.has(rowKeyFor(c))}
                       onToggle=${() => toggleTagRow(rowKeyFor(c))}
                     />` : null}

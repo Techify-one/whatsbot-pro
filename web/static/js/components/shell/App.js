@@ -24,8 +24,10 @@ import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import { authHeaders, getUnreadCount } from '../../services/api.js';
 import { shouldNotifyNewMessage } from '../../services/conversationRows.js';
+import { isModifiedClick, spaLinkTarget } from '../../services/spaLink.js';
 import * as soundEngine from '../../utils/soundEngine.js';
 import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
+import { hasPermission } from '../../utils/permissions.js';
 import { GearMenu } from './GearMenu.js';
 import { ScreenRouter } from './ScreenRouter.js';
 import { Toaster } from './Toaster.js';
@@ -105,6 +107,8 @@ export function App({ onLogout, hasPassword, currentUser }) {
   const [aiTyping, setAiTyping] = useState(null);   // {phone, channel_id, active} — IA processando
   const [contactInfoUpdated, setContactInfoUpdated] = useState(null);
   const [tagsChanged, setTagsChanged] = useState(null);
+  // Catálogo global de ETIQUETAS DE CONVERSA (separado das tags de contato acima).
+  const [convLabelsRegistry, setConvLabelsRegistry] = useState(null);
   const [contactTagsUpdated, setContactTagsUpdated] = useState(null);
   const [contactAiToggled, setContactAiToggled] = useState(null);
   const [messagesRead, setMessagesRead] = useState(null);
@@ -200,6 +204,61 @@ export function App({ onLogout, hasPassword, currentUser }) {
     };
   }, []);
 
+  // Plano 106 · F2 — interceptor delegado de links internos. Qualquer <a href="/…">
+  // do painel — do core OU de um plugin, SEM o plugin fazer nada — passa a navegar
+  // por SPA no clique simples e a ser entregue ao navegador no clique modificado
+  // (Ctrl/⌘ = nova guia, Shift = nova janela, Alt = baixar). É o que remove a
+  // necessidade de repetir o guard do GearMenu em cada ponto de navegação.
+  //
+  // É um listener de BUBBLING no document, então roda DEPOIS dos onClick dos
+  // componentes: quem já chamou preventDefault (ex.: copyDeepLink) continua
+  // vencendo. Quem decide se a âncora é nossa é o predicado puro spaLinkTarget —
+  // link externo, target, download, mailto:/tel: e data-no-spa saem intactos.
+  useEffect(() => {
+    // Base = a URL COMPLETA (não só o origin): além de comparar o host, resolve
+    // corretamente um href relativo que uma tela de plugin venha a usar.
+    function targetFor(el) {
+      const a = el && el.closest ? el.closest('a[href]') : null;
+      if (!a) return null;
+      return spaLinkTarget({
+        href: a.getAttribute('href'),
+        target: a.getAttribute('target'),
+        // hasAttribute, NÃO a.download: a propriedade devolve '' tanto para
+        // ausente quanto para `<a download>` sem valor, e não distingue os dois.
+        download: a.hasAttribute('download'),
+        dataset: a.dataset,
+      }, window.location.href);
+    }
+
+    function onClick(e) {
+      if (isModifiedClick(e) || e.defaultPrevented) return;
+      const target = targetFor(e.target);
+      if (!target) return;
+      e.preventDefault();
+      const here = window.location.pathname + window.location.search + window.location.hash;
+      // Um clique = um passo no "voltar": não empilha quando já estamos no destino
+      // (o call site pode ter empurrado a URL antes de o evento borbulhar até aqui).
+      if (here !== target.path) history.pushState(null, '', target.path);
+      // pushState não dispara popstate; é este par que todo call site já usa e que
+      // o efeito de rota abaixo escuta.
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+
+    // Clique do meio: o Chrome inicia o auto-scroll no mousedown. Cancelar só ele
+    // (button === 1) sobre link interno deixa o navegador abrir a guia no auxclick.
+    function onMouseDown(e) {
+      if (e.button !== 1 || e.defaultPrevented) return;
+      if (targetFor(e.target)) e.preventDefault();
+    }
+
+    document.addEventListener('click', onClick);
+    document.addEventListener('mousedown', onMouseDown);
+    return () => {
+      document.removeEventListener('click', onClick);
+      document.removeEventListener('mousedown', onMouseDown);
+    };
+  }, []);
+
   useEffect(() => {
     function onPopState() {
       redirectLegacyPath();
@@ -241,6 +300,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
     onAiTyping: useCallback((data) => setAiTyping(data), []),
     onContactInfoUpdated: useCallback((data) => setContactInfoUpdated(data), []),
     onTagsChanged: useCallback((data) => setTagsChanged(data), []),
+    onConvLabelsRegistryChanged: useCallback((data) => setConvLabelsRegistry(data), []),
     onContactTagsUpdated: useCallback((data) => setContactTagsUpdated(data), []),
     onHumanTransferAlert: useCallback((data) => {
       // Per-channel alert (plano 21): the payload carries the channel's resolved
@@ -456,17 +516,39 @@ export function App({ onLogout, hasPassword, currentUser }) {
 
   // The full prop bundle the chat hub (Contacts) receives — same keys/values as
   // the pre-decomposition inline element (ScreenRouter spreads it).
+  // A engrenagem é UMA só (mesmo componente, mesmas ações/permissões): no hub de
+  // conversas ela mora DENTRO da barra verde da sidebar, ao lado do botão de
+  // arquivar; nas demais telas continua flutuando no canto superior direito. O
+  // hub recebe uma FÁBRICA (`renderGear`) em vez de um elemento pronto porque ele
+  // é quem sabe se a sidebar está na tela — quando ela é recolhida (desktop) ou
+  // cede lugar ao chat (mobile), ele volta a pintar a versão flutuante para o
+  // menu nunca ficar inalcançável.
+  const gearProps = {
+    tab, onTabChange: setTab, pluginScreens, hasPassword, onLogout,
+    accountUrl: config && config.account_url, currentUser,
+    onChangePassword: () => setShowChangePassword(true),
+  };
+  const renderGear = (variant) => html`<${GearMenu} ...${gearProps} variant=${variant} />`;
+  // O flutuante só é suprimido quando o hub NATIVO de conversas é o que está na
+  // tela — ou seja, quando a sidebar (que hospeda a engrenagem inline) de fato
+  // renderiza. Plugin que reivindica a rota 'contacts' ou usuário sem
+  // `conversation.read` continuam vendo o botão flutuante; sem esse guard a
+  // engrenagem sumiria e o menu ficaria inalcançável.
+  const showsInlineGear = tab === 'contacts' && !activeRouteOverride
+    && hasPermission(currentUser, 'conversation.read');
+
   const contactsProps = {
     newMessage, chatPresence, aiTyping, contactInfoUpdated, tagsChanged,
-    contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
+    convLabelsRegistry, contactTagsUpdated, contactAiToggled, messagesRead, messageStatus,
     messageAction, messageReaction, avatarUpdated, groupParticipantsChanged,
     initialContactId, initialConversationId, initialScrollMsgId, conversationCreated,
     wsConnected, config, onConfigSave: save, onUnreadChange: refreshUnreadCount,
+    renderGear,
   };
 
   return html`
     <div class="h-dvh overflow-hidden flex flex-col relative">
-      <${GearMenu} tab=${tab} onTabChange=${setTab} pluginScreens=${pluginScreens} hasPassword=${hasPassword} onLogout=${onLogout} accountUrl=${config && config.account_url} currentUser=${currentUser} onChangePassword=${() => setShowChangePassword(true)} />
+      ${showsInlineGear ? null : renderGear('floating')}
 
       <main class="flex-1 min-h-0 overflow-auto ${tab !== 'contacts' ? 'bg-wa-panel' : ''}">
         <${ScreenRouter}

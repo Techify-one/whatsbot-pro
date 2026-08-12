@@ -3,17 +3,17 @@
 // Bulk-selection hook (Plano 23 · D2) — extracted verbatim from Contacts.js.
 // Owns selection mode + the per-row selected keys (keyed per CONVERSATION via
 // rowKeyFor, so two channels of the same number select independently) and every
-// bulk action: IA on/off, archive, tag toggle / remove-all, pin, mark read/unread.
+// bulk action: IA on/off, archive, etiqueta toggle / remove-all, pin, mark read/unread.
 //
-// Each action dedupes by the correct identity (per conversation_id for IA, per
-// phone for the contact-level archive/pin/tags/read) exactly as before.
+// Each action dedupes by the correct identity (per conversation_id for IA,
+// etiquetas e arquivo; per phone só no fallback legado de leitura).
 // Cross-hook wiring: list + selection refs/setters + the actions hook's
-// `applyTagResults` are passed in.
+// `applyConvLabelResults` are passed in.
 import { useState, useCallback } from 'preact/hooks';
 import {
   setConversationAi, archiveConversation, pinConversation,
   markAsRead, markAsUnread, markConversationRead, markConversationUnread,
-  updateContactTags, assignAgent,
+  updateConversationLabels, assignAgent,
 } from '../../../services/api.js';
 import { rowKeyFor } from '../ContactList.js';
 
@@ -28,12 +28,12 @@ import { rowKeyFor } from '../ContactList.js';
  * @param {(v:any)=>void} opts.setSelected
  * @param {(v:any)=>void} opts.setSelectedConvId
  * @param {{ current: string|null }} opts.selectedRef
- * @param {(results:any[])=>void} opts.applyTagResults
+ * @param {(results:any[])=>void} opts.applyConvLabelResults
  */
 export function useBulkSelection({
   contactsRef, displayedRef, showArchivedRef,
   setContacts, sortContacts, setContactData,
-  setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyTagResults,
+  setSelected, setSelectedConvId, selectedRef, selectedConvIdRef, applyConvLabelResults,
   // plano 72 F5 — reconcilia a lista server-filtrada após um bulk otimista de
   // membership (no-op fora de serverMode). Default no-op p/ callers antigos.
   reconcileAfterMembershipChange = () => {},
@@ -149,45 +149,51 @@ export function useBulkSelection({
     exitSelection();
   }, [_selectedRows, exitSelection, showArchivedRef, setContacts, selectedConvIdRef, setSelected, setSelectedConvId, setContactData]);
 
-  const _selectedTargets = useCallback(() => {
-    // Tags are contact-level (per phone) — dedupe the selected rows by phone so each
-    // number is updated once even when both of its channels are selected.
-    const byPhone = new Map();
-    for (const c of _selectedRows()) if (!byPhone.has(c.phone)) byPhone.set(c.phone, c);
-    return [...byPhone.values()];
-  }, [_selectedRows]);
+  // Etiquetas são por CONVERSA — cada linha selecionada é um atendimento e vale por
+  // si. NÃO deduplicar por phone: selecionar os dois canais do mesmo número etiqueta
+  // os dois atendimentos, independentemente. Linha legada sem atendimento é pulada
+  // (não há onde pendurar a etiqueta).
+  const _selectedLabelTargets = useCallback(
+    () => _selectedRows().filter(c => c.conversation_id != null),
+    [_selectedRows]);
 
-  // Toggle a tag across all selected: if every selected conversation already has
+  // Toggle a label across all selected: if every selected conversation already has
   // it, remove it from all; otherwise add it to all (keeping those that had it).
   // Repeated clicks cycle add → remove → add …
-  const handleBulkTag = useCallback(async (tagName) => {
-    const targets = _selectedTargets();
+  const handleBulkTag = useCallback(async (labelName) => {
+    const targets = _selectedLabelTargets();
     if (!targets.length) return;
-    const allHave = targets.every(c => (c.tags || []).includes(tagName));
+    const allHave = targets.every(c => (c.conv_labels || []).includes(labelName));
     const results = await Promise.all(targets.map(async (c) => {
-      const tags = Array.isArray(c.tags) ? c.tags : [];
+      const labels = Array.isArray(c.conv_labels) ? c.conv_labels : [];
       const next = allHave
-        ? tags.filter(t => t !== tagName)
-        : (tags.includes(tagName) ? tags : [...tags, tagName]);
-      if (next.length === tags.length) return { phone: c.phone, tags };
-      const res = await updateContactTags(c.phone, next).catch(() => null);
-      return { phone: c.phone, tags: (res && res.ok) ? res.data.tags : tags };
+        ? labels.filter(t => t !== labelName)
+        : (labels.includes(labelName) ? labels : [...labels, labelName]);
+      if (next.length === labels.length) return { conversationId: c.conversation_id, labels };
+      const res = await updateConversationLabels(c.conversation_id, next).catch(() => null);
+      return {
+        conversationId: c.conversation_id,
+        labels: (res && res.ok) ? res.data.labels : labels,
+      };
     }));
-    applyTagResults(results);
-  }, [_selectedTargets, applyTagResults]);
+    applyConvLabelResults(results);
+  }, [_selectedLabelTargets, applyConvLabelResults]);
 
-  // Remove all tags from all selected conversations.
+  // Remove all labels from all selected conversations.
   const handleBulkRemoveAllTags = useCallback(async () => {
-    const targets = _selectedTargets();
+    const targets = _selectedLabelTargets();
     if (!targets.length) return;
     const results = await Promise.all(targets.map(async (c) => {
-      const tags = Array.isArray(c.tags) ? c.tags : [];
-      if (!tags.length) return { phone: c.phone, tags };
-      const res = await updateContactTags(c.phone, []).catch(() => null);
-      return { phone: c.phone, tags: (res && res.ok) ? res.data.tags : [] };
+      const labels = Array.isArray(c.conv_labels) ? c.conv_labels : [];
+      if (!labels.length) return { conversationId: c.conversation_id, labels };
+      const res = await updateConversationLabels(c.conversation_id, []).catch(() => null);
+      return {
+        conversationId: c.conversation_id,
+        labels: (res && res.ok) ? res.data.labels : [],
+      };
     }));
-    applyTagResults(results);
-  }, [_selectedTargets, applyTagResults]);
+    applyConvLabelResults(results);
+  }, [_selectedLabelTargets, applyConvLabelResults]);
 
   // Pin/unpin all selected at once (pinned ones sort to the top). Plano 54: por
   // CONVERSA (uma chamada por conversation_id); linhas legadas sem atendimento pulam.

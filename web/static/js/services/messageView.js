@@ -35,9 +35,12 @@
  */
 export const SYSTEM_CARD_VARIANTS = {
   // Operator private note — purple accent (kept; theme-specific intent color).
+  // `style` existe para o chip minimizado (nota LONGA — ver `isCollapsibleCard`)
+  // sair idêntico ao card expandido; o card expandido continua com o hex inline.
   private_note: {
     label: 'Mensagem privada', icon: 'lock', layout: 'inline',
     uppercaseLabel: true, showTime: true, useWaClasses: false,
+    style: 'background:#3b266b; color:#ede9fe; border:1px solid #7c3aed;',
   },
   // Private audio/image transcription — muted purple (kept).
   // Collapsible (plano 63): diagnostic noise, minimized to a 1-line chip by default.
@@ -97,6 +100,32 @@ export function isSystemCardRole(role) {
 export function isCollapsibleRole(role) {
   const v = SYSTEM_CARD_VARIANTS[role];
   return !!(v && v.collapsible);
+}
+
+/**
+ * A partir de quantos caracteres uma nota privada vira um card recolhível.
+ * Nota curta (o caso do operador escrevendo um lembrete) não ganha seta nenhuma.
+ */
+export const LONG_NOTE_CHARS = 180;
+
+/**
+ * Se ESTE card pode recolher — role + tamanho do conteúdo.
+ *
+ * Superconjunto de `isCollapsibleRole`: `transcription`/`tool_call` recolhem
+ * sempre (ruído diagnóstico), e `private_note` recolhe **só quando é longa**
+ * (> `LONG_NOTE_CHARS`). Nota longa costuma ser escrita por automação — um plugin
+ * de follow-up, por exemplo, registra numa nota a instrução INTEIRA mandada à IA
+ * — e ocupava a tela inteira; nota curta de humano continua exatamente como
+ * antes (D1).
+ *
+ * @param {string} role
+ * @param {string|null|undefined} content
+ * @returns {boolean}
+ */
+export function isCollapsibleCard(role, content) {
+  if (isCollapsibleRole(role)) return true;
+  if (role !== 'private_note') return false;
+  return String(content == null ? '' : content).trim().length > LONG_NOTE_CHARS;
 }
 
 /**

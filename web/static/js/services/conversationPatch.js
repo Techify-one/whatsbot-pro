@@ -20,6 +20,7 @@
  * @property {number|null} [assignee_user_id]
  * @property {string|null} [active_agent_key]
  * @property {boolean} [conv_ai_active]
+ * @property {string[]} [conv_labels] - etiquetas da CONVERSA (não as tags do contato).
  */
 
 /**
@@ -30,6 +31,7 @@
  * @property {number|null} [assignee_user_id]
  * @property {string|null} [active_agent_key]
  * @property {boolean} [ai_active]
+ * @property {string[]} [labels] - snapshot de `conversation_labels_changed`.
  * @property {{ custom_attributes?: any }} [fields] - e.g. `{ custom_attributes: {...} }`.
  */
 
@@ -70,6 +72,9 @@ export function conversationPatch(row, ev) {
   if (ev.assignee_user_id !== undefined) patch.assignee_user_id = ev.assignee_user_id;
   if (ev.active_agent_key !== undefined) patch.active_agent_key = ev.active_agent_key;
   if (ev.ai_active !== undefined) patch.conv_ai_active = ev.ai_active;
+  // `conversation_labels_changed` carries the conversation's label snapshot as
+  // `labels`; the sidebar row calls it `conv_labels` (o campo que os chips leem).
+  if (ev.labels !== undefined) patch.conv_labels = ev.labels;
   // A legacy contact-only row adopts the conversation id from the event.
   if (ev.conversation_id != null && row && row.conversation_id == null) {
     patch.conversation_id = ev.conversation_id;

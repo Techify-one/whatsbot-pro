@@ -13,6 +13,7 @@ import * as coreApi from '../services/api.js';
 import { authHeaders, handleUnauthorized, handleErrorResponse } from '../services/httpClient.js';
 import { notifyPermissionDenied } from '../services/notify.js';
 import { useWebSocket } from '../hooks/useWebSocket.js';
+import { subscribe as subscribeWs } from '../services/wsBus.js';
 import { hasPermission, hasAnyPermission } from '../utils/permissions.js';
 import { satisfiesVersionRange, selectSupportedVersion } from './versionCompat.js';
 import {
@@ -30,8 +31,9 @@ export const FRONTEND_API_VERSION = '1.0';
 //
 // CONTRACT (versioned by PLUGIN_SERVICES_VERSION below):
 //   `api.services` exposes ONLY the core `api.js` functions named here, plus the
-//   non-`api.js` extras wired in `buildPluginApi` (useWebSocket, hasPermission,
-//   hasAnyPermission). This is the stable surface a plugin screen may call.
+//   non-`api.js` extras wired in `buildPluginApi` (useWebSocket, subscribe,
+//   hasPermission, hasAnyPermission). This is the stable surface a plugin screen
+//   may call.
 //
 //   • ADDITIVE / MINOR: adding a NON-sensitive function to PLUGIN_SERVICES is a
 //     MINOR bump (back-compatible — never remove a name a plugin already uses).
@@ -55,8 +57,16 @@ export const FRONTEND_API_VERSION = '1.0';
 // the current surface. Manifests negotiate this independently from the registry
 // API through `plugin_services_version`; legacy manifests default to 1.x and get
 // a narrow compatibility adapter, while incompatible declared ranges are skipped.
-export const PLUGIN_SERVICES_VERSION = '2.0';
-export const SUPPORTED_PLUGIN_SERVICES_VERSIONS = Object.freeze(['1.0', '2.0']);
+//
+// 2.1 ADDS `subscribe` (the shared WS bus). Purely additive — nothing was removed,
+// so 2.0 manifests keep working unchanged. It exists because there was NO supported
+// way for a plugin screen to receive its OWN broadcast: `useWebSocket` hard-codes a
+// map of CORE event names, so `plugin_<id>_changed` could never reach a handler
+// through it. Three screens improvised a raw `new WebSocket('/ws')` — which carries
+// no `?token=` and is closed with 4401 the moment ≥1 user exists (plano 48 F0),
+// silently. That was the whole of plano 107; this is the fix for the NEXT plugin.
+export const PLUGIN_SERVICES_VERSION = '2.1';
+export const SUPPORTED_PLUGIN_SERVICES_VERSIONS = Object.freeze(['1.0', '2.0', '2.1']);
 
 /** Sensitive core functions a plugin screen must NEVER reach. Frozen. */
 export const PLUGIN_SERVICES_DENY = Object.freeze([
@@ -228,6 +238,12 @@ export function buildPluginApi(pluginId, pluginServicesRange = '1.0') {
     // never re-introduce the spread.
     services: buildAllowedServices({
       useWebSocket,
+      // Plugin services 2.1 — subscribe to the SHARED, AUTHENTICATED socket by event
+      // name, including the plugin's own `plugin_<id>_*` broadcasts (which
+      // `useWebSocket` cannot deliver: its event map is hard-coded to core names).
+      // Same handler shape as `useWebSocket`; returns an unsubscribe fn. Feature-detect
+      // (`api.services.subscribe || …`) so the screen still loads on an older core.
+      subscribe: subscribeWs,
       hasPermission,
       hasAnyPermission,
     }, negotiatedServicesVersion),
