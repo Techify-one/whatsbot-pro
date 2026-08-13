@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from db.repositories import (channel_repo, contact_repo, conversation_repo,
                              inbox_repo, message_repo)
@@ -295,10 +296,57 @@ async def list_templates(deps, channel_id: str) -> list[dict]:
     return await asyncio.to_thread(deps.outbound_router.list_templates, channel_id)
 
 
+# Tipos de cabeçalho de template que o painel sabe desenhar como bolha de mídia.
+# Não é vocabulário de provedor: é a lista do que ``MediaContent.js`` renderiza.
+_SAVEABLE_MEDIA = {"image", "video", "document"}
+
+
+def sanitize_media(deps, media_type, media_path):
+    """Valida a mídia que o cliente PEDIU para gravar junto do template.
+
+    O caminho vem do navegador, então nunca é usado como veio: só passa a forma
+    exata ``statics/outbox/<arquivo>`` — sem barra, sem ``..`` — que é o mesmo
+    diretório de onde ``/send-image`` grava e de onde a rota
+    ``GET /statics/outbox/{name}`` serve. Um caminho fora disso deixaria o painel
+    pedir um arquivo arbitrário do disco.
+
+    Falha é SEMPRE macia: devolve ``(None, None)`` e a mensagem é gravada como
+    texto (o comportamento anterior). Recusar o envio seria pior — quando isto é
+    chamado o template já foi entregue ao cliente, e uma miniatura ausente no
+    histórico não justifica devolver erro de um envio que deu certo.
+
+    :returns: ``(media_type, media_path)`` normalizados, ou ``(None, None)``.
+    """
+    kind = (media_type or "").strip().lower()
+    path = (media_path or "").strip().lstrip("/")
+    if not kind and not path:
+        return (None, None)
+    if kind not in _SAVEABLE_MEDIA:
+        logger.warning("[Template] media_type ignorado: %r", media_type)
+        return (None, None)
+    prefix = "statics/outbox/"
+    name = path[len(prefix):] if path.startswith(prefix) else ""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        logger.warning("[Template] media_path fora de %s: %r", prefix, media_path)
+        return (None, None)
+    outbox = getattr(deps, "statics_outbox_dir", None)
+    if outbox is not None:
+        try:
+            if not (Path(outbox) / name).is_file():
+                logger.warning("[Template] media_path inexistente: %r", media_path)
+                return (None, None)
+        except OSError as e:  # noqa: BLE001 — nome esquisito não derruba o save
+            logger.warning("[Template] media_path irresolvível (%s): %r", e, media_path)
+            return (None, None)
+    return (kind, prefix + name)
+
+
 async def send_template(deps, channel_id: str, *, phone: str, template_name: str,
                         language: str, components, preview_text: str,
                         sent_by_user_id: int | None = None,
-                        sent_by_name: str | None = None):
+                        sent_by_name: str | None = None,
+                        media_type: str | None = None,
+                        media_path: str | None = None):
     """Send an approved template and persist the operator message (plano 21).
 
     Returns one of:
@@ -309,6 +357,11 @@ async def send_template(deps, channel_id: str, *, phone: str, template_name: str
     Saving the operator message creates the contact + conversation in this
     channel's inbox, so the new thread appears in the sidebar like a normal first
     send; then it broadcasts ``new_message`` and emits ``message.sent``.
+
+    ``media_type``/``media_path`` (plano 119) gravam o CABEÇALHO de mídia do
+    template junto da mensagem, para o histórico mostrar a imagem que saiu em vez
+    de só o texto do corpo. Opcionais e validados por :func:`sanitize_media`;
+    inválidos ⇒ grava texto puro, como antes.
     """
     outbound = deps.outbound_router
     result = await asyncio.to_thread(
@@ -319,11 +372,13 @@ async def send_template(deps, channel_id: str, *, phone: str, template_name: str
 
     msg_id = result.external_msg_id or None
     preview = (preview_text or "").strip() or f"📋 Template: {template_name}"
+    m_kind, m_path = sanitize_media(deps, media_type, media_path)
     try:
         msg_data = await asyncio.to_thread(
             deps.agent_handler.save_operator_message, phone, preview,
             status="operator", msg_id=msg_id, channel_id=channel_id,
-            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name)
+            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+            media_type=m_kind, media_path=m_path)
     except Exception as e:  # noqa: BLE001
         return ("save_failed", str(e))
 
@@ -334,7 +389,7 @@ async def send_template(deps, channel_id: str, *, phone: str, template_name: str
         pass
     await emit_with_filter("message.sent", {
         "phone": phone, "text": preview, "msg_id": msg_id,
-        "media_type": None, "media_path": None,
+        "media_type": m_kind, "media_path": m_path,
         "source": "template", "status": "operator",
         "template_name": template_name, "ts": time.time(),
     })

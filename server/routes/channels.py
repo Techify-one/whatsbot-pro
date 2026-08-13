@@ -120,7 +120,9 @@ def register_routes(app, deps):
         no conversation yet (plano 21). Channel-scoped twin of
         ``POST /api/conversations/{id}/send-template``.
 
-        body: ``{phone, template_name, language?, components?, preview_text?}``.
+        body: ``{phone, template_name, language?, components?, preview_text?,
+        media_type?, media_path?}`` — os dois últimos gravam o cabeçalho de mídia
+        do template no histórico (plano 119); ver ``tpl_svc.sanitize_media``.
         """
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -147,7 +149,9 @@ def register_routes(app, deps):
             language=language, components=components,
             preview_text=body.get("preview_text") or "",
             sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None))
+            sent_by_name=(_u.get("name") if _u else None),
+            media_type=body.get("media_type"),
+            media_path=body.get("media_path"))
         if kind == "send_failed":
             return _err(f"Falha ao enviar template: {data}", status=502)
         if kind == "save_failed":

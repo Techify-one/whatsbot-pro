@@ -385,6 +385,8 @@ class AgentHandler:
                               sent_by_user_id: int | None = None,
                               sent_by_name: str | None = None,
                               channel_id: str = "default",
+                              media_type: str | None = None,
+                              media_path: str | None = None,
                               reopen: bool | None = None) -> dict:
         """Save a manually sent message (from the operator) without LLM processing.
 
@@ -394,11 +396,20 @@ class AgentHandler:
 
         ``sent_by_user_id``/``sent_by_name`` gravam QUEM (operador logado) enviou —
         o nome (snapshot) é exibido no painel no lugar de "Manual". None quando não
-        há usuário logado (instalação legada/aberta) → cai em "Manual"."""
+        há usuário logado (instalação legada/aberta) → cai em "Manual".
+
+        ``media_type``/``media_path`` (plano 119) fazem esta linha renderizar como
+        BOLHA DE MÍDIA em vez de texto puro — mesma forma que ``send_media`` já
+        grava no envio de imagem do operador (``media_path`` relativo, tipo em
+        ``image``/``video``/``document``). Ambos ``None`` ⇒ comportamento anterior
+        byte a byte. ``media_caption`` fica de fora de propósito: o painel cai no
+        ``content`` (é o que o envio de imagem do operador faz hoje), e a coluna
+        do plano 87 significa "o que o CLIENTE digitou junto da mídia"."""
         contact = self._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", text, status=status, msg_id=msg_id,
                             reply_to_msg_id=reply_to_msg_id,
                             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                            media_type=media_type, media_path=media_path,
                             reopen=reopen)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 

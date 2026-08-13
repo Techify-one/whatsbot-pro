@@ -23,7 +23,6 @@ from server.avatars import avatar_version
 from channels import audio_transcode, media_limits, video_transcode
 from db import filters as conv_filters
 from db.filters.translate import FilterContext
-from plugins.events import emit_with_filter
 from server.authz import permission_denied, has_permission, current_user, visible_inbox_ids
 from server.helpers import _ok, _err
 from server.pagination import CAP_MSGS, PAGE_MSGS, clamp_limit, clamp_offset
@@ -837,10 +836,19 @@ def register_routes(app, deps):
     async def send_conversation_template(conv_id: int, body: dict, request: Request):
         """Send an approved template through the conversation's channel (Frente C).
 
-        body: ``{template_name, language?, components?, preview_text?}`` — components
-        are the filled Graph parameters (built by the UI from the template
-        definition). Persists the sent message (operator), broadcasts ``new_message``
-        and emits ``message.sent`` (source ``template``), mirroring operator sends.
+        body: ``{template_name, language?, components?, preview_text?, media_type?,
+        media_path?}`` — components are the filled Graph parameters (built by the
+        UI from the template definition); ``media_*`` gravam o cabeçalho de mídia
+        no histórico (plano 119). Persists the sent message (operator), broadcasts
+        ``new_message`` and emits ``message.sent`` (source ``template``), mirroring
+        operator sends.
+
+        O miolo (enviar → salvar → broadcast → emit) é o de
+        ``tpl_svc.send_template``, o MESMO que a rota por canal usa. Era copiado
+        aqui, e as duas cópias divergiram em silêncio até o plano 119 (só uma
+        delas ganhava qualquer melhoria). Esta rota mantém o que de fato é dela:
+        resolver a conversa, esconder inbox de outra equipe e o formato da
+        resposta.
         """
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -864,37 +872,21 @@ def register_routes(app, deps):
         if not phone:
             return _err("Conversa sem número de destino.", status=400)
 
-        result = await asyncio.to_thread(
-            outbound.send_template, channel_id, phone, template_name,
-            lang=language, components=components or None)
-        if not result.ok:
-            return _err(f"Falha ao enviar template: {result.error}", status=502)
-
-        msg_id = result.external_msg_id or None
-        preview = (body.get("preview_text") or "").strip() or f"📋 Template: {template_name}"
-        try:
-            _u = current_user(request)
-            msg_data = await asyncio.to_thread(
-                agent_handler.save_operator_message, phone, preview,
-                status="operator", msg_id=msg_id, channel_id=channel_id,
-                sent_by_user_id=(_u.get("id") if _u else None),
-                sent_by_name=(_u.get("name") if _u else None))
-        except Exception as e:  # noqa: BLE001
-            logger.error("[Template] save failed for %s: %s", phone, e)
-            return _err(f"Template enviado, mas falha ao salvar a mensagem: {e}", status=500)
-
-        try:
-            await deps.ws_manager.broadcast("new_message", {
-                "phone": phone, "channel_id": channel_id, "message": msg_data})
-        except Exception as e:  # noqa: BLE001
-            logger.debug("template new_message broadcast failed: %s", e)
-        await emit_with_filter("message.sent", {
-            "phone": phone, "text": preview, "msg_id": msg_id,
-            "media_type": None, "media_path": None,
-            "source": "template", "status": "operator",
-            "template_name": template_name, "ts": time.time(),
-        })
-        return _ok({"message": "Template enviado.", "msg_id": msg_id})
+        _u = current_user(request)
+        kind, data = await tpl_svc.send_template(
+            deps, channel_id, phone=phone, template_name=template_name,
+            language=language, components=components,
+            preview_text=body.get("preview_text") or "",
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None),
+            media_type=body.get("media_type"),
+            media_path=body.get("media_path"))
+        if kind == "send_failed":
+            return _err(f"Falha ao enviar template: {data}", status=502)
+        if kind == "save_failed":
+            logger.error("[Template] save failed for %s: %s", phone, data)
+            return _err(f"Template enviado, mas falha ao salvar a mensagem: {data}", status=500)
+        return _ok({"message": "Template enviado.", "msg_id": data.get("msg_id")})
 
 
     @app.post("/api/atendimentos/{conv_id}/templates")

@@ -6412,6 +6412,44 @@ with _get_engine().connect() as _conn:
         .limit(1)).first()
 check("send-template -> mensagem persistida no fio", _tpl_saved is not None)
 
+# Plano 119 — o cabeçalho de mídia do template vira BOLHA no histórico. Antes o
+# painel guardava só o texto do corpo: quem abrisse a conversa depois não tinha
+# como saber qual imagem tinha saído.
+_tpl_outbox = app.state.deps.statics_outbox_dir
+_tpl_outbox.mkdir(parents=True, exist_ok=True)
+(_tpl_outbox / "tpl_header.jpg").write_bytes(b"\xff\xd8\xff\xdb")
+
+
+def _tpl_last_msg():
+    with _get_engine().connect() as _c:
+        return _c.execute(
+            _sa_select(_msgs_t.c.content, _msgs_t.c.media_type, _msgs_t.c.media_path)
+            .where(_msgs_t.c.contact_id == _cid)
+            .order_by(_msgs_t.c.id.desc()).limit(1)).first()
+
+
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/send-template", json={
+    "template_name": "boas_vindas", "language": "pt_BR",
+    "preview_text": "Olá Alice, com imagem",
+    "media_type": "image", "media_path": "statics/outbox/tpl_header.jpg"})
+check("send-template com mídia -> 200", r.status_code == 200)
+_m = _tpl_last_msg()
+check("send-template com mídia -> linha vira bolha de imagem",
+      _m is not None and _m[1] == "image" and _m[2] == "statics/outbox/tpl_header.jpg")
+check("send-template com mídia -> texto do corpo continua na linha",
+      _m is not None and "com imagem" in (_m[0] or ""))
+
+# Path traversal NUNCA vira media_path: a mensagem grava como texto e o envio
+# (que já chegou ao cliente) não vira erro na tela.
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/send-template", json={
+    "template_name": "boas_vindas", "language": "pt_BR",
+    "preview_text": "Olá Alice, sem imagem",
+    "media_type": "image", "media_path": "statics/outbox/../../.env"})
+check("send-template com caminho traversal -> 200 (recusa macia)", r.status_code == 200)
+_m = _tpl_last_msg()
+check("send-template com caminho traversal -> gravou texto puro",
+      _m is not None and _m[1] is None and _m[2] is None)
+
 check("send-template canal sem suporte -> 400",
       client.post(f"/api/conversations/{_conv2['id']}/send-template",
                   json={"template_name": "x"}).status_code == 400)
