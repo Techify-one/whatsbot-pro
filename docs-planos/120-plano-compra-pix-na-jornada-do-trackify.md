@@ -1,6 +1,10 @@
 # Plano 120 — A cobrança PIX paga vira COMPRA na jornada do Trackify (e o produto sai de um cadastro)
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-08-13 · **Escopo:** médio
+> **Status:** EXECUTADO (F0–F6 ✅ · F7 e F8 dependem do usuário) · **Data:** 2026-08-13 · **Escopo:** médio
+> **Entrega:** plugin `pagamentos` **1.1.0** — fonte, ZIP e catálogo atualizados no repositório de
+> plugins; cópia viva instalada em `storages/plugins/pagamentos` (dev). Suíte do plugin: **106 testes
+> verdes**. **Falta o usuário fazer a §7 na tela do Trackify** (7 mapeamentos + 2 regras) — sem ela o
+> evento chega bonito e vale R$ 0,00 — e importar o `.zip` em produção (F8).
 > **Origem:** pedido do usuário — *"Ainda preciso fazer a liberação do curso, e pensei em fazer isso em
 > outro lugar, mas para isso preciso enviar o evento de pagamento para algum lugar. Esse lugar vai ser o
 > trackify (via plugin interno), pois nele consigo criar automações com outro módulo para liberar o curso
@@ -258,11 +262,16 @@ WAVE 4   F7 (configurar o Trackify)  🔴 [dep F1]   ·   F8 (publicar + instala
 **Pronto quando:** o teste roda e falha **pela razão certa** (kwargs inesperados), não por import.
 
 #### Status de execução — Fase 0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** novo `tests/python/test_trackify_bridge.py` com o provedor dublado
+  `_FakeTrackify.track_event`, que declara a assinatura **real** (com `*`), e a fixture `trackify_fake`
+  que o registra em `plugins.services` sobre o app real (`build_app(["pagamentos"])`).
+- **Como foi feito / decisões:** provedor FAKE em vez do `trackify` de verdade — o teste é sobre a
+  FORMA da chamada, e depender do plugin real trocaria o alvo por credencial/`mirror_enabled`. Baseline
+  medido antes de tocar em qualquer linha: **70 testes verdes**.
+- **Problemas / pendências:** nenhum.
+- **Verificação:** ❌ **vermelho pela razão certa** — `TypeError: _FakeTrackify.track_event() got an
+  unexpected keyword argument 'txid'`, 10 falhas / 4 passes. É o retrato exato do bug em produção.
 
 ---
 
@@ -303,11 +312,32 @@ cobrança de R$ 1,00 faz aparecer **um** evento na aba Jornada com título legí
 valor — isso é a F7).
 
 #### Status de execução — Fase 1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `trackify_bridge.py` reescrito. `_data(cob, valor, extra)` monta o payload com as
+  chaves-contrato e **descarta `None`/`""`**; `_titulo(kind, cob)` usa o mapa `_TITULOS`; `track()` passa
+  `contact_id`/`phone` como argumentos próprios, `external_key`, `occurred_at` e `title`; `_conferir()`
+  examina o envelope. Kinds: `KIND_PAGO = "purchase"`, novo `KIND_DEVOLVIDO = "refunded"`,
+  `pix_gerado`/`pix_expirado` mantidos. Novo `cobranca_devolvida(cob)`.
+- **Como foi feito / decisões:**
+  - **P1 ✅ decidido — opção (a)**: `"Compra por PIX — <produto>"` (cai em `descricao`, e só no rótulo
+    base quando não há nenhum dos dois), cortado em 120 chars.
+  - **P2 ✅ decidido — opção (a)**: `pix_gerado`/`pix_expirado` continuam indo ao CDP, **sem `valor`**.
+    Não custam nada e agora têm título legível.
+  - **Desvio deliberado (a favor):** `_conferir` também trata `status=ok` com `{"ok": False}` (recusa
+    semântica do trackify — contato fora de `mirror_contact_types`, grupo) como **WARNING**, não só os
+    statuses de envelope do item 6. Motivo: uma configuração errada de `mirror_contact_types` recusa
+    **todo** contato exatamente assim, e foi silêncio o que escondeu o bug original. `unavailable` e
+    `disabled` continuam em `debug`, como o plano previa.
+  - O `_emit_bus` continua emitindo `pagamentos.<kind>` com o payload achatado **mais** a identidade —
+    quem assina `"*"` quer o fato inteiro num dict só, sem conhecer o vocabulário do CDP.
+- **Problemas / pendências:** os 4 testes de log ficavam verdes/vermelhos conforme a ORDEM da suíte.
+  Causa medida: `test_cliente_inter.py` importa o pacote do plugin no topo (tempo de coleta), e o
+  `logging.fileConfig` do Alembic roda depois com `disable_existing_loggers=True` ⇒ o logger
+  `plugin.pagamentos` chega `disabled` (`lg.disabled is True`, confirmado por sonda). É **artefato do
+  harness, não do produto** — em produção o logging é configurado no boot e os plugins são importados
+  depois. Resolvido com a fixture `ponte_falante`, mesmo precedente do core em
+  [test_plugin_filter_catalog.py:15-19](../tests/contracts/test_plugin_filter_catalog.py).
+- **Verificação:** ✅ 15/15 verdes no arquivo da F0; suíte inteira do plugin verde depois da fixture.
 
 ---
 
@@ -339,11 +369,26 @@ valor — isso é a F7).
 grava `produto_nome`; migration roda limpa em banco novo **e** em banco já existente.
 
 #### Status de execução — Fase 2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `migrations/003_produtos.sql` (tabela + índice único + `produto_id`/`produto_nome`
+  na cobrança); `store.py` ganhou `T_PROD`, `NomeDuplicado`, `_produto_row` e o CRUD
+  `list/get/create/update/delete_produto`; `_COB_COLS` e as colunas do INSERT passaram a carregar o
+  produto; `routes.py` ganhou `/produtos` (GET/POST/PUT/DELETE, `view`/`manage`, com `audit`),
+  `metadata` devolve `produtos` (só ativos) e `criar_cobranca` aceita `produto_id`.
+- **Como foi feito / decisões:**
+  - **P6 ✅ decidido — opção (a)**: índice único em `LOWER(nome)`. A colisão vem do **banco**, não de um
+    SELECT antes do INSERT (que perderia a corrida entre duas abas), e a grafia cadastrada é
+    **preservada** — normalizar destruiria justamente o que importa (D3/R1).
+  - Gravei **`produto_id` além do `produto_nome`**: o plano pedia só o snapshot, mas o id custa uma
+    coluna e permite auditar depois qual linha do cadastro originou a venda. O que viaja ao CDP continua
+    sendo **só o nome**.
+  - **Desvio deliberado (a favor):** produto escolhido com a descrição apagada ⇒ a descrição cai no nome
+    do produto. Sem isso o `infoAdicionais` do Inter iria vazio e o cliente não leria o que está pagando.
+- **Problemas / pendências:** nenhum. A migration roda limpa em banco novo e em banco existente (o
+  `IF NOT EXISTS` cobre os dois) — confirmado no log: `applied migration 003_produtos.sql`.
+- **Verificação:** ✅ 8 testes novos em `test_produtos_e_devolucao.py` (CRUD, valor BR `"1.997,00"` →
+  1997.00, duplicado ignorando caixa ⇒ 400, `metadata` só com ativos, snapshot que sobrevive ao rename,
+  produto inexistente ⇒ 400, cobrança sem produto intacta).
 
 ---
 
@@ -365,11 +410,19 @@ grava `produto_nome`; migration roda limpa em banco novo **e** em banco já exis
 com `produto_nome`; sem cadastro nenhum, o modal é byte-idêntico ao atual.
 
 #### Status de execução — Fase 3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `static/CobrancaModal.js` — estado `produtoId`, helper puro `valorBr()`,
+  `escolherProduto(id)` (preenche descrição + valor), `<select>` **acima** da descrição com a opção
+  `"Sem produto (só descrever)"` como primeira, e `produto_id` no corpo do POST.
+- **Como foi feito / decisões:** o `valorBr()` existe porque o campo de valor é digitado em formato BR
+  e é assim que o servidor o valida — jogar `1997` cru no input faria quem confere ler R$ 19,97. A
+  opção do select mostra `nome · R$ valor` quando há valor padrão. Editar descrição/valor depois **não**
+  desfaz a escolha: o que viaja ao CDP é o produto, não o texto.
+- **Problemas / pendências:** nenhum. Sem produtos cadastrados o `<select>` **não é renderizado** — o
+  modal fica igual ao de antes do plano 120.
+- **Verificação:** `node --input-type=module --check` verde; classes só `wa-*`/`.wa-field`, como o resto
+  do modal (modo escuro). Teste de ponta a ponta do elo (cadastro → cobrança → pagamento →
+  `product_name` no CDP) em `test_produto_viaja_ao_cdp_no_evento_de_compra`.
 
 ---
 
@@ -390,11 +443,16 @@ com `produto_nome`; sem cadastro nenhum, o modal é byte-idêntico ao atual.
 modal sem recarregar a página inteira. Legível no modo escuro.
 
 #### Status de execução — Fase 4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `static/config.js` — estados `produtos`/`novoProduto`, `/produtos` no
+  `Promise.all` do `carregar()`, `criarProduto`/`removerProduto`, e a seção **Produtos** irmã da de
+  Vendedores (nome + valor padrão opcional, lista com valor formatado e marca de inativo).
+- **Como foi feito / decisões:** o texto de ajuda diz, em negrito, que **o nome precisa ser idêntico ao
+  do checkout** e explica a consequência (dois produtos na jornada, automação errando o alvo) — é a
+  mitigação de tela do R1. Lista vazia mostra uma frase explicando que o formulário segue só com
+  descrição livre, em vez de um vazio mudo. Nada disso encostou no painel de Configurações do core.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `node --input-type=module --check` verde; só classes `wa-*`/`.wa-field`.
 
 ---
 
@@ -427,11 +485,40 @@ modal sem recarregar a página inteira. Legível no modo escuro.
 nota privada e o CDP recebe `refunded`; o "Total gasto" do contato **volta ao valor anterior**.
 
 #### Status de execução — Fase 5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `reconcile._devolucao_efetivada()` + `_motivo_de()` + `_aplicar_devolucao()`;
+  `migrations/004_devolucao.sql` (`refunded_at`, `valor_devolvido`, `devolucao_id`, `motivo_devolucao` +
+  índice `(status, paid_at)`); `store.STATUS_DEVOLVIDA`, `mark_refunded()`, `paid_for_refund_check()` e
+  a config `refund_watch_days`; `mensagem.nota_devolucao()` + `notify.aviso_devolvido()`;
+  `run_cycle` com a **segunda fila**; rota pública `/public/webhook/{secret}/devolucao`; status
+  `DEVOLVIDA` na tela de histórico (chip + filtro).
+- **Como foi feito / decisões:**
+  - **P3 — resolvido sem assumir.** Não afirmei que o Inter empurra callback de devolução: a fonte de
+    verdade continua sendo a **reconsulta** (`GET /cob/{txid}` traz `devolucoes[]` no mesmo `pix[0]`).
+    A rota `/devolucao` foi acrescentada como caminho RÁPIDO opcional, exatamente pelo raciocínio que já
+    justificava o sufixo `/pix`: se o callback existir, o estorno aparece na hora; se não existir,
+    ninguém a chama e nada muda.
+  - **P4 ✅ decidido — opção (a)**: `refund_watch_days` default **30**, configurável na tela (0 desliga).
+    A 2ª fila tem teto próprio (`limit // 5`) — é vigilância, não o caminho quente.
+  - **P5 ✅ decidido — sim**: nota privada de estorno. Sem dedupe própria (ao contrário do `aviso_pago`):
+    a porta é a transição do `mark_refunded`.
+  - Só `status == "DEVOLVIDO"` conta. `EM_PROCESSAMENTO` seria adiantar um fato que pode não acontecer —
+    e a existência de `NAO_REALIZADO` prova que às vezes não acontece.
+  - `mark_refunded` só sai de `CONCLUIDA`: deixar `ATIVA` virar `DEVOLVIDA` esconderia erro de leitura.
+- **Problemas / pendências:** 🐛 **bug real encontrado PELO teste**, não previsto no plano:
+  `mark_paid` guardava por `status <> 'CONCLUIDA'`, e o Inter continua reportando o pagamento dentro de
+  `pix[]` **para sempre** (a devolução mora ao lado, não no lugar). Logo, a cobrança estornada era
+  remarcada como paga na conferência seguinte, voltava a `DEVOLVIDA` logo depois, e **cada ciclo da
+  varredura gerava uma nota privada nova**. Corrigido para `status NOT IN (CONCLUIDA, DEVOLVIDA)` +
+  regressão dedicada (`test_cobranca_devolvida_nao_volta_a_ser_paga`). No mesmo caminho, `check_txid`
+  passou a ler o status **da linha** em vez de assumir `CONCLUIDA`, e a cobrança já paga passou a
+  carimbar `checked_at` explicitamente — sem isso a 2ª fila (`ORDER BY checked_at`) releria as mesmas
+  linhas para sempre e a devolução da 11ª cobrança nunca seria vista.
+  - Efeito colateral bom: `total_pago_desde` soma `status = CONCLUIDA`, então o "recebido hoje" do
+    painel já **desconta** sozinho a cobrança estornada.
+- **Verificação:** ✅ 12 testes de devolução/janela verdes (liquidada, em processamento ignorada,
+  parcial mandando só o valor devolvido, aviso único, não-paga não vira devolvida, janela 0 desliga,
+  pagamento antigo sai da janela, `checked_at` gira a fila, `run_cycle` com as duas filas).
 
 ---
 
@@ -454,11 +541,19 @@ nota privada e o CDP recebe `refunded`; o "Total gasto" do contato **volta ao va
 mas a regra do repo é não avançar com vermelho não-explicado).
 
 #### Status de execução — Fase 6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** dois arquivos novos — `tests/python/test_trackify_bridge.py` (16 testes: contrato
+  da assinatura, chaves de `data`, `pix_code` fora do evento, só compra/estorno com valor, estorno com o
+  valor devolvido, `external_key` idempotente e sem colisão compra×estorno, `occurred_at` do pagamento,
+  os 4 de degradação/log, bus vivo) e `tests/python/test_produtos_e_devolucao.py` (20 testes: CRUD,
+  snapshot, elo até o CDP, devolução e janela). Os 3 arquivos anteriores seguem intactos.
+- **Como foi feito / decisões:** ambos sobem o app pelo **loader real** (`build_app`) e batem nos
+  endpoints reais — teste que importa o módulo por caminho continuaria verde com a costura arrancada.
+  Nomes de produto são gerados com sufixo único porque as tabelas do plugin são compartilhadas pelo
+  módulo de teste e o índice do nome é único.
+- **Problemas / pendências:** nenhuma. Vale registrar que **o valor dos testes se provou na prática**:
+  a F0 pegou o bug que motivou o plano, e a F5 pegou o bug de status oscilando que ninguém tinha previsto.
+- **Verificação:** ✅ `python3 scripts/test_plugins.py pagamentos` → **106 passed** (baseline eram 70).
 
 ---
 
@@ -479,11 +574,15 @@ mas a regra do repo é não avançar com vermelho não-explicado).
 com o **nome do produto** na jornada.
 
 #### Status de execução — Fase 7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ⬜ Não iniciada — **é a sua parte** (D6: o WhatsBot não configura o CRM alheio)
+- **O que foi feito:** nada por código, por decisão. O passo a passo exato está na **§7** e o lado do
+  plugin já manda as chaves com os nomes certos.
+- **Como foi feito / decisões:** —
+- **Problemas / pendências:** ⚠️ **enquanto isto não for feito, o evento chega bonito e vale R$ 0,00.**
+  E o evento é idempotente por `external_key`: reprocessar depois **não** conserta uma venda que entrou
+  sem valor (ver F8, item 6).
+- **Verificação:** o teste de aceitação está em §7.4 — PIX de R$ 1,00 pago faz o "Total gasto" subir
+  R$ 1,00 e a compra aparece com o nome do produto na jornada.
 
 ---
 
@@ -507,11 +606,24 @@ com o **nome do produto** na jornada.
 cobrança real de valor baixo percorre o ciclo inteiro até somar no CDP.
 
 #### Status de execução — Fase 8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** 🟡 Em andamento — empacotado; **falta instalar em produção**
+- **O que foi feito:** `version: "1.1.0"` no `plugin.yaml` (MINOR: recurso novo, nada quebrado);
+  descrição do manifesto e do `pagamentos.json` atualizadas (produtos, compra que soma no CDP,
+  devolução); `catalog.json` em 1.1.0; cópia viva instalada em
+  `whatsbot-pro/storages/plugins/pagamentos` (`rsync` preservando o `certs/` de runtime — `diff -rq`
+  confirma fonte ≡ instalado); ZIP reconstruído.
+- **Como foi feito / decisões:** o build recusou duas vezes antes de aceitar, e **corretamente**:
+  primeiro porque `pagamentos.json` ainda dizia 1.0.0, depois porque o `catalog.json` dizia. É a trava
+  de coerência de versão do repositório fazendo o trabalho dela.
+- **Problemas / pendências:**
+  1. ⚠️ **Não importei o `.zip` em produção nem consultei a tabela `plugins` de lá** — a versão em
+     produção pode ter mudado no meio do trabalho (armadilha conhecida deste repositório), e subir plugin
+     é ação com efeito externo. **Conferir a `plugins` de produção antes de afirmar paridade.**
+  2. ⚠️ A **F7 precisa estar feita antes do primeiro pagamento real**, senão a primeira venda entra sem
+     valor e fica torta na jornada — e o `external_key` idempotente impede que reprocessar conserte.
+  3. Nada foi commitado (nem aqui nem no repositório de plugins).
+- **Verificação:** ✅ `python3 scripts/build_plugins.py pagamentos` → `updated (23 files, 69131 bytes,
+  sha256=c7ec6f36…)`; `--check` → `current`, mesmo sha. Fonte ≡ instalado (`diff -rq`).
 
 ---
 
@@ -529,43 +641,47 @@ cobrança real de valor baixo percorre o ciclo inteiro até somar no CDP.
 | R8 | Restart do plugin | Ativar/atualizar plugin derruba o processo (`os._exit`) | Nada de estado em variável de módulo; tudo em `plugin_pagamentos_*` — o plugin já segue isso |
 | R9 | Contato inelegível | Cobrança em grupo ou canal fora de `mirror_contact_types` ⇒ `eligible()` recusa e o evento some | Degradação esperada e correta. O `warning` da F1 item 6 torna isso **visível** em vez de mudo |
 | R10 | Segredo em log/auditoria | `pix_code` é o instrumento de pagamento | Já tratado no plugin ([routes.py:230-236](../../whatsbot-pro-plugins/plugins/pagamentos/src/routes.py) exclui do diff); **não** acrescentar `pix_code` ao `data` do evento |
+| R11 | ⭐ **Descoberto na execução** — estado terminal do `mark_paid` | O Inter reporta o pagamento em `pix[]` **para sempre** (a devolução mora AO LADO, não no lugar). Com o guard `status <> 'CONCLUIDA'`, a cobrança estornada era remarcada como paga na conferência seguinte e voltava a `DEVOLVIDA` — status oscilando e **uma nota privada nova a cada ciclo** | `WHERE status NOT IN (CONCLUIDA, DEVOLVIDA)` + `test_cobranca_devolvida_nao_volta_a_ser_paga`. **Lição para quem acrescentar um 5º estado:** todo estado terminal novo precisa entrar neste `NOT IN`, senão a varredura o desfaz |
+| R12 | ⭐ **Descoberto na execução** — a fila da 2ª janela precisa girar | `mark_paid` não carimba `checked_at` numa cobrança já concluída (o `WHERE` dele a exclui). Sem carimbo explícito, `paid_for_refund_check` (`ORDER BY checked_at`) releria as mesmas linhas para sempre e a devolução da 11ª cobrança nunca apareceria | `store.touch_checked(txid)` no ramo "já estava paga" do `check_txid` + `test_conferencia_sem_mudanca_carimba_para_a_fila_girar` |
 
 ---
 
 ## 6. Perguntas em aberto
 
 **P1 — Qual `title` do evento de compra?**
-Sem `title` a timeline mostra `purchase` cru. (a) `"Compra por PIX — <produto>"`; (b) só `"Compra por
-PIX"`; (c) o nome do produto puro (é o que o `ticto` faz, mapeando `offer.name → title`).
-**Recomendação: (a)** — a origem (atendimento, não checkout) é justamente o que o Ticto não diz, e o
-produto aparece junto. ⏸️ Confirmar na F1.
+✅ **DECIDIDO (2026-08-13) — opção (a)**: `"Compra por PIX — <produto>"`, com fallback para a descrição
+livre e, na falta das duas, só `"Compra por PIX"`. Cortado em 120 chars. A origem (atendimento, não
+checkout) é justamente o que o Ticto não diz, e o produto aparece junto.
+Implementado em `_TITULOS`/`_titulo()` no `trackify_bridge.py`.
 
 **P2 — `pix_gerado` e `pix_expirado` continuam indo ao CDP?**
-(a) Sim, sem valor — a timeline mostra "cobrança enviada" e "cobrança venceu", útil para o vendedor;
-(b) não, só `purchase`/`refunded`, deixando a jornada enxuta.
-**Recomendação: (a)** — não custa nada (sem `valor`, não viram dinheiro) e agora terão `title` legível.
-⏸️ Confirmar na F1.
+✅ **DECIDIDO (2026-08-13) — opção (a)**: continuam, **sem `valor`**. Não custam nada (sem a chave
+`valor`, não viram dinheiro por mais que o canal tenha o mapeamento) e agora têm título legível.
+Travado por `test_cobranca_gerada_nao_leva_valor` / `test_cobranca_expirada_nao_leva_valor`.
 
 **P3 — O Banco Inter empurra webhook de devolução?**
-Muda o desenho da F5: com webhook, a varredura vira só rede de segurança; sem ele, a janela de
-reconsulta (item 13) é o **único** caminho. O plugin hoje só registra webhook de PIX recebido
-([inter.py:252-262](../../whatsbot-pro-plugins/plugins/pagamentos/src/inter.py)).
-**A confirmar na documentação/sandbox do Inter — não assumir.** ⏸️
+✅ **RESOLVIDO SEM PRECISAR DA RESPOSTA (2026-08-13).** O desenho ficou correto nos dois casos: a fonte
+de verdade é a **reconsulta** (`GET /pix/v2/cob/{txid}` traz `devolucoes[]` dentro do mesmo `pix[0]`),
+varrida pela janela de pagas recentes; e a rota `/public/webhook/{secret}/devolucao` foi acrescentada
+como caminho **rápido opcional** — mesmo raciocínio que já justificava o sufixo `/pix`. Se o Inter
+empurrar, o estorno aparece na hora; se não empurrar, ninguém chama a rota e nada muda.
+⏸️ Continua valendo confirmar na documentação do Inter, mas **nada depende disso**.
 
 **P4 — Janela de reconsulta pós-pagamento.**
-(a) 30 dias; (b) 90 dias (o prazo de MED do PIX é maior); (c) configurável.
-**Recomendação: (a) 30 dias como default configurável** — cobre o caso real (estorno é rápido) sem virar
-varredura eterna. ⏸️ Decidir na F5.
+✅ **DECIDIDO (2026-08-13) — opção (a)**: config `refund_watch_days`, default **30 dias**, editável na
+aba Configurar; `0` desliga. A 2ª fila tem teto próprio (`limit // 5`, 5 por ciclo no default) e ordena
+por `checked_at` — é vigilância, não o caminho quente.
 
 **P5 — Nota privada quando o dinheiro volta?**
-**Recomendação: sim** — o atendente precisa saber que a venda caiu, e o precedente (`aviso_pago`) já
-existe. ⏸️ Decidir na F5.
+✅ **DECIDIDO (2026-08-13) — sim.** `notify.aviso_devolvido()` + `mensagem.nota_devolucao()`, que
+destaca o valor **devolvido** e, quando menor que o da cobrança, diz explicitamente
+`"Devolução PARCIAL — a cobrança era de R$ …"`: "estornou tudo" e "estornou um pedaço" são situações
+diferentes para quem atende.
 
 **P6 — Como impedir dois produtos com o mesmo nome escrito diferente?**
-(a) índice único **case-insensitive** (`LOWER(nome)`) e nada mais; (b) normalizar acento/caixa na
-escrita — perde a grafia exata que o Ticto usa, e a grafia exata é justamente o que importa (D3);
-(c) nada, só o aviso de tela.
-**Recomendação: (a)** — barra o duplicado óbvio e **preserva** a grafia. ⏸️ Decidir na F2.
+✅ **DECIDIDO (2026-08-13) — opção (a)**: índice único em `LOWER(nome)`. Barra o duplicado óbvio e
+**preserva** a grafia cadastrada, que é exatamente o que precisa bater com o checkout (D3). A colisão
+vem do banco, não de um SELECT antes do INSERT — que perderia a corrida entre duas abas.
 
 **P7 — Semear o cadastro a partir do catálogo do Nexus?**
 `produtos_produtos` tem os cursos com o nome canônico e resolveria a R1 de vez. A D4 excluiu o Nexus
@@ -677,21 +793,28 @@ aparecem como **`ignore`** — nenhum deles carrega `valor`, mas o explícito ev
 
 ## 9. Checklist de verificação
 
-- [ ] Teste de contrato da assinatura de `track_event` **verde** (o que teria pego este bug)
-- [ ] `ServiceResult` com status inesperado gera **warning** — nunca mais falha muda
-- [ ] `purchase` leva `valor`; `pix_gerado`/`pix_expirado` **não** levam
-- [ ] Idempotência: webhook + varredura + "Conferir agora" ⇒ **um** evento no CDP
-- [ ] `occurred_at` é o horário do pagamento, não o do processamento
-- [ ] Migration 003/004: **sem `;` em comentário**; round-trip em banco novo **e** existente
-- [ ] Prefixo `plugin_pagamentos_` em toda tabela/índice novo
-- [ ] Cobrança **sem** produto continua funcionando (D7)
-- [ ] Modal e aba de configuração legíveis no **modo escuro** (`wa-*`, `.wa-field`)
-- [ ] Nenhuma opção nova no painel de Configurações do **core**
-- [ ] `pix_code` fora do `data` do evento e fora da auditoria
-- [ ] Sem `plugins.services` / trackify desligado / trackify ausente ⇒ o pagamento acontece igual
-- [ ] `python3 scripts/test_plugins.py pagamentos` verde
-- [ ] Suíte do core verde no Postgres (`WHATSBOT_TEST_DB_URL`)
-- [ ] §7 aplicada na tela do Trackify **antes** do primeiro pagamento real
-- [ ] "Total gasto" sobe no PIX pago e **volta** no estorno
-- [ ] Versão instalada no dev conferida na interface **antes** de publicar o `.zip`
-- [ ] Tabela `plugins` de produção consultada antes de afirmar paridade de versão
+- [x] Teste de contrato da assinatura de `track_event` **verde** (o que teria pego este bug)
+- [x] `ServiceResult` com status inesperado gera **warning** — nunca mais falha muda
+- [x] `purchase` leva `valor`; `pix_gerado`/`pix_expirado` **não** levam
+- [x] Idempotência: webhook + varredura + "Conferir agora" ⇒ **um** evento no CDP
+- [x] `occurred_at` é o horário do pagamento, não o do processamento
+- [x] Migration 003/004: **sem `;` em comentário**; round-trip em banco novo **e** existente
+- [x] Prefixo `plugin_pagamentos_` em toda tabela/índice novo
+- [x] Cobrança **sem** produto continua funcionando (D7)
+- [x] Modal e aba de configuração legíveis no **modo escuro** (`wa-*`, `.wa-field`)
+- [x] Nenhuma opção nova no painel de Configurações do **core**
+- [x] `pix_code` fora do `data` do evento e fora da auditoria
+- [x] Sem `plugins.services` / trackify desligado / trackify ausente ⇒ o pagamento acontece igual
+- [x] `python3 scripts/test_plugins.py pagamentos` verde — **106 passed**
+- [x] Suíte do core no Postgres (`WHATSBOT_TEST_DB_URL`) — sem regressão: exatamente as **3 falhas
+      pré-existentes** conhecidas (`test_alembic_hygiene` ×2 + `test_audit_matrix_is_complete`).
+      ⚠️ **Rode UMA suíte por vez.** Ao rodar a do plugin em paralelo com a do core (mesmo banco
+      `whatsbot_test`, e `tests/pg.py` recria o schema por processo), apareceram 12 falhas fantasma
+      (`test_default_agent` ×4, `test_conversation_window_navigation` ×8 e uma no
+      `test_retentativa_entrega_quando_o_destino_volta`) que **somem** quando cada suíte roda sozinha
+- [ ] **§7 aplicada na tela do Trackify antes do primeiro pagamento real** ← *sua parte*
+- [ ] "Total gasto" sobe no PIX pago e **volta** no estorno *(depende da §7)*
+- [ ] Versão instalada no dev **conferida na interface** — o servidor precisa reiniciar para carregar a
+      1.1.0 (o toggle do plugin ou o watchdog do `linux_start.sh` fazem isso)
+- [ ] Tabela `plugins` de **produção** consultada antes de afirmar paridade de versão
+- [ ] `.zip` importado em produção e ativado

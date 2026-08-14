@@ -236,6 +236,12 @@ WAVE 1' 04 E-mail 🟢  ─── independente das outras (só usa spawn_task; p
   (`graph.instagram.com` + token de 60 dias com refresh); o usuário decidiu em 2026-07-24 seguir o caminho do Chatwoot
   (Página do Facebook + Page Access Token em `graph.facebook.com`), o que **eliminou** o refresh de token e deixou o
   hook `ChannelCapabilities.token_refresh` do 01-C no core **sem nenhum consumidor**.
+  ⚠️ **O desvio (2) foi REVERTIDO em 2026-08-14 pelo [plano 121](121-plano-instagram-login.md)**: o caminho por Página
+  do Facebook usa `instagram_manage_messages`, que exige Acesso Avançado, e sem ele a Meta **nunca entrega o webhook**
+  de quem não tem papel no app — medido em dois apps independentes, com o administrador trocando DM normalmente e
+  nenhuma mensagem de terceiro chegando, sem erro em lugar nenhum. O `D1` original valia. O plugin voltou ao Instagram
+  Login (v3.0.0), agora com OAuth dentro do painel, e o hook `token_refresh` do 01-C **ganhou seu primeiro consumidor**
+  — a pendência "decidir o destino do hook órfão", abaixo, está resolvida.
 - **Problemas / pendências:** o sub-plano **04 (E-mail) não tem uma linha escrita** — é todo o trabalho restante deste
   plano. Pendências menores herdadas: validação em campo do Messenger (app/Página reais), ação "Reautorizar" no card do
   canal Instagram, e decidir o destino do hook `token_refresh` órfão (manter documentado como seam ou remover).
