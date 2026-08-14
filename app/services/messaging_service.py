@@ -129,7 +129,7 @@ def _turn_handed_off(tool_calls) -> bool:
     Plano 122 — o discriminador do perdão de ``_cycle_may_continue``: só um turno
     que de fato chamou ``transfer_to_human`` pode falar depois de o gate ter sido
     fechado, porque foi ele próprio quem o fechou
-    ([transfer_to_human.py:87-89] grava ``ai_active=0``).
+    ([transfer_to_human.py:96-98] grava ``ai_active=0``).
 
     ``not skipped`` é obrigatório e não é detalhe: um ``filter.tool.args`` que
     aborte a tool ([agno_engine.py:239/287]) deixa a entrada em ``tool_calls`` com
@@ -250,7 +250,7 @@ class MessagingService:
 
         ``allow_self_handoff`` (plano 122) perdoa **apenas** o gate de banco, e só
         quando o turno chamou ``transfer_to_human`` — que grava ``ai_active=0``
-        ([transfer_to_human.py:87-89]) no MEIO do turno e assim descartava a
+        ([transfer_to_human.py:96-98]) no MEIO do turno e assim descartava a
         despedida que ele mesmo acabou de escrever (226 transferências mudas em
         produção entre 31/07 e 14/08).
 

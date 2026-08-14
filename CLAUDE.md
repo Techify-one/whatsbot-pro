@@ -393,7 +393,7 @@ Atribuir uma conversa a um atendente, desligar a IA ou simplesmente **enviar** u
 
 ### A IA pode se despedir ao transferir (plano 122) — o perdão de escopo mínimo
 
-⚠️ **`transfer_to_human` fecha o gate DENTRO do turno** ([transfer_to_human.py:87-89](agent/tools/transfer_to_human.py) grava `ai_active=0`), e o guard acima, ao reconsultar, descartava a **despedida que aquele mesmo turno acabou de escrever** — a IA calando a si mesma. Não era só bloqueio: como o save só roda para `sent_parts`, a mensagem sumia sem rastro e nem o operador via no painel o que a IA queria dizer. Foram **226 transferências mudas** em produção entre 31/07 e 14/08 (de 178/178 com despedida na semana de 20/07 para 0/115 na de 03/08).
+⚠️ **`transfer_to_human` fecha o gate DENTRO do turno** ([transfer_to_human.py:96-98](agent/tools/transfer_to_human.py) grava `ai_active=0`), e o guard acima, ao reconsultar, descartava a **despedida que aquele mesmo turno acabou de escrever** — a IA calando a si mesma. Não era só bloqueio: como o save só roda para `sent_parts`, a mensagem sumia sem rastro e nem o operador via no painel o que a IA queria dizer. Foram **226 transferências mudas** em produção entre 31/07 e 14/08 (de 178/178 com despedida na semana de 20/07 para 0/115 na de 03/08).
 
 O conserto é um kwarg **`allow_self_handoff`** em `_cycle_may_continue` / `_send_with_typing_guard` / `send_reply`, derivado pelo call site do próprio turno via `_turn_handed_off(result.tool_calls)` (predicado de módulo, exige `not skipped`). Regras que **não** podem ser mexidas:
 

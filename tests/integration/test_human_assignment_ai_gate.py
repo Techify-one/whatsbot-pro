@@ -567,7 +567,7 @@ _TRANSFER_TOOL_CALL = [{"tool": "transfer_to_human", "args": {}, "result": "ok"}
 
 
 def _transfer_closes_the_gate(conv_id: int) -> None:
-    """O que ``transfer_to_human`` escreve (agent/tools/transfer_to_human.py:87-89).
+    """O que ``transfer_to_human`` escreve (agent/tools/transfer_to_human.py:96-98).
 
     ⚠️ NÃO confundir com ``_turn_ai_off``, que simula o painel: aqui
     ``assignee_user_id`` fica ``None`` — ninguém assumiu, a IA se auto-desligou.
@@ -580,7 +580,7 @@ def _make_fake_handoff_run(reply: str):
     """Stub do motor AGNO que se comporta como ``transfer_to_human``.
 
     Fecha o gate da conversa DENTRO do turno (é o que a tool faz em
-    transfer_to_human.py:87-89) e registra a chamada em ``executed_tools`` — sem
+    transfer_to_human.py:96-98) e registra a chamada em ``executed_tools`` — sem
     esses dois efeitos juntos o teste não reproduz o bug, só o encena."""
     from agent.agno_engine import EngineResult
     from agent.execution import track_step
