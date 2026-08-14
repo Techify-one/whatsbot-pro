@@ -298,7 +298,7 @@ Tool calls = `step_type='tool_executed'`; transferências pra humano = `data->>'
 
 - **`tags`**: `id` PK, `name` UNIQUE, `color`. Tags globais.
 - **`contact_tags`**: PK composta `(contact_id, tag_id)` — N:N contato↔tag.
-- Tag operacional relevante: `transferido_atendente` (`TRANSFER_TAG`) sinaliza gate de humano (IA cala).
+- Tag legada: `transferido_atendente` (`TRANSFER_TAG`). Já sinalizou o gate de humano; hoje **não é escrita por ninguém** (a `transfer_to_human` deixou de aplicá-la) — o gate é `atendimentos.ai_active`/`assignee_user_id`. Linhas antigas ainda são removidas quando a IA reassume.
 
 ### `atendimento_labels` + `atendimento_label_links` (`db/tables.py:482-499`) — etiquetas de CONVERSA
 **Separadas** das tags de contato (aplicam-se ao atendimento, não ao número).

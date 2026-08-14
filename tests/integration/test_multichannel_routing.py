@@ -174,10 +174,11 @@ def test_d1_transfer_does_not_silence_sibling_channel(build_app):
     ctx = SimpleNamespace(contact=s.tg_mem, tag_registry=handler.tag_registry)
     t2h.execute(ctx, {"reason": "quero humano"})
 
-    # A tag foi gravada (rótulo visual, contact-global)...
+    # A tag NÃO é mais gravada — o handoff vive na conversa (ai_active=0 +
+    # assignee); o rótulo contact-global deixou de ser aplicado.
     from db.repositories import tag_repo
-    assert t2h.TRANSFER_TAG in (tag_repo.get_contact_tags(s.contact_id) or [])
-    # ...mas o gate é por-conversa: Telegram calado, WhatsApp respondendo.
+    assert t2h.TRANSFER_TAG not in (tag_repo.get_contact_tags(s.contact_id) or [])
+    # O gate é por-conversa: Telegram calado, WhatsApp respondendo.
     assert _conversation_ai_active(s.tg_mem) is False
     assert _conversation_ai_active(s.d_mem) is True
 
