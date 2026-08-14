@@ -467,11 +467,17 @@ def _poll(pred, timeout: float = 4.0, step: float = 0.02) -> bool:
 
 
 def _private_ai_send(built, *, assignee, reply="resposta da IA privada",
-                     take_over_after_first: bool = False) -> list:
+                     take_over_after_first: bool = False,
+                     ai_active: int | None = None,
+                     tool_calls: list | None = None) -> list:
     """Nota privada com "IA lê" + "responder no chat" numa conversa atribuída.
 
     Devolve os envios que chegaram AO CLIENTE (o transporte é espionado no
     ``outbound_router``, o mesmo ponto por onde a resposta sairia de verdade).
+
+    ``ai_active``/``tool_calls`` (plano 122) permitem montar o outro fechamento de
+    portão: o que a PRÓPRIA IA faz ao chamar ``transfer_to_human`` — ``ai_active=0``
+    **sem** dono humano, com a tool registrada no turno.
     """
     from tests.fakes import fake_agent_reply
 
@@ -485,7 +491,7 @@ def _private_ai_send(built, *, assignee, reply="resposta da IA privada",
     conv = conversation_repo.get_open_for_contact(row["id"])
     conversation_repo.assign_agent(
         conv["id"], assignee_user_id=assignee, active_agent_key=None,
-        ai_active=0 if assignee else 1)
+        ai_active=(0 if assignee else 1) if ai_active is None else ai_active)
 
     sent: list = []
     router = built.app.state.deps.outbound_router
@@ -504,7 +510,7 @@ def _private_ai_send(built, *, assignee, reply="resposta da IA privada",
 
     router.send_text = _spy
     try:
-        with fake_agent_reply(reply, handler=handler):
+        with fake_agent_reply(reply, handler=handler, tool_calls=tool_calls):
             r = built.client.post(f"/api/contacts/{phone}/private-message", json={
                 "text": "responde o cliente",
                 "conversation_id": conv["id"],
@@ -544,3 +550,232 @@ def test_nota_privada_reconsulta_gate_entre_partes(build_app):
         build_app(["gowa"]), assignee=None,
         reply='["primeira", "segunda"]', take_over_after_first=True)
     assert sent == ["primeira"]
+
+
+# ── Plano 122 · a IA não pode calar a si mesma ──────────────────────────────
+#
+# O plano 96 endureceu o guard para o caso do HUMANO. Faltava o caso em que quem
+# fecha o portão é a própria IA: ``transfer_to_human`` grava ``ai_active=0`` no
+# meio do turno e o guard, ao reconsultar, descarta a despedida que aquele mesmo
+# turno acabou de escrever (226 transferências mudas em produção desde 31/07).
+#
+# O discriminador é a ÉPOCA: toda tomada humana passa por ``abort_ai_cycle``, que
+# a incrementa antes de qualquer outra coisa; ``transfer_to_human`` não a toca.
+
+
+_TRANSFER_TOOL_CALL = [{"tool": "transfer_to_human", "args": {}, "result": "ok"}]
+
+
+def _transfer_closes_the_gate(conv_id: int) -> None:
+    """O que ``transfer_to_human`` escreve (agent/tools/transfer_to_human.py:87-89).
+
+    ⚠️ NÃO confundir com ``_turn_ai_off``, que simula o painel: aqui
+    ``assignee_user_id`` fica ``None`` — ninguém assumiu, a IA se auto-desligou.
+    """
+    conversation_repo.assign_agent(
+        conv_id, assignee_user_id=None, active_agent_key=None, ai_active=0)
+
+
+def _make_fake_handoff_run(reply: str):
+    """Stub do motor AGNO que se comporta como ``transfer_to_human``.
+
+    Fecha o gate da conversa DENTRO do turno (é o que a tool faz em
+    transfer_to_human.py:87-89) e registra a chamada em ``executed_tools`` — sem
+    esses dois efeitos juntos o teste não reproduz o bug, só o encena."""
+    from agent.agno_engine import EngineResult
+    from agent.execution import track_step
+
+    async def _fake(handler, contact, sender, messages, active_tools,
+                    model_config=None):
+        track_step("llm_request", {"model": "fake/model", "engine": "agno",
+                                   "context_messages": len(messages), "tools": []})
+        conv = conversation_repo.get_open_for_contact(contact.id)
+        if conv:
+            _transfer_closes_the_gate(conv["id"])
+        track_step("llm_response", {"model": "fake/model", "engine": "agno",
+                                    "prompt_tokens": 10, "completion_tokens": 5,
+                                    "has_tool_calls": True})
+        return EngineResult(reply=reply, executed_tools=list(_TRANSFER_TOOL_CALL),
+                            usage={"prompt_tokens": 10, "completion_tokens": 5,
+                                   "total_tokens": 15})
+
+    return _fake
+
+
+def _run_handoff_turn(build_app, phone: str, reply: str):
+    """Turno REAL pelo webhook: ingest → LLM → tool → guard → envio → save.
+
+    Ao contrário dos testes de seam acima, este exercita o CABEAMENTO (o call site
+    que deriva ``allow_self_handoff`` de ``result.tool_calls``) — é o que ficaria
+    verde com o guard consertado e o call site esquecido."""
+    from unittest.mock import patch
+
+    from agent import agent_factory
+    from ai_engine import dynamic_registry
+
+    agent_factory.seed_default_agent()
+    dynamic_registry.invalidate()
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": True, "message_batch_delay": 0,
+        "split_messages": True, "split_message_delay": 0,
+        "response_delay_min": 0, "response_delay_max": 0,
+    })
+    try:
+        from agent import agno_engine
+        with patch.object(agno_engine, "run_async",
+                          side_effect=_make_fake_handoff_run(reply)):
+            r = built.client.post("/api/webhook/gowa/default", json={
+                "event": "message", "payload": {
+                    "from": f"{phone}@s.whatsapp.net", "id": f"p122_{phone}",
+                    "body": "quero falar com um atendente",
+                    "from_name": "Cliente"}})
+            assert r.status_code == 200, r.text
+
+            async def _drain():
+                for _ in range(6):
+                    task = built.app.state.deps.state.processing_tasks.get(
+                        ("default", phone))
+                    if task is None:
+                        break
+                    try:
+                        await asyncio.wait_for(task, timeout=5.0)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0)
+
+            built.client.portal.call(_drain)
+    finally:
+        built.settings.set("auto_reply", False)
+
+    row = contact_repo.get_by_phone(phone)
+    assert row, "contato não materializado pelo turno"
+    conv = conversation_repo.get_open_for_contact(row["id"])
+    return row, conv
+
+
+# ── Lado A · a despedida PASSA (inverte a caracterização da F0) ─────────────
+
+def test_despedida_da_transferencia_chega_ao_cliente(cycle):
+    """A F0 assegurava o OPOSTO: o guard descartava a despedida inteira.
+
+    Quem fechou o gate foi este turno; a época está intacta, então não houve
+    tomada humana nenhuma para respeitar."""
+    _transfer_closes_the_gate(cycle.conv["id"])
+    sent = asyncio.run(cycle.svc._send_with_typing_guard(
+        CHANNEL, cycle.phone, "já vou te transferir para um atendente",
+        allow_self_handoff=True))
+    assert sent is True
+    assert cycle.outbound.sent == ["já vou te transferir para um atendente"]
+
+
+def test_despedida_atravessa_o_split_inteiro(cycle):
+    """A F0 assegurava o OPOSTO: zero partes entregues.
+
+    Trava o item 4 da F1 — sem o perdão em ``send_reply`` a despedida morreria na
+    parte 1/N, e ``split_messages`` é default ``True``: o conserto ficaria pela
+    metade sem nenhum teste reclamando."""
+    _transfer_closes_the_gate(cycle.conv["id"])
+    sent = asyncio.run(cycle.svc.send_reply(
+        CHANNEL, cycle.phone, '["um", "dois", "três"]', allow_self_handoff=True))
+    assert sent is True
+    assert cycle.outbound.sent == ["um", "dois", "três"]
+
+
+def test_ia_privada_entrega_a_despedida(build_app):
+    """A F0 assegurava o OPOSTO: o terceiro caminho de saída também engolia a
+    despedida — e ainda gravava um card dizendo que "um atendente assumiu"."""
+    assert _private_ai_send(
+        build_app(["gowa"]), assignee=None, ai_active=0,
+        tool_calls=_TRANSFER_TOOL_CALL) == ["resposta da IA privada"]
+
+
+def test_despedida_e_salva_e_nao_vira_takeover(build_app):
+    """Turno completo pelo webhook — o teste que cobre o CABEAMENTO.
+
+    Três asserções que o fio de produção exige juntas: a despedida (a) foi
+    persistida como ``assistant`` (o save só roda para ``sent_parts``, então isso
+    prova a ida ao wire), (b) NÃO produziu o card "A IA assumiu a conversa"
+    (D4 — seria absurdo logo depois de "SISTEMA pausou a IA") e (c) o card de
+    pausa continua no fio."""
+    from server import system_notices
+
+    phone = "5511975122001"
+    row, conv = _run_handoff_turn(build_app, phone, "já vou te transferir!")
+
+    replies = [m for m in message_repo.get_all(row["id"]) if m["role"] == "assistant"]
+    assert [m["content"] for m in replies] == ["já vou te transferir!"]
+    assert replies[0]["status"] == "sent"
+
+    assert system_notices.has_event(conv["id"], "ai_takeover") is False
+    assert system_notices.has_event(conv["id"], "ai_off") is True
+
+
+# ── Lado B · o perdão NÃO vaza (o plano 96 continua de pé) ──────────────────
+
+def test_perdao_nao_sobrevive_a_atribuicao_humana(cycle):
+    """⭐ O teste central do D2 — o que impede este plano de desfazer o 96.
+
+    Turno que transferiu (perdão LIGADO) **e** operador que assumiu no meio
+    (época+1) ⇒ nada sai. A época é checada ANTES do perdão em
+    ``_cycle_may_continue``; inverter as duas linhas faz este teste ficar
+    vermelho, que é exatamente o ponto."""
+    epoch = cycle.svc._abort_epoch(CHANNEL, cycle.phone)
+    _transfer_closes_the_gate(cycle.conv["id"])
+    abort_ai_cycle(cycle.deps, CHANNEL, cycle.phone)  # o humano assumiu
+    sent = asyncio.run(cycle.svc._send_with_typing_guard(
+        CHANNEL, cycle.phone, "despedida", abort_epoch=epoch,
+        allow_self_handoff=True))
+    assert sent is False
+    assert cycle.outbound.sent == []
+
+
+def test_perdao_nao_vaza_para_o_turno_seguinte(cycle):
+    """D3: o perdão é parâmetro de chamada e morre no ``return``.
+
+    Turno 1 transfere e se despede; turno 2 (sem transferência, gate ainda
+    fechado) fica calado — senão a IA voltaria a falar numa conversa já entregue
+    a um humano."""
+    _transfer_closes_the_gate(cycle.conv["id"])
+    primeiro = asyncio.run(cycle.svc._send_with_typing_guard(
+        CHANNEL, cycle.phone, "já vou te transferir", allow_self_handoff=True))
+    segundo = asyncio.run(cycle.svc._send_with_typing_guard(
+        CHANNEL, cycle.phone, "ah, e mais uma coisa"))
+    assert (primeiro, segundo) == (True, False)
+    assert cycle.outbound.sent == ["já vou te transferir"]
+
+
+def test_tool_pulada_por_filtro_nao_ganha_perdao(cycle):
+    """``skipped=True`` ⇒ a tool NÃO rodou ⇒ o gate não foi fechado por este turno.
+
+    Trava o ``not tc.get('skipped')`` do predicado: sem ele, um ``filter.tool.args``
+    que aborte a transferência daria à IA uma licença para falar numa conversa que
+    outra coisa qualquer desligou."""
+    from app.services.messaging_service import _turn_handed_off
+
+    assert _turn_handed_off([{"tool": "transfer_to_human"}]) is True
+    assert _turn_handed_off([{"tool": "transfer_to_human", "skipped": True}]) is False
+    assert _turn_handed_off([{"tool": "transferir_agente"}]) is False
+    assert _turn_handed_off(None) is False
+
+    _transfer_closes_the_gate(cycle.conv["id"])
+    sent = asyncio.run(cycle.svc._send_with_typing_guard(
+        CHANNEL, cycle.phone, "não deveria sair",
+        allow_self_handoff=_turn_handed_off(
+            [{"tool": "transfer_to_human", "skipped": True}])))
+    assert sent is False
+    assert cycle.outbound.sent == []
+
+
+def test_envio_do_operador_durante_o_turno_continua_cortando(cycle):
+    """``_operator_took_over`` (contacts.py:350-362) chama ``abort_ai_cycle``.
+
+    Enviar como atendente não desliga a IA da conversa — só invalida a geração.
+    Com ou sem perdão, a resposta em voo é descartada."""
+    epoch = cycle.svc._abort_epoch(CHANNEL, cycle.phone)
+    abort_ai_cycle(cycle.deps, CHANNEL, cycle.phone)  # o que a rota de envio faz
+    for perdao in (False, True):
+        sent = asyncio.run(cycle.svc._send_with_typing_guard(
+            CHANNEL, cycle.phone, "resposta obsoleta", abort_epoch=epoch,
+            allow_self_handoff=perdao))
+        assert sent is False
+    assert cycle.outbound.sent == []

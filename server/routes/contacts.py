@@ -160,7 +160,8 @@ def register_routes(app, deps):
     # (R14 — image/audio/document unified) lives in ``MessagingService.send_media``.
     # The AI gate isn't exercised by ``send_media`` but the context requires it;
     # mirror the webhook's master gate so the service is wired identically.
-    from app.services.messaging_service import MessagingContext, MessagingService
+    from app.services.messaging_service import (MessagingContext, MessagingService,
+                                                _turn_handed_off)
     # Conversation lifecycle/ownership service (plano 23 Fase B4): the per-contact
     # AI toggle emits its events + system notice + P17 conversation mirror through
     # ``conversation_service.toggle_contact_ai``. Deferred import (cycle avoidance).
@@ -1297,9 +1298,15 @@ def register_routes(app, deps):
                                if abort_epoch is None else abort_epoch)
         run_wire = await asyncio.to_thread(_wire_target, phone, conversation_id)
 
-        async def _may_reply_in_chat_now() -> bool:
+        async def _may_reply_in_chat_now(allow_self_handoff: bool = False) -> bool:
+            """Espelha ``MessagingService._cycle_may_continue`` (plano 122).
+
+            Época PRIMEIRO — o perdão jamais a alcança. Ele só existe para o turno
+            que chamou ``transfer_to_human`` e portanto fechou o próprio gate."""
             if messaging._abort_epoch(run_channel, phone) != private_abort_epoch:
                 return False
+            if allow_self_handoff:
+                return True
             return await asyncio.to_thread(
                 _private_ai_conversation_open, run_channel, phone)
 
@@ -1364,7 +1371,12 @@ def register_routes(app, deps):
         # interruptor de automação apagaria o recurso inteiro em instalação com a
         # automação desligada, que não é o problema que o plano 96 ataca (D1: o que
         # cala é o HUMANO no comando daquela conversa).
-        if reply_in_chat and not await _may_reply_in_chat_now():
+        #
+        # Plano 122 — o perdão do turno que transferiu. Sem ele, uma IA privada com
+        # "responder no chat" que chame ``transfer_to_human`` cai aqui e grava um
+        # card FALSO ("um atendente assumiu a conversa" — ninguém assumiu).
+        handed_off = _turn_handed_off(result.tool_calls)
+        if reply_in_chat and not await _may_reply_in_chat_now(handed_off):
             logger.info("[PrivateAI] resposta não enviada a %s — a conversa está "
                         "com um atendente humano", phone)
             await _blocked_notice()
@@ -1432,7 +1444,7 @@ def register_routes(app, deps):
             # Same last-moment rule as the normal AI pipeline. The initial check
             # above is not enough: plugins and a multi-part response create another
             # window in which the operator can take over.
-            if not await _may_reply_in_chat_now():
+            if not await _may_reply_in_chat_now(handed_off):
                 logger.info("[PrivateAI] split de %s/%s interrompido na parte %d/%d",
                             run_channel, phone, i + 1, len(parts))
                 await _blocked_notice()

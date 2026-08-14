@@ -123,6 +123,24 @@ async def broadcast_and_emit(deps, ws_event: str, bus_event: str, payload: dict,
             set_current_execution(prev)
 
 
+def _turn_handed_off(tool_calls) -> bool:
+    """Este turno terminou transferindo o atendimento para um humano?
+
+    Plano 122 — o discriminador do perdão de ``_cycle_may_continue``: só um turno
+    que de fato chamou ``transfer_to_human`` pode falar depois de o gate ter sido
+    fechado, porque foi ele próprio quem o fechou
+    ([transfer_to_human.py:87-89] grava ``ai_active=0``).
+
+    ``not skipped`` é obrigatório e não é detalhe: um ``filter.tool.args`` que
+    aborte a tool ([agno_engine.py:239/287]) deixa a entrada em ``tool_calls`` com
+    ``skipped=True`` — e nesse caso o gate NÃO foi fechado por este turno, então
+    não há nada a perdoar.  Mesma forma dos predicados irmãos
+    ([:648] e agent_run_service.py:105/402).
+    """
+    return any(tc.get("tool") == "transfer_to_human" and not tc.get("skipped")
+               for tc in (tool_calls or []))
+
+
 # ── service context ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -222,16 +240,45 @@ class MessagingService:
         return int(epochs.get((channel_id, phone), 0) or 0)
 
     def _cycle_may_continue(self, channel_id: str, phone: str,
-                            abort_epoch: int | None) -> bool:
+                            abort_epoch: int | None, *,
+                            allow_self_handoff: bool = False) -> bool:
         """Whether this specific AI cycle may still put text on the wire.
 
         The database gate covers assignment/IA-OFF.  The generation closes the
         other takeover path: an operator SEND does not permanently disable the AI,
         but it must invalidate the reply that was already being prepared.
+
+        ``allow_self_handoff`` (plano 122) perdoa **apenas** o gate de banco, e só
+        quando o turno chamou ``transfer_to_human`` — que grava ``ai_active=0``
+        ([transfer_to_human.py:87-89]) no MEIO do turno e assim descartava a
+        despedida que ele mesmo acabou de escrever (226 transferências mudas em
+        produção entre 31/07 e 14/08).
+
+        ⚠️ A ordem das duas checagens É o contrato: a época vem PRIMEIRO e o perdão
+        nunca a alcança. É o que preserva o plano 96 inteiro — toda tomada humana
+        (``assign``/``assign_me``/``assign_unified``/``set_ai(0)`` e o envio do
+        operador) passa por ``abort_ai_cycle``, que incrementa a época antes de
+        qualquer outra coisa, inclusive quando se recusa a cancelar a task por
+        estar em ``sending``/``processing``.  ``transfer_to_human`` não toca na
+        época.  Inverter as duas linhas devolveria o bug do plano 96 em silêncio.
         """
         if abort_epoch is not None and self._abort_epoch(channel_id, phone) != abort_epoch:
             return False
+        if allow_self_handoff:
+            return True
         return self._ai_may_speak_now(channel_id, phone)
+
+    def _guard_reason(self, channel_id: str, phone: str,
+                      abort_epoch: int | None) -> str:
+        """Por que o guard cortou — só para log (leitura em memória, sem DB).
+
+        O texto único de antes ("gate fechado ou ciclo invalidado") fundia os dois
+        motivos, que agora têm consequências diferentes: época = humano assumiu;
+        gate = a conversa está desligada.  Diagnosticar a próxima ocorrência exige
+        saber qual dos dois foi."""
+        if abort_epoch is not None and self._abort_epoch(channel_id, phone) != abort_epoch:
+            return "ciclo invalidado pelo operador (época)"
+        return "gate da conversa fechado"
 
     # ── error bubble ──────────────────────────────────────────────────────────
 
@@ -372,12 +419,16 @@ class MessagingService:
 
     async def send_reply(self, channel_id: str, phone: str, reply: str, *,
                          agent_key: str | None = None,
-                         abort_epoch: int | None = None) -> bool:
+                         abort_epoch: int | None = None,
+                         allow_self_handoff: bool = False) -> bool:
         """Send reply (possibly split into multiple parts) and broadcast.
 
         Channel-aware (plano 11): every leg goes through ``OutboundRouter`` so the
         reply lands on the conversation's own channel. Presence / @mentions are
         gated by ``ChannelCapabilities`` — a Cloud channel skips them silently.
+
+        ``allow_self_handoff`` (plano 122): ver ``_cycle_may_continue``. Perdoa só o
+        gate de banco; a época continua cortando o split a qualquer momento.
         """
         outbound = self.outbound
         ws_manager = self.ws_manager
@@ -469,10 +520,11 @@ class MessagingService:
             # também invalida o ciclo quando a ação foi um envio manual (que não
             # muda o gate persistido da conversa).
             if not await asyncio.to_thread(
-                    self._cycle_may_continue, channel_id, phone, abort_epoch):
-                logger.info("[Guard] resposta de %s/%s interrompida na parte %d/%d — "
-                            "gate fechado ou ciclo invalidado pelo operador",
-                            channel_id, phone, i + 1, len(parts))
+                    self._cycle_may_continue, channel_id, phone, abort_epoch,
+                    allow_self_handoff=allow_self_handoff):
+                logger.info("[Guard] resposta de %s/%s interrompida na parte %d/%d — %s",
+                            channel_id, phone, i + 1, len(parts),
+                            self._guard_reason(channel_id, phone, abort_epoch))
                 break
 
             # Track for echo-back filtering (key on the wire text we actually send)
@@ -855,7 +907,8 @@ class MessagingService:
 
     async def _send_with_typing_guard(self, channel_id: str, phone: str, reply: str, *,
                                       agent_key: str | None = None,
-                                      abort_epoch: int | None = None) -> bool:
+                                      abort_epoch: int | None = None,
+                                      allow_self_handoff: bool = False) -> bool:
         """Wait for typing to stop and send, returning whether any part was delivered.
 
         Plano 96 I3 — ÚLTIMO ponto reversível: entre o gate (lido antes do LLM) e
@@ -863,6 +916,9 @@ class MessagingService:
         humanizado. O veredito é reconsultado DEPOIS da espera e ANTES de ligar
         ``state.sending``. A task deixa de ser cancelável a partir daí, mas a geração
         de aborto e o gate são rechecados antes de cada parte, inclusive a primeira.
+
+        ``allow_self_handoff`` (plano 122) atravessa até o guard por-parte: sem isso
+        a despedida da transferência morreria aqui **ou** na parte 1/N.
         """
         state = self.state
         key = (channel_id, phone)
@@ -870,16 +926,18 @@ class MessagingService:
             abort_epoch = self._abort_epoch(channel_id, phone)
         await self._wait_typing_paused(channel_id, phone)
         if not await asyncio.to_thread(
-                self._cycle_may_continue, channel_id, phone, abort_epoch):
-            logger.info("[Guard] resposta da IA descartada para %s/%s — "
-                        "gate fechado ou ciclo invalidado pelo operador",
-                        channel_id, phone)
+                self._cycle_may_continue, channel_id, phone, abort_epoch,
+                allow_self_handoff=allow_self_handoff):
+            logger.info("[Guard] resposta da IA descartada para %s/%s — %s",
+                        channel_id, phone,
+                        self._guard_reason(channel_id, phone, abort_epoch))
             return False
         state.sending[key] = True
         try:
             return await self.send_reply(
                 channel_id, phone, reply, agent_key=agent_key,
-                abort_epoch=abort_epoch)
+                abort_epoch=abort_epoch,
+                allow_self_handoff=allow_self_handoff)
         finally:
             state.sending[key] = False
 
@@ -1089,7 +1147,14 @@ class MessagingService:
                                         sent = await self._send_with_typing_guard(
                                             channel_id, phone, result.reply,
                                             agent_key=result.agent_key,
-                                            abort_epoch=abort_epoch)
+                                            abort_epoch=abort_epoch,
+                                            allow_self_handoff=_turn_handed_off(
+                                                result.tool_calls))
+                                        # ⚠️ O takeover fica no predicado ESTRITO (plano
+                                        # 122 D4): um turno que terminou em transferência
+                                        # não é um "a IA assumiu" — o fio ficaria absurdo
+                                        # ("SISTEMA pausou a IA" seguido de "A IA assumiu
+                                        # a conversa"). Não propague o perdão para cá.
                                         if (sent and await asyncio.to_thread(
                                                 self._cycle_may_continue,
                                                 channel_id, phone, abort_epoch)):
@@ -1285,7 +1350,9 @@ class MessagingService:
                             sent = await self._send_with_typing_guard(
                                 channel_id, phone, result.reply,
                                 agent_key=result.agent_key,
-                                abort_epoch=abort_epoch)
+                                abort_epoch=abort_epoch,
+                                allow_self_handoff=_turn_handed_off(result.tool_calls))
+                            # Takeover no predicado ESTRITO — ver o call site de texto.
                             if (sent and await asyncio.to_thread(
                                     self._cycle_may_continue,
                                     channel_id, phone, abort_epoch)):

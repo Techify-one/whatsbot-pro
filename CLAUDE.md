@@ -391,6 +391,18 @@ Atribuir uma conversa a um atendente, desligar a IA ou simplesmente **enviar** u
 - **IA da nota privada**: `_run_private_ai` consulta o veredito **só** quando `reply_in_chat=True` (era o único caminho de saída sem gate nenhum), no fim do LLM e novamente antes de cada parte; também carrega o epoch capturado quando a task foi agendada. Bloqueado, grava um card `system_notice` explicando. Com `reply_in_chat=False` a resposta vira nota privada e nunca é gateada.
 - **O selo conta a verdade** ([conversationRows.js](web/static/js/services/conversationRows.js) `aiEffectivelyOn(row, {autoReply})`): helper PURO que espelha o gate — global off, `conv_ai_active` 0/false, **ou** `assignee_user_id` preenchido ⇒ "IA OFF". Consumido pelo selo da sidebar ([ContactList.js](web/static/js/components/contacts/ContactList.js)) e pela dimensão `ai` do filtro (selo e filtro divergirem seria o mesmo bug duas vezes). Dois estados só — não há "IA pausada".
 
+### A IA pode se despedir ao transferir (plano 122) — o perdão de escopo mínimo
+
+⚠️ **`transfer_to_human` fecha o gate DENTRO do turno** ([transfer_to_human.py:87-89](agent/tools/transfer_to_human.py) grava `ai_active=0`), e o guard acima, ao reconsultar, descartava a **despedida que aquele mesmo turno acabou de escrever** — a IA calando a si mesma. Não era só bloqueio: como o save só roda para `sent_parts`, a mensagem sumia sem rastro e nem o operador via no painel o que a IA queria dizer. Foram **226 transferências mudas** em produção entre 31/07 e 14/08 (de 178/178 com despedida na semana de 20/07 para 0/115 na de 03/08).
+
+O conserto é um kwarg **`allow_self_handoff`** em `_cycle_may_continue` / `_send_with_typing_guard` / `send_reply`, derivado pelo call site do próprio turno via `_turn_handed_off(result.tool_calls)` (predicado de módulo, exige `not skipped`). Regras que **não** podem ser mexidas:
+
+- **A época vem PRIMEIRO e o perdão nunca a alcança.** É o que preserva o plano 96 inteiro: toda tomada humana passa por `abort_ai_cycle`, que incrementa `state.ai_abort_epochs` **antes de qualquer outra coisa** — inclusive quando se recusa a cancelar a task por estar em `sending`/`processing` —, enquanto `transfer_to_human` não toca na época. Inverter as duas linhas devolve o bug do plano 96 **em silêncio**; travado por `test_perdao_nao_sobrevive_a_atribuicao_humana`.
+- **O perdão é parâmetro de chamada**, não `ContextVar` nem flag em `AppState`: morre no `return` e não vaza para o turno seguinte.
+- **O card "🤖 A IA assumiu a conversa" fica no predicado ESTRITO** — `maybe_emit_ai_takeover` NÃO recebe o perdão. Um turno que terminou em transferência não é um takeover; o fio ficaria absurdo (*"SISTEMA pausou a IA"* seguido de *"A IA assumiu a conversa"*). A assimetria é proposital e está comentada nos dois call sites.
+- Vale nos **três** caminhos de saída — batch de texto, batch de mídia e a IA da nota privada (que, sem isso, ainda gravava um card **falso** dizendo que *"um atendente assumiu a conversa"*).
+- O log do guard agora diz **qual** dos dois motivos cortou (`_guard_reason`: época × gate) — antes fundia os dois numa frase só.
+
 ## Fotos de perfil (avatars)
 
 [server/avatars.py](server/avatars.py) cacheia as fotos de perfil em disco em `statics/avatars/<phone>.jpg` (servidas pelo mount estático). Como o WhatsApp não emite evento de "foto mudou", a atualização é por re-fetch do GOWA (ao abrir a conversa e numa varredura periódica de fundo — `AVATAR_REFRESH_INTERVAL = 1800s` em [server/background.py](server/background.py)), sobrescrevendo o arquivo só quando os bytes diferem. O frontend faz cache-bust pelo mtime (`avatar_v`); uma mudança dispara o WS `avatar_updated` `{phone, v}` pra atualizar ao vivo sem reload.
