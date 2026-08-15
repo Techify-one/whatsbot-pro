@@ -375,7 +375,7 @@ class MessagingService:
         _allow_reopen = await apply_filter(
             "filter.conversation.before_reopen", True,
             {"phone": phone, "role": "assistant", "text": emit_text})
-        contact.add_message("assistant", content, media_type=kind,
+        _saved = contact.add_message("assistant", content, media_type=kind,
                             media_path=rel_path, status="operator", msg_id=msg_id,
                             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
                             reopen=(False if not _allow_reopen else None))
@@ -383,7 +383,8 @@ class MessagingService:
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": channel_id, "message": msg_data})
         await emit_with_filter("message.sent", {
-            "phone": phone, "text": emit_text, "msg_id": msg_id,
+            "phone": phone, "channel_id": channel_id, "text": emit_text, "msg_id": msg_id,
+            "conversation_id": (_saved or {}).get("conversation_id"),
             "media_type": kind, "media_path": rel_path,
             "source": "operator", "status": "operator",
             "ts": time.time(),
@@ -1109,7 +1110,9 @@ class MessagingService:
                     except Exception:
                         logger.exception("[Batch] falha ao re-emitir new_message pós-save para %s", phone)
                     await emit_with_filter("message.saved", {
-                        "phone": phone, "text": combined, "msg_id": last_msg_id,
+                        "phone": phone, "channel_id": channel_id,
+                        "text": combined, "msg_id": last_msg_id,
+                        "conversation_id": (saved or {}).get("conversation_id"),
                         "media_type": None, "media_path": None,
                         "is_group": contact.is_group,
                         "source": "batch_text",
@@ -1236,8 +1239,9 @@ class MessagingService:
                 except Exception:
                     logger.exception("[Batch] falha ao re-emitir new_message (mídia) pós-save para %s", phone)
                 await emit_with_filter("message.saved", {
-                    "phone": phone, "text": _saved_text,
+                    "phone": phone, "channel_id": channel_id, "text": _saved_text,
                     "msg_id": item.get("msg_id"),
+                    "conversation_id": (saved or {}).get("conversation_id"),
                     "media_type": _saved_media_type,
                     "media_path": _saved_media_path,
                     "media_extras": item.get("media_extras"),

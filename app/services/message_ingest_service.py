@@ -297,7 +297,7 @@ class MessageIngestService:
         reply_to = _filtered.reply_to_msg_id
 
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
-        await asyncio.to_thread(
+        _saved = await asyncio.to_thread(
             contact.add_message, "assistant", text,
             media_type=media_type, media_path=media_path, msg_id=msg_id,
             reply_to_msg_id=reply_to, status="operator")
@@ -312,6 +312,7 @@ class MessageIngestService:
             "phone": phone, "channel_id": channel_id, "message": broadcast_msg})
         await emit_with_filter("message.sent", {
             "phone": phone, "channel_id": channel_id, "text": text, "msg_id": msg_id,
+            "conversation_id": (_saved or {}).get("conversation_id"),
             "media_type": media_type, "media_path": media_path, "media_extras": media_extras,
             "source": "echo", "status": "operator", "ts": time.time(),
         })
@@ -536,6 +537,7 @@ class MessageIngestService:
             await emit_with_filter("message.saved", {
                 "phone": phone, "channel_id": channel_id, "text": ui_text,
                 "msg_id": msg_id, "media_type": media_type, "media_path": media_path,
+                "conversation_id": (saved or {}).get("conversation_id"),
                 "media_extras": media_extras, "is_group": event.is_group,
                 "group_jid": event.chat_id if event.is_group else None,
                 "source": "group_no_mention", "ts": time.time(),

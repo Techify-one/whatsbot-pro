@@ -38,6 +38,46 @@ trata versão pura como compatibilidade por MAJOR — semântica oposta. **No
 
 ---
 
+## 1.3.0 — 2026-08-15 · `channel_id`/`conversation_id` em `message.saved` e `message.sent`
+
+Aditiva. Dois campos **acrescentados** a payloads que já existem; quem não os lê
+não vê diferença, e todo manifest do parque (`">=1.0,<2.0"`) segue válido.
+
+### O problema
+
+O bus dizia *de quem* veio a mensagem (`phone`) e nunca *por onde*. Um plugin que
+precisasse da conversa tinha de resolvê-la por telefone —
+`contact_repo.get_by_phone` (que casa as variantes BR de 12↔13 dígitos e devolve
+`.first()` **sem `ORDER BY`**) seguido de `conversation_repo.get_open_for_contact`,
+que **ignora o inbox**. Com o mesmo cliente atendido em dois canais, o plugin
+escrevia na thread errada; com um par de contatos duplicados, qual contato voltava
+era indefinido. Seis plugins instalados em produção compartilhavam esse idioma
+(`protocolos`, `agendamento_retorno`, `retornos`, `trackify`, `janela_72h`,
+`utm_atendente`). O dado sempre existiu no escopo — o `ws_manager.broadcast`
+imediatamente acima de cada emit já carregava `channel_id`; só não era publicado.
+
+### O que mudou
+
+| Evento | Campos novos | Onde |
+|---|---|---|
+| `message.saved` | `channel_id`, `conversation_id` | `batch_text`, `batch_media`, `group_no_mention` |
+| `message.sent` | `channel_id`, `conversation_id` | `operator` (texto, mídia e sandbox), `private_ai`, `echo`, `template`, `retry` (só `channel_id`) |
+
+### O que o consumidor precisa saber
+
+- **`conversation_id` pode faltar.** Publicamos só onde o id está de fato resolvido
+  no escopo do call site. No `retry` (que apenas faz `UPDATE` de status numa row
+  existente) e na resposta da IA (`source="ai"`, cujo save acontece depois do
+  envio) ele **não** vem. Campo ausente é melhor que valor errado — trate `None`.
+- **`channel_id` agora vem em todos os sites**; antes vinha só em alguns
+  (`source="ai"`, `echo`, `group_no_mention`).
+- **Um plugin que queira exigir isto declara `">=1.3,<2.0"`** — e aí falha duro
+  (`load_error`) num core anterior, que é a garantia que a declaração compra. Quem
+  precisa carregar nos dois deve continuar em `">=1.0,<2.0"` e degradar: sem
+  `channel_id` no payload, cair no comportamento antigo.
+
+---
+
 ## 1.2.0 — 2026-08-12 · API interna plugin→plugin (`entry.services`)
 
 Tudo abaixo é **aditivo**. Nenhum plugin precisa mudar — `">=1.0,<2.0"` continua

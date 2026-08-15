@@ -659,7 +659,7 @@ O vocabulário da Meta que o core carregava (categorias, formatos de cabeçalho,
 
 ### Versionamento da API de plugins (`WHATSBOT_API_VERSION`)
 
-**Versão atual: `1.2.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
+**Versão atual: `1.3.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
 
 ⚠️ **A constante ficou congelada em `1.0.0` por 93 dias** (2026-05-10 → 2026-08-11) enquanto a superfície crescia de 35 para 75 eventos e de 0 para 24 filtros. Consequência: o guard de compat nunca rejeitou nada e **nenhum plugin conseguia declarar de que core ele precisa** — o `whatsapp_cloud` teve de degradar fechado em runtime porque não tinha como exigir o `ctx.extras.signature_authenticated` do plano 84. A regra em prosa existia desde 2026-06-29 e foi violada 8 dias depois, em silêncio. Por isso a disciplina agora tem dente, não só texto.
 
@@ -756,8 +756,8 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | Evento | Quando dispara | Payload chave |
 |--------|---------------|---------------|
 | `message.received` | Inbound user msg (inclui group sem @mention). **Emitido ANTES do save** — listener que precisa ler do DB deve usar `message.saved` | `phone, name, text, raw_text, msg_id, media_type, media_path, media_extras, is_group, group_jid, individual_phone, raw` |
-| `message.saved` | **NOVO** — emitido DEPOIS do INSERT no DB, em todos os 3 sites de save inbound (text batch, media batch, group_no_mention) | `phone, text, msg_id, media_type, media_path, media_extras, is_group, group_jid, source` — `source ∈ {batch_text, batch_media, group_no_mention}` |
-| `message.sent` | Resposta IA, operator send, image/audio panel, retry, private @ia, echo do próprio celular | `phone, text, msg_id, media_type, media_path, media_extras, source, status` — `source ∈ {ai, operator, private_ai, retry, echo}` |
+| `message.saved` | Emitido DEPOIS do INSERT no DB, nos 3 sites de save inbound (text batch, media batch, group_no_mention) | `phone, channel_id, conversation_id, text, msg_id, media_type, media_path, media_extras, is_group, group_jid, source` — `source ∈ {batch_text, batch_media, group_no_mention}` |
+| `message.sent` | Resposta IA, operator send, image/audio panel, retry, private @ia, template, echo do próprio celular | `phone, channel_id, conversation_id, text, msg_id, media_type, media_path, media_extras, source, status` — `source ∈ {ai, operator, private_ai, retry, template, echo}` |
 | `message.any` *(alias)* | Re-dispatch de `received` + `sent` com `direction: "in"\|"out"` | igual ao original + `direction` |
 | `message.reaction` | Reação emoji em mensagem | `id, phone, reaction, reacted_message_id, is_from_me` |
 | `message.edited` | Mensagem editada (inbound: cliente editou a própria) — o core JÁ atualiza `messages.content` + `edited_ts` e faz broadcast `message_edited` (GOWA/Telegram; Cloud não emite) | `id, phone, original_message_id, body` |
@@ -772,6 +772,8 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | `newsletter.event` | Eventos de newsletter | `subtype, raw` |
 | `chat.archived` | Arquivamento detectado no GOWA | `phone, archived` |
 | `connection.changed` | GOWA connect/disconnect/QR | `is_connected, is_logged_in, qr_required` |
+
+⚠️ **`channel_id` e `conversation_id` em `message.saved`/`message.sent` (API 1.3.0, plano 123)** — antes disso o bus dizia *de quem* veio a mensagem e nunca *por onde*, e um plugin que precisasse da conversa tinha de resolvê-la por telefone: `contact_repo.get_by_phone` (que casa as variantes BR de 12↔13 dígitos e devolve `.first()` **sem `ORDER BY`**) seguido de `conversation_repo.get_open_for_contact`, que **ignora o inbox**. Com o mesmo cliente em dois canais, o plugin escrevia na thread errada — foi o fechamento em cascata do `protocolos`. O dado sempre esteve no escopo (o `ws_manager.broadcast` logo acima de cada emit já o usava), só não era publicado. **`conversation_id` pode faltar**: só é publicado onde o id está de fato resolvido, então o `retry` (que só faz `UPDATE` de status) e a resposta da IA (`source="ai"`, cujo save é posterior ao envio) mandam apenas `channel_id` — trate `None`. Um plugin que EXIJA os campos declara `">=1.3,<2.0"` e falha duro num core anterior; quem precisa carregar nos dois fica em `">=1.0,<2.0"` e degrada para o caminho por telefone.
 
 **Eventos internos**:
 

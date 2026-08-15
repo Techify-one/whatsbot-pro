@@ -1006,6 +1006,8 @@ def register_routes(app, deps):
             await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
             await emit_with_filter("message.sent", {
                 "phone": phone, "text": message, "msg_id": None,
+                "channel_id": body.get("channel_id") or "default",
+                "conversation_id": (msg_data or {}).get("conversation_id"),
                 "media_type": None, "media_path": None,
                 "source": "operator", "status": "operator",
                 "reply_to_msg_id": reply_to,
@@ -1099,7 +1101,8 @@ def register_routes(app, deps):
 
         # Plugin event: manual operator send
         await emit_with_filter("message.sent", {
-            "phone": phone, "text": message, "msg_id": msg_id,
+            "phone": phone, "channel_id": channel_id, "text": message, "msg_id": msg_id,
+            "conversation_id": (msg_data or {}).get("conversation_id"),
             "media_type": None, "media_path": None,
             "source": "operator", "status": "operator",
             "reply_to_msg_id": reply_to,
@@ -1492,7 +1495,8 @@ def register_routes(app, deps):
                 "phone": phone, "channel_id": channel_id, "message": msg_data,
             })
             await emit_with_filter("message.sent", {
-                "phone": phone, "text": part, "msg_id": msg_id,
+                "phone": phone, "channel_id": channel_id, "text": part, "msg_id": msg_id,
+                "conversation_id": (msg_data or {}).get("conversation_id"),
                 "media_type": None, "media_path": None,
                 "source": "private_ai", "status": "sent",
                 "ts": time.time(),
@@ -1973,7 +1977,10 @@ def register_routes(app, deps):
 
         state.msg_count += 1
         await emit_with_filter("message.sent", {
-            "phone": phone, "text": message, "msg_id": msg_id,
+            "phone": phone, "channel_id": channel_id, "text": message, "msg_id": msg_id,
+            # `conversation_id` fica de fora: o retry só faz UPDATE de status numa row
+            # que já existe, então não há id de conversa resolvido no escopo — e o do
+            # body é do cliente. Campo ausente é melhor que valor errado (plano 123 F2·2).
             "media_type": None, "media_path": None,
             "source": "retry", "status": "sent",
             "ts": time.time(),

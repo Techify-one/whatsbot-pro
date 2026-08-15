@@ -388,7 +388,8 @@ async def send_template(deps, channel_id: str, *, phone: str, template_name: str
     except Exception:
         pass
     await emit_with_filter("message.sent", {
-        "phone": phone, "text": preview, "msg_id": msg_id,
+        "phone": phone, "channel_id": channel_id, "text": preview, "msg_id": msg_id,
+        "conversation_id": (msg_data or {}).get("conversation_id"),
         "media_type": m_kind, "media_path": m_path,
         "source": "template", "status": "operator",
         "template_name": template_name, "ts": time.time(),

@@ -42,7 +42,15 @@ logger = logging.getLogger(__name__)
 # Todo manifest do parque declara ``">=1.0,<2.0"`` e segue compatível. ⚠️ Um
 # plugin que declare ``">=1.2"`` FALHA DURO num core anterior (o manifest levanta
 # ⇒ load_error), então só declare quando o plugin for inútil sem os serviços.
-WHATSBOT_API_VERSION = "1.2.0"
+#
+# 1.3.0: ADITIVA — ``message.saved`` e ``message.sent`` passam a carregar
+# ``channel_id`` e ``conversation_id`` (plano 123 F2). Antes disso o plugin só
+# recebia ``phone`` e tinha de adivinhar a thread por telefone — o que, num
+# contato atendido em dois canais (ou num par duplicado 12↔13 dígitos), escolhia
+# a conversa errada. Campo ACRESCENTADO a payload existente: quem não lê não vê
+# diferença. ``conversation_id`` pode vir ausente/``None`` onde o id não está no
+# escopo do call site (retry, resposta da IA) — o consumidor tem de tolerar.
+WHATSBOT_API_VERSION = "1.3.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")
