@@ -30,11 +30,29 @@
 // Behavior-preserving para o caminho de 1 item: mesmas formas de mensagem
 // otimista (sandbox vs operator vs nota privada), mesmo blob/object-URL
 // handling, mesmo steering de `session_window_closed`.
+//
+// Plano 124: a legenda deixou de morar aqui. A fila virou uma BANDEJA que
+// convive com o compositor (ela não o substitui mais), então o texto digitado
+// no compositor É a legenda — `confirmQueue(caption)` a recebe por parâmetro e
+// o estado `mediaCaption` deixou de existir. Duas consequências:
+//
+//   • a janela de 24h fechada NÃO descarta mais a fila — com o texto servindo de
+//     legenda, limpar significaria perder texto E anexos de uma vez só por ter
+//     esbarrado na janela;
+//   • a legenda de uma NOTA PRIVADA carrega as menções internas (@atendente/
+//     @time): as rotas `/private-image` e `/private-document` sempre aceitaram
+//     `mentions`, só ninguém as mandava daqui.
+//
+// ⚠️ Nenhuma das duas tem teste automatizado — este repo não tem harness de
+// montagem de componente (sem build step, sem jsdom). A parte testável da
+// decisão de envio mora em `services/composerSubmit.js`; aqui, a rede é o
+// roteiro manual do plano 124.
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../../services/api.js';
 import { buildQueueItems, audioQueueItem, progressLabel } from '../../../services/mediaQueue.js';
 import { applyUploadLimits, limitsMessage, MAX_FILES_PER_DROP } from '../../../services/uploadLimits.js';
 import { checkMediaFile, limitsSummary, isAttachmentOfKind } from '../../../services/mediaLimits.js';
+import { captionTargetIndex } from '../../../services/composerSubmit.js';
 import { notify } from '../../../services/notify.js';
 
 /**
@@ -53,12 +71,17 @@ import { notify } from '../../../services/notify.js';
  * @param {()=>void} opts.openTemplatePicker
  * @param {()=>Promise<any>|any} [opts.onSent] - chamado após ao menos um ACK bem-sucedido.
  * @param {Object|null} opts.mediaLimits - limites por tipo declarados pelo canal.
+ * @param {((text:string)=>any)|null} [opts.collectMentions] - menções internas da legenda (nota privada).
+ * @param {(()=>void)|null} [opts.resetMentions] - zera as menções escolhidas após enviar.
+ * @param {(()=>void)|null} [opts.onQueued] - um gesto acabou de ACRESCENTAR anexo(s)
+ *   à bandeja (plano 124 · F8). Chamado UMA vez por gesto e só quando algo de fato
+ *   entrou; o consumidor devolve o foco ao compositor para o `Enter` enviar.
  */
 export function useMediaUpload({
   api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
   mode = 'reply', aiReadPrivate = false, aiReplyInChat = true,
   setContactData, updateMsgByLocalId, openTemplatePicker, onSent = null,
-  mediaLimits = null,
+  mediaLimits = null, collectMentions = null, resetMentions = null, onQueued = null,
 }) {
   const [sending, setSending] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
@@ -77,8 +100,8 @@ export function useMediaUpload({
   // bytes — P5; a granularidade é o arquivo).
   const [sentCount, setSentCount] = useState(0);
   const [sendTotal, setSendTotal] = useState(0);
-  // Legenda do lote (P3 — compartilhada no v1; áudio nunca leva legenda).
-  const [mediaCaption, setMediaCaption] = useState('');
+  // A legenda do lote NÃO mora mais aqui (plano 124): é o texto do compositor,
+  // entregue a `confirmQueue(caption)` no momento do envio.
   const fileInputRef = useRef(null);
   const docInputRef = useRef(null);
   const videoInputRef = useRef(null);
@@ -217,6 +240,15 @@ export function useMediaUpload({
 
     // O updater fica PURO (preact pode reexecutá-lo): nada de efeito colateral.
     setPendingQueue(prev => prev.concat(keep));
+    // Plano 124 · F8 — aviso de "entrou anexo por um GESTO do operador". É de
+    // propósito um callback e não um `useEffect` sobre `pendingQueue.length`:
+    // o efeito também dispararia ao remover um item e ao esvaziar a fila no
+    // envio, roubando o foco em dois momentos que ninguém pediu.
+    //
+    // Com algum arquivo RECUSADO o foco não se move: o popup de recusa acabou de
+    // abrir, e devolver o foco ao compositor atrás dele deixaria um `Enter`
+    // distraído enviar o lote sem o operador ter lido o aviso.
+    if (onQueued && !firstBad) onQueued();
     return keep.length;
   }
 
@@ -271,6 +303,11 @@ export function useMediaUpload({
   }
 
   // Audio path: the recorder hook produces { type:'audio', blob, filename, previewUrl }.
+  //
+  // Substituir a fila (em vez de acrescentar) é seguro porque o microfone só
+  // existe no compositor quando NÃO há nada pendente — com bandeja cheia o botão
+  // já é o de enviar. Se essa condição mudar no `Composer`, isto vira perda
+  // silenciosa de anexos e precisa virar "acrescenta" ou "recusa com aviso".
   function setPendingAudio(item) {
     if (!item) return;
     if (!mediaAllowed({ name: item.filename, size: item.blob && item.blob.size }, 'audio')) {
@@ -280,6 +317,9 @@ export function useMediaUpload({
     setPendingQueue([audioQueueItem({
       blob: item.blob, filename: item.filename, previewUrl: item.previewUrl,
     })]);
+    // Idem F8: um clipe recém-gravado também responde ao `Enter` (o texto vai
+    // como mensagem separada — `text_then_media`).
+    if (onQueued) onQueued();
   }
 
   /** Remove um item da fila (botão "×" na prévia), liberando o objectURL. */
@@ -298,11 +338,16 @@ export function useMediaUpload({
       }
       return [];
     });
-    setMediaCaption('');
   }
 
   // ── Envio de UM item (miolo reusado pela fila) ──────────────────
-  async function sendOne(item, caption) {
+  /**
+   * @param {any} item
+   * @param {string} caption
+   * @param {{mentions?:any[], mention_inbox?:boolean}|null} [mentions]
+   *   Menções internas da legenda — só a NOTA PRIVADA as aceita.
+   */
+  async function sendOne(item, caption, mentions = null) {
     const isPrivate = mode === 'private';
     const isPrivateAudio = item.kind === 'audio' && isPrivate;
     const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -329,12 +374,19 @@ export function useMediaUpload({
     // provider sabe enviar.
     const kind = (item.kind === 'video' && !api.sendVideo) ? 'document' : item.kind;
 
+    // Menções internas (@atendente / @time) que o operador escreveu na legenda.
+    // Só as rotas de nota privada as aceitam — ver o cabeçalho do arquivo.
+    const mentionOpts = mentions
+      ? { mentions: mentions.mentions, mentionInbox: mentions.mention_inbox }
+      : {};
+
     let optimistic, sendPromise;
     if (kind === 'image' && isPrivate) {
       // Imagem como nota privada (só no painel).
       optimistic = { ...privateNote, content: caption || '[Imagem]',
                      media_type: 'image', media_path: localUrl };
-      sendPromise = sendPrivateImage(phone, item.file, caption, { conversationId, channelId });
+      sendPromise = sendPrivateImage(phone, item.file, caption,
+                                     { conversationId, channelId, ...mentionOpts });
     } else if ((kind === 'document' || kind === 'video') && isPrivate) {
       // Documento/vídeo como nota privada (só no painel).
       const docContent = caption
@@ -342,7 +394,8 @@ export function useMediaUpload({
         : `[Documento enviado: ${item.filename}]`;
       optimistic = { ...privateNote, content: docContent,
                      media_type: 'document', media_path: localUrl };
-      sendPromise = sendPrivateDocument(phone, item.file, caption, { conversationId, channelId });
+      sendPromise = sendPrivateDocument(phone, item.file, caption,
+                                        { conversationId, channelId, ...mentionOpts });
     } else if (kind === 'image') {
       optimistic = { ...base, content: caption, media_type: 'image', media_path: localUrl };
       sendPromise = api.sendImage(phone, item.file, caption, conversationId, channelId);
@@ -430,9 +483,45 @@ export function useMediaUpload({
         return { ok: false, error: res.error, rejected: true };
       }
 
-      updateMsgByLocalId(localId, () => sandbox
-        ? { _status: res.ok ? null : 'failed' }
-        : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
+      // Identidade estável na bolha otimista — é o que impede a mídia de
+      // aparecer DUPLICADA no fio até o F5.
+      //
+      // O caminho de TEXTO (`useComposer`) sempre adotou o `msg_id` que o POST
+      // devolve; o de mídia nunca adotou, embora `/send-image`, `/send-audio` e
+      // `/send-document` também o devolvam. Sem `msg_id` e sem `_id`, a bolha
+      // não tem identidade nenhuma, e a reconciliação do broadcast `new_message`
+      // cai na heurística legada de `sameMessage`: mesmo papel + mesmo conteúdo
+      // dentro de 30s. Ela falha em três situações reais e cada uma vira uma
+      // segunda bolha idêntica:
+      //   • o upload demora mais de 30s (arquivo grande / uplink lento) — a
+      //     bolha carimba `ts` no INÍCIO do envio e o servidor no fim;
+      //   • relógio do cliente defasado do servidor (o mesmo bug que o plano 53
+      //     consertou nas notas privadas, aqui sem o `_id` que o salvou lá);
+      //   • o conteúdo diverge por construção — vídeo (`[Vídeo]` na bolha, `""`
+      //     no servidor) e documento sem legenda.
+      // Com o `msg_id` adotado, o WS reconcilia pela identidade e a heurística
+      // deixa de importar. Sandbox não tem id de provedor: segue no caminho antigo.
+      const ackMsgId = (!sandbox && res && res.ok && res.data && res.data.msg_id) || null;
+      if (ackMsgId) {
+        setContactData(prev => {
+          if (!prev || !prev.messages) return prev;
+          // A cópia do servidor pode ter chegado ANTES do ACK e não ter casado
+          // com a bolha (é exatamente o cenário do bug): aí a bolha é descartada
+          // em vez de virar a segunda metade do par.
+          const serverCopyArrived = prev.messages.some(
+            m => m.msg_id === ackMsgId && m._localId !== localId);
+          const messages = serverCopyArrived
+            ? prev.messages.filter(m => m._localId !== localId)
+            : prev.messages.map(m => m._localId === localId
+                ? { ...m, _status: null, status: 'operator', msg_id: ackMsgId }
+                : m);
+          return { ...prev, messages };
+        });
+      } else {
+        updateMsgByLocalId(localId, () => sandbox
+          ? { _status: res.ok ? null : 'failed' }
+          : { _status: res.ok ? null : 'failed', status: res.ok ? 'operator' : 'failed' });
+      }
       if (res && !res.ok && res.data && res.data.reason === 'session_window_closed'
           && conversationId != null) {
         openTemplatePicker();
@@ -450,33 +539,42 @@ export function useMediaUpload({
   // Falha parcial (P4): NÃO aborta o lote — marca o item como falho na bolha e
   // segue para o próximo. A exceção é a janela de 24h fechada, que vale para a
   // conversa inteira: aí para e abre o seletor de template.
-  async function confirmQueue() {
+  /** @param {string} [captionArg] - legenda do lote (o texto do compositor). */
+  async function confirmQueue(captionArg = '') {
     if (!pendingQueue.length || sending) return false;
     const isPrivate = mode === 'private';
     // 24h window closed (WhatsApp Cloud): media also requires a template.
+    // ⚠️ A fila NÃO é descartada aqui (plano 124): com o texto do compositor
+    // servindo de legenda, limpar significaria jogar fora texto E anexos de uma
+    // vez só por ter esbarrado na janela. O operador escolhe o template — ou
+    // desiste — com o trabalho dele intacto.
     if (sessionClosed && !isPrivate) {
-      cancelPendingMedia();
       openTemplatePicker();
       return false;
     }
     const queue = pendingQueue;
-    const caption = mediaCaption.trim();
+    const caption = String(captionArg || '').trim();
+    // Menções internas só valem para a nota privada; resolvê-las fora disso
+    // gastaria trabalho para um destino que não as aceita.
+    const mentions = (isPrivate && caption && collectMentions)
+      ? collectMentions(caption) : null;
     setPendingQueue([]);
-    setMediaCaption('');
     setSentCount(0);
     setSendTotal(queue.length);
     setSending(true);
+
+    // A legenda vai num item só, e é o ÚLTIMO que a aceita — regra pura em
+    // `captionTargetIndex`, compartilhada com a bandeja para que o selo mostrado
+    // ao operador e o envio nunca discordem. `done` é o índice do item corrente
+    // (ele só é incrementado depois do envio).
+    const captionIndex = caption ? captionTargetIndex(queue) : -1;
 
     let done = 0;
     let failures = 0;
     let rejected = 0;
     for (const item of queue) {
-      // Legenda compartilhada (P3) vai só no PRIMEIRO item — repeti-la em cada
-      // um dos 5 arquivos poluiria a conversa do cliente (mesmo critério do
-      // Telegram, que legenda o álbum, não cada foto). Áudio é nota de voz:
-      // /send-audio não aceita legenda (GOWA).
-      const itemCaption = (item.kind === 'audio' || done > 0) ? '' : caption;
-      const res = await sendOne(item, itemCaption);
+      const itemCaption = done === captionIndex ? caption : '';
+      const res = await sendOne(item, itemCaption, itemCaption ? mentions : null);
       done += 1;
       setSentCount(done);
       if (!res.ok) failures += 1;
@@ -494,16 +592,13 @@ export function useMediaUpload({
     setSending(false);
     setSentCount(0);
     setSendTotal(0);
+    if (mentions && resetMentions) resetMentions();
     const successes = done - failures;
     if (successes > 0 && onSent) {
       try { await onSent(); } catch (_) { /* envio confirmou; recarga é best-effort */ }
     }
     return successes > 0;
   }
-
-  // Nome antigo mantido (o Composer e os testes o conhecem): confirmar a
-  // "mídia pendente" é confirmar a fila inteira.
-  const confirmPendingMedia = confirmQueue;
 
   // Libera os objectURLs vivos quando a conversa é trocada / o painel desmonta.
   // O cleanup lê a fila por REF (ver `queueRef` lá em cima).
@@ -519,11 +614,10 @@ export function useMediaUpload({
     pendingQueue, setPendingQueue, pendingMedia, setPendingAudio, removePendingItem,
     rejection, dismissRejection,
     sentCount, sendTotal, sendProgressLabel: sending ? progressLabel(sentCount, sendTotal) : '',
-    mediaCaption, setMediaCaption,
     fileInputRef, docInputRef, videoInputRef,
     handleAttachClick, pickImage, pickDocument, pickVideo,
     handleFileSelected, handleDocSelected, handleVideoSelected, handlePaste,
     requestImageSend, requestDocumentSend, requestVideoSend, requestFilesDrop,
-    cancelPendingMedia, confirmPendingMedia, confirmQueue,
+    cancelPendingMedia, confirmQueue,
   };
 }

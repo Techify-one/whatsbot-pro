@@ -2,7 +2,7 @@ import { h } from 'preact';
 import { useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { SendIcon, EmojiIcon, AttachIcon, MicIcon, StopIcon, TemplateIcon } from './icons.js';
-import { MediaQueuePreview } from './MediaQueuePreview.js';
+import { MediaTray } from './MediaTray.js';
 import { EmojiPicker } from './EmojiPicker.js';
 import { MediaRejectedModal } from './MediaRejectedModal.js';
 import { hasPermission } from '../../utils/permissions.js';
@@ -28,6 +28,14 @@ function formatRecordTime(secs) {
 //
 // Receives the hook return objects so each piece of state stays where it lives;
 // this component is presentational + event wiring only.
+//
+// ⚠️ Plano 124 — a barra de entrada NÃO some quando há anexo pendente. Ela sumia
+// (a fila renderizava no lugar dela), e era essa troca que fazia o texto já
+// digitado desaparecer da tela e matava o `onPaste` — que vive na `<textarea>` e
+// portanto ia junto, impedindo colar um SEGUNDO arquivo. Hoje a bandeja
+// (`MediaTray`) é uma faixa acima do `<form>` e o texto do compositor é a
+// legenda do lote. O único estado que ainda substitui a barra é a GRAVAÇÃO de
+// áudio, que é modal de verdade.
 export function Composer({
   sandbox, canSend, templatesSupported, sessionClosed,
   composer, autocomplete, media, audio, quotedInfo, openTemplatePicker, handleKeyDown,
@@ -45,14 +53,18 @@ export function Composer({
     mentionLabel, applyMention, applyQuickReply,
   } = autocomplete;
   const {
-    attachMenuOpen, attachMenuRef, pendingQueue, mediaCaption, setMediaCaption,
+    attachMenuOpen, attachMenuRef, pendingQueue,
     fileInputRef, docInputRef, videoInputRef, sending, sendProgressLabel, removePendingItem,
     handleAttachClick, pickImage, pickDocument, pickVideo,
     handleFileSelected, handleDocSelected, handleVideoSelected,
-    handlePaste, cancelPendingMedia, confirmPendingMedia,
+    handlePaste, cancelPendingMedia,
     rejection, dismissRejection,
   } = media;
   const hasPending = pendingQueue.length > 0;
+  // Áudio é o único anexo que não aceita legenda (`/send-audio` é nota de voz),
+  // então o placeholder promete o que o envio de fato faz: mandar o texto como
+  // mensagem separada, antes do clipe.
+  const audioOnlyPending = hasPending && pendingQueue.every(i => i.kind === 'audio');
   const { recording, recordDuration, handleMicClick } = audio;
 
   // Highlight overlay (WYSIWYG-in-place): a mirror <div> renders the typed text
@@ -102,22 +114,15 @@ export function Composer({
     <!-- Anexo recusado pelas regras do canal (tamanho/formato) -->
     <${MediaRejectedModal} rejection=${rejection} onClose=${dismissRejection} />
 
-    <!-- Prévia da fila de mídia (plano 64 · F7) -->
+    <!-- Bandeja de anexos (plano 64 · F7; virou faixa no plano 124) -->
     ${hasPending && canSend ? html`
-      <${MediaQueuePreview}
+      <${MediaTray}
         queue=${pendingQueue}
-        caption=${mediaCaption}
-        setCaption=${setMediaCaption}
         onRemove=${removePendingItem}
         onCancel=${cancelPendingMedia}
-        onConfirm=${confirmPendingMedia}
         sending=${sending}
-        progressLabel=${sendProgressLabel}
-        mode=${mode}
-        aiReadPrivate=${aiReadPrivate}
-        setAiReadPrivate=${setAiReadPrivate}
-        aiReplyInChat=${aiReplyInChat}
-        setAiReplyInChat=${setAiReplyInChat}
+        escClears=${!hasText}
+        hasText=${hasText}
       />
     ` : ''}
 
@@ -140,7 +145,7 @@ export function Composer({
           Você não pode enviar mensagens neste grupo
         </span>
       </div>
-    ` : hasPending ? '' : recording ? html`
+    ` : recording ? html`
       <div class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
         <div class="flex-1 flex items-center gap-3 mx-[5px]">
           <span class="w-[10px] h-[10px] rounded-full bg-red-500 animate-pulse shrink-0"></span>
@@ -354,14 +359,20 @@ export function Composer({
             onKeyDown=${handleKeyDown}
             onPaste=${handlePaste}
             onScroll=${(e) => syncMirror(e.target, mirrorRef.current)}
-            placeholder=${mode === 'private' ? 'Mensagem privada' : 'Digite uma mensagem'}
+            placeholder=${hasPending
+              ? (audioOnlyPending ? 'Mensagem (enviada antes do áudio)' : 'Adicionar uma legenda (opcional)')
+              : mode === 'private' ? 'Mensagem privada' : 'Digite uma mensagem'}
             style="caret-color: rgb(var(--wa-text));"
             class="relative z-[1] box-border w-full block bg-transparent text-transparent text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px]"
           ></textarea>
         </div>
-        ${hasText ? html`
+        ${(hasText || hasPending) ? html`
+          <!-- Sem "disabled" durante o lote: mandar uma mensagem de texto
+               enquanto os anexos sobem sempre foi possível e continua sendo.
+               Quem impede um segundo disparo da FILA é o submitPlan. -->
           <button
             type="submit"
+            title=${hasPending ? (hasText ? 'Enviar anexo com a legenda' : 'Enviar anexo') : 'Enviar'}
             class="p-[8px] shrink-0 transition-colors"
             style="color: ${mode === 'private' ? '#a78bfa' : '#00a884'};"
           >

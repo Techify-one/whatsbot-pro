@@ -29,10 +29,11 @@ import {
  * @param {string} opts.input
  * @param {(v:string)=>void} opts.setInput
  * @param {{ current: HTMLTextAreaElement|null }} opts.inputRef
+ * @param {boolean} [opts.mentionsUnsupported] - o destino atual do texto não aceita menção.
  */
 export function useTokenAutocomplete({
   phone, sandbox, contact, groupParticipantsChanged, input, setInput, inputRef,
-  mode = 'reply',
+  mode = 'reply', mentionsUnsupported = false,
 }) {
   // Group @mention autocomplete: list of participants + open menu state.
   const [members, setMembers] = useState([]);
@@ -137,8 +138,16 @@ export function useTokenAutocomplete({
 
   // Detect an "@token" at the cursor and open/close the mention menu. Habilitado
   // em grupos (menção de participante) OU no modo privado (menção de atendente/time).
+  //
+  // ⚠️ Plano 124 — com anexo na bandeja, o texto do compositor é a LEGENDA. As
+  // rotas de mídia para o cliente (`/send-image` e irmãs) não recebem `mentions`,
+  // então um "@Fulano" ali sairia como texto literal. O menu é suprimido nesse
+  // caso para não prometer o que o envio não entrega. A NOTA PRIVADA é a
+  // exceção: `/private-image` e `/private-document` aceitam menções, e o
+  // `useMediaUpload` passa a mandá-las.
   function updateMentionMenu(el, val) {
     if (sandbox || !(isPrivate || (contact && contact.is_group))) { setMentionMenu(null); return; }
+    if (mentionsUnsupported) { setMentionMenu(null); return; }
     const pos = (el && el.selectionStart != null) ? el.selectionStart : val.length;
     const tok = detectMentionToken(val.slice(0, pos), pos);
     if (tok) setMentionMenu({ query: tok.query, start: tok.start, index: 0 });

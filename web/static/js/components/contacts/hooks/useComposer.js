@@ -93,6 +93,18 @@ export function useComposer({
     setDraft(draftKeyRef.current, val);
   }, [applyInput]);
 
+  // Consome o texto do compositor: devolve o que estava lá e limpa estado +
+  // rascunho de uma vez (plano 124). Existe porque o envio de MÍDIA passou a
+  // usar o texto como legenda e precisa da mesma limpeza que `handleSend` faz
+  // — sem que o `ContactDetail` mexa no rascunho por fora, o que duplicaria a
+  // regra de qual chave de rascunho vale agora.
+  const consumeInput = useCallback(() => {
+    const val = inputValueRef.current;
+    applyInput('');
+    clearDraft(draftKeyRef.current);
+    return val;
+  }, [applyInput]);
+
   // Troca de conversa: hidrata o compositor com o rascunho salvo (ou esvazia).
   // Layout effect — o operador nunca vê o texto da conversa anterior piscar.
   useLayoutEffect(() => {
@@ -363,18 +375,25 @@ export function useComposer({
     return false;
   }
 
-  // Stop typing presence imperatively (used when sending media before the form).
+  // Stop typing presence imperatively (envio de mídia, que não passa pelo
+  // `handleSend`). Cancelar o debounce sem avisar o provedor deixaria o
+  // "Fulano está digitando…" dos outros atendentes pendurado até expirar por
+  // segurança (15s) — por isso o 'stop' é EMITIDO aqui, não só cancelado.
   function stopPresence() {
+    const wasTyping = !!presenceTimerRef.current;
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
     presenceStartedAtRef.current = 0;
+    if (wasTyping && phone && !sandbox) {
+      sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
+    }
   }
 
   return {
     input, setInput, mode, setMode,
     aiReadPrivate, setAiReadPrivate, aiReplyInChat, setAiReplyInChat,
     replyingTo, setReplyingTo, emojiOpen, setEmojiOpen,
-    inputRef, emojiRef,
+    inputRef, emojiRef, consumeInput,
     insertEmoji, handleInputChange, handleSend, handleRetry, stopPresence,
   };
 }

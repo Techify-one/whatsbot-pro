@@ -2297,7 +2297,13 @@ def register_routes(app, deps):
                     status=422, data={"reason": "bad_codec"})
             return _err(f"{verb} ao enviar vídeo: {err}", status=500)
         logger.info("[Send] Video sent to %s", phone)
-        return _ok({"message": "Vídeo enviado."})
+        # `msg_id` como nas irmãs (imagem/áudio/documento): o painel adota o id na
+        # bolha otimista para o broadcast `new_message` reconciliar por identidade
+        # em vez da heurística conteúdo+30s — sem ele o vídeo aparecia duas vezes
+        # (a bolha diz "[Vídeo]", a cópia do servidor vem com a legenda vazia).
+        return _ok({"message": "Vídeo enviado.",
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/presence")
     async def send_presence_to_contact(phone: str, body: dict, request: Request):
