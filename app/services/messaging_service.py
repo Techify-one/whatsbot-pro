@@ -354,9 +354,11 @@ class MessagingService:
             return {"ok": False, "error": str(e), "kind": "unexpected"}
 
         # msg_id is the channel external id (None for sandbox). Mark it processed so
-        # the webhook ignores the WhatsApp echo of our own message.
+        # the webhook ignores the echo of our own message. The key MUST carry the
+        # channel prefix: it is the format ``_ingest_echo`` looks up, and the raw id
+        # registered here before never matched anything (dead guard).
         if msg_id:
-            state.processed_messages.add(msg_id)
+            state.processed_messages.add(f"{channel_id}:{msg_id}")
 
         rel_path = f"statics/outbox/{dest.name}"
         msg_data = {

@@ -891,9 +891,16 @@ export function useConversationWsEvents(opts) {
       // An inbound (customer) message reopens the 24h free-text window — refresh
       // the compositor hint live so the operator isn't stuck on "fora da janela"
       // (WhatsApp Cloud) until a manual reload.
+      // A janela da IA (capability `ai_window_hours`) reabre pelo MESMO inbound e
+      // tem de acompanhar aqui: senão os toggles "IA lê"/"IA responde no chat"
+      // seguem escondidos depois de o cliente voltar a escrever, até um reload
+      // manual. Um inbound que acaba de chegar deixa qualquer janela aberta
+      // (canal com janela: 0h de idade; canal sem janela: sempre aberta), então
+      // `true` vale para todo provider — mesmo raciocínio do `session_open`.
       if (message.role === 'user') {
-        setContactData(prev => (prev && prev.session_open !== true)
-          ? { ...prev, session_open: true } : prev);
+        setContactData(prev => (prev
+          && (prev.session_open !== true || prev.ai_window_open !== true))
+          ? { ...prev, session_open: true, ai_window_open: true } : prev);
       }
     }
 

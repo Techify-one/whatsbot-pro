@@ -50,7 +50,22 @@ logger = logging.getLogger(__name__)
 # a conversa errada. Campo ACRESCENTADO a payload existente: quem não lê não vê
 # diferença. ``conversation_id`` pode vir ausente/``None`` onde o id não está no
 # escopo do call site (retry, resposta da IA) — o consumidor tem de tolerar.
-WHATSBOT_API_VERSION = "1.4.0"
+# 1.4.0: ADITIVA — ``screens[].width`` no manifest (``normal``/``wide``/``full``,
+# só para screen ``config: true``). Campo OPCIONAL: screen que não o declara
+# continua byte-idêntica, e o parser de um core anterior descarta a chave (o dict
+# de screen é whitelist) ⇒ modal no tamanho de sempre. Não declare ``">=1.4"`` só
+# por causa dele.
+#
+# 1.5.0: ADITIVA — ``ChannelCapabilities.ai_window_hours`` (default 0 = sem
+# restrição, comportamento idêntico ao de antes) e o avaliador
+# ``OutboundRouter.ai_window_open``. Declara a janela dentro da qual a IA do canal
+# pode falar, que NÃO é derivável das outras duas: nos canais Meta o operador
+# escreve por 7 dias com a tag HUMAN_AGENT enquanto o ``filters.py`` do plugin já
+# calou a IA às 24h. Provider que não a declara não muda em nada. ⚠️ O plugin que
+# a declarar deve fazê-lo condicionalmente (``dataclasses.fields``) se quiser
+# continuar carregando num core anterior — passar o kwarg a um
+# ``ChannelCapabilities`` sem o campo levanta ``TypeError`` no import.
+WHATSBOT_API_VERSION = "1.5.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

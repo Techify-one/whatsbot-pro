@@ -173,6 +173,26 @@ test('shapeConvData: passa has_more do payload (keyset scroll-up)', () => {
   assert.equal(shapeConvData({ has_more: false }).has_more, false);
 });
 
+// A janela da IA (capability `ai_window_hours`) fecha ANTES da do operador nos
+// canais Meta: com a tag HUMAN_AGENT ligada `session_open` continua `true` por 7
+// dias enquanto a IA já está calada desde as 24h. Esquecer a chave nesta
+// whitelist fazia o compositor ler `undefined` e seguir oferecendo os toggles
+// "IA lê"/"IA responde no chat" no 2º–7º dia, com a instrução do atendente
+// descartada em silêncio pelo filtro do plugin.
+test('shapeConvData: preserva ai_window_open (divergente de session_open)', () => {
+  const d = shapeConvData({ session_open: true, ai_window_open: false });
+  assert.equal(d.session_open, true);
+  assert.equal(d.ai_window_open, false);
+});
+
+test('shapeConvData: ai_window_open ausente fica undefined (não vira false)', () => {
+  // Canal sem restrição (GOWA/Telegram/Cloud) ou core antigo: só um `false`
+  // explícito bloqueia — coagir para bool aqui esconderia os toggles em todo
+  // canal que nunca teve janela de IA.
+  assert.equal(shapeConvData({}).ai_window_open, undefined);
+  assert.equal(shapeConvData({ ai_window_open: true }).ai_window_open, true);
+});
+
 // ── clauseMatches ──────────────────────────────────────────────────
 const NOW = 1_000_000;  // unix seconds
 

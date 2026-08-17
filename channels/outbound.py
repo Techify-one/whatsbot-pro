@@ -66,6 +66,30 @@ class OutboundRouter:
         hours = caps.session_window_hours
         if by_human:
             hours = max(hours, getattr(caps, "human_window_hours", 0) or 0)
+        return self._window_open(hours, last_inbound_ts)
+
+    def ai_window_open(self, channel_id: str, last_inbound_ts: float | None) -> bool:
+        """Whether the AI is allowed to speak on ``channel_id`` right now.
+
+        A TERCEIRA janela, independente das outras duas (``capabilities.
+        ai_window_hours``): Messenger/Instagram calam a IA 24h depois do último
+        inbound — o ``filters.py`` deles devolve ``None`` em ``filter.llm.messages``
+        e aborta o turno inteiro —, enquanto o ATENDENTE segue podendo escrever por
+        até 7 dias com a tag ``HUMAN_AGENT``. Quem cala continua sendo o plugin;
+        isto aqui existe só para o painel não OFERECER ao operador uma instrução
+        para a IA que será descartada em silêncio.
+
+        ``ai_window_hours == 0`` (GOWA, Telegram, WhatsApp Cloud) ⇒ sempre aberta:
+        nesses canais o turno da IA roda, e no máximo o envio é recusado na ponta.
+        Capability-driven, nunca por nome de provider.
+        """
+        caps = self.capabilities(channel_id)
+        return self._window_open(getattr(caps, "ai_window_hours", 0) or 0,
+                                 last_inbound_ts)
+
+    @staticmethod
+    def _window_open(hours: float, last_inbound_ts: float | None) -> bool:
+        """A regra comum às janelas: 0 = sempre aberta, sem inbound = fechada."""
         if not hours:
             return True
         if not last_inbound_ts:

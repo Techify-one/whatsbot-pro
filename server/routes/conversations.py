@@ -456,7 +456,21 @@ def register_routes(app, deps):
             "channel_id": channel_id,
             "avatar_v": avatar_version(settings, phone) if can_read_contact else None,
             "templates_supported": outbound.supports(channel_id, "templates"),
-            "session_open": outbound.session_open(channel_id, last_inbound_ts),
+            # ``by_human=True``: quem lê este payload é o COMPOSITOR do operador, e
+            # é ele que o usa pra bloquear (ou não) o campo de texto. Sem o flag, um
+            # canal que estende a janela pro atendente (Instagram/Messenger com a
+            # tag HUMAN_AGENT ligada) apareceria bloqueado no 2º dia enquanto o
+            # envio continuaria passando — painel e rota discordando sobre a mesma
+            # regra. Canal sem extensão (``human_window_hours=0``: Cloud, GOWA,
+            # Telegram) não muda em nada.
+            "session_open": outbound.session_open(channel_id, last_inbound_ts,
+                                                  by_human=True),
+            # A janela da IA é OUTRA (capability ``ai_window_hours``) e some antes
+            # da do atendente: com a tag HUMAN_AGENT ligada o compositor fica
+            # aberto 7 dias, mas o filtro do plugin cala a IA às 24h. Sem este
+            # campo o painel oferece "IA lê"/"IA responde no chat" durante 6 dias
+            # em que a instrução do atendente é descartada sem aviso.
+            "ai_window_open": outbound.ai_window_open(channel_id, last_inbound_ts),
             "revoke_supported": outbound.supports(channel_id, "revoke"),
             "edit_supported": outbound.supports(channel_id, "edit_message"),
             # Limites de mídia declarados pelo canal (provider é dono dos números)

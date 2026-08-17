@@ -40,6 +40,8 @@ const PRESENCE_REFRESH_MS = 10000;
  * @param {any} opts.channelId
  * @param {boolean} opts.sandbox
  * @param {boolean} opts.sessionClosed - 24h window closed (WhatsApp Cloud).
+ * @param {boolean} opts.aiWindowClosed - janela da IA do canal fechada: o plugin
+ *   do canal aborta o turno, então a nota privada não pede IA nenhuma.
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  * @param {(localId:string, updater:(m:any)=>any)=>void} opts.updateMsgByLocalId
  * @param {(el:HTMLTextAreaElement, val:string)=>void} opts.updateMenus - autocomplete tick.
@@ -47,7 +49,8 @@ const PRESENCE_REFRESH_MS = 10000;
  * @param {()=>void} opts.openTemplatePicker
  */
 export function useComposer({
-  api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
+  api, phone, conversationId, channelId, sandbox, sessionClosed,
+  aiWindowClosed = false, currentUser = null,
   setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, openTemplatePicker,
   collectMentions = null, resetMentions = null,
 }) {
@@ -258,7 +261,12 @@ export function useComposer({
       const mm = collectMentions ? collectMentions(text) : { mentions: [], mention_inbox: false };
       try {
         const res = await sendPrivateMessage(phone, text, {
-          aiRead: aiReadPrivate,
+          // Com a janela da IA fechada os toggles não são nem renderizados, mas o
+          // ESTADO deles sobrevive à troca de conversa (só reseta ao sair da
+          // aba): sem este `&&`, quem deixou "IA lê" ligado noutro atendimento
+          // continuaria agendando um turno que o filtro do plugin descarta em
+          // silêncio. A nota privada em si é salva normalmente.
+          aiRead: aiReadPrivate && !aiWindowClosed,
           aiReply: aiReadPrivate ? aiReplyInChat : true,
           conversationId,
           channelId,  // plano 37 (C1): conversa nova em canal não-default não misfila
