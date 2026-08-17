@@ -206,6 +206,11 @@ def _build_manifest(data: dict, plugin_dir: Path) -> PluginManifest:
             # Optional RBAC gate (plano "RBAC para Plugins"): when set, the screen
             # is hidden in the gear menu unless the user holds plugin.<id>.<requires>.
             "requires": str(s["requires"]).strip() if s.get("requires") else None,
+            # Optional width hint for a `config: true` screen. The core owns the
+            # modal, so a plugin cannot widen it from the inside; it DECLARES a
+            # size and the core maps it to a class (unknown value → default).
+            # Ignored for non-config screens (those are full-page already).
+            "width": str(s.get("width") or "").strip().lower() or None,
         })
 
     permissions = [str(p) for p in (data.get("permissions") or []) if isinstance(p, str)]

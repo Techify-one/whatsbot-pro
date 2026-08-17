@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # a conversa errada. Campo ACRESCENTADO a payload existente: quem não lê não vê
 # diferença. ``conversation_id`` pode vir ausente/``None`` onde o id não está no
 # escopo do call site (retry, resposta da IA) — o consumidor tem de tolerar.
-WHATSBOT_API_VERSION = "1.3.0"
+WHATSBOT_API_VERSION = "1.4.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

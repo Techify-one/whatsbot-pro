@@ -3277,10 +3277,18 @@ if _src_protocolos:
           _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-3"}), True) is True)
 
     # Feature 2 — pular avaliação por atributos (contato + conversa)
-    check("attr match string (case/trim)", _alogic._attr_value_matches("Não Possui", " não possui ") is True)
-    check("attr match lista nativa", _alogic._attr_value_matches(["a", "não possui"], "não possui") is True)
-    check("attr match multi vírgula", _alogic._attr_value_matches("a, não possui, b", "não possui") is True)
-    check("attr no-match diferente", _alogic._attr_value_matches("possui", "não possui") is False)
+    # O casamento valor-armazenado × valor-da-regra é do `_rule_matches` (via
+    # `_stored_parts`/`_condition_matches`). O helper antigo `_attr_value_matches` existia
+    # só para a decisão de continuidade por atributo, removida na 2.0.0 do plugin.
+    def _r1(op, *values):
+        return {"key": "a", "scope": "contact", "conditions": [{"op": op, "values": list(values)}]}
+    check("attr match string (case/trim)", _alogic._rule_matches("Não Possui", _r1("eq", " não possui ")) is True)
+    check("attr match lista nativa", _alogic._rule_matches(["a", "não possui"], _r1("eq", "não possui")) is True)
+    check("attr match multi vírgula", _alogic._rule_matches("a, não possui, b", _r1("eq", "não possui")) is True)
+    check("attr no-match diferente", _alogic._rule_matches("possui", _r1("eq", "não possui")) is False)
+    # Fichas (plugin 2.0.0): positivo casa com QUALQUER uma, negativo exige NENHUMA.
+    check("attr match qualquer ficha", _alogic._rule_matches("possui", _r1("eq", "não possui", "possui")) is True)
+    check("attr negativo exige nenhuma ficha", _alogic._rule_matches("possui", _r1("neq", "não possui", "possui")) is False)
     check("sanitize descarta scope inválido",
           _alogic._sanitize_skip_attrs([{"key": "k", "scope": "x", "value": "v"}]) == [])
 
@@ -3293,10 +3301,12 @@ if _src_protocolos:
     _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
                                  "privado": {"title": "", "link": ""},
                                  "skip_attrs": [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}]})
+    # A condição guarda `values` (fichas) + o espelho legado `value` quando é 1 ficha só.
     check("skip_attrs round-trip na protocol-config",
           _alogic.get_protocol_config().get("skip_attrs")
           == [{"key": "curso_de_interesse", "scope": "contact", "join": "any",
-               "conditions": [{"op": "eq", "value": "não possui"}], "value": "não possui"}])
+               "conditions": [{"op": "eq", "values": ["não possui"], "value": "não possui"}],
+               "value": "não possui"}])
     check("skip avaliação por atributo de CONTATO -> True",
           _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is True)
     _ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "engenharia"})
@@ -3317,7 +3327,8 @@ if _src_protocolos:
     check("sanitize aceita scope protocolo",
           _alogic._sanitize_skip_attrs([{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
           == [{"key": "resultado", "scope": "protocolo", "join": "any",
-               "conditions": [{"op": "eq", "value": "sem contato"}], "value": "sem contato"}])
+               "conditions": [{"op": "eq", "values": ["sem contato"], "value": "sem contato"}],
+               "value": "sem contato"}])
     _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
                                  "privado": {"title": "", "link": ""},
                                  "skip_attrs": [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}]})

@@ -632,6 +632,8 @@ Há dois jeitos (escolha um, ou combine) de preencher o modal "Configurar":
 
 Referências: `auto_signature` (settings declarativas, na Loja de Plugins — repo *community*) e as screens `config: true` de `gowa`/`telegram`/`whatsapp_cloud`, que combinam as duas coisas.
 
+**Largura do modal: o plugin DECLARA, o core traduz** (API 1.4.0). O modal "Configurar" é do core ([PluginsManager.js](web/static/js/components/PluginsManager.js)), então uma screen não escapa da largura dele por dentro — `max-width` é restrição do pai. Uma screen `config: true` declara `screens[].width` no manifest: `normal` (default, `max-w-2xl`) · `wide` (`max-w-6xl`) · `full` (`max-w-[95vw]`). O core apenas **avalia**, por um mapa fechado em `configModalWidth()`: valor desconhecido cai no default e a string do manifest **nunca** é interpolada numa classe (senão um plugin injetaria CSS arbitrário no painel). Mesmo padrão de `MediaLimits`/`TemplateSpec` — sem `if plugin_id ==`. O modal é `flex flex-col` com cabeçalho `shrink-0` e corpo `flex-1 overflow-y-auto`, então `sticky top-0`/`sticky bottom-0` DENTRO da screen grudam no scrollport do corpo (é como o `protocolos` fixa a tira de abas e a barra de Salvar). ⚠️ **Não declare `">=1.4,<2.0"` só por causa disto**: a chave degrada sozinha (o dict de screen em [manifest.py](plugins/manifest.py) é uma whitelist, e um core anterior a descarta → modal no tamanho de sempre). Escolha pelo conteúdo: `wide` para grade de 2 colunas ou construtor de regras, `normal` para uma configuração de meia dúzia de campos. Quem usa hoje: `protocolos` (`wide`).
+
 ⚠️ **`custom_sounds` e `notifications` NÃO são mais plugins** (medido em 2026-07-31): o subsistema de som foi absorvido pelo core na direção CONTRÁRIA (plugin → core) e hoje vive em [server/sound_catalog.py](server/sound_catalog.py), [server/routes/sound_prefs.py](server/routes/sound_prefs.py), [db/repositories/custom_sound_repo.py](db/repositories/custom_sound_repo.py), a tabela `custom_sounds` e o componente core [SoundSettings.js](web/static/js/components/SoundSettings.js). Nenhum dos dois está instalado em `storages/plugins/`.
 
 ### Frontend dinâmico
@@ -677,7 +679,7 @@ O vocabulário da Meta que o core carregava (categorias, formatos de cabeçalho,
 
 ### Versionamento da API de plugins (`WHATSBOT_API_VERSION`)
 
-**Versão atual: `1.3.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
+**Versão atual: `1.4.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
 
 ⚠️ **A constante ficou congelada em `1.0.0` por 93 dias** (2026-05-10 → 2026-08-11) enquanto a superfície crescia de 35 para 75 eventos e de 0 para 24 filtros. Consequência: o guard de compat nunca rejeitou nada e **nenhum plugin conseguia declarar de que core ele precisa** — o `whatsapp_cloud` teve de degradar fechado em runtime porque não tinha como exigir o `ctx.extras.signature_authenticated` do plano 84. A regra em prosa existia desde 2026-06-29 e foi violada 8 dias depois, em silêncio. Por isso a disciplina agora tem dente, não só texto.
 

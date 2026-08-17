@@ -38,6 +38,52 @@ trata versão pura como compatibilidade por MAJOR — semântica oposta. **No
 
 ---
 
+## 1.4.0 — 2026-08-17 · `screens[].width` — a screen de config declara a largura do modal
+
+Aditiva. Um campo **opcional** de manifest; screen que não o declara continua
+byte-idêntica, e todo manifest do parque (`">=1.0,<2.0"`) segue válido.
+
+### O problema
+
+O modal **Configurar** de um plugin é do core (`PluginsManager.js`), com largura
+fixa em `max-w-2xl` (~672 px) para toda screen `config: true`. Uma tela de
+configuração não consegue passar disso por dentro — `max-width` é restrição do
+pai, e furá-la exigiria posicionamento fixo ou margem negativa, isto é, um plugin
+escapando do próprio container. O resultado era uma coluna estreita para
+configurações que não são estreitas: o `protocolos` tem quatro abas, um
+construtor de rótulos e um construtor de regras, tudo empilhado numa coluna só.
+
+As duas saídas ruins eram alargar o modal para **todos** os plugins (telas
+estreitas passariam a nadar num modal largo) ou deixar o plugin hackear o layout.
+
+### O que mudou
+
+- `screens[].width` no manifest — `normal` (default) · `wide` · `full`. Vale só
+  para screen `config: true`; screen de funcionalidade já é full-page.
+- O core **apenas avalia**: `configModalWidth()` traduz o valor numa classe por
+  um mapa fechado. Valor desconhecido cai no default — a string do manifest
+  **nunca** é interpolada numa classe (senão um plugin injetaria CSS arbitrário
+  no painel). Mesmo padrão de `MediaLimits`/`TemplateSpec`: o plugin declara, o
+  core executa, sem `if plugin_id ==`.
+- Junto veio uma correção de layout no mesmo modal: ele virou `flex flex-col` com
+  cabeçalho `shrink-0` e corpo `flex-1 overflow-y-auto` (antes o modal inteiro
+  rolava, levando o cabeçalho embora). Isso também é o que faz `sticky top-0` /
+  `sticky bottom-0` dentro de uma screen de config funcionarem contra o
+  scrollport do corpo, e não contra a página.
+
+### O que o consumidor precisa saber
+
+- **Não declare `">=1.4,<2.0"` só por causa disto.** O campo degrada sozinho: num
+  core anterior a chave é descartada pelo parser do manifest (o dict de screen é
+  uma whitelist) e o modal fica no tamanho de sempre. Continue em
+  `">=1.0,<2.0"` — travar o range aqui só compra `load_error` num core antigo em
+  troca de alguns pixels.
+- **Escolha pelo conteúdo, não por gosto.** `wide` é para tela com grade de duas
+  colunas ou construtor de regras; `full` é para tabela larga. Uma configuração de
+  seis campos deve continuar `normal`.
+
+---
+
 ## 1.3.0 — 2026-08-15 · `channel_id`/`conversation_id` em `message.saved` e `message.sent`
 
 Aditiva. Dois campos **acrescentados** a payloads que já existem; quem não os lê
