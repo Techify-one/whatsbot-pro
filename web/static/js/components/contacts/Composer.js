@@ -37,7 +37,7 @@ function formatRecordTime(secs) {
 // legenda do lote. O único estado que ainda substitui a barra é a GRAVAÇÃO de
 // áudio, que é modal de verdade.
 export function Composer({
-  sandbox, canSend, templatesSupported, sessionClosed,
+  sandbox, canSend, templatesSupported, sessionClosed, aiWindowClosed = false,
   composer, autocomplete, media, audio, quotedInfo, openTemplatePicker, handleKeyDown,
   currentUser = null,
 }) {
@@ -180,7 +180,18 @@ export function Composer({
             Mensagem Privada
           </button>
         </div>
-        ${mode === 'private' ? html`
+        ${mode === 'private' && aiWindowClosed ? html`
+          <!-- Janela da IA fechada (capability ai_window_hours): o filtro do canal
+               aborta o turno inteiro, então oferecer "IA lê" seria prometer o que o
+               plugin vai descartar em silêncio — era esse o bug. A linha existe
+               porque com a tag HUMAN_AGENT ligada o compositor CONTINUA aberto e
+               nem a faixa de janela fechada aparece: sem ela os toggles sumiriam
+               sem motivo visível. -->
+          <span class="text-[12px] text-wa-secondary">
+            Fora da janela de 24h a IA não pode responder neste canal.
+          </span>
+        ` : ''}
+        ${mode === 'private' && !aiWindowClosed ? html`
           <label class="inline-flex items-center gap-[6px] cursor-pointer select-none" title="Quando ligado, a IA processa a mensagem privada como instrução.">
             <input
               type="checkbox"
@@ -230,10 +241,17 @@ export function Composer({
       ${sessionClosed ? html`
         <div class="px-[14px] py-[6px] bg-wa-panel shrink-0">
           <div class="text-[12px] text-wa-secondary bg-wa-bg border border-wa-border rounded-[6px] px-3 py-1.5">
-            Fora da janela de 24h: só é possível enviar um ${' '}
-            ${templatePickerAvailable() ? html`
-              <button type="button" onClick=${openTemplatePicker} class="text-wa-teal underline font-medium">template aprovado</button>.
-            ` : html`<span class="font-medium">template aprovado</span>.`}
+            ${templatesSupported ? html`
+              Fora da janela de 24h: só é possível enviar um ${' '}
+              ${templatePickerAvailable() ? html`
+                <button type="button" onClick=${openTemplatePicker} class="text-wa-teal underline font-medium">template aprovado</button>.
+              ` : html`<span class="font-medium">template aprovado</span>.`}
+            ` : html`
+              <!-- Canal sem template (Instagram/Messenger): não há saída — o
+                   provedor só reabre a conversa quando o CLIENTE escreve. -->
+              Fora da janela de mensagens deste canal. Aguarde o cliente
+              responder para voltar a enviar mensagens.
+            `}
           </div>
         </div>
       ` : ''}

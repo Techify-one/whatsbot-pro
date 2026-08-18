@@ -4,7 +4,7 @@
       "class AccountIdentity(fields=['kind', 'value'], methods=[])",
       "class AudioLimits(fields=['codecs', 'codecs_by_ext', 'extensions', 'max_bytes', 'transcode', 'transcode_targets'], methods=['codecs_for(self, ext)'])",
       "class Channel(fields=['provider'], methods=['account_identity(self)', 'check_phone(self, phone)', 'classmethod can_initiate_conversation(cls)', 'classmethod contact_type(cls)', 'classmethod identity_from_credentials(cls, creds)', 'classmethod provider_descriptor(cls)', 'classmethod source_id_for(cls, phone, is_group)', 'create_template(self, name, *, category, language, body_text, header_text=…, footer_text=…, body_examples=…, header_examples=…, header_format=…, header_handle=…, buttons=…)', 'delete_template(self, name)', 'edit_text(self, chat_id, msg_id, text)', 'fetch_avatar(self, chat_id)', 'get_qr(self)', 'list_templates(self)', 'logout(self)', 'mark_read(self, chat_id, msg_id)', 'parse_inbound(self, raw)', 'react(self, chat_id, msg_id, emoji)', 'reconnect(self)', 'refresh_token_if_needed(self)', 'reject_duplicate(self)', 'revoke(self, chat_id, msg_id)', 'send_media(self, chat_id, kind, path_or_url, *, caption=…, filename=…)', 'send_presence(self, chat_id, state)', 'send_template(self, *args, **kwargs)', 'send_text(self, chat_id, text, *, reply_to=…, mentions=…)', 'start(self)', 'status(self)', 'stop(self)', 'upload_example(self, file_bytes, mime, filename)', 'verify_inbound_signature(self, raw_body, headers)', 'verify_inbound_signature_result(self, raw_body, headers)'])",
-      "class ChannelCapabilities(fields=['edit_message', 'groups', 'human_window_hours', 'inbound_route', 'media', 'media_limits', 'presence', 'qr', 'reactions', 'required_credentials', 'revoke', 'session_window_hours', 'template_spec', 'templates', 'token_refresh'], methods=[])",
+      "class ChannelCapabilities(fields=['ai_window_hours', 'edit_message', 'groups', 'human_window_hours', 'inbound_route', 'media', 'media_limits', 'presence', 'qr', 'reactions', 'required_credentials', 'revoke', 'session_window_hours', 'template_spec', 'templates', 'token_refresh'], methods=[])",
       "class MediaLimits(fields=['extensions', 'max_bytes'], methods=[])",
       "class SendResult(fields=['error', 'external_msg_id', 'ok'], methods=[])",
       "class TemplateSpec(fields=['button_text_max', 'button_type_max', 'button_types', 'buttons_max', 'categories', 'header_formats', 'upload_max_bytes', 'upload_mimes'], methods=[])",
@@ -212,5 +212,5 @@
       "validate_services(plugin_id, raw)"
     ]
   },
-  "whatsbot_api_version": "1.4.0"
+  "whatsbot_api_version": "1.5.0"
 }

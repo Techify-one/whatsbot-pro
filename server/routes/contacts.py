@@ -310,9 +310,16 @@ def register_routes(app, deps):
         # agentic reply, which never passes through this guard, can't reach it.
         if outbound.session_open(channel_id, last_ts, by_human=True):
             return None
-        return _err(
-            "Fora da janela de 24h: só é possível enviar um template aprovado.",
-            status=409, data={"reason": "session_window_closed"})
+        # Canal SEM template (Instagram/Messenger) não tem para onde mandar o
+        # operador: a conversa só reabre quando o cliente escreve. Mandá-lo
+        # procurar um "template aprovado" que não existe naquele canal é pior do
+        # que não dizer nada. Dirigido por CAPABILITY, nunca por nome de provider.
+        if outbound.supports(channel_id, "templates"):
+            msg = "Fora da janela de 24h: só é possível enviar um template aprovado."
+        else:
+            msg = ("Fora da janela de mensagens deste canal: aguarde o cliente "
+                   "responder para voltar a enviar mensagens.")
+        return _err(msg, status=409, data={"reason": "session_window_closed"})
 
     def _media_limits_block(channel_id: str, kind: str, filename: str, size: int):
         """Guard for the media limits the CHANNEL declares (tamanho/formato).
@@ -836,7 +843,15 @@ def register_routes(app, deps):
                 last_ts = (message_repo.last_inbound_ts(
                     conversation_id=scoped_conv["id"]) if scoped_conv else None)
                 data["templates_supported"] = outbound.supports(channel, "templates")
-                data["session_open"] = outbound.session_open(channel, last_ts)
+                # ``by_human=True``: ver a nota em routes/conversations.py — este
+                # payload alimenta o compositor do OPERADOR, então tem de enxergar
+                # a mesma janela que a rota de envio dele enxerga.
+                data["session_open"] = outbound.session_open(channel, last_ts,
+                                                             by_human=True)
+                # Janela da IA — ver a nota em routes/conversations.py. Ela fecha
+                # antes da do operador nos canais Meta, e é ela que decide se os
+                # toggles de instrução para a IA aparecem no compositor.
+                data["ai_window_open"] = outbound.ai_window_open(channel, last_ts)
                 # Capability hints p/ o menu de contexto da mensagem: esconder
                 # "Apagar" onde o canal não revoga (Cloud), mostrar "Editar" só onde
                 # o canal edita. Dirigido por CAPABILITY, nunca por nome de provider.
@@ -1471,7 +1486,9 @@ def register_routes(app, deps):
             if send_failed:
                 msg_id = None
             if msg_id:
-                state.processed_messages.add(msg_id)
+                # Prefixed — same format ``_ingest_echo`` looks up (o id cru nunca
+                # casava). Ver o gotcha "Echo do próprio envio" no CLAUDE.md.
+                state.processed_messages.add(f"{channel_id}:{msg_id}")
 
             try:
                 msg_data = await asyncio.to_thread(

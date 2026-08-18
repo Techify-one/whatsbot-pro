@@ -259,9 +259,14 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   // Texto livre só é permitido dentro da janela de 24h (ou em canais sempre-abertos
   // como o GOWA, onde windowOpen é sempre true). O template é SEMPRE opcional num
   // canal com suporte — mesmo dentro das 24h.
-  const freeTextAllowed = !templatesChannel || windowOpen;
-  // Fora da janela num canal com templates → texto livre indisponível, só template.
-  const windowClosed = templatesChannel && !windowOpen;
+  // ⚠️ NÃO volte a condicionar isto a `templatesChannel`: num canal SEM template
+  // (Instagram/Messenger) a janela fechada não tem plano B, e amarrar o bloqueio
+  // ao template deixava o operador escrever e mandar para receber 409 do backend.
+  // `!sessionState` = a consulta ainda não voltou/falhou → fail-open, quem decide
+  // é o servidor.
+  const freeTextAllowed = !sessionState || windowOpen;
+  // Fora da janela → texto livre indisponível (só template, onde houver).
+  const windowClosed = !!sessionState && !windowOpen;
 
   const canSendNormal = !!checkResult && !!channelId && message.trim().length > 0
     && !sending && freeTextAllowed && !sessionLoading;
@@ -479,9 +484,13 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
           ${checkResult && windowClosed ? html`
             <div class="flex items-start gap-1.5 rounded-lg border border-amber-200 bg-amber-100 text-amber-700 px-3 py-2.5 text-[13px]">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 mt-0.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-              <span>${sessionState && sessionState.has_conversation
-                ? 'Passaram-se mais de 24 horas desde a última mensagem do cliente. Só é possível enviar um template aprovado.'
-                : 'Ainda não há conversa com este número neste canal. O primeiro contato precisa ser um template aprovado.'}</span>
+              <span>${templatesChannel
+                ? (sessionState && sessionState.has_conversation
+                  ? 'Passaram-se mais de 24 horas desde a última mensagem do cliente. Só é possível enviar um template aprovado.'
+                  : 'Ainda não há conversa com este número neste canal. O primeiro contato precisa ser um template aprovado.')
+                : (sessionState && sessionState.has_conversation
+                  ? 'Fora da janela de mensagens deste canal. Aguarde o cliente responder para voltar a enviar mensagens.'
+                  : 'Este canal não permite iniciar a conversa: o primeiro contato precisa partir do cliente.')}</span>
             </div>
           ` : ''}
 

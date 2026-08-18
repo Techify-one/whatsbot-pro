@@ -617,6 +617,17 @@ export function shapeConvData(d) {
     // Compositor hints (Frente C): template capability + 24h session window.
     templates_supported: !!d.templates_supported,
     session_open: d.session_open,
+    // ⚠️ A janela da IA é OUTRA e fecha ANTES da do operador: no Messenger/
+    // Instagram com a tag HUMAN_AGENT ligada `session_open` segue `true` por 7
+    // dias enquanto o filtro do plugin já calou a IA às 24h. Este shape é uma
+    // whitelist — esquecer a chave aqui não deixa `ai_window_open` chegar
+    // `false` ao compositor, ele lê `undefined` e volta a OFERECER os toggles
+    // "IA lê"/"IA responde no chat" numa janela em que a instrução do atendente
+    // é descartada em silêncio (era o bug: toda conversa aberta pelo hub de
+    // Atendimentos passa por aqui). Preservado CRU, como `session_open`: só um
+    // `false` explícito bloqueia; `undefined` (canal sem restrição, core antigo)
+    // mantém o compositor como sempre foi.
+    ai_window_open: d.ai_window_open,
     // Message context-menu capability hints: hide "Apagar" where the channel can't
     // revoke (Cloud), show "Editar" only where it can edit. Preserved as-is (a real
     // `false` from the backend must survive so the gate can distinguish it from

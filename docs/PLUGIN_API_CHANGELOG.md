@@ -38,6 +38,57 @@ trata versão pura como compatibilidade por MAJOR — semântica oposta. **No
 
 ---
 
+## 1.5.0 — 2026-08-17 · `ChannelCapabilities.ai_window_hours`
+
+Aditiva. Um campo **novo com default `0`** na capability e um avaliador no core
+(`OutboundRouter.ai_window_open`). Provider que não declara nada não muda em
+nada, e todo manifest do parque (`">=1.0,<2.0"`) segue válido.
+
+### O problema
+
+O painel enxergava UMA janela (`session_open`) e existem TRÊS. Nos canais Meta,
+com o toggle `human_agent_tag` ligado, o compositor do atendente fica aberto por
+7 dias (`human_window_hours`, tag `HUMAN_AGENT`) — enquanto o `filters.py` do
+próprio plugin já calou a IA às 24h devolvendo `None` em `filter.llm.messages`.
+No intervalo entre as duas, o painel continuava oferecendo os toggles "IA lê" e
+"IA responde no chat" da nota privada: o atendente escrevia a instrução, o turno
+era abortado antes do LLM e **nada acontecia, sem card, sem erro, sem log no
+fio**. A terceira janela não é derivável das outras duas — `session_window_hours`
+vale para todo mundo e `human_window_hours` só para o humano.
+
+### O que mudou
+
+| Símbolo | Semântica |
+|---|---|
+| `ChannelCapabilities.ai_window_hours` | Horas após o último inbound em que a IA do canal pode falar. `0` (default) = sem restrição |
+| `OutboundRouter.ai_window_open(channel_id, last_inbound_ts)` | Avalia a capability. `0` ⇒ sempre `True`; sem inbound ⇒ `False`, mesma leitura de `session_open` |
+
+O campo `ai_window_open` passou a sair nos payloads de conversa/contato, e o
+compositor esconde os dois toggles de instrução para a IA quando ele é `False`.
+
+### O que o provider precisa saber
+
+- **Quem cala a IA continua sendo o plugin**, no filtro. A capability é só o que
+  o painel lê para parar de OFERECER o que vai ser descartado; o core não ganhou
+  nenhum poder de bloquear turno.
+- **Declare condicionalmente se quiser carregar num core anterior**: passar
+  `ai_window_hours=` a um `ChannelCapabilities` que não tem o campo levanta
+  `TypeError` no import e o plugin **não carrega**. O idioma é o mesmo já usado
+  para `media_limits`:
+
+  ```python
+  _AI_WINDOW_CAP = any(f.name == "ai_window_hours"
+                       for f in dataclasses.fields(ChannelCapabilities))
+  ...
+  **({"ai_window_hours": 24} if _AI_WINDOW_CAP else {}),
+  ```
+
+- Consumidores hoje: `facebook_messenger` e `instagram` (24h cada). `whatsapp_cloud`
+  fica em `0` de propósito — lá o turno da IA roda fora da janela e produz nota
+  privada normalmente; só o envio ao cliente é recusado pela Meta.
+
+---
+
 ## 1.4.0 — 2026-08-17 · `screens[].width` — a screen de config declara a largura do modal
 
 Aditiva. Um campo **opcional** de manifest; screen que não o declara continua

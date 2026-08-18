@@ -242,7 +242,9 @@ def session_state(deps, channel_id: str, phone: str) -> dict:
                if conv_id else None)
     return {
         "templates_supported": templates_supported,
-        "session_open": outbound.session_open(channel_id, last_ts),
+        # ``by_human=True``: só o painel do operador consulta este endpoint (é o
+        # "Nova conversa"). Ver a nota em routes/conversations.py.
+        "session_open": outbound.session_open(channel_id, last_ts, by_human=True),
         "has_conversation": conv is not None,
         "conversation_id": conv_id,
         "last_inbound_ts": last_ts,

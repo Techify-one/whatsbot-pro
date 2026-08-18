@@ -236,10 +236,26 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // ao iniciar um atendimento Novo pela caixa de entrada escolhida (plano 21), do
   // payload channel-scoped do getContact (ainda sem conversationId). O TemplatePicker
   // opera em "channel mode" (channelId + phone) quando não há atendimento.
-  // sessionClosed → a janela de texto livre de 24h expirou (ou nunca abriu, no caso de
-  // um número novo no Cloud), então só um template pode sair.
+  // sessionClosed → a janela de texto livre expirou (ou nunca abriu, no caso de
+  // um número novo no Cloud). No Cloud ainda resta o template; num canal SEM
+  // template (Instagram/Messenger) não sobra nada e o compositor fica bloqueado
+  // até o cliente escrever de novo.
+  //
+  // ⚠️ NÃO reintroduza o `templatesSupported &&` que existia aqui: ele amarrava o
+  // bloqueio a "o canal tem template", então Instagram e Messenger — os únicos em
+  // que a janela fecha SEM saída — nunca bloqueavam nada. O operador digitava,
+  // mandava, e só a Meta recusava, virando bolha "falhou" sem explicação.
   const templatesSupported = !sandbox && !!(contact && contact.templates_supported);
-  const sessionClosed = templatesSupported && contact && contact.session_open === false;
+  const sessionClosed = !sandbox && !!contact && contact.session_open === false;
+  // aiWindowClosed → a janela da IA deste canal (capability `ai_window_hours`)
+  // fechou: o plugin do canal cala o turno da IA e qualquer instrução escrita na
+  // nota privada seria descartada em silêncio. É uma janela DIFERENTE de
+  // `sessionClosed`: no Messenger/Instagram com a tag HUMAN_AGENT ligada o
+  // compositor do atendente segue aberto por 7 dias enquanto esta já fechou às
+  // 24h — foi exatamente esse intervalo que fazia o operador instruir a IA e
+  // nada acontecer. Ausente no payload (canal sem restrição, core antigo) ⇒
+  // aberta, e o compositor fica como sempre foi.
+  const aiWindowClosed = !sandbox && !!contact && contact.ai_window_open === false;
   // Message context-menu capability gates (plano — editar/apagar mensagem):
   //  • revokeSupported: default TRUE — só esconde "Apagar" quando o canal declara
   //    explicitamente que NÃO revoga (WhatsApp Cloud). GOWA e a visão legada
@@ -263,7 +279,8 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   const autocompleteRef = useRef(null);
 
   const composer = useComposer({
-    api: _api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser,
+    api: _api, phone, conversationId, channelId, sandbox, sessionClosed,
+    aiWindowClosed, currentUser,
     setContactData, updateMsgByLocalId,
     updateMenus: (el, val) => autocompleteRef.current && autocompleteRef.current.updateMenus(el, val),
     closeMentionMenu: () => autocompleteRef.current && autocompleteRef.current.setMentionMenu(null),
@@ -322,7 +339,11 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
 
   const media = useMediaUpload({
     api: _api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser,
-    mode: composer.mode, aiReadPrivate: composer.aiReadPrivate,
+    // O `&& !aiWindowClosed` espelha o gate do useComposer: o estado do toggle
+    // sobrevive à troca de conversa, então sem ele um áudio privado gravado numa
+    // conversa com a janela da IA fechada ainda pediria um turno que o filtro do
+    // plugin descarta calado.
+    mode: composer.mode, aiReadPrivate: composer.aiReadPrivate && !aiWindowClosed,
     aiReplyInChat: composer.aiReadPrivate ? composer.aiReplyInChat : true,
     setContactData, updateMsgByLocalId, openTemplatePicker, mediaLimits,
     onSent: () => finishSuccessfulOutput(true),
@@ -1078,6 +1099,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       ${canReply ? html`
       <${Composer}
         sandbox=${sandbox} canSend=${canSend} templatesSupported=${templatesSupported} sessionClosed=${sessionClosed}
+        aiWindowClosed=${aiWindowClosed}
         composer=${composerUi} autocomplete=${autocomplete} media=${media} audio=${audio}
         quotedInfo=${quotedInfo} openTemplatePicker=${openTemplatePicker} handleKeyDown=${handleKeyDown} currentUser=${currentUser} />
       ` : html`
