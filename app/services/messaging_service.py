@@ -1050,6 +1050,10 @@ class MessagingService:
             text_parts: list[str] = []
             text_msg_ids: list[str] = []
             text_reply_to: str | None = None
+            # plano 129 M4: o ts REAL do provedor do ÚLTIMO item de texto — coerente
+            # com ``last_msg_id = text_msg_ids[-1]`` (a linha combinada herda a
+            # identidade do último item). ``None`` cai em ``time.time()`` no save.
+            text_ts_last: float | None = None
             media_items: list[dict] = []
             for item in items:
                 if (item.get("image_path") or item.get("audio_path")
@@ -1059,6 +1063,8 @@ class MessagingService:
                     text_parts.append(item.get("text", ""))
                     if item.get("msg_id"):
                         text_msg_ids.append(item["msg_id"])
+                    if item.get("ts"):
+                        text_ts_last = item["ts"]
                     # Best-effort: the combined batch quotes the last quoted item.
                     if item.get("reply_to_msg_id"):
                         text_reply_to = item["reply_to_msg_id"]
@@ -1105,7 +1111,8 @@ class MessagingService:
                         {"phone": phone, "role": "user", "text": combined})
                     saved = contact.add_message("user", combined, msg_id=last_msg_id,
                                         reply_to_msg_id=text_reply_to,
-                                        reopen=(False if not _allow_reopen else None))
+                                        reopen=(False if not _allow_reopen else None),
+                                        ts=(text_ts_last or None))  # plano 129 M4
                     # plano 57: re-emite um new_message AUTORITATIVO pós-save (com o _id/ts
                     # reais da linha) — fecha a janela "broadcast-antes-do-save" em que a 1ª
                     # mensagem de uma conversa nova (ou quem abre na janela t=0↔save) nunca
@@ -1238,6 +1245,7 @@ class MessagingService:
                     media_caption=_saved_caption,
                     msg_id=item.get("msg_id"),
                     reply_to_msg_id=item.get("reply_to_msg_id"),
+                    ts=(item.get("ts") or None),  # plano 129 M5 — ts real do provedor
                 )
                 # plano 57: new_message autoritativo pós-save (cada mídia é 1 linha própria,
                 # com seu próprio msg_id → reconcilia no lugar; sem supersedes).

@@ -302,7 +302,8 @@ class MessageIngestService:
         _saved = await asyncio.to_thread(
             contact.add_message, "assistant", text,
             media_type=media_type, media_path=media_path, msg_id=msg_id,
-            reply_to_msg_id=reply_to, status="operator")
+            reply_to_msg_id=reply_to, status="operator",
+            ts=(event.ts or None))  # plano 129 M7 — ts real do provedor (echo)
         broadcast_msg: dict = {"role": "assistant", "content": text, "ts": time.time(),
                                "msg_id": msg_id, "status": "operator"}
         if reply_to:
@@ -551,7 +552,8 @@ class MessageIngestService:
             saved = await asyncio.to_thread(
                 contact.add_message, "user", ui_text,
                 media_type=media_type, media_path=media_path,
-                msg_id=msg_id, reply_to_msg_id=reply_to, reopen=_reopen)
+                msg_id=msg_id, reply_to_msg_id=reply_to, reopen=_reopen,
+                ts=(event.ts or None))  # plano 129 M6 — grupo sem @menção
             # plano 57: new_message autoritativo pós-save (grupo sem @menção — 1 linha).
             try:
                 await ws_manager.broadcast("new_message", {
@@ -587,6 +589,7 @@ class MessageIngestService:
             "media_extras": media_extras,
             "msg_id": msg_id,
             "reply_to_msg_id": reply_to,
+            "ts": event.ts,  # plano 129 M3 — ts real do provedor até o batch
         })
         messaging.schedule_orchestrator(channel_id, phone)
 

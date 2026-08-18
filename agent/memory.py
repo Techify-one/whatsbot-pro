@@ -442,6 +442,7 @@ class ContactMemory:
                     sent_by_name: str | None = None,
                     agent_key: str | None = None,
                     execution_id: int | None = None,
+                    ts: float | None = None,
                     reopen: bool | None = None) -> dict:
         # plano 01 Fase 2: resolve/stamp the atendimento thread centrally, so every
         # save site (inbound batch/media/group + outbound) links conversation_id sem
@@ -470,6 +471,11 @@ class ContactMemory:
             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
             agent_key=agent_key,
             execution_id=execution_id,
+            # plano 129: o INBOUND carimba o ts REAL do provedor (event.ts); os
+            # sites de save passam esse valor. ``None`` (outbound, ou provedor
+            # sem carimbo) cai em ``time.time()`` dentro do message_repo.add.
+            # A ordem da sidebar (touch_activity) continua em now() — D3.
+            ts=ts,
         )
         if conversation_id is not None:
             try:
