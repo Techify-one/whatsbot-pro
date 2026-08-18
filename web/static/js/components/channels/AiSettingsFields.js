@@ -4,7 +4,7 @@
 // the knobs that used to be global in the IA "Configurações" tab — now per channel.
 import { h } from 'preact';
 import htm from 'htm';
-import { parseAudioModes, serializeAudioModes } from './constants.js';
+import { mediaModesFrom, serializeMediaModes } from './constants.js';
 import { SearchableSelect } from '../SearchableSelect.js';
 
 const html = htm.bind(h);
@@ -20,13 +20,28 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
     set(key, isNaN(n) ? fallback : n);
   };
   const aiOn = ai.ai_enabled !== false;
-  // Audio transcription is a multi-select of directions (recebidas/enviadas/privadas).
-  const audioModes = parseAudioModes(ai.audio_transcription_mode);
+  // Transcrição de áudio E descrição de imagem são multi-selects de direção
+  // (recebidas/enviadas/privadas), resolvidos pela mesma escada do backend.
+  const audioModes = mediaModesFrom(ai, 'audio');
   const audioOff = audioModes.size === 0;
   const toggleAudioMode = (token, on) => {
     const next = new Set(audioModes);
     if (on) next.add(token); else next.delete(token);
-    set('audio_transcription_mode', serializeAudioModes(next));
+    set('audio_transcription_mode', serializeMediaModes(next));
+  };
+  const imageModes = mediaModesFrom(ai, 'image');
+  const imageOff = imageModes.size === 0;
+  const toggleImageMode = (token, on) => {
+    const next = new Set(imageModes);
+    if (on) next.add(token); else next.delete(token);
+    // Mantém o booleano legado em sincronia com a direção "Recebidas" (era o único
+    // significado que ele tinha): um core anterior ao plano 118, ou um downgrade,
+    // continua lendo a intenção do operador para a mídia de entrada.
+    onChange({
+      ...ai,
+      image_transcription_mode: serializeMediaModes(next),
+      image_transcription_enabled: next.has('received'),
+    });
   };
   // Sequential reply toggle (per channel). When the channel hasn't set it yet,
   // fall back to ``sequentialDefault`` (GOWA → on, other providers → off on new
@@ -59,32 +74,43 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
         ` : null}
       </div>
 
-      ${aiOn ? html`
-        <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
-          <input type="checkbox" checked=${ai.default_ai_enabled !== false}
-            onChange=${(e) => set('default_ai_enabled', e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
-          IA ativada por padrão para novos contatos
-        </label>
+      <!-- Transcrição de mídia (plano 118 · D2). SEMPRE visível — igual ao
+           "Atendente padrão" acima: o backend NUNCA gateou transcrição pela IA do
+           canal (maybe_transcribe não lê ai_enabled nem auto_reply, e no lote ela
+           roda ANTES do gate), então esconder os campos com a IA off só tirava do
+           operador o único lugar de configurá-los.
+           ATENÇÃO: nenhuma CRASE pode aparecer neste comentário — ele está DENTRO
+           do template do htm, e uma crase o fecharia, quebrando o módulo inteiro
+           (a tela de Canais para de abrir e o modal nunca aparece). -->
+      <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
+        <div class="text-[13px] font-semibold text-wa-text">Transcrição de mídia</div>
+        <span class="text-[11px] text-wa-secondary">Vale mesmo com a IA deste canal desligada. Cada transcrição/descrição consome crédito do LLM.</span>
 
         <div>
-          <label class="block text-[12px] text-wa-secondary mb-1">Resposta da IA em grupos</label>
-          <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-            value=${ai.group_reply_mode || 'mention_only'}
-            onChange=${(e) => set('group_reply_mode', e.target.value)}>
-            <option value="mention_only">Somente quando o bot for mencionado</option>
-            <option value="always">Sempre (responder a todas as mensagens do grupo)</option>
-            <option value="never">Nunca (não responder em grupos)</option>
-          </select>
+          <label class="block text-[12px] text-wa-secondary mb-1.5">Descrever imagem</label>
+          <div class="flex flex-col gap-1.5">
+            <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
+              <input type="checkbox" checked=${imageModes.has('received')}
+                onChange=${(e) => toggleImageMode('received', e.target.checked)}
+                class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+              Recebidas
+            </label>
+            <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
+              <input type="checkbox" checked=${imageModes.has('sent')}
+                onChange=${(e) => toggleImageMode('sent', e.target.checked)}
+                class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+              Enviadas (pelo painel ou pelo celular)
+            </label>
+            <label class="flex items-center gap-2 text-[13px] text-wa-text cursor-pointer">
+              <input type="checkbox" checked=${imageModes.has('private')}
+                onChange=${(e) => toggleImageMode('private', e.target.checked)}
+                class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+              Privadas (imagens em nota privada)
+            </label>
+          </div>
+          ${imageOff ? html`<span class="block text-[11px] text-wa-secondary mt-1">Nenhuma marcada — descrição desativada.</span>` : null}
+          <span class="block text-[11px] text-wa-secondary mt-1">A descrição aparece sempre como card privado, só no painel.</span>
         </div>
-
-        <!-- Transcrição de mídia -->
-        <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
-          <input type="checkbox" checked=${ai.image_transcription_enabled !== false}
-            onChange=${(e) => set('image_transcription_enabled', e.target.checked)}
-            class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
-          Descrever imagem
-        </label>
         <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
           <input type="checkbox" checked=${ai.document_transcription_enabled !== false}
             onChange=${(e) => set('document_transcription_enabled', e.target.checked)}
@@ -92,7 +118,7 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
           Ler documento
         </label>
 
-        <div class="flex flex-col gap-2 p-3 bg-wa-bg rounded-lg border border-wa-border">
+        <div class="flex flex-col gap-2 pt-2 mt-1 border-t border-wa-border">
           <div class="text-[13px] font-semibold text-wa-text">Transcrição de áudio</div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -140,6 +166,26 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
                 onInput=${(e) => set('audio_transcription_chat_prefix', e.target.value)}></textarea>
             </div>
           ` : null}
+        </div>
+      </div>
+
+      ${aiOn ? html`
+        <label class="flex items-center gap-3 text-[13px] text-wa-text cursor-pointer">
+          <input type="checkbox" checked=${ai.default_ai_enabled !== false}
+            onChange=${(e) => set('default_ai_enabled', e.target.checked)}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal" />
+          IA ativada por padrão para novos contatos
+        </label>
+
+        <div>
+          <label class="block text-[12px] text-wa-secondary mb-1">Resposta da IA em grupos</label>
+          <select class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+            value=${ai.group_reply_mode || 'mention_only'}
+            onChange=${(e) => set('group_reply_mode', e.target.value)}>
+            <option value="mention_only">Somente quando o bot for mencionado</option>
+            <option value="always">Sempre (responder a todas as mensagens do grupo)</option>
+            <option value="never">Nunca (não responder em grupos)</option>
+          </select>
         </div>
 
         <!-- Contexto + agrupamento -->

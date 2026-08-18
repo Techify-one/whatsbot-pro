@@ -292,7 +292,7 @@ class MessagingService:
                          emit_text: str, caption: str = "",
                          filename: str | None = None,
                          error_label: str,
-                         transcribe_audio: bool = False,
+                         transcribe: bool = False,
                          sent_by_user_id: int | None = None,
                          sent_by_name: str | None = None,
                          wire_phone: str | None = None) -> dict:
@@ -314,8 +314,10 @@ class MessagingService:
         The per-kind variation is parameterised: ``content`` (the persisted/broadcast
         body), ``emit_text`` (the ``message.sent`` text — caption for image/document,
         ``""`` for audio), ``caption`` + ``filename`` (forwarded to the channel's
-        media send), ``error_label`` (PT-BR wording), and ``transcribe_audio`` (the
-        audio-only tail). ``dest`` is the already-written ``Path``.
+        media send), ``error_label`` (PT-BR wording), and ``transcribe`` (the
+        transcription tail — plano 118: vale para ``audio`` E ``image``, gateado
+        por direção ``sent`` no ``<kind>_transcription_mode`` DO CANAL).
+        ``dest`` is the already-written ``Path``.
 
         Returns ``{"ok": True, "msg_id": ..., "media_path": ...}`` on success or
         ``{"ok": False, "error": ..., "kind": "send"|"unexpected"}`` when the send
@@ -392,17 +394,23 @@ class MessagingService:
             "ts": time.time(),
         })
 
-        if transcribe_audio:
-            # Transcribe the operator-sent audio when enabled (audio_transcription_mode
-            # in sent/both) so the panel/AI can read what was said — same private card
-            # used for inbound media. Defensive: a transcription failure never breaks
-            # the send (the audio was already delivered above).
-            transcription = await maybe_transcribe(
-                "audio", str(dest),
-                settings=self.settings, agent_handler=agent_handler,
+        if transcribe:
+            # Transcreve/descreve a mídia que o OPERADOR acabou de enviar quando o
+            # canal marcou a direção "Enviadas" (``<kind>_transcription_mode``), para
+            # que painel/IA leiam o conteúdo — mesmo card privado da mídia de entrada.
+            # Defensivo: uma falha de transcrição nunca quebra o envio (a mídia já foi
+            # entregue acima).
+            #
+            # ⚠️ plano 118 B1 — usa o WRAPPER (``self.maybe_transcribe``), que resolve
+            # o gate PELO CANAL (``ai_settings.view``). Antes chamava o helper com
+            # ``settings=self.settings`` (o config GLOBAL), então marcar/desmarcar
+            # "Enviadas" no canal não tinha efeito nenhum neste caminho.
+            transcription = await self.maybe_transcribe(
+                kind, str(dest),
                 phone=phone, source="operator",
                 is_group=contact.is_group,
                 group_jid=phone if contact.is_group else None,
+                channel_id=channel_id,
             )
             if transcription:
                 contact.add_message("transcription", transcription)

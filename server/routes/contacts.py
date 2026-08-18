@@ -1883,6 +1883,38 @@ def register_routes(app, deps):
             actor=_u, raw_mentions=_parse_mentions_field(mentions_raw),
             mention_inbox=str(mention_inbox_raw).lower() in ("1", "true", "yes", "on"),
             preview=db_content)
+
+        # plano 118 — descrição da IMAGEM colada como nota privada, gateada pela
+        # direção "Privadas" do canal (``image_transcription_mode``); molde do
+        # ``/private-audio``. Só o card visível: fazer a IA LER a imagem privada
+        # exigiria o toggle "IA lê", que este endpoint não tem (P4). A nota em si
+        # nunca vai ao contato — invariante deste helper.
+        if kind == "image":
+            card_text = ""
+            try:
+                card_text = await messaging.maybe_transcribe(
+                    "image", str(dest),
+                    phone=phone, source="private",
+                    channel_id=resolved_channel)
+            except Exception as e:
+                logger.error("[Private] Image description failed for %s: %s", phone, e)
+            if card_text:
+                try:
+                    await asyncio.to_thread(
+                        lambda: agent_handler._get_contact(
+                            phone, channel_id=resolved_channel).add_message(
+                            "transcription", card_text))
+                except Exception as e:
+                    logger.error("[Private] Failed to save description for %s: %s", phone, e)
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone,
+                    "channel_id": resolved_channel,
+                    "message": {
+                        "role": "transcription",
+                        "content": card_text,
+                        "ts": time.time(),
+                    },
+                })
         return note_msg
 
     @app.post("/api/contacts/{phone}/private-image")
@@ -2049,7 +2081,7 @@ def register_routes(app, deps):
         result = await messaging.send_media(
             channel_id=channel_id, phone=phone, kind="image", dest=dest,
             is_sandbox=is_sandbox, content=caption, emit_text=caption,
-            caption=caption, error_label="imagem",
+            caption=caption, error_label="imagem", transcribe=True,
             sent_by_user_id=(_u.get("id") if _u else None),
             sent_by_name=(_u.get("name") if _u else None),
             wire_phone=wire_phone)
@@ -2141,7 +2173,7 @@ def register_routes(app, deps):
         result = await messaging.send_media(
             channel_id=channel_id, phone=phone, kind="audio", dest=dest,
             is_sandbox=is_sandbox, content="[Áudio]", emit_text="",
-            error_label="áudio", transcribe_audio=True,
+            error_label="áudio", transcribe=True,
             sent_by_user_id=(_u.get("id") if _u else None),
             sent_by_name=(_u.get("name") if _u else None),
             wire_phone=wire_phone)

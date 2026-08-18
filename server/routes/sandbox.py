@@ -20,6 +20,7 @@ from server.execution import (
     astamp_execution_channel,
 )
 from server.helpers import _ok, _err, parse_split_reply
+from server.transcription import maybe_transcribe
 from server.upload_names import unique_media_name
 
 # Config-key prefix flagging a contact as a sandbox/test number. Operator sends
@@ -207,14 +208,17 @@ def register_routes(app, deps):
                                 media_caption=caption or None)
             await _broadcast_user_message(phone, caption, media_type="image", media_path=rel_path)
 
-            description = ""
-            if settings.get("image_transcription_enabled", True):
-                try:
-                    description = await asyncio.to_thread(
-                        agent_handler.describe_image, abs_path, phone,
-                    )
-                except Exception as e:
-                    logger.error("[Sandbox] Image description failed for %s: %s", phone, e)
+            # plano 118 F6 — pelo helper compartilhado: o sandbox é onde o operador
+            # valida a configuração, então tem que passar pelo MESMO gate (escada
+            # mode → bool legado) e pelos MESMOS hooks de plugin
+            # (``filter.transcription.should_run``/``.result``) do canal real, que
+            # a chamada direta a ``describe_image`` ignorava. ``source="batch"``:
+            # o sandbox simula uma mensagem recebida.
+            description = await maybe_transcribe(
+                "image", abs_path,
+                settings=settings, agent_handler=agent_handler,
+                phone=phone, source="batch",
+            )
 
             if description:
                 desc_prefix = f"[Descrição da imagem]: {description}"
@@ -339,14 +343,13 @@ def register_routes(app, deps):
                                           media_type="document", media_path=rel_path)
 
             abs_path = str(statics_outbox_dir / Path(rel_path).name)
-            transcription = ""
-            if settings.get("document_transcription_enabled", True):
-                try:
-                    transcription = await asyncio.to_thread(
-                        agent_handler.transcribe_document, abs_path, phone, filename, "",
-                    )
-                except Exception as e:
-                    logger.error("[Sandbox] Document transcription failed for %s: %s", phone, e)
+            # Mesmo caminho compartilhado da imagem acima (plano 118 F6).
+            transcription = await maybe_transcribe(
+                "document", abs_path,
+                settings=settings, agent_handler=agent_handler,
+                phone=phone, source="batch",
+                file_name=filename,
+            )
 
             if transcription:
                 doc_prefix = f"[Conteúdo do documento]: {transcription}"

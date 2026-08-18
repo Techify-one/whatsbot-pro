@@ -252,7 +252,9 @@ class MessageIngestService:
 
         Mirror of the GOWA webhook's ``is_from_me`` branch, provider-agnostic: save
         as an operator message + broadcast + ``message.sent`` (source echo), honoring
-        ``filter.message.outgoing``. (Outgoing-audio transcription is a follow-up.)"""
+        ``filter.message.outgoing``. Áudio E imagem que saem do celular são
+        transcritos/descritos quando o canal marcou a direção "Enviadas"
+        (plano 118 — a imagem era resolvida e jogada fora aqui)."""
         agent_handler = self.agent_handler
         ws_manager = self.ws_manager
         state = self.state
@@ -266,7 +268,7 @@ class MessageIngestService:
             state.processed_messages.add(dedup_key)
         text = (event.text or "").strip()
         media_type = event.media_type
-        media_path, _img, audio_path = await self._resolve_inbound_media(event)
+        media_path, image_path, audio_path = await self._resolve_inbound_media(event)
         media_extras = event.media_extras or None
         if not text and not media_type:
             return
@@ -331,6 +333,30 @@ class MessageIngestService:
             if out_transcription:
                 await messaging.deliver_audio_transcription(
                     phone, contact, out_transcription, channel_id=channel_id)
+        elif image_path:
+            # plano 118 — a imagem que o atendente mandou pelo WhatsApp do celular.
+            # SEMPRE card privado: mandar a descrição de volta ao chat (o que o
+            # ``deliver_audio_transcription`` faria com target=chat) viraria outro
+            # ``message.sent`` → eco → nova descrição.
+            out_description = await messaging.maybe_transcribe(
+                "image", image_path,
+                phone=phone, source="echo",
+                is_group=contact.is_group,
+                group_jid=phone if contact.is_group else None,
+                channel_id=channel_id,
+            )
+            if out_description:
+                await asyncio.to_thread(
+                    contact.add_message, "transcription", out_description)
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone,
+                    "channel_id": channel_id,
+                    "message": {
+                        "role": "transcription",
+                        "content": out_description,
+                        "ts": time.time(),
+                    },
+                })
 
     async def ingest_event(self, event: InboundEvent):
         """Single ingress for ANY channel's inbound message (plano 11 / plano 13).

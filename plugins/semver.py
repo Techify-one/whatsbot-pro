@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # a declarar deve fazê-lo condicionalmente (``dataclasses.fields``) se quiser
 # continuar carregando num core anterior — passar o kwarg a um
 # ``ChannelCapabilities`` sem o campo levanta ``TypeError`` no import.
-WHATSBOT_API_VERSION = "1.5.0"
+WHATSBOT_API_VERSION = "1.6.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

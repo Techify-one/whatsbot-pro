@@ -38,6 +38,42 @@ trata versão pura como compatibilidade por MAJOR — semântica oposta. **No
 
 ---
 
+## 1.6.0 — 2026-08-18 · `filter.transcription.*` alcança mais situações
+
+Aditiva por ALCANCE: nenhum nome, tipo ou semântica de `None` mudou — o mesmo
+filtro passou a ser aplicado onde antes não era. Todo manifest do parque
+(`">=1.0,<2.0"`) segue válido; declare `">=1.6,<2.0"` só se o seu plugin
+DEPENDER de ser consultado nos call sites novos.
+
+### O que mudou
+
+O plano 118 deu **direções** à descrição de imagem (`image_transcription_mode` =
+`received`/`sent`/`private`, como o áudio já tinha) e ligou os call sites que
+existiam mas nunca descreviam imagem. Consequência para quem assina
+`filter.transcription.should_run` / `filter.transcription.result`:
+
+| `ctx.extras` | Antes | Agora |
+|---|---|---|
+| `media_kind="image"` com `source="operator"` | nunca ocorria | ocorre no envio do operador pelo painel |
+| `media_kind="image"` com `source="echo"` | nunca ocorria | ocorre no eco do próprio celular |
+| `media_kind="image"` com `source="private"` | nunca ocorria | ocorre na imagem colada como nota privada |
+| imagem/documento do **sandbox** | não passava pelo filtro (chamava `describe_image`/`transcribe_document` direto) | passa pelo helper compartilhado, como qualquer canal |
+
+O `source` documentado no CLAUDE.md listava `group_no_mention`, que **nunca teve
+call site** (o ramo salva e volta); o valor real é `{batch, echo, operator,
+private}`.
+
+### O que fazer
+
+Nada, se o seu filtro já era defensivo (o contrato sempre disse "filtre por
+`media_kind`/`source` no INÍCIO do handler"). ⚠️ Um filtro que devolvia `False`
+apenas para `media_kind="audio"` e deixava imagem passar agora vai ver imagem em
+três situações novas — cada uma é uma chamada de visão PAGA. Quem quiser barrar
+por direção pode ler o `source`; quem quiser barrar de vez, o operador desmarca a
+direção no canal (Canais → editar → Transcrição de mídia).
+
+---
+
 ## 1.5.0 — 2026-08-17 · `ChannelCapabilities.ai_window_hours`
 
 Aditiva. Um campo **novo com default `0`** na capability e um avaliador no core

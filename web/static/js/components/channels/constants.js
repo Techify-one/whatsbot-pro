@@ -66,6 +66,10 @@ export function aiDefaultsFrom(cfg) {
     default_ai_enabled: cfg.default_ai_enabled ?? true,
     group_reply_mode: cfg.group_reply_mode ?? 'mention_only',
     image_transcription_enabled: cfg.image_transcription_enabled ?? true,
+    // plano 118 — direções da descrição de imagem. Semeado pela MESMA escada do
+    // backend: sem a chave global, cai no booleano global (canal novo nasce
+    // idêntico ao que a instalação já fazia).
+    image_transcription_mode: serializeMediaModes(mediaModesFrom(cfg, 'image')),
     document_transcription_enabled: cfg.document_transcription_enabled ?? true,
     audio_transcription_mode: cfg.audio_transcription_mode ?? 'received',
     audio_transcription_target: cfg.audio_transcription_target ?? 'private',
@@ -78,24 +82,61 @@ export function aiDefaultsFrom(cfg) {
   };
 }
 
-// Audio transcription "mode" is a multi-select set of directions to transcribe.
-// Stored in config.ai.audio_transcription_mode. Backward-compatible with the
-// legacy single-value strings ("received"/"sent"/"both"/"off"); the multi-select
-// persists a comma-joined list ("received,sent,private"). Mirrors
-// server/transcription.py:parse_audio_modes so the UI and the gate agree.
-export const AUDIO_MODE_TOKENS = ['received', 'sent', 'private'];
+// A transcription "mode" is a multi-select set of directions to transcribe.
+// Stored in config.ai.<kind>_transcription_mode (audio; image desde o plano 118).
+// Backward-compatible with the legacy single-value strings
+// ("received"/"sent"/"both"/"off"); the multi-select persists a comma-joined list
+// ("received,sent,private"). Mirrors server/transcription.py:parse_media_modes so
+// the UI and the gate agree.
+export const MEDIA_MODE_TOKENS = ['received', 'sent', 'private'];
+// Legacy alias (nome anterior à imagem ganhar direções).
+export const AUDIO_MODE_TOKENS = MEDIA_MODE_TOKENS;
 
-export function parseAudioModes(raw) {
+export function parseMediaModes(raw) {
   if (raw == null) return new Set(['received']);
   const s = String(raw).trim().toLowerCase();
   if (s === 'both') return new Set(['received', 'sent']);
   if (s === '' || s === 'off' || s === 'none') return new Set();
-  return new Set(s.split(',').map((t) => t.trim()).filter((t) => AUDIO_MODE_TOKENS.includes(t)));
+  return new Set(s.split(',').map((t) => t.trim()).filter((t) => MEDIA_MODE_TOKENS.includes(t)));
 }
 
-export function serializeAudioModes(set) {
-  const ordered = AUDIO_MODE_TOKENS.filter((t) => set.has(t));
+export function serializeMediaModes(set) {
+  const ordered = MEDIA_MODE_TOKENS.filter((t) => set.has(t));
   return ordered.length ? ordered.join(',') : 'off';
+}
+
+// Aliases mantidos: são os nomes importados pelo AiSettingsFields desde o plano 21.
+export const parseAudioModes = parseMediaModes;
+export const serializeAudioModes = serializeMediaModes;
+
+// A escada "mode → booleano legado → default", ESPELHO de
+// server/transcription.py:modes_for. UI e gate discordarem seria o mesmo bug duas
+// vezes: `image_transcription_enabled: false` num canal antigo tem de continuar
+// aparecendo como "nenhuma direção marcada".
+export function mediaModesFrom(ai, kind) {
+  const o = ai || {};
+  const mode = o[`${kind}_transcription_mode`];
+  if (mode != null) return parseMediaModes(mode);
+  const legacy = o[`${kind}_transcription_enabled`];
+  if (legacy != null) return legacy ? new Set(['received']) : new Set();
+  return new Set(['received']);
+}
+
+// Resolve o booleano legado DO CANAL num ``mode`` explícito ANTES de mesclar com
+// os defaults derivados do config GLOBAL. Sem isto o merge
+// `{...defaults, ...channelAi}` deixaria um mode global vencer o booleano do
+// canal, e a caixa "Descrever imagem" que o operador havia DESmarcado voltaria
+// ligada sozinha no primeiro Salvar. PURA.
+export function withResolvedMediaModes(channelAi, kinds = ['image']) {
+  const o = { ...(channelAi || {}) };
+  for (const kind of kinds) {
+    const modeKey = `${kind}_transcription_mode`;
+    const legacyKey = `${kind}_transcription_enabled`;
+    if (o[modeKey] == null && o[legacyKey] != null) {
+      o[modeKey] = serializeMediaModes(mediaModesFrom(o, kind));
+    }
+  }
+  return o;
 }
 
 // Interpolate a widget channel's embed snippet from the descriptor-provided

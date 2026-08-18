@@ -10,6 +10,7 @@ import htm from 'htm';
 import { updateChannel, getChannelMembers, setChannelMembers } from '../../services/api.js';
 import {
   parseChannelConfig, aiDefaultsFrom, buildEditPayload, validateCredentials,
+  withResolvedMediaModes,
 } from './constants.js';
 import { ConfigFields, CredentialFields, FormComponentLoader } from './DescriptorFields.js';
 import { EmbedSnippetBlock } from './notices.js';
@@ -24,7 +25,10 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
   // global-derived defaults (so unset keys show the inherited value).
   const [ai, setAi] = useState(() => {
     const cfg = parseChannelConfig(channel.config);
-    return { ...(aiDefaults || aiDefaultsFrom({})), ...(cfg.ai || {}) };
+    // ``withResolvedMediaModes``: o booleano legado DESTE canal vira mode explícito
+    // antes do merge, senão o default derivado do global venceria (plano 118).
+    return { ...(aiDefaults || aiDefaultsFrom({})),
+             ...withResolvedMediaModes(cfg.ai || {}) };
   });
   // Editable config-field values (generated fields are immutable → skipped).
   const [configValues, setConfigValues] = useState(() => {

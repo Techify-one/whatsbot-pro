@@ -29,7 +29,10 @@ PER_CHANNEL_AI_KEYS = (
     "ai_enabled",
     "default_ai_enabled",
     "group_reply_mode",
-    "image_transcription_enabled",
+    "image_transcription_enabled",   # legado (bool) — fallback do mode abaixo
+    # plano 118 — direções da DESCRIÇÃO DE IMAGEM (received/sent/private), igual ao
+    # áudio. Sem esta linha o override do canal seria silenciosamente ignorado.
+    "image_transcription_mode",
     "document_transcription_enabled",
     "audio_transcription_mode",
     "audio_transcription_target",
@@ -114,6 +117,20 @@ class ChannelSettingsView:
         if key in ov and ov[key] is not None and key in PER_CHANNEL_AI_KEYS:
             return ov[key]
         return self._settings.get(key, default)
+
+    def overridden_keys(self) -> frozenset:
+        """As chaves que ESTE canal de fato sobrepõe (não as globais herdadas).
+
+        Usado por ``server.transcription.modes_for`` (plano 118) para resolver a
+        escada "mode → bool legado" DENTRO do mesmo escopo: um canal que só tem o
+        booleano antigo não pode ser vencido por um ``*_transcription_mode`` que
+        existe apenas no config global.
+        """
+        ov = self._ov
+        return frozenset(
+            k for k, v in ov.items()
+            if v is not None and k in PER_CHANNEL_AI_KEYS
+        )
 
 
 def view(channel_id: str, settings) -> ChannelSettingsView:

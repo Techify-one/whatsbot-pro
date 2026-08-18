@@ -1,6 +1,8 @@
 # Plano 118 — Descrever imagem por direção (recebida/enviada/privada) e transcrição que não depende da IA do canal
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-08-13 · **Escopo:** médio
+> **Status:** ✅ EXECUTADO (2026-08-18) — F0–F8 concluídas; ver o "Status de execução" de cada fase e o §8.
+> Validação manual no navegador confirmada pelo usuário em 2026-08-18 (§8, último item).
+> **Status original:** PLANEJAMENTO · **Data:** 2026-08-13 · **Escopo:** médio
 > **Origem:** pedido do usuário — *"preciso de uma configuração para eu conseguir transcrever imagens
 > enviadas por um usuário do whatsbot (igual o áudio) e também quero que essa opção e a opção de
 > transcrever áudios não dependam da IA estar ativa no canal, pois atualmente só consigo marcá-las se o
@@ -254,11 +256,11 @@ WAVE 3   F8 (docs + verificação final)                              ← 🔴
 e o veredito de B2 registrado abaixo (com o número de linhas observado).
 
 #### Status de execução — Fase F0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** [tests/integration/test_media_transcription_directions.py](../tests/integration/test_media_transcription_directions.py) — 11 testes cobrindo os 3 itens de caracterização e os comportamentos novos (o arquivo serve F0 e F3–F5 juntos). O item 4 (medir B2) foi respondido por leitura + teste JÁ EXISTENTE.
+- **Como foi feito / decisões:** os itens 2 e 3 (imagem do operador / do eco NÃO descritas hoje) foram escritos **direto na forma pós-mudança** em vez de como golden da linha de base: as duas pontas do gate (`sent` marcado ⇒ descreve · desmarcado ⇒ **zero** chamadas a `describe_image`, com spy de contagem) travam a mesma coisa que o golden travaria, sem gravar um golden que o F3/F4 apagaria no mesmo dia. Nenhum golden novo foi criado — os goldens de mídia existentes seguem intactos, que é a evidência de que F2 não mudou comportamento.
+- **Problemas / pendências:** **B2 já estava consertado** — os dois produtores (`messaging_service.py:361` e `contacts.py:1491`) já gravam `f"{channel_id}:{msg_id}"`, exatamente a chave que `_ingest_echo` lê. O plano apontava `contacts.py:1459` gravando a chave crua; essa linha não existe mais. Há teste dedicado: [tests/integration/test_outbound_echo_dedup.py](../tests/integration/test_outbound_echo_dedup.py) (`test_media_send_registers_the_canonical_echo_key`, que inclusive assere que a chave crua **não** aparece sozinha). **Veredito de B2: inerte — nada a consertar, F4 item 4 NÃO executado**, conforme o plano manda registrar. O caso "descrito duas vezes" ganhou teste próprio mesmo assim (`test_eco_da_imagem_que_o_painel_enviou_nao_e_descrito_de_novo`): 1 chamada de visão, 1 card.
+- **Verificação:** `venv/bin/python -m pytest tests/integration/test_media_transcription_directions.py tests/integration/test_outbound_echo_dedup.py tests/integration/characterization -q` — ver F8.
 
 ---
 
@@ -282,11 +284,11 @@ e o veredito de B2 registrado abaixo (com o número de linhas observado).
 (reproduz o print nº 2 do usuário, agora com os campos). Legível no tema escuro.
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** [AiSettingsFields.js](../web/static/js/components/channels/AiSettingsFields.js) — o bloco de transcrição saiu de dentro do `${aiOn ? …}` e virou o grupo **"Transcrição de mídia"** (imagem + documento + áudio numa caixa só), vizinho do "Atendente padrão". `default_ai_enabled`, `group_reply_mode`, contexto, sequencial e mensagens picadas continuam dentro do ramo.
+- **Como foi feito / decisões:** o painel de áudio perdeu a borda própria e virou uma sub-seção separada por `border-t` dentro do grupo — encaixar a caixa antiga dentro de outra caixa ficaria pesado. Copy: *"Vale mesmo com a IA deste canal desligada. Cada transcrição/descrição consome crédito do LLM."* (o aviso de custo é o item 2 do plano).
+- **Problemas / pendências:** 🐞 **DEFEITO ENTREGUE E CORRIGIDO NO MESMO DIA.** O comentário HTML que eu escrevi para explicar a mudança ficou DENTRO do template do `htm` **com crases** (citando `maybe_transcribe`/`ai_enabled`). Crase fecha o template: o componente passou a lançar `html(...) is not a function` ao renderizar e, como o Preact não monta a subárvore de um componente que lança, **a tela de Canais mudava a URL e o modal nunca abria** — o usuário relatou "sistema completamente travado". Corrigido reescrevendo o comentário sem crase. Salvar com a IA off continua não apagando chave nenhuma (§2.4 confirmado: `buildEditPayload` grava `ai` inteiro).
+- **Verificação:** ⚠️ `node --input-type=module --check` **PASSOU no arquivo quebrado** (falso negativo comprovado nesta sessão: com número PAR de crases o arquivo continua sintaticamente válido). O que pega é (a) importar o módulo e RENDERIZAR o componente — feito com shims ESM para as libs vendorizadas, nos 3 estados (IA ligada, IA desligada, canal legado só com booleano), e (b) `node --test web/static/js/services/htmTemplates.test.js`, que eu **não havia rodado** e que também tinha um furo: o `htmBlocks` só inspeciona de cada `html` até a crase seguinte, então o comentário entre dois templates aninhados escapava. Acrescentei ali uma **segunda rede** textual (nenhum comentário HTML pode conter crase) — ela reprova o arquivo defeituoso e passa na árvore limpa. Hoje: `services/*.test.js` **452 passed**, `constants.test.js` **28 passed**, cadeia inteira da tela de Canais importando OK (incluindo `ChannelsManager.js`).
 
 ---
 
@@ -319,11 +321,13 @@ legado.
 ainda) e `venv/bin/python -m pytest` verde.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** [server/transcription.py](../server/transcription.py) ganhou `parse_media_modes` (com `parse_audio_modes` mantido como alias do MESMO callable), `direction_of(source)` e `modes_for(settings, media_kind)`; o gate passou a ser `direction_of(source) in modes_for(settings, kind)` para áudio **e** imagem, com `document` seguindo no booleano (P1). `image_transcription_mode` entrou em `PER_CHANNEL_AI_KEYS` ([channels/ai_settings.py](../channels/ai_settings.py)) e como `ConfigKey` ([config/settings.py](../config/settings.py)).
+- **Como foi feito / decisões:** **dois desvios deliberados do texto do plano**, os dois pela D3 (zero regressão):
+  1. a `ConfigKey` **não é seedada** (`_NO_SEED`, com `get_default=None`) em vez de `default="received"` como o item 5 dizia. Seedar o mode no global faria uma instalação que desligou a descrição no global (`image_transcription_enabled=False`) **voltar a descrever**, porque o mode vence o bool na escada;
+  2. `ChannelSettingsView.overridden_keys()` (novo) + o "passo 0" de `modes_for`: um canal que só carrega o booleano legado não pode ser vencido por um mode que existe apenas no GLOBAL. Sem isso a mesma escada erraria no escopo do canal — e o merge do formulário (`{...defaults, ...cfg.ai}`) ligaria sozinha a caixa que o operador tinha desmarcado.
+- **Problemas / pendências:** nenhuma. `_AUDIO_MODE_TOKENS` continua exportado (alias de `_MODE_TOKENS`).
+- **Verificação:** [tests/core/test_transcription_modes.py](../tests/core/test_transcription_modes.py) — 11 testes (mode vence · bool legado · nada · lixo · alias · `direction_of` · os 3 casos de escopo canal×global). Verde.
 
 ---
 
@@ -352,11 +356,11 @@ card de descrição aparece; sem `sent`, nenhuma chamada a `describe_image` (spy
 **global com** `sent` → o áudio do operador **não** é transcrito.
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** `send_media` ([messaging_service.py](../app/services/messaging_service.py)) trocou `transcribe_audio: bool` por `transcribe: bool`, aplicado ao `kind` que chegou; `/send-image` passou a mandar `transcribe=True` ([contacts.py](../server/routes/contacts.py)). **B1 corrigido na mesma linha**: a cauda usa `self.maybe_transcribe(..., channel_id=channel_id)` (wrapper per-canal) no lugar de `maybe_transcribe(..., settings=self.settings)` (config global).
+- **Como foi feito / decisões:** a descrição sai como card privado `role="transcription"` + `new_message`, reusando o bloco que já existia para o áudio (nada duplicado). Sandbox descreve normalmente (nada vai ao provedor). Documento e vídeo seguem sem `transcribe`.
+- **Problemas / pendências:** `transcribe_audio` tinha **um** call site (a rota de áudio) e nenhum uso em teste, então a renomeação não deixou compatibilidade para trás.
+- **Verificação:** `test_imagem_do_operador_descrita_quando_enviadas_marcado` · `..._nao_descrita_sem_enviadas` · `test_canal_legado_com_booleano_...` · e os dois de B1 (`test_audio_do_operador_honra_o_canal_e_nao_o_global`, com o global mandando transcrever e o canal não).
 
 ---
 
@@ -383,11 +387,11 @@ card de descrição aparece; sem `sent`, nenhuma chamada a `describe_image` (spy
 linha `assistant` (golden novo `echo_image_description`); com `sent` desmarcado → nenhum.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** [message_ingest_service.py](../app/services/message_ingest_service.py) — o `_img` deixou de ser descartado (`media_path, image_path, audio_path = …`) e ganhou o ramo `elif image_path:` com `source="echo"`; docstring corrigido (o "Outgoing-audio transcription is a follow-up" deixou de ser verdade).
+- **Como foi feito / decisões:** card privado direto, **não** `deliver_audio_transcription` — com `target=chat` aquele helper mandaria a descrição ao contato, virando `message.sent` → eco → nova descrição (§4.2).
+- **Problemas / pendências:** o item 4 (alinhar a chave de dedup) **não foi executado, e de propósito**: B2 é inerte, já consertado antes deste plano (ver F0). Nenhuma linha de supressão de eco foi tocada.
+- **Verificação:** `test_eco_de_imagem_descrito_uma_vez_quando_enviadas_marcado` (1 card, 1 linha `assistant`, nenhum envio) · `test_eco_de_imagem_nao_descrito_sem_enviadas` · `test_eco_da_imagem_que_o_painel_enviou_nao_e_descrito_de_novo` (a cobrança acontece uma vez só).
 
 ---
 
@@ -407,11 +411,11 @@ linha `assistant` (golden novo `echo_image_description`); com `sent` desmarcado 
 `private` → nada. A nota privada **nunca** vai ao contato (invariante do `_save_private_media`).
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** `_save_private_media` ([contacts.py](../server/routes/contacts.py)) descreve a imagem com `source="private"` depois de registrar as menções, e emite o card `transcription`.
+- **Como foi feito / decisões:** só o card — `ai_read`/`force` **não** foram replicados (P4): `/private-image` não tem esse toggle. O `db_content` da nota continua sendo a legenda/`[Imagem]` (ao contrário do `/private-audio`, onde a transcrição VIRA o conteúdo para a IA lê-lo): sem "IA lê" aqui, reescrever o conteúdo só poluiria o contexto.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `test_imagem_em_nota_privada_descrita_quando_privadas_marcado` (+ assere que nada foi ao contato) e `..._nao_descrita_sem_privadas`.
 
 ---
 
@@ -431,11 +435,11 @@ linha `assistant` (golden novo `echo_image_description`); com `sent` desmarcado 
 que registre `filter.transcription.should_run` retornando `False` passa a barrar também o sandbox.
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** [sandbox.py](../server/routes/sandbox.py) — imagem e documento passaram a chamar o `maybe_transcribe` compartilhado (`source="batch"`), no lugar de `describe_image`/`transcribe_document` diretos atrás de um `if settings.get(...)`.
+- **Como foi feito / decisões:** usa o helper de MÓDULO com o `settings` global (o sandbox não é escopado a canal — ele carimba `primary_channel_id()`), o que preserva o gate de hoje pela escada e acrescenta os hooks de plugin. ⚠️ O **áudio do sandbox ficou como estava**: ele hoje transcreve SEM gate nenhum, e roteá-lo pelo helper acrescentaria um gate que ninguém pediu (mudança de comportamento fora do escopo do plano, que lista só imagem e documento).
+- **Problemas / pendências:** o áudio do sandbox segue divergente do canal real — vale um P6 se incomodar.
+- **Verificação:** os goldens do sandbox não mudaram (suíte de caracterização).
 
 ---
 
@@ -462,11 +466,11 @@ que registre `filter.transcription.should_run` retornando `False` passa a barrar
 legível no tema escuro.
 
 #### Status de execução — Fase F7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** [constants.js](../web/static/js/components/channels/constants.js) — `parseMediaModes`/`serializeMediaModes` (com `parseAudioModes`/`serializeAudioModes` como alias), `mediaModesFrom(ai, kind)` (a escada, espelhando `modes_for`), `withResolvedMediaModes(channelAi)` e o seed de `image_transcription_mode` em `aiDefaultsFrom`. [ChannelEditForm.js](../web/static/js/components/channels/ChannelEditForm.js) resolve o legado do canal ANTES do merge. [AiSettingsFields.js](../web/static/js/components/channels/AiSettingsFields.js) — "Descrever imagem" virou 3 caixas, com o aviso "Nenhuma marcada — descrição desativada" e **sem** o seletor "Onde aparece".
+- **Como foi feito / decisões:** `withResolvedMediaModes` é o item que o plano não previa e sem o qual F7 seria uma regressão silenciosa: o estado do formulário nasce `{...aiDefaults, ...cfg.ai}`, então um canal com `image_transcription_enabled:false` (e sem mode) receberia o mode `received` dos defaults e **religaria a descrição no primeiro Salvar**. O toggle também mantém o booleano legado em sincronia com a direção "Recebidas", para um downgrade de core continuar lendo a intenção do operador.
+- **Problemas / pendências:** nenhuma.
+- **Verificação:** `node --test web/static/js/components/channels/constants.test.js` — **28 testes, 0 falhas** (8 novos: parse/serialize, aliases, escada, os dois casos de merge, seed do `aiDefaultsFrom`, `buildEditPayload` carregando a chave).
 
 ---
 
@@ -481,11 +485,12 @@ legível no tema escuro.
 3. `[paralelo]` Preencher o §7 e o resultado de B2.
 
 #### Status de execução — Fase F8
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída (2026-08-18)
+- **O que foi feito:** [CLAUDE.md](../CLAUDE.md) — a linha de `filter.transcription.should_run` (o `source` real é `{batch, echo, operator, private}`; `media_kind` inclui `document`; o sandbox passou a ser coberto), a lista `PER_CHANNEL_AI_KEYS` e **dois marcadores novos** na seção "Configuração de IA por canal" (transcrição não depende da IA; a escada de direções, com os dois avisos de armadilha). `WHATSBOT_API_VERSION` **1.5.0 → 1.6.0** + entrada no topo de [docs/PLUGIN_API_CHANGELOG.md](../docs/PLUGIN_API_CHANGELOG.md) + snapshot regenerado. §7 e §8 preenchidos.
+- **Como foi feito / decisões:** P2 fechado em **(b) com MINOR**, não PATCH — justificativa na própria pergunta. O `source` documentado no CLAUDE.md listava `group_no_mention`, que **nunca teve call site** (§3.3): a linha foi corrigida para os quatro valores reais em vez de propagar a ficção.
+- **Problemas / pendências:** a **falha pré-existente** `test_audit_characterization.py::test_audit_matrix_is_complete` continua vermelha (a matriz não cobre `channel.*` nem `plugin.imported/deleted`) — não é deste plano: ela compara `db/audit_actions.py` com um literal do teste, e nenhum dos dois foi tocado aqui.
+- **Verificação:** `venv/bin/python -m pytest tests/core/test_transcription_modes.py tests/integration/test_media_transcription_directions.py tests/integration/test_outbound_echo_dedup.py tests/integration/characterization` ⇒ **1 failed (a pré-existente acima), 129 passed, 2 skipped** em 11m20s. `node --test .../constants.test.js` ⇒ **28/28**. `pytest tests/contracts/test_plugin_api_surface.py` ⇒ **5/5**.
+  ⚠️ **Nota de ambiente (custou 3 execuções inválidas):** o banco compartilhado `whatsbot_test` estava sendo usado ao mesmo tempo por **outra máquina** (`10.8.200.103`; esta é a `.102`), e o reset de schema dela derrubou duas execuções no meio — uma delas morreu dentro do próprio `_engine_ready` (`repair_postgres_sequences` achou `observations` inexistente logo após o Alembic criá-la), cascateando 118 erros de setup. A execução válida rodou num banco **privado** (`whatsbot_test_p118`, UTF8/template0), que ficou criado para as próximas. Antes disso eu mesmo cometi o erro clássico de disparar dois pytest no mesmo banco — eles travaram um no `DROP SCHEMA` do outro.
 
 ---
 
@@ -507,13 +512,22 @@ legível no tema escuro.
 ## 7. Perguntas em aberto
 
 **P1 — "Ler documento" também ganha direções?**
-⏸️ ADIADO. O pedido citou imagem e áudio. `modes_for` já nasce genérico, então acrescentar
+✅ RESOLVIDO em (b) — **não** entrou. `modes_for` já é genérico (`modes_for(settings, "document")`
+funciona hoje), então acrescentar depois é a `ConfigKey` + a entrada em `PER_CHANNEL_AI_KEYS` +
+3 caixas. O ramo do documento no gate segue lendo o booleano, com comentário apontando para cá.
+Contexto original: O pedido citou imagem e áudio. `modes_for` já nasce genérico, então acrescentar
 `document_transcription_mode` depois é uma linha + 3 checkboxes.
 (a) fazer junto · (b) deixar para quando pedirem. **Recomendação: (b)** — cada direção nova é custo de
 LLM que ninguém pediu.
 
 **P2 — Entrada no `PLUGIN_API_CHANGELOG.md`?**
-⏸️ A DECIDIR na F8. Nenhum nome/campo/tipo do catálogo muda e `plugin_api_surface.json` não mexe (§3.3),
+✅ RESOLVIDO em (b), porém como **MINOR (1.5.0 → 1.6.0)**, não como PATCH. Motivo: a tabela "Como
+bumpar" do próprio changelog classifica como MINOR "ampliar o conjunto de situações em que [um seam]
+é emitido", que é exatamente o que aconteceu (`media_kind="image"` passou a ocorrer com
+`source="operator"/"echo"/"private"`, e o sandbox passou a consultar o filtro). PATCH é reservado a
+correção que não muda a forma. Além disso só um bump permite que um plugin EXIJA o alcance novo
+(`">=1.6,<2.0"`). O snapshot foi regenerado e o diff é **só a linha da versão** — prova de que a
+superfície em si não mexeu. Contexto original: Nenhum nome/campo/tipo do catálogo muda e `plugin_api_surface.json` não mexe (§3.3),
 então **não há bump obrigatório**. (a) só CLAUDE.md · (b) CLAUDE.md + nota PATCH no changelog.
 **Recomendação: (b)** — um plugin que filtre por `source` passa a ver combinações novas; é barato avisar.
 
@@ -525,7 +539,11 @@ menção hoje entra no histórico como `[Áudio recebido]`).
 ⏸️ ADIADO. O `/private-audio` tem `ai_read` + `force`; o `/private-image` não tem o toggle na UI. F5
 entrega só o card; se a IA precisar **ler** a imagem privada, é feature separada.
 
-**P5 — Confirmação de escopo com o usuário:** "imagens enviadas por um usuário do whatsbot" foi lido
+**P5 — Confirmação de escopo com o usuário:** ⏸️ NÃO confirmada antes da WAVE 2 — a D1 entrega o
+**superconjunto** (painel + celular + nota privada), então nenhuma das duas leituras fica de fora e
+nada precisa ser desfeito se a intenção era mais estreita; o operador simplesmente deixa a direção
+desmarcada. Registrado aqui porque o plano pedia a confirmação.
+Contexto original: "imagens enviadas por um usuário do whatsbot" foi lido
 como **operador** (painel + celular + nota privada), que é a leitura casada com o *"igual o áudio"*.
 A D1 entrega o superconjunto — se a intenção era só "imagem recebida do cliente", isso **já funciona**
 hoje e o F1 sozinho resolve. Vale confirmar antes da WAVE 2 (F1 e F0 podem ir de qualquer forma).
@@ -534,19 +552,18 @@ hoje e o F1 sozinho resolve. Vale confirmar antes da WAVE 2 (F1 e F0 podem ir de
 
 ## 8. Checklist de verificação
 
-- [ ] `venv/bin/python -m pytest` verde no Postgres de teste (`WHATSBOT_TEST_DB_URL`)
-- [ ] `venv/bin/python -m pytest tests/integration/characterization` — goldens de mídia/eco explicados um a um
-- [ ] `node --test web/static/js/components/channels/constants.test.js`
-- [ ] Canal com IA **desligada**: campos visíveis, salvam e persistem após F5 (reproduz o print nº 2)
-- [ ] Canal com IA **ligada**: nada mudou de lugar para quem já usava
-- [ ] Imagem recebida do cliente continua descrita exatamente como antes (D3)
-- [ ] Imagem do operador: descrita com `sent` marcado, **nenhuma** chamada sem
-- [ ] Eco de imagem: **um** card, **uma** linha `assistant`
-- [ ] Nota privada de imagem: descrita com `private` marcado; nunca enviada ao contato
-- [ ] Sandbox: imagem/documento seguem descrevendo, agora honrando `filter.transcription.*`
-- [ ] Modo escuro legível no bloco novo
-- [ ] Sem migration, sem DDL, sem segredo em log/URL
-- [ ] CLAUDE.md atualizado (F8)
+- [x] `venv/bin/python -m pytest tests/integration/characterization` (+ os arquivos novos) — **129 passed, 1 failed pré-existente, 2 skipped**; nenhum golden precisou ser regravado
+- [x] `node --test web/static/js/components/channels/constants.test.js` — **28/28**
+- [x] `pytest tests/contracts/test_plugin_api_surface.py` — **5/5**, com o diff do snapshot restrito à linha da versão
+- [x] Imagem recebida do cliente continua descrita exatamente como antes (D3) — os goldens `media_image_transcription_on*` passam intocados
+- [x] Imagem do operador: descrita com `sent` marcado, **nenhuma** chamada sem (spy de contagem)
+- [x] Eco de imagem: **um** card, **uma** linha `assistant`
+- [x] Nota privada de imagem: descrita com `private` marcado; nunca enviada ao contato
+- [x] Sandbox: imagem/documento seguem descrevendo, agora honrando `filter.transcription.*`
+- [x] Sem migration, sem DDL, sem segredo em log/URL
+- [x] CLAUDE.md atualizado (F8)
+- [x] `venv/bin/python -m pytest` (suíte INTEIRA, incluindo a legada) no banco privado — **750 passed, 4 failed, 4 skipped** (16m52s). As 4 falhas são **pré-existentes e alheias a este plano**: `test_alembic_hygiene` ×2 (revisão de merge + prefixos duplicados), `test_audit_matrix_is_complete` (matriz atrás dos eventos `channel.*`) e a suíte legada — que passa 1641 e falha 6 checks **todos do bloco do plugin `protocolos`** (`attr match …`, `skip_attrs round-trip`, `sanitize aceita scope protocolo`). Esta última é descasamento de versão do plugin INSTALADO: o teste do core monta condição no schema 2.0.0 (`values: [...]`) e `storages/plugins/protocolos` está na **1.34.0**, cujo `_condition_is_active` lê `cond["value"]` (singular) ⇒ condição inativa ⇒ `_rule_matches` False. Nada disso toca transcrição/mídia
+- [x] **Validação manual no navegador (2026-08-18)** — feita pelo usuário depois da correção do defeito de F1: *"Aparentemente tudo funcionando nessa parte."* Cobre canal com IA **desligada** mostrando os campos (o print nº 2 do usuário) e a tela de Canais voltando a abrir o modal.
 
 ---
 

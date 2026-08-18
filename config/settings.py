@@ -157,6 +157,12 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("audio_transcription_target", default="private", exposed=True, writable=True),
     ConfigKey("audio_transcription_chat_prefix", default="", exposed=True, writable=True),
     ConfigKey("image_transcription_enabled", default=True, exposed=True, writable=True),
+    # plano 118 — direções da descrição de imagem (received/sent/private), irmão do
+    # ``audio_transcription_mode``. NÃO é seedado de propósito (``_NO_SEED``): seedar
+    # "received" faria uma instalação que desligou a descrição no global
+    # (``image_transcription_enabled=False``) voltar a descrever, porque o mode vence
+    # o bool. Ausente ⇒ ``modes_for`` cai no bool legado — zero regressão (D3).
+    ConfigKey("image_transcription_mode", exposed=True, get_default=None, writable=True),
     ConfigKey("document_transcription_enabled", default=True, exposed=True, writable=True),
     ConfigKey("transfer_alert_enabled", default=True, exposed=True, writable=True),
     ConfigKey("transfer_alert_duration", default=5, exposed=True, writable=True),

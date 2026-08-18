@@ -212,5 +212,5 @@
       "validate_services(plugin_id, raw)"
     ]
   },
-  "whatsbot_api_version": "1.5.0"
+  "whatsbot_api_version": "1.6.0"
 }

@@ -26,14 +26,17 @@ _MEDIA_PREFIX = {
 }
 
 
-# Audio transcription "mode" is a multi-select set drawn from these tokens: which
+# A transcription "mode" is a multi-select set drawn from these tokens: which
 # message directions get transcribed. Inbound → "received"; outbound (echo from the
 # phone / operator send) → "sent"; operator-recorded private note → "private".
-_AUDIO_MODE_TOKENS = ("received", "sent", "private")
+# Shared by audio (``audio_transcription_mode``) and, since plano 118, by image
+# (``image_transcription_mode``).
+_MODE_TOKENS = ("received", "sent", "private")
+_AUDIO_MODE_TOKENS = _MODE_TOKENS  # legacy alias (kept: imported by the suite)
 
 
-def parse_audio_modes(raw) -> set[str]:
-    """Parse ``audio_transcription_mode`` into a set of {received, sent, private}.
+def parse_media_modes(raw) -> set[str]:
+    """Parse a ``<kind>_transcription_mode`` into a set of {received, sent, private}.
 
     Backward-compatible with the legacy single-value strings so old channel
     overrides and the global config keep working unchanged:
@@ -57,7 +60,64 @@ def parse_audio_modes(raw) -> set[str]:
         if s in ("", "off", "none"):
             return set()
         tokens = [t.strip() for t in s.split(",")]
-    return {t for t in tokens if t in _AUDIO_MODE_TOKENS}
+    return {t for t in tokens if t in _MODE_TOKENS}
+
+
+# Backwards-compatible alias: the name predates image having directions and is
+# imported by ``app/services/messaging_service.py`` and by the test suite.
+parse_audio_modes = parse_media_modes
+
+
+def direction_of(source: str) -> str:
+    """Map a call-site ``source`` to the direction token it is gated by.
+
+    ``echo`` (sent from the user's own phone) and ``operator`` (sent from the
+    panel) are both outbound → ``"sent"``; ``private`` is the operator's
+    panel-only note; anything else (``batch``, ``group_no_mention``) is inbound.
+    """
+    if source in ("echo", "operator"):
+        return "sent"
+    if source == "private":
+        return "private"
+    return "received"
+
+
+def modes_for(settings, media_kind: str) -> set[str]:
+    """Which directions of ``media_kind`` are transcribed, per the config ladder.
+
+    Resolution (plano 118 §4.1), in one place so every call site agrees:
+
+    1. ``<kind>_transcription_mode`` present → parse it;
+    2. else the legacy boolean ``<kind>_transcription_enabled`` → ``True`` means
+       ``{"received"}`` (what the bool always meant: inbound only), ``False``
+       means "off";
+    3. else ``{"received"}``.
+
+    ⚠️ Step 0 exists because ``settings`` may be a
+    :class:`channels.ai_settings.ChannelSettingsView`, which overlays ONE
+    channel's overrides on the globals: a channel that only carries the legacy
+    boolean (never re-saved since plano 118) must not have it beaten by a mode
+    key that exists only GLOBALLY — that would silently flip the operator's
+    unchecked box back on. When the view tells us which keys it actually
+    overrides, the channel's own legacy bool wins over a global mode.
+    """
+    mode_key = f"{media_kind}_transcription_mode"
+    legacy_key = f"{media_kind}_transcription_enabled"
+    overridden = getattr(settings, "overridden_keys", None)
+    if callable(overridden):
+        try:
+            ov = overridden()
+        except Exception:  # never let a settings double break transcription
+            ov = ()
+        if legacy_key in ov and mode_key not in ov:
+            return {"received"} if settings.get(legacy_key) else set()
+    raw = settings.get(mode_key, None)
+    if raw is not None:
+        return parse_media_modes(raw)
+    legacy = settings.get(legacy_key, None)
+    if legacy is not None:
+        return {"received"} if legacy else set()
+    return {"received"}
 
 
 def format_media_content(media_kind: str, transcription: str, text: str = "") -> str:
@@ -150,18 +210,12 @@ async def maybe_transcribe(
     """
     if force:
         allow = True
-    elif media_kind == "audio":
-        modes = parse_audio_modes(settings.get("audio_transcription_mode", "received"))
-        if source in ("echo", "operator"):
-            allow = "sent" in modes
-        elif source == "private":
-            allow = "private" in modes
-        else:
-            allow = "received" in modes
     elif media_kind == "document":
+        # Documento segue no booleano nesta entrega (plano 118 · P1); ``modes_for``
+        # já o atende genericamente quando ganhar direções.
         allow = bool(settings.get("document_transcription_enabled", True))
-    else:  # image
-        allow = bool(settings.get("image_transcription_enabled", True))
+    else:  # audio | image — gated by direction
+        allow = direction_of(source) in modes_for(settings, media_kind)
     if not allow:
         return ""
 
