@@ -714,11 +714,56 @@ const UPSERT_MSG_FIELDS = [
 ];
 
 /**
+ * Se algum campo do patch REALMENTE muda o valor da linha (plano 130 · F2).
+ * Comparação rasa por `!==` — os patches da sidebar só carregam escalares
+ * (contadores, status, nome, flags). Um patch com objeto/array seria sempre
+ * considerado diferente, o que é o lado seguro do erro.
+ * @param {Record<string, any>} row
+ * @param {Record<string, any>} patch
+ * @returns {boolean}
+ */
+function rowNeedsPatch(row, patch) {
+  for (const k of Object.keys(patch)) {
+    if (row[k] !== patch[k]) return true;
+  }
+  return false;
+}
+
+/**
+ * Aplica um patch nas linhas que casam `matches`, preservando a IDENTIDADE do array
+ * quando nada muda de valor (plano 130 · F2).
+ *
+ * ⚠️ O `prev.map(...)` cru devolvia um array novo mesmo num patch no-op. Como todo
+ * evento de WS passa por `setContacts` e o `conversation_upsert` sai a cada mensagem
+ * visível da instância inteira, a identidade de `contacts` trocava ~1×/s — o que
+ * re-renderizava a sidebar toda e, pior, re-disparava o efeito da contagem das abas
+ * (que zerava o total e fazia o badge piscar entre 252 e 50).
+ *
+ * @param {Record<string, any>[]} rows
+ * @param {(row: Record<string, any>) => boolean} matches
+ * @param {Record<string, any> | ((row: Record<string, any>) => (Record<string, any>|null))} patch
+ * @returns {Record<string, any>[]} `rows` quando nenhuma linha muda; array novo quando muda.
+ */
+export function patchRows(rows, matches, patch) {
+  if (!Array.isArray(rows)) return rows;
+  let changed = false;
+  const next = rows.map((row) => {
+    if (!matches(row)) return row;
+    const p = typeof patch === 'function' ? patch(row) : patch;
+    if (!p || !rowNeedsPatch(row, p)) return row;
+    changed = true;
+    return { ...row, ...p };
+  });
+  return changed ? next : rows;
+}
+
+/**
  * Apply a `conversation_upsert` row to the sidebar list (idempotent by
  * `conversation_id`). Absent → INSERT (replacing any legacy phone-only row of the
  * same contact, mirroring `buildRows`). Present → scoped MERGE of message/preview/
- * unread fields, guarded so an older snapshot never regresses the preview. Always a
- * NEW sorted array.
+ * unread fields, guarded so an older snapshot never regresses the preview. Devolve a
+ * MESMA referência quando o merge não muda nada (plano 130 · F2); array novo e
+ * ordenado quando muda.
  * @param {Record<string, any>[]} prev - current sidebar rows.
  * @param {Record<string, any>} incoming - a `convRowToSidebarRow(...)` result.
  * @returns {Record<string, any>[]}
@@ -766,6 +811,12 @@ export function upsertConversationRow(prev, incoming) {
   }
   // Activity/sort bump is always forward-only.
   patch.updated_at = Math.max(existing.updated_at || 0, incoming.updated_at || 0);
+  // ⚠️ O patch NUNCA é vazio (o `updated_at` acima é sempre escrito), então a
+  // comparação tem de ser sobre os VALORES resultantes, não sobre
+  // `Object.keys(patch).length`. Um re-emit idêntico (o caso comum: vários
+  // `conversation_upsert` da mesma mensagem) devolve `prev` intacto — sem cópia,
+  // sem re-ordenação e sem trocar a identidade da lista (plano 130 · F2).
+  if (!rowNeedsPatch(existing, patch)) return prev;
   const next = [...prev];
   next[idx] = { ...existing, ...patch };
   return sortContacts(next);

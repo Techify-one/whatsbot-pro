@@ -83,9 +83,12 @@ export function conversationPatch(row, ev) {
 }
 
 /**
- * Apply a conversation event across a list of rows, returning a NEW array with
- * the targeted row(s) patched (others returned unchanged by reference). This is
- * the single-source mapping used by the sidebar's `setContacts(prev => …)`.
+ * Apply a conversation event across a list of rows. The targeted row(s) are patched
+ * (others returned unchanged by reference); quando NENHUMA linha muda, devolve o
+ * MESMO array (plano 130 · F2) — o `rows.map` cru trocava a identidade da lista em
+ * todo evento, re-renderizando a sidebar inteira e re-disparando o efeito da
+ * contagem das abas. This is the single-source mapping used by the sidebar's
+ * `setContacts(prev => …)`.
  *
  * @param {ConversationRow[]} rows
  * @param {ConversationEvent} ev
@@ -93,11 +96,18 @@ export function conversationPatch(row, ev) {
  */
 export function applyConversationEvent(rows, ev) {
   if (!Array.isArray(rows)) return rows;
-  return rows.map(row => {
+  let changed = false;
+  const next = rows.map(row => {
     if (!eventTargetsRow(row, ev)) return row;
     const patch = conversationPatch(row, ev);
-    return Object.keys(patch).length ? { ...row, ...patch } : row;
+    // Só conta como mudança se algum VALOR difere: um evento que reafirma o estado
+    // atual (o mesmo assignee, o mesmo status) não pode trocar a identidade da linha.
+    // `conv_labels` é array, então compara por referência — o lado seguro do erro.
+    if (!Object.keys(patch).some(k => row[k] !== patch[k])) return row;
+    changed = true;
+    return { ...row, ...patch };
   });
+  return changed ? next : rows;
 }
 
 /**

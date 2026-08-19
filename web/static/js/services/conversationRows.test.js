@@ -13,7 +13,7 @@ import {
   isVisibleInSidebar, sortContactsBy, sortContacts, splitSort, combineSort,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
   convRowToSidebarRow, upsertConversationRow, distinctChannelCount,
-  rowMatchesView, specNeedsServer, aiEffectivelyOn,
+  rowMatchesView, specNeedsServer, aiEffectivelyOn, patchRows,
 } from './conversationRows.js';
 
 // ── buildRows ──────────────────────────────────────────────────────
@@ -828,4 +828,95 @@ test('filtro ai: conversa sem dono continua em "on"', () => {
   const row = { conv_ai_active: 1, assignee_user_id: null };
   assert.equal(clauseMatches(row, { dim: 'ai', op: 'eq', value: 'on' }), true);
   assert.equal(clauseMatches(row, { dim: 'ai', op: 'ne', value: 'on' }), false);
+});
+
+// ── plano 130 · F2 — identidade do array preservada no no-op ─────────────────
+// Todo evento de WS passa por `setContacts`, e o `conversation_upsert` sai a cada
+// mensagem visível da INSTÂNCIA. Enquanto um patch no-op devolvia array novo, a
+// identidade de `contacts` trocava ~1×/s: a sidebar re-renderizava inteira e o
+// efeito da contagem das abas re-disparava, zerando o total (badge 252 ⇄ 50).
+
+const ROWS = Object.freeze([
+  { conversation_id: 1, phone: '5511', unread_count: 0, last_message_status: 'read', name: 'Ana' },
+  { conversation_id: 2, phone: '5522', unread_count: 3, last_message_status: 'sent', name: 'Beto' },
+]);
+
+test('patchRows: patch que não muda valor devolve a MESMA referência', () => {
+  const out = patchRows(ROWS, c => c.phone === '5511', { unread_count: 0 });
+  assert.equal(out, ROWS);
+});
+
+test('patchRows: nenhuma linha casa ⇒ mesma referência', () => {
+  assert.equal(patchRows(ROWS, c => c.phone === 'ninguem', { unread_count: 9 }), ROWS);
+});
+
+test('patchRows: mudança real ⇒ array novo, só a linha alvo trocada', () => {
+  const out = patchRows(ROWS, c => c.phone === '5522', { unread_count: 0 });
+  assert.notEqual(out, ROWS);
+  assert.equal(out[0], ROWS[0], 'linha não-alvo preserva a própria identidade');
+  assert.notEqual(out[1], ROWS[1]);
+  assert.equal(out[1].unread_count, 0);
+  assert.equal(out[1].name, 'Beto', 'campos fora do patch sobrevivem');
+  assert.equal(ROWS[1].unread_count, 3, 'entrada não é mutada');
+});
+
+test('patchRows: patch por função vê a linha e pode virar no-op', () => {
+  const keepName = patchRows(ROWS, c => c.phone === '5511', c => ({ name: '' || c.name }));
+  assert.equal(keepName, ROWS);
+  const newName = patchRows(ROWS, c => c.phone === '5511', c => ({ name: 'Ana Maria' || c.name }));
+  assert.notEqual(newName, ROWS);
+  assert.equal(newName[0].name, 'Ana Maria');
+});
+
+test('patchRows: patch nulo/vazio nunca troca a referência', () => {
+  assert.equal(patchRows(ROWS, () => true, {}), ROWS);
+  assert.equal(patchRows(ROWS, () => true, () => null), ROWS);
+});
+
+test('patchRows: entrada que não é array passa intacta', () => {
+  assert.equal(patchRows(null, () => true, { a: 1 }), null);
+  assert.equal(patchRows(undefined, () => true, { a: 1 }), undefined);
+});
+
+test('upsertConversationRow: re-emit idêntico devolve a MESMA lista', () => {
+  const row = convRowToSidebarRow({
+    id: 10, contact_id: 5, phone: '5533', name: 'Caio',
+    last_message: 'oi', last_message_ts: 1000, last_activity_at: 1000, unread_count: 2,
+  });
+  const seeded = upsertConversationRow([], row);
+  assert.equal(seeded.length, 1);
+  // o MESMO snapshot chegando de novo (o caso comum numa rajada) não pode
+  // re-ordenar nem trocar a identidade da lista
+  assert.equal(upsertConversationRow(seeded, row), seeded);
+  assert.equal(upsertConversationRow(upsertConversationRow(seeded, row), row), seeded);
+});
+
+test('upsertConversationRow: snapshot MAIS ANTIGO também é no-op de identidade', () => {
+  const novo = convRowToSidebarRow({
+    id: 10, contact_id: 5, phone: '5533',
+    last_message: 'nova', last_message_ts: 2000, last_activity_at: 2000,
+  });
+  const velho = convRowToSidebarRow({
+    id: 10, contact_id: 5, phone: '5533',
+    last_message: 'velha', last_message_ts: 1000, last_activity_at: 1000,
+  });
+  const list = upsertConversationRow([], novo);
+  const out = upsertConversationRow(list, velho);
+  assert.equal(out, list, 'o guard anti-regressão não pode custar uma realocação');
+  assert.equal(out[0].last_message, 'nova');
+});
+
+test('upsertConversationRow: mudança real continua devolvendo lista nova e ordenada', () => {
+  const t0 = convRowToSidebarRow({
+    id: 10, contact_id: 5, phone: '5533', last_message_ts: 1000, last_activity_at: 1000,
+  });
+  const t1 = convRowToSidebarRow({
+    id: 10, contact_id: 5, phone: '5533', last_message: 'nova',
+    last_message_ts: 2000, last_activity_at: 2000, unread_count: 4,
+  });
+  const list = upsertConversationRow([], t0);
+  const out = upsertConversationRow(list, t1);
+  assert.notEqual(out, list);
+  assert.equal(out[0].last_message, 'nova');
+  assert.equal(out[0].unread_count, 4);
 });

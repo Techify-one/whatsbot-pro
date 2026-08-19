@@ -25,7 +25,7 @@ import * as soundEngine from '../../../utils/soundEngine.js';
 import { optimisticDupIndex, dropSuperseded } from '../../../services/messages.js';
 import { samePhone } from '../../../utils/phone.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
-import { upsertConversationRow, convRowToSidebarRow, rowMatchesView, specNeedsServer } from '../../../services/conversationRows.js';
+import { upsertConversationRow, convRowToSidebarRow, rowMatchesView, specNeedsServer, patchRows } from '../../../services/conversationRows.js';
 import { typingKey } from '../ContactList.js';
 import { threadKeyOf } from './useConversationSelection.js';
 import { countNewWhileAnchored } from '../../../services/threadData.js';
@@ -169,9 +169,8 @@ export function useConversationWsEvents(opts) {
       pageVisibleRef.current = visible;
       if (visible && selectedRef.current && !openThreadAnchoredRef.current) {
         markAsRead(selectedRef.current);
-        setContacts(prev => prev.map(c =>
-          isOpenRow(c) ? { ...c, unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false } : c
-        ));
+        setContacts(prev => patchRows(prev, isOpenRow,
+          { unread_count: 0, unread_ai_count: 0, has_unread_mention: false, has_user_mention: false }));
         // plano 72 F8 — DROP-GATE das Menções (leitura). Na aba Menções (serverMode) ler
         // a menção da conversa aberta a tira da view server-filtrada (has_mention→false),
         // mas o patch acima só zera o flag sem remover a linha → ela fica presa (lista N
@@ -293,8 +292,8 @@ export function useConversationWsEvents(opts) {
       const convId = data.conversation_id;
       if (convId != null && selectedConvIdRef.current === convId
           && !openThreadAnchoredRef.current) return;  // já estou nela, na ponta recente
-      setContacts(prev => prev.map(c =>
-        c.conversation_id === convId ? { ...c, has_user_mention: true } : c));
+      setContacts(prev => patchRows(prev, c => c.conversation_id === convId,
+        { has_user_mention: true }));
       // plano 72 F7 — INSERT-GATE das Menções. Na aba Menções (serverMode) a lista vem
       // server-filtrada por has_mention=true; a conversa recém-mencionada e AUSENTE não é
       // inserida pelo prev.map acima (só patcha presentes) e NÃO há conversation_upsert
@@ -381,7 +380,10 @@ export function useConversationWsEvents(opts) {
       let next = applyConversationEvent(prev, data);
       if (serverGate && !needsServer) {
         const now = Date.now() / 1000;
-        next = next.filter(c => !eventTargetsRow(c, data) || rowMatchesView(c, vs, now));
+        const kept = next.filter(c => !eventTargetsRow(c, data) || rowMatchesView(c, vs, now));
+        // `filter` devolve array novo mesmo sem remover nada; só adota quando de fato
+        // caiu alguém (plano 130 · F2 — preservar a identidade da lista no no-op).
+        if (kept.length !== next.length) next = kept;
       }
       return next;
     });
@@ -517,9 +519,8 @@ export function useConversationWsEvents(opts) {
     if (!phone || !updatedInfo) return;
 
     // Update sidebar name (all rows of this phone share the contact name)
-    setContacts(prev => prev.map(c =>
-      c.phone === phone ? { ...c, name: updatedInfo.name || c.name } : c
-    ));
+    setContacts(prev => patchRows(prev, c => c.phone === phone,
+      c => ({ name: updatedInfo.name || c.name })));
 
     // Update detail view if this contact is selected
     if (phone === selectedRef.current) {
@@ -548,9 +549,7 @@ export function useConversationWsEvents(opts) {
     if (!contactAiToggled) return;
     const { phone, ai_enabled } = contactAiToggled;
     if (!phone) return;
-    setContacts(prev => prev.map(c =>
-      c.phone === phone ? { ...c, ai_enabled } : c
-    ));
+    setContacts(prev => patchRows(prev, c => c.phone === phone, { ai_enabled }));
     if (phone === selectedRef.current) {
       setContactData(prev => prev ? { ...prev, ai_enabled } : prev);
     }
@@ -574,7 +573,8 @@ export function useConversationWsEvents(opts) {
       const patched = prev.map(c => c.phone === phone ? { ...c, tags } : c);
       if (serverGate && !needsServer) {
         const now = Date.now() / 1000;
-        return patched.filter(c => c.phone !== phone || rowMatchesView(c, vs, now));
+        const kept = patched.filter(c => c.phone !== phone || rowMatchesView(c, vs, now));
+        if (kept.length !== patched.length) return kept;   // idem (plano 130 · F2)
       }
       return patched;
     });
@@ -588,11 +588,8 @@ export function useConversationWsEvents(opts) {
     if (!messagesRead) return;
     const { phone, only_user } = messagesRead;
     if (!phone) return;
-    setContacts(prev => prev.map(c =>
-      c.phone === phone
-        ? { ...c, unread_count: 0, ...(only_user ? {} : { unread_ai_count: 0, has_unread_mention: false }) }
-        : c
-    ));
+    setContacts(prev => patchRows(prev, c => c.phone === phone,
+      { unread_count: 0, ...(only_user ? {} : { unread_ai_count: 0, has_unread_mention: false }) }));
   }, [messagesRead]);
 
   // Handle delivery/read status updates for outgoing messages
@@ -617,13 +614,10 @@ export function useConversationWsEvents(opts) {
     const { phone } = messageStatus;
     if (phone) {
       const STATUS_ORDER = { sent: 1, delivered: 2, read: 3 };
-      setContacts(prev => prev.map(c => {
-        if (c.phone === phone && c.last_message_role === 'assistant'
-            && (STATUS_ORDER[status] || 0) > (STATUS_ORDER[c.last_message_status] || 0)) {
-          return { ...c, last_message_status: status };
-        }
-        return c;
-      }));
+      setContacts(prev => patchRows(prev,
+        c => c.phone === phone && c.last_message_role === 'assistant'
+          && (STATUS_ORDER[status] || 0) > (STATUS_ORDER[c.last_message_status] || 0),
+        { last_message_status: status }));
     }
   }, [messageStatus]);
 
@@ -674,7 +668,7 @@ export function useConversationWsEvents(opts) {
     if (!avatarUpdated) return;
     const { phone, v } = avatarUpdated;
     if (!phone || !v) return;
-    setContacts(prev => prev.map(c => c.phone === phone ? { ...c, avatar_v: v } : c));
+    setContacts(prev => patchRows(prev, c => c.phone === phone, { avatar_v: v }));
     setContactData(prev => (prev && prev.phone === phone) ? { ...prev, avatar_v: v } : prev);
   }, [avatarUpdated]);
 
@@ -706,12 +700,9 @@ export function useConversationWsEvents(opts) {
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i];
       if (m.role === 'assistant' && m.status) {
-        setContacts(prev => prev.map(c => {
-          if (isOpenRow(c) && c.last_message_role === 'assistant' && m.status !== c.last_message_status) {
-            return { ...c, last_message_status: m.status };
-          }
-          return c;
-        }));
+        setContacts(prev => patchRows(prev,
+          c => isOpenRow(c) && c.last_message_role === 'assistant',
+          { last_message_status: m.status }));
         break;
       }
     }
