@@ -1,4 +1,4 @@
-# Plano 131 — Sistema de API com chave por usuário
+# Plano 134 — Sistema de API com chave por usuário
 
 > **Status: IMPLEMENTADO** (2026-08-20). Este arquivo é o registro do plano
 > COMO EXECUTADO — inclui as divergências encontradas na implementação, que são
