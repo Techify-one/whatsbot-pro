@@ -284,6 +284,16 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     setContactData, updateMsgByLocalId,
     updateMenus: (el, val) => autocompleteRef.current && autocompleteRef.current.updateMenus(el, val),
     closeMentionMenu: () => autocompleteRef.current && autocompleteRef.current.setMentionMenu(null),
+    closeMenus: () => {
+      const a = autocompleteRef.current;
+      if (!a) return;
+      a.setMentionMenu(null);
+      a.setQuickReplyMenu(null);
+    },
+    menusOpen: () => {
+      const a = autocompleteRef.current;
+      return !!(a && (a.mentionMenu || a.quickReplyMenu));
+    },
     collectMentions: (text) => autocompleteRef.current
       ? autocompleteRef.current.collectMentions(text) : { mentions: [], mention_inbox: false },
     resetMentions: () => autocompleteRef.current && autocompleteRef.current.resetMentions(),

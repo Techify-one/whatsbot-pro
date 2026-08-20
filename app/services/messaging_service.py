@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass
 
 from channels import ai_settings
-from db.repositories import agent_repo, contact_repo, conversation_repo
+from db.repositories import agent_repo, contact_repo, conversation_repo, message_repo
 from agent import group_mentions
 from server import sound_catalog, system_notices
 from server.execution import (
@@ -1639,10 +1639,32 @@ class MessagingService:
                     else:
                         new_content = None
                     if new_content:
-                        await asyncio.to_thread(
-                            agent_handler.update_last_user_message_content, phone,
-                            new_content, channel_id
-                        )
+                        # plano 133 — cola na linha que ESTE laço acabou de inserir,
+                        # mirada pelo ``id`` que o ``INSERT`` devolveu (⚠️ a chave é
+                        # ``"id"``; ``"_id"`` só existe no caminho de LEITURA,
+                        # ``message_repo._row_to_dict``).
+                        #
+                        # Aqui se chamava ``update_last_user_message_content``, que
+                        # REPROCURA "a última msg ``role='user'`` da conversa" por
+                        # ``ORDER BY ts DESC`` — sem exigir ``media_type``. Enquanto
+                        # o ``ts`` era o relógio do INSERT a mídia (salva por último)
+                        # vencia sempre e o alvo saía certo por acidente; desde o
+                        # plano 129 o ``ts`` é o REAL do provedor, e um TEXTO do
+                        # mesmo segundo tem carimbo maior. A descrição ia para a
+                        # linha de texto: prefixo interno virava bolha pública (sem
+                        # ``media_type`` o painel não o esconde), o texto do cliente
+                        # era destruído pelo UPDATE e a imagem ficava sem descrição.
+                        #
+                        # ⚠️ ``saved`` é rebindado a cada iteração do laço — a
+                        # colagem tem de ficar DENTRO da iteração.
+                        saved_id = (saved or {}).get("id")
+                        if saved_id:
+                            await asyncio.to_thread(
+                                message_repo.update_content, saved_id, new_content)
+                        else:
+                            logger.warning(
+                                "[Batch] mídia sem id no retorno do INSERT (%s): "
+                                "descrição/transcrição NÃO colada (plano 133)", phone)
                     if audio_path:
                         await self.deliver_audio_transcription(phone, contact, transcription,
                                                                channel_id=channel_id)

@@ -23,12 +23,19 @@ LLM_API_BASE_URL = os.environ.get(
 # and sends a WhatsApp message to it, Techify creates an account + API key, and
 # the wizard polls TECHIFY_REQUEST_APIKEY_URL (keyed by the connected WhatsApp
 # number) until the key is ready. Once the account is created the key stays
-# downloadable for ~1 minute. TECHIFY_PROVISION_NUMBER is a fallback used only
-# when the service-number endpoint is unreachable.
+# downloadable for ~1 minute.
+#
+# ⚠️ TECHIFY_PROVISION_NUMBER is the fallback for when /service_number is
+# unreachable, and it is EMPTY unless the environment sets it (it was the literal
+# "5513981744038" until 2026-08-20). A number baked into the core is a destination
+# nobody chose: with nothing configured, the provisioning message left silently
+# for it instead of the wizard saying there is no destination. With no destination
+# resolved the send is now REFUSED with an actionable error — see
+# ``provisioning_service.request_key`` ("no_destination").
 TECHIFY_SERVICE_NUMBER_URL = os.environ.get(
     "TECHIFY_SERVICE_NUMBER_URL", "https://llm.techify.one/service_number"
 ).rstrip("/")
-TECHIFY_PROVISION_NUMBER = os.environ.get("TECHIFY_PROVISION_NUMBER", "5513981744038")
+TECHIFY_PROVISION_NUMBER = os.environ.get("TECHIFY_PROVISION_NUMBER", "").strip()
 TECHIFY_REQUEST_APIKEY_URL = os.environ.get(
     "TECHIFY_REQUEST_APIKEY_URL", "https://llm.techify.one/request-apikey"
 ).rstrip("/")

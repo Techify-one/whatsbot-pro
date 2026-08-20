@@ -52,6 +52,15 @@ def register_routes(app, deps):
                 "Não foi possível identificar seu número. "
                 "Aguarde a conexão concluir e tente de novo."
             )
+        if kind == "no_destination":
+            # O core não tem número embutido: sem destino configurado o wizard
+            # recusa em vez de mandar a mensagem para um número que ninguém
+            # escolheu. A mensagem não cita plugin nenhum — o core não os conhece.
+            return _err(
+                "Nenhum número de destino configurado para o provisionamento. "
+                "Configure o número que deve receber o pedido de conta e "
+                "tente de novo."
+            )
         if kind == "send_failed":
             return _err(f"Não foi possível enviar a mensagem: {data['error']}")
         if kind == "manual":

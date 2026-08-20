@@ -46,7 +46,7 @@ export function Composer({
   const {
     input, mode, setMode, aiReadPrivate, setAiReadPrivate, aiReplyInChat, setAiReplyInChat,
     replyingTo, setReplyingTo, emojiOpen, setEmojiOpen, inputRef, emojiRef,
-    insertEmoji, handleInputChange,
+    insertEmoji, handleInputChange, handleSelect, handleClick, handleCaretKeyUp, handleBlur,
   } = composer;
   const {
     mentionMenu, quickReplyMenu, getMentionCandidates, getQuickReplyCandidates,
@@ -83,6 +83,26 @@ export function Composer({
     const raf = requestAnimationFrame(sync);
     return () => cancelAnimationFrame(raf);
   }, [input]);
+
+  // O espelho também precisa re-sincronizar quando a LARGURA muda sem o texto
+  // mudar (plano 132 · F4): redimensionar a janela, abrir/fechar o painel de
+  // informações do contato, a bandeja de anexos empurrando o layout. O efeito
+  // acima só roda em `[input]`, então até aqui o espelho ficava dessincronizado
+  // até o operador digitar mais uma tecla — e nesse meio-tempo o caret cai fora
+  // do texto que ele está vendo.
+  //
+  // Efeito PRÓPRIO com deps `[]`: pendurado no `[input]` ele criaria e destruiria
+  // um observador por tecla. Sem laço de realimentação — observa o TEXTAREA e
+  // `syncMirror` só escreve no ESPELHO.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => syncMirror(inputRef.current, mirrorRef.current));
+    ro.observe(el);
+    // ⚠️ Desobservar SEMPRE: há precedente no repo de ResizeObserver que nunca
+    // desconecta (useChatDayHeader.js) — não repetir.
+    return () => ro.disconnect();
+  }, []);
 
   const hasText = input.trim().length > 0;
 
@@ -369,14 +389,25 @@ export function Composer({
             class="pointer-events-none absolute inset-0 z-0 overflow-hidden box-border rounded-[8px] px-[12px] py-[9px] border border-transparent text-[15px] leading-[20px] whitespace-pre-wrap break-words bg-wa-inputBg text-wa-text"
             dangerouslySetInnerHTML=${{ __html: highlightComposerMarkup(input) }}
           ></div>
+          <!-- autocorrect OFF (plano 132 · F6): a página declara lang="pt-BR",
+               então a autocorreção do navegador nasce LIGADA, e em português
+               quase toda substituição dela PRODUZ um acento. Um Backspace logo
+               depois significa "desfazer a autocorreção", não "apagar um
+               caractere" — que é o sintoma relatado. O spellcheck fica como
+               está: ele só sublinha; quem troca a palavra é o autocorrect. -->
           <textarea
             ref=${inputRef}
             rows="1"
             value=${input}
             onInput=${handleInputChange}
+            onSelect=${handleSelect}
+            onClick=${handleClick}
+            onKeyUp=${handleCaretKeyUp}
+            onBlur=${handleBlur}
             onKeyDown=${handleKeyDown}
             onPaste=${handlePaste}
             onScroll=${(e) => syncMirror(e.target, mirrorRef.current)}
+            autocorrect="off"
             placeholder=${hasPending
               ? (audioOnlyPending ? 'Mensagem (enviada antes do áudio)' : 'Adicionar uma legenda (opcional)')
               : mode === 'private' ? 'Mensagem privada' : 'Digite uma mensagem'}

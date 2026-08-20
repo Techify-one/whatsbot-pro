@@ -65,7 +65,17 @@ logger = logging.getLogger(__name__)
 # a declarar deve fazê-lo condicionalmente (``dataclasses.fields``) se quiser
 # continuar carregando num core anterior — passar o kwarg a um
 # ``ChannelCapabilities`` sem o campo levanta ``TypeError`` no import.
-WHATSBOT_API_VERSION = "1.6.0"
+# 1.7.0: ADITIVA no catálogo — seam ``filter.provisioning.number`` (str),
+# aplicado em ``provisioning_service.fetch_provision_number`` depois de o core
+# resolver o destino da mensagem de provisionamento. ``None``/``""``
+# ABORTA (semântica padrão de filtro): sem destino o core recusa o envio, em vez
+# de escolher um número por conta própria — na mesma release o literal embutido
+# em ``TECHIFY_PROVISION_NUMBER`` foi removido, então "nenhum destino" passou a
+# ser um desfecho normal. Instalação sem filtro registrado só muda se também não
+# tiver env nem ``/service_number``. Plugin que precise do seam declara
+# ``">=1.7,<2.0"``; quem só quer degradar (o registro de um nome desconhecido é
+# WARNING, não erro) continua em ``">=1.0,<2.0"``.
+WHATSBOT_API_VERSION = "1.7.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

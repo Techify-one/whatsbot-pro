@@ -796,7 +796,7 @@ Um `tools.py` costuma declarar VÁRIAS tools, e a identidade de uma linha é o *
 
 ### Versionamento da API de plugins (`WHATSBOT_API_VERSION`)
 
-**Versão atual: `1.6.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
+**Versão atual: `1.7.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
 
 ⚠️ **A constante ficou congelada em `1.0.0` por 93 dias** (2026-05-10 → 2026-08-11) enquanto a superfície crescia de 35 para 75 eventos e de 0 para 24 filtros. Consequência: o guard de compat nunca rejeitou nada e **nenhum plugin conseguia declarar de que core ele precisa** — o `whatsapp_cloud` teve de degradar fechado em runtime porque não tinha como exigir o `ctx.extras.signature_authenticated` do plano 84. A regra em prosa existia desde 2026-06-29 e foi violada 8 dias depois, em silêncio. Por isso a disciplina agora tem dente, não só texto.
 
@@ -966,6 +966,7 @@ Chave especial `*` — subscrever via `EVENT_HANDLERS = {"*": fn}` recebe todo e
 | `filter.reply.part` | cada parte antes do envio ao provider (vale para envio manual também) | `str` | Aquela parte é pulada | `phone` |
 | `filter.outbound.text` | texto wire-only, depois da cópia exibida/salva e antes do provider | `str` | Mantém o texto anterior | `phone, channel_id, source, sent_by_name, index, total` |
 | `filter.authz.decision` | `authz.check`/`acheck` DEPOIS do RBAC | `dict {user, permission_key, allow}` | trata como `allow=False` (nega) | `permission_key` |
+| `filter.provisioning.number` | `provisioning_service.fetch_provision_number` DEPOIS de o core resolver o destino (`/service_number` → env `TECHIFY_PROVISION_NUMBER`, **vazia por padrão**) | `str` | **Aborta o envio**: `None`/`""` ⇒ sem destino, o wizard recusa com erro acionável em vez de mandar a frase para o número que o core conhecia. O core não valida formato — normalizar é de quem responde | `source ∈ {service_number, fallback}, message` |
 | `filter.conversation.before_status` | antes de fechar a conversa | `dict {conversation_id, new_status}` | Aborta o fechamento | `user_id` |
 | `filter.conversation.before_assign` | antes de atribuir/desatribuir | `dict {conversation_id, assignee_user_id}` | Aborta a atribuição | `user_id` |
 | `filter.conversation.clear_assignee_on_close` | **NOVO (plano 67)** — `conversation_service.set_status` no fechamento, DEPOIS do `before_status` | `bool` (default `True` = limpar o atendente humano) | `None`/ausente ⇒ default seguro (limpa) | `conversation_id, user_id` |

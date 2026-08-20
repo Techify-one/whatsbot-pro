@@ -158,7 +158,12 @@ export function useTokenAutocomplete({
   function applyMention(cand) {
     if (!cand || !mentionMenu) return;
     const el = inputRef.current;
-    const pos = (el && el.selectionStart != null) ? el.selectionStart : input.length;
+    // Valor e índice saem da MESMA fonte — o DOM vivo. Ler a string do closure
+    // (`input`, que é o state) junto de um caret lido do DOM é exatamente como o
+    // splice erra quando o operador move o cursor com o menu aberto
+    // (plano 132 · F5). Mesmo padrão do `insertEmoji` em useComposer.js.
+    const cur = el ? el.value : input;
+    const pos = (el && el.selectionStart != null) ? el.selectionStart : cur.length;
     // Rótulo inserido no texto. No modo privado rastreamos a escolha (rótulo → user_id
     // ou flag de time) para o envio saber os destinatários.
     let label;
@@ -168,7 +173,7 @@ export function useTokenAutocomplete({
     } else {
       label = cand.special ? 'todos' : mentionLabel(cand);
     }
-    const { value: newVal, caret } = replaceToken(input, mentionMenu.start, pos, '@' + label + ' ');
+    const { value: newVal, caret } = replaceToken(cur, mentionMenu.start, pos, '@' + label + ' ');
     setInput(newVal);
     setMentionMenu(null);
     setTimeout(() => {
@@ -213,8 +218,10 @@ export function useTokenAutocomplete({
   function applyQuickReply(cand) {
     if (!cand || !quickReplyMenu) return;
     const el = inputRef.current;
-    const pos = (el && el.selectionStart != null) ? el.selectionStart : input.length;
-    const { value: newVal, caret } = replaceToken(input, quickReplyMenu.start, pos, cand.content);
+    // Mesma fonte para valor e índice — ver applyMention (plano 132 · F5).
+    const cur = el ? el.value : input;
+    const pos = (el && el.selectionStart != null) ? el.selectionStart : cur.length;
+    const { value: newVal, caret } = replaceToken(cur, quickReplyMenu.start, pos, cand.content);
     setInput(newVal);
     setQuickReplyMenu(null);
     setTimeout(() => {

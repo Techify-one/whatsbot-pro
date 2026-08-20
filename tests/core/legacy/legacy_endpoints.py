@@ -5704,14 +5704,47 @@ def _fake_async_client(resp):
     return MagicMock(return_value=cm)
 
 
+def _service_number_unreachable():
+    """Patch target: ``GET /service_number`` fora do ar.
+
+    Sem isto o bloco abaixo dependeria de REDE. O core deixou de ter número de
+    provisionamento embutido (era o literal "5513981744038" até 2026-08-20), então
+    numa máquina sem internet o destino passaria a ser vazio e o envio seria
+    recusado — o teste falharia por ambiente, não por regressão. Fixamos os dois
+    lados: endpoint inacessível + env conhecida.
+    """
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=MagicMock(
+        get=AsyncMock(side_effect=RuntimeError("sem rede"))))
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=cm)
+
+
 # request-key: sends the provisioning WhatsApp message and arms polling
 _send_calls_before = mock_gowa_client.send_message.call_count
-r = client.post("/api/setup/request-key")
+with patch("app.services.provisioning_service.httpx.AsyncClient",
+           _service_number_unreachable()), \
+     patch("app.services.provisioning_service.TECHIFY_PROVISION_NUMBER",
+           "5513981744038"):
+    r = client.post("/api/setup/request-key")
 check("POST /api/setup/request-key -> 200", r.status_code == 200)
 check("POST /api/setup/request-key -> returns number",
       r.json()["data"].get("number") == "5511999990001")
 check("POST /api/setup/request-key -> WhatsApp message sent",
       mock_gowa_client.send_message.call_count == _send_calls_before + 1)
+
+# ...e sem destino nenhum (nem env, nem endpoint) NADA é enviado: o core não tem
+# mais número embutido para servir de reserva.
+_send_calls_before = mock_gowa_client.send_message.call_count
+with patch("app.services.provisioning_service.httpx.AsyncClient",
+           _service_number_unreachable()), \
+     patch("app.services.provisioning_service.TECHIFY_PROVISION_NUMBER", ""):
+    r = client.post("/api/setup/request-key")
+check("POST /api/setup/request-key sem destino -> 400", r.status_code == 400)
+check("POST /api/setup/request-key sem destino -> erro acionável",
+      r.json()["ok"] is False and "destino" in r.json()["error"])
+check("POST /api/setup/request-key sem destino -> nada enviado",
+      mock_gowa_client.send_message.call_count == _send_calls_before)
 
 # key-status: account not ready yet
 with patch("server.routes.setup.httpx.AsyncClient",

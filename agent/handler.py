@@ -422,12 +422,27 @@ class AgentHandler:
 
     def update_last_user_message_content(self, phone: str, new_content: str,
                                          channel_id: str = "default") -> None:
-        """Update the content of the last user message (e.g., with transcription).
+        """Update the content of the last user message.
+
+        ⚠️ **NÃO use para colar transcrição/descrição de mídia** (plano 133). O
+        alvo é RESOLVIDO POR REPROCURA — ``get_last_user_message`` ordena por
+        ``ts DESC`` e **não exige ``media_type``**. Enquanto o ``ts`` era o
+        relógio do INSERT a mídia (salva por último) vencia sempre e o alvo saía
+        certo por acidente; desde o **plano 129** o ``ts`` é o REAL do provedor,
+        então um TEXTO entregue no mesmo segundo tem carimbo maior e recebia a
+        descrição — prefixo interno virando bolha pública (linha sem
+        ``media_type`` não é filtrada pelo painel) e texto do cliente destruído
+        pelo ``UPDATE``. Quem insere a linha tem o ``id`` de volta: use
+        ``message_repo.update_content(saved["id"], …)``.
 
         Plano 37 (B5): escopa à conversa do CANAL do turno (o ``ContactMemory`` é
         construído com ``channel_id`` → carrega ``inbox_id``), evitando a corrida
         cross-canal em que a transcrição sobrescreveria a última msg de outro canal.
-        Fail-open: sem conversa aberta naquele inbox, cai no contact-global."""
+        Fail-open: sem conversa aberta naquele inbox, cai no contact-global.
+
+        Sem chamador em ``app/``/``server/`` desde o plano 133 — permanece porque
+        a semântica "última msg do turno" é consumida por plugin (ver
+        ``message_repo.get_last_user_message``)."""
         contact = self._get_contact(phone, channel_id=channel_id)
         from db.repositories import conversation_repo
         conv = conversation_repo.get_open_for_contact_scoped(contact)

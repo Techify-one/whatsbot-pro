@@ -13,14 +13,14 @@ from pathlib import Path
 
 from fastapi import Depends, File, Form, UploadFile
 
-from db.repositories import channel_repo, config_repo
+from db.repositories import channel_repo, config_repo, message_repo
 from server.deps import require_permission, install_exception_handlers
 from server.execution import (
     astart_execution, aend_execution, atrack_step, prune_executions,
     astamp_execution_channel,
 )
 from server.helpers import _ok, _err, parse_split_reply
-from server.transcription import maybe_transcribe
+from server.transcription import format_media_content, maybe_transcribe
 from server.upload_names import unique_media_name
 
 # Config-key prefix flagging a contact as a sandbox/test number. Operator sends
@@ -28,6 +28,28 @@ from server.upload_names import unique_media_name
 SANDBOX_CONTACT_PREFIX = "sandbox_contact."
 
 logger = logging.getLogger(__name__)
+
+
+async def _paste_media_content(saved: dict | None, new_content: str,
+                               phone: str) -> None:
+    """Cola a descrição/transcrição NA LINHA DA MÍDIA recém-inserida (plano 133).
+
+    Mira pelo ``id`` que o ``INSERT`` devolveu — ⚠️ a chave é ``"id"``, não
+    ``"_id"`` (este último só existe no caminho de LEITURA, ``_row_to_dict``).
+
+    Os 3 sites daqui chamavam ``agent_handler.update_last_user_message_content``,
+    que REPROCURA "a última msg ``role='user'`` da conversa" por ``ORDER BY ts
+    DESC`` sem exigir ``media_type``. No sandbox o ``ts`` ainda é o do INSERT, de
+    modo que o alvo saía certo — era bug LATENTE, não ativo. No batch real, com o
+    ``ts`` do provedor (plano 129), o mesmo padrão colava o texto interno numa
+    linha sem ``media_type``, onde o painel não esconde o prefixo.
+    """
+    saved_id = (saved or {}).get("id")
+    if not saved_id:
+        logger.warning("[Sandbox] mídia sem id no retorno do INSERT (%s): "
+                       "descrição/transcrição NÃO colada (plano 133)", phone)
+        return
+    await asyncio.to_thread(message_repo.update_content, saved_id, new_content)
 
 
 def register_routes(app, deps):
@@ -204,8 +226,9 @@ def register_routes(app, deps):
             await astamp_execution_channel(
                 contact, channel_repo.primary_channel_id() or "default",
                 channel_label="Sandbox")
-            contact.add_message("user", caption, media_type="image", media_path=rel_path,
-                                media_caption=caption or None)
+            saved = contact.add_message("user", caption, media_type="image",
+                                        media_path=rel_path,
+                                        media_caption=caption or None)
             await _broadcast_user_message(phone, caption, media_type="image", media_path=rel_path)
 
             # plano 118 F6 — pelo helper compartilhado: o sandbox é onde o operador
@@ -221,11 +244,10 @@ def register_routes(app, deps):
             )
 
             if description:
-                desc_prefix = f"[Descrição da imagem]: {description}"
-                new_content = f"{desc_prefix}\n{caption}" if caption else desc_prefix
-                await asyncio.to_thread(
-                    agent_handler.update_last_user_message_content, phone, new_content,
-                )
+                # plano 133 — o mesmo prefixo de antes, agora pelo helper único
+                # (``format_media_content``) e colado na linha certa.
+                new_content = format_media_content("image", description, caption)
+                await _paste_media_content(saved, new_content, phone)
                 contact.add_message("transcription", description)
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
@@ -271,7 +293,8 @@ def register_routes(app, deps):
             await astamp_execution_channel(
                 contact, channel_repo.primary_channel_id() or "default",
                 channel_label="Sandbox")
-            contact.add_message("user", "[Áudio recebido]", media_type="audio", media_path=rel_path)
+            saved = contact.add_message("user", "[Áudio recebido]",
+                                        media_type="audio", media_path=rel_path)
             await _broadcast_user_message(phone, "[Áudio recebido]",
                                           media_type="audio", media_path=rel_path)
 
@@ -284,10 +307,9 @@ def register_routes(app, deps):
                 logger.error("[Sandbox] Transcription failed for %s: %s", phone, e)
 
             if transcription:
-                await asyncio.to_thread(
-                    agent_handler.update_last_user_message_content, phone,
-                    f"[Transcrição do áudio]: {transcription}",
-                )
+                # plano 133 — ver _paste_media_content.
+                await _paste_media_content(
+                    saved, format_media_content("audio", transcription), phone)
                 contact.add_message("transcription", transcription)
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
@@ -337,8 +359,9 @@ def register_routes(app, deps):
                 channel_label="Sandbox")
             # plano 87: o ``content`` do sandbox já embute "[Documento recebido: …]";
             # a legenda crua vai na coluna própria (vazia = documento sem legenda).
-            contact.add_message("user", content, media_type="document", media_path=rel_path,
-                                media_caption=caption.strip() or None)
+            saved = contact.add_message("user", content, media_type="document",
+                                        media_path=rel_path,
+                                        media_caption=caption.strip() or None)
             await _broadcast_user_message(phone, content,
                                           media_type="document", media_path=rel_path)
 
@@ -352,11 +375,11 @@ def register_routes(app, deps):
             )
 
             if transcription:
-                doc_prefix = f"[Conteúdo do documento]: {transcription}"
-                new_content = f"{content}\n{doc_prefix}"
-                await asyncio.to_thread(
-                    agent_handler.update_last_user_message_content, phone, new_content,
-                )
+                # plano 133 — formato INVERTIDO em relação à imagem (texto primeiro,
+                # prefixo depois); ``content`` nunca é vazio aqui (carrega sempre o
+                # rótulo "[Documento recebido: …]"), então a string é a mesma.
+                new_content = format_media_content("document", transcription, content)
+                await _paste_media_content(saved, new_content, phone)
                 contact.add_message("transcription", transcription)
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,

@@ -184,6 +184,16 @@ KNOWN_FILTERS: set[str] = {
     "filter.outbound.text",
     # AuthZ ABAC seam
     "filter.authz.decision",
+    # Onboarding / provisionamento: ``filter.provisioning.number`` — str. O core
+    # resolve o destino da mensagem de provisionamento (``/service_number`` → env
+    # ``TECHIFY_PROVISION_NUMBER``, que nasce VAZIA — não há número embutido) e
+    # oferece o resultado ao filtro, que tem a última palavra. ``None``/``""``
+    # ABORTA: sem destino o core RECUSA o envio e o wizard responde com erro
+    # acionável, em vez de mandar a frase para o número que ele por acaso
+    # conhecia. O core não valida o formato do que volta — normalizar é de quem
+    # responde. ``ctx.extras`` traz ``{source ∈ {service_number, fallback},
+    # message}``. Produtor: ``app/services/provisioning_service.py``.
+    "filter.provisioning.number",
     # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.
     # ``filter.conversation.before_status`` was RELOCATED from the route into
     # ``conversation_service``; ``filter.conversation.before_assign`` is new.

@@ -460,6 +460,54 @@ def test_media_image_transcription_on_com_legenda(build_app):
                       caption)], media
 
 
+def test_media_image_transcription_ts_fora_de_ordem(build_app):
+    """plano 133 — a descrição vai para a LINHA DA IMAGEM mesmo com o ``ts`` do
+    provedor fora de ordem.
+
+    Este golden trava a correção do vazamento em produção (5 linhas, 3 conversas,
+    19–20/08/2026). O cliente manda um TEXTO cujo ``ts`` do provedor é POSTERIOR
+    ao da imagem (1 segundo bastou no incidente). Antes do plano 133 o batch
+    colava a descrição na "última msg ``role='user'`` por ``ts DESC``" — a linha
+    de TEXTO —, que por não ter ``media_type`` era desenhada crua pelo painel:
+    ``[Descrição da imagem]: …`` virava bolha pública e o texto do cliente era
+    destruído pelo ``UPDATE``.
+
+    O golden fixa as DUAS linhas: a imagem com o ``content`` composto e o texto
+    do cliente INTACTO. As asserções finas (por ``ts``) ficam em
+    tests/integration/test_media_description_target.py."""
+    phone = "5511970002007"
+    client_text = "o aparelho não conecta na rede"
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0,
+        "image_transcription_enabled": True,
+    })
+    from unittest.mock import patch
+    with EventRecorder() as rec:
+        # 1º o TEXTO, com ts do provedor POSTERIOR…
+        r = built.client.post("/api/webhook/gowa/default", json={
+            "event": "message", "payload": {
+                "from": f"{phone}@s.whatsapp.net", "id": "tsfora_txt",
+                "from_name": "Cliente", "timestamp": 1_600_000_100,
+                "body": client_text}})
+        assert r.status_code == 200, r.text
+        _drain_orchestrator(built, "default", phone)
+        # …e só então a IMAGEM, com ts ANTERIOR (entrega fora de ordem).
+        with patch.object(built.agent_handler, "describe_image",
+                          return_value=_CANNED_IMAGE_DESC):
+            r = built.client.post("/api/webhook/gowa/default", json={
+                "event": "message", "payload": {
+                    "from": f"{phone}@s.whatsapp.net", "id": "tsfora_img",
+                    "from_name": "Cliente", "timestamp": 1_600_000_050,
+                    "image": {"path": "statics/media/cat.jpg"}}})
+            assert r.status_code == 200, r.text
+            _drain_orchestrator(built, "default", phone)
+        rec.drain()
+    golden_assert("media_image_transcription_ts_fora_de_ordem",
+                  _capture(phone, rec, built.gowa_client))
+    media = _saved_captions(phone)
+    assert media == [("image", f"[Descrição da imagem]: {_CANNED_IMAGE_DESC}", None)], media
+
+
 def test_media_document_transcription_on_com_legenda(build_app):
     """plano 87 — documento COM legenda e extração ligada.
 

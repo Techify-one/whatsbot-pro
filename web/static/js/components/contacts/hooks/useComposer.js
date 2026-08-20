@@ -46,12 +46,15 @@ const PRESENCE_REFRESH_MS = 10000;
  * @param {(localId:string, updater:(m:any)=>any)=>void} opts.updateMsgByLocalId
  * @param {(el:HTMLTextAreaElement, val:string)=>void} opts.updateMenus - autocomplete tick.
  * @param {()=>void} opts.closeMentionMenu - close @mention menu on send.
+ * @param {()=>void} [opts.closeMenus] - close BOTH autocomplete menus (blur).
+ * @param {()=>boolean} [opts.menusOpen] - true quando algum menu está aberto.
  * @param {()=>void} opts.openTemplatePicker
  */
 export function useComposer({
   api, phone, conversationId, channelId, sandbox, sessionClosed,
   aiWindowClosed = false, currentUser = null,
-  setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, openTemplatePicker,
+  setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, closeMenus = null,
+  menusOpen = null, openTemplatePicker,
   collectMentions = null, resetMentions = null,
 }) {
   const [input, setInputState] = useState('');
@@ -187,6 +190,60 @@ export function useComposer({
         el.setSelectionRange(caret, caret);
       }
     }, 0);
+  }
+
+  // ── O menu de autocomplete tem de seguir o CARET, não só o texto ───────
+  //
+  // Até o plano 132 · F5, `updateMenus` tinha um único gatilho: o evento
+  // `input`. Mover o cursor não reavaliava nada, então o menu continuava aberto
+  // ancorado num "@" que o operador já tinha deixado para trás — e aplicar a
+  // escolha ali fazia o splice comer todo o trecho entre a âncora velha e o
+  // cursor novo. A guarda de `replaceToken` impede o estrago; estes gatilhos
+  // evitam o menu enganoso que levava até ele.
+  //
+  // ⚠️ MEDIDO em Chromium 151 e Firefox 153: o evento `select` da textarea
+  // dispara APENAS quando há seleção de verdade. Clique simples, seta, Home e
+  // End movem o caret sem disparar `select` nenhum — por isso `onSelect`
+  // sozinho não cobre o caso relatado (o operador CLICA noutro ponto). Daí os
+  // quatro gatilhos abaixo: seleção, clique, tecla de navegação e perda de foco.
+  const CARET_MOVE_KEYS = new Set([
+    'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown',
+  ]);
+
+  // ⚠️ CONSERVADOR de propósito: o caret que se move só pode FECHAR ou reancorar
+  // um menu que já estava aberto — nunca ABRIR um. O menu é uma ajuda de quem
+  // está DIGITANDO; se um clique pudesse abri-lo, um "/agendar" no meio de uma
+  // mensagem já escrita faria o menu saltar quando o operador só queria pôr o
+  // cursor ali — e o Enter seguinte inseriria a resposta rápida em vez de
+  // enviar a mensagem. Com nenhum menu aberto, mexer o cursor não faz nada.
+  function syncMenusToCaret(el) {
+    if (!el) return;
+    if (menusOpen && !menusOpen()) return;
+    updateMenus(el, el.value);
+  }
+
+  // Seleção de verdade (arrastar, duplo clique, Ctrl+A).
+  function handleSelect(e) { syncMenusToCaret(e.target); }
+
+  // Clique simples: o caret anda e nada mais avisa.
+  function handleClick(e) { syncMenusToCaret(e.target); }
+
+  // Teclas que movem o caret sem mudar o texto.
+  //
+  // ⚠️ ArrowUp/ArrowDown ficam DE FORA de propósito: com o menu aberto elas são
+  // a navegação entre candidatos (`handleMenuKeyDown` dá `preventDefault`, o
+  // caret não anda), e recalcular o menu aqui zeraria o `index` a cada seta —
+  // a lista voltaria para o primeiro item a cada tecla.
+  function handleCaretKeyUp(e) {
+    if (CARET_MOVE_KEYS.has(e.key)) syncMenusToCaret(e.target);
+  }
+
+  // Perder o foco fecha os dois menus: eles são um enfeite flutuante ancorado
+  // num caret que não existe mais. Seguro porque os itens do menu aplicam a
+  // escolha no `onMouseDown` com `preventDefault` — clicar num deles não tira o
+  // foco do campo e portanto não chega aqui.
+  function handleBlur() {
+    if (closeMenus) closeMenus();
   }
 
   // Send typing presence to contact (debounced)
@@ -402,6 +459,7 @@ export function useComposer({
     aiReadPrivate, setAiReadPrivate, aiReplyInChat, setAiReplyInChat,
     replyingTo, setReplyingTo, emojiOpen, setEmojiOpen,
     inputRef, emojiRef, consumeInput,
-    insertEmoji, handleInputChange, handleSend, handleRetry, stopPresence,
+    insertEmoji, handleInputChange, handleSelect, handleClick, handleCaretKeyUp, handleBlur,
+    handleSend, handleRetry, stopPresence,
   };
 }
