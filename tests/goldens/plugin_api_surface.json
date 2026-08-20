@@ -167,6 +167,7 @@
       "filter.message.notify",
       "filter.message.outgoing",
       "filter.outbound.text",
+      "filter.provisioning.number",
       "filter.reply.part",
       "filter.reply.parts",
       "filter.reply.raw",
@@ -212,5 +213,5 @@
       "validate_services(plugin_id, raw)"
     ]
   },
-  "whatsbot_api_version": "1.6.0"
+  "whatsbot_api_version": "1.7.0"
 }

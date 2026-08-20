@@ -38,6 +38,64 @@ trata versão pura como compatibilidade por MAJOR — semântica oposta. **No
 
 ---
 
+## 1.7.0 — 2026-08-20 · `filter.provisioning.number` — o destino do provisionamento é plugável (e deixa de ter reserva)
+
+**Aditiva no catálogo.** Um plugin que não registre o filtro não muda em nada.
+Muda, sim, o comportamento do core quando NADA está configurado — ver "Quebra
+possível" no fim.
+
+### O seam
+
+`filter.provisioning.number` — `str`. Produtor único:
+[`app/services/provisioning_service.py`](../app/services/provisioning_service.py)
+`fetch_provision_number()`, chamado pelo wizard de 1ª execução
+(`POST /api/setup/request-key`) e por toda re-provisão de chave.
+
+O core resolve o que consegue — `GET /service_number` da Techify, caindo na env
+`TECHIFY_PROVISION_NUMBER` — e oferece o resultado à cadeia de filtros, que tem a
+**última palavra**. `ctx.extras` traz `{source, message}`, onde `source ∈
+{"service_number", "fallback"}` diz de onde veio o valor oferecido e `message` é a
+frase que será enviada (`TECHIFY_PROVISION_MESSAGE`).
+
+`None` (ou `""`) **ABORTA**: significa "não há destino", e o core **não envia
+nada** — `request_key` devolve `("no_destination", {})` e a rota responde com erro
+acionável. Nada do caminho de envio roda: o contato do destino não é materializado
+(seria um contato fantasma de telefone vazio) e o polling da chave não é armado (o
+wizard giraria até o TTL esperando uma chave que ninguém pediu).
+
+O core **não valida o formato** do que volta: o valor vai cru para o link `wa.me` e
+para o envio pelo provider, exatamente como sempre foi com o valor do
+`/service_number`. Normalizar o telefone é de quem responde ao filtro.
+
+⚠️ **Um filtro que LEVANTA não aborta** — `apply_filter` engole a exceção e o valor
+segue intacto pela cadeia. Plugin que queira fail-closed precisa capturar a própria
+exceção e devolver `None` (é o que o `criar_conta` faz quando não consegue ler a
+configuração: mensagem de WhatsApp para o número errado não tem desfazer).
+
+### Por que existe
+
+O destino era imutável em runtime: vinha de um endpoint remoto ou de uma env, e
+trocá-lo exigia acesso ao ambiente do container. Quem opera a ponta que *recebe* o
+pedido não tinha como apontar o wizard para o próprio número. O seam é o mínimo
+genérico que resolve isso sem o core conhecer plugin por nome — mesma forma de
+`filter.authz.decision`: o core resolve e oferece, o plugin decide.
+
+### Quebra possível (fora do catálogo, mas na mesma release)
+
+`config.settings.TECHIFY_PROVISION_NUMBER` **deixou de ter o literal embutido**
+(`"5513981744038"`) e nasce vazia. Um número escrito no código é um destino que
+ninguém escolheu: com o campo do plugin em branco, ou com `/service_number` fora
+do ar, a mensagem saía calada para a Techify. Agora "nenhum destino" é um desfecho
+normal e explícito.
+
+**Efeito:** instalação que dependia do literal — sem env e sem `/service_number`
+acessível — para de provisionar sozinha e passa a exibir o aviso. Restaurar o
+comportamento antigo é definir `TECHIFY_PROVISION_NUMBER` no ambiente.
+
+### Migração
+
+Nenhuma para plugin existente.
+
 ## 1.6.0 — 2026-08-18 · `filter.transcription.*` alcança mais situações
 
 Aditiva por ALCANCE: nenhum nome, tipo ou semântica de `None` mudou — o mesmo

@@ -29,6 +29,7 @@ from config.settings import (
 )
 from db.repositories import conversation_repo
 from gowa.client import GOWASendError
+from plugins.events import apply_filter
 
 logger = logging.getLogger(__name__)
 
@@ -49,23 +50,38 @@ def qr_data_uri(url: str) -> str:
 
 
 async def fetch_provision_number() -> str:
-    """Fetch the current Techify provisioning number from /service_number.
+    """Resolve the destination of the provisioning message. ``""`` = none.
 
-    Falls back to TECHIFY_PROVISION_NUMBER when the endpoint is unreachable or
-    returns an unexpected body.
+    Order: ``GET /service_number`` → env ``TECHIFY_PROVISION_NUMBER`` (empty by
+    default) → ``filter.provisioning.number``, which has the LAST word and may
+    answer ``None``/``""`` to say there is no destination at all. No number is
+    hardcoded here, so an empty answer is a legitimate outcome and ``request_key``
+    refuses to send rather than pick a destination nobody chose.
+
+    The core does not validate the shape of what comes back — normalizing a phone
+    number belongs to whoever answers, exactly as it always did for the value
+    coming out of ``/service_number``.
     """
+    source = "fallback"
+    number = TECHIFY_PROVISION_NUMBER
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(TECHIFY_SERVICE_NUMBER_URL)
         resp.raise_for_status()
         data = resp.json()
-        number = str(data.get("phone", "")).strip() if isinstance(data, dict) else ""
-        if number:
-            return number
-        logger.warning("Setup: /service_number returned no phone, using fallback")
+        fetched = str(data.get("phone", "")).strip() if isinstance(data, dict) else ""
+        if fetched:
+            number, source = fetched, "service_number"
+        else:
+            logger.warning("Setup: /service_number returned no phone, using fallback")
     except Exception as e:
         logger.warning("Setup: failed to fetch service number (%s), using fallback", e)
-    return TECHIFY_PROVISION_NUMBER
+
+    chosen = await apply_filter(
+        "filter.provisioning.number", number,
+        {"source": source, "message": TECHIFY_PROVISION_MESSAGE},
+    )
+    return str(chosen or "").strip()
 
 
 async def request_key(deps) -> tuple[str, dict]:
@@ -73,6 +89,10 @@ async def request_key(deps) -> tuple[str, dict]:
 
     Returns a ``(kind, data)`` tuple the route turns into a response:
       * ``("no_number", {})`` — the WhatsApp number isn't known yet (route → _err);
+      * ``("no_destination", {})`` — nothing resolved a destination, so NOTHING is
+        sent (route → _err). Since 2026-08-20 this is a normal outcome, not an
+        edge case: the core has no built-in number, so an unconfigured install
+        (or a plugin that aborts the seam because its field is blank) lands here;
       * ``("manual", {...})`` — reach-out timelock; the user must send by hand;
       * ``("send_failed", {"error": str})`` — the send failed (route → _err);
       * ``("sent", {"number": str})`` — provisioning message sent, polling armed.
@@ -91,6 +111,14 @@ async def request_key(deps) -> tuple[str, dict]:
         return ("no_number", {})
 
     provision_number = await fetch_provision_number()
+    if not provision_number:
+        # No destination = no send. Nothing below this line may run: materializing
+        # the contact and pausing its AI would create a ghost contact keyed by the
+        # empty string, and the polling must not be armed for a message that never
+        # went out (the wizard would spin until the TTL expired).
+        logger.warning("Setup: no provisioning destination configured; "
+                       "refusing to send the provisioning message")
+        return ("no_destination", {})
 
     # The Techify provisioning number is a support/automation contact — the bot
     # must never auto-reply to it. Force AI off for that contact before the message
