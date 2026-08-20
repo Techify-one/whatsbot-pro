@@ -1,0 +1,47 @@
+{
+  "events": {
+    "sequence": [
+      "message.received",
+      "execution.started",
+      "message.saved",
+      "execution.ended",
+      "message.received",
+      "execution.started",
+      "message.saved",
+      "execution.ended"
+    ],
+    "set": [
+      "execution.ended",
+      "execution.started",
+      "message.received",
+      "message.saved"
+    ]
+  },
+  "messages": [
+    {
+      "content": "[Descrição da imagem]: uma foto de um gato laranja",
+      "media_path": "statics/media/cat.jpg",
+      "media_type": "image",
+      "msg_id": "<MSGID>",
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "o aparelho não conecta na rede",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": "<MSGID:1>",
+      "role": "user",
+      "status": null
+    },
+    {
+      "content": "uma foto de um gato laranja",
+      "media_path": null,
+      "media_type": null,
+      "msg_id": null,
+      "role": "transcription",
+      "status": null
+    }
+  ],
+  "sent": []
+}

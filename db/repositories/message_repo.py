@@ -533,7 +533,17 @@ def last_inbound_ts(*, conversation_id: int | None = None,
 
 def get_last_user_message(contact_id: int,
                           conversation_id: int | None = None) -> dict | None:
-    """Return the most recent user message (for updating with transcription etc).
+    """Return the most recent user message.
+
+    ⚠️ **Não filtra ``media_type``** — devolve a última linha ``role='user'``
+    qualquer que seja, por ``ts DESC``. Desde o plano 129 esse ``ts`` é o do
+    PROVEDOR, não o do INSERT: usar esta função para escolher onde colar a
+    transcrição de uma mídia erra o alvo sempre que outra mensagem do cliente
+    tiver carimbo maior (plano 133). Quem inseriu a linha deve mirar pelo ``id``.
+
+    Assinatura e query **congeladas** (plano 133 · D5): há consumidor externo vivo
+    — o plugin ``vendas_ia`` (``filters.py``) lê por aqui o texto do turno, e
+    endurecer com ``media_type IS NOT NULL`` o quebraria.
 
     Plano 37 (B5): ``conversation_id`` escopa a busca àquela conversa/canal — num
     contato com áudio no Telegram e texto no GOWA na mesma janela, a transcrição
@@ -553,7 +563,13 @@ def get_last_user_message(contact_id: int,
 
 
 def update_content(message_id: int, content: str) -> None:
-    """Update the content of a specific message."""
+    """Update the content of a specific message.
+
+    ⚠️ Troca o ``content`` INTEIRO e **não toca em ``media_type``/``media_caption``**.
+    Colar um ``content`` composto (``[Descrição da imagem]: …``) numa linha que
+    não é mídia produz vazamento no painel: sem ``media_type``, ``mediaCaptionOf``
+    não é consultada e o prefixo interno é desenhado como texto do cliente
+    (plano 133). Passe o ``id`` da linha que você mesmo inseriu."""
     with get_engine().begin() as conn:
         conn.execute(sa_update(messages).where(messages.c.id == message_id).values(content=content))
 
