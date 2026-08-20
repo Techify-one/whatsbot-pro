@@ -28,7 +28,7 @@ _CORE_PLUGIN_ID = "__core_audit__"
 _RESOURCE_ID_KEYS = ("phone", "id", "plugin_id", "name", "tag", "key", "contact_id",
                      "channel_id")
 
-_ACTOR_TYPES = ("system", "user", "ai")
+_ACTOR_TYPES = ("system", "user", "ai", "apikey")
 
 
 def _resource_id(payload: dict):
@@ -80,6 +80,9 @@ def record(*, action: str, resource_type: str, resource_id=None,
             after=after,
             ip_address=actor.ip,
             request_id=actor.request_id,
+            # Procedência: mantida mesmo quando o ator é forçado (ai/system) —
+            # continua sendo verdade por onde a request entrou.
+            api_key_id=actor.api_key_id,
         )
     except Exception as e:  # auditing never breaks the audited action
         logger.warning("audit record falhou para %s: %s", action, e)
@@ -123,6 +126,7 @@ def audit_event_handler(ctx, payload: dict) -> None:
             after=after,                   # sanitised inside add()
             ip_address=actor.ip,
             request_id=actor.request_id,
+            api_key_id=actor.api_key_id,
         )
     except Exception as e:  # never let auditing break the bus
         logger.warning("audit listener failed for %s: %s", getattr(ctx, "event_name", "?"), e)

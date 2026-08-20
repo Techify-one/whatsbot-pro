@@ -15,9 +15,7 @@ from gowa.client import GOWASendError
 
 from db.repositories import contact_repo, message_repo, config_repo, conversation_repo, tag_repo
 from db.repositories import custom_attribute_repo as ca_repo
-from db.repositories import inbox_repo
 from db.repositories import mention_repo, inbox_member_repo
-from db.repositories import contact_inbox_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from channels.contact_type import resolve_contact_type
@@ -166,6 +164,8 @@ def register_routes(app, deps):
     # AI toggle emits its events + system notice + P17 conversation mirror through
     # ``conversation_service.toggle_contact_ai``. Deferred import (cycle avoidance).
     from app.services import conversation_service as conv_svc
+    # Escrita de contato (plano de API): compartilhada com a fachada /api/v1.
+    from app.services import contact_service as contact_svc
 
     def _channel_ai_enabled(channel_id: str) -> bool:
         if not settings.get("auto_reply", True):
@@ -180,74 +180,39 @@ def register_routes(app, deps):
     ))
 
     def _channel_for(phone: str, conversation_id=None, channel_id=None) -> str:
-        """Channel a conversation belongs to (plano 11 D1). The conversa-cêntrica UI
-        passes ``conversation_id``; an explicit ``channel_id`` is used when starting a
-        BRAND-NEW conversation (no conversation row yet — the inbox picker chooses it).
-        Legacy callers (neither) fall back to 'default' (GOWA), preserving the previous
-        behavior exactly. Routing is by CHANNEL, never name."""
-        if conversation_id:
-            from db.repositories import conversation_repo as _cr
-            try:
-                conv = _cr.get_with_channel(int(conversation_id))
-            except (TypeError, ValueError):
-                conv = None
-            if conv and conv.get("channel_id"):
-                return conv["channel_id"]
-        if channel_id:
-            return str(channel_id)
-        return "default"
+        """Canal a que a conversa pertence — delega a ``messaging_service`` (R-txt).
+
+        A regra subiu para o serviço porque a fachada ``/api/v1`` precisa dela;
+        manter uma cópia aqui produziria roteamento divergente entre as duas
+        superfícies. O nome local fica como atalho dos ~12 call sites deste módulo.
+        """
+        from app.services.messaging_service import resolve_channel_id
+        return resolve_channel_id(phone, conversation_id, channel_id)
 
     def _wire_target(phone: str, conversation_id=None) -> str:
-        """Real send address (the JID the conversation RECEIVES from), not the saved
-        ``contacts.phone``.
-
-        ``contacts.phone`` can drift from the WhatsApp account's JID — the classic
-        Brazilian 9th-digit case: a number saved with 13 digits whose WhatsApp is
-        registered on 12 (or vice-versa). Inbound and the AI auto-reply always use the
-        exact JID that came in the received message, so they deliver; a manual/operator
-        send that used the raw ``phone`` went to a GHOST JID (GOWA still returns a
-        msg_id, but WhatsApp silently drops it → the client never sees it, no delivery
-        ack). This resolves the conversation's ``contact_inbox.source_jid`` (the address
-        the conversation actually receives from) and returns its bare digits for a
-        person (``@s.whatsapp.net``) or the full JID for a group (``@g.us``); anything
-        else (lid / Telegram / Cloud / unknown) keeps ``phone`` unchanged, so only the
-        exact bug is corrected and other providers are untouched. Falls back to
-        ``phone`` on any lookup failure — never raises."""
-        if not conversation_id:
-            return phone
-        try:
-            conv = conversation_repo.get(int(conversation_id))
-            ci_id = (conv or {}).get("contact_inbox_id")
-            if not ci_id:
-                return phone
-            ci = contact_inbox_repo.get(int(ci_id))
-            cand = ((ci or {}).get("source_jid")
-                    or (ci or {}).get("source_id") or "").strip()
-        except Exception:  # noqa: BLE001 — a resolution glitch must never block a send
-            return phone
-        if cand.endswith("@g.us"):
-            return cand
-        if cand.endswith("@s.whatsapp.net"):
-            digits = cand.split("@", 1)[0]
-            return digits if digits.isdigit() else phone
-        return phone
+        """Endereço real de envio — delega a ``messaging_service.wire_target`` (R-txt)."""
+        from app.services.messaging_service import wire_target
+        return wire_target(phone, conversation_id)
 
     def _resolve_inbox_id(conversation_id=None, channel_id=None) -> int | None:
-        """Inbox id targeted by an operator write (plano inboxes/canais §4.7).
+        """Inbox alvo de uma escrita do operador — delega a ``messaging_service`` (R-txt)."""
+        from app.services.messaging_service import resolve_inbox_id
+        return resolve_inbox_id(conversation_id, channel_id)
 
-        Prefers the conversation's inbox; falls back to the channel's inbox when
-        starting a brand-new conversation. ``None`` quando indeterminável — o
-        chamador (``can_access_inbox``) nega para usuários escopados."""
-        if conversation_id:
-            try:
-                conv = conversation_repo.get(int(conversation_id))
-            except (TypeError, ValueError):
-                conv = None
-            if conv:
-                return conv.get("inbox_id")
-        cid = str(channel_id) if channel_id else "default"
-        inbox = inbox_repo.get_by_channel(cid)
-        return inbox["id"] if inbox else None
+    async def _inbox_guard_veredict(request: Request, conversation_id=None,
+                                    channel_id=None):
+        """Veredito de DOMÍNIO do gate de inbox (para o ``inbox_guard`` do serviço).
+
+        Mesma decisão de :func:`_inbox_send_denied`, mas devolve o dict que
+        ``MessagingService.send_text`` entende (ou ``None`` quando liberado) —
+        um ``JSONResponse`` não teria como ser mapeado pela fachada ``/api/v1``.
+        """
+        inbox_id = await asyncio.to_thread(
+            _resolve_inbox_id, conversation_id, channel_id)
+        if not can_access_inbox(request, inbox_id):
+            return {"ok": False, "reason": "inbox_forbidden",
+                    "message": "Sem acesso a esta caixa de entrada.", "status": 403}
+        return None
 
     async def _inbox_send_denied(request: Request, *, conversation_id=None,
                                  channel_id=None):
@@ -270,56 +235,18 @@ def register_routes(app, deps):
         return res.external_msg_id or ""
 
     def _session_window_block(channel_id, conversation_id, phone=None):
-        """Guard for the WhatsApp Cloud 24h free-text window (plano 02 P17).
+        """Guard da janela de 24h — delega o VEREDITO a ``messaging_service`` (R-txt)
+        e o embrulha no ``_err(409)`` que as rotas do painel já devolviam.
 
-        Returns a 409 ``_err`` when free text/media is NOT allowed right now —
-        i.e. a windowed channel (Cloud, ``session_window_hours>0``) whose last
-        inbound is older than the window (or has none). Returns ``None`` when the
-        send is allowed, which is ALWAYS the case for always-open channels
-        (GOWA/Telegram, ``session_window_hours==0``). Capability-driven — never by
-        provider name. Outside the window only an approved template may be sent.
-        The agentic auto-reply (webhook) does not pass through here and is
-        inherently in-window, so it is never affected.
-
-        When ``conversation_id`` is absent (a BRAND-NEW conversation from the "Nova
-        conversa" modal — plano 21) but ``phone`` is given, resolves the contact's
-        latest conversation in this channel's inbox so an already-open 24h window is
-        honored (otherwise a fresh send would be wrongly blocked even mid-window).
+        A regra em si (capability ``session_window_hours``, último inbound,
+        ``by_human=True``, texto por capability de template) mora no serviço, que
+        é onde a fachada ``/api/v1`` também a consome.
         """
-        caps = outbound.capabilities(channel_id)
-        if not getattr(caps, "session_window_hours", 0):
+        from app.services.messaging_service import session_window_block
+        verdict = session_window_block(outbound, channel_id, conversation_id, phone)
+        if verdict is None:
             return None
-        last_ts = None
-        if conversation_id:
-            try:
-                last_ts = message_repo.last_inbound_ts(conversation_id=int(conversation_id))
-            except (TypeError, ValueError):
-                last_ts = None
-        elif phone:
-            contact = contact_repo.get_by_phone(phone)
-            if contact:
-                from db.repositories import inbox_repo
-                inbox = inbox_repo.get_by_channel(channel_id)
-                conv = (conversation_repo.get_latest_for_contact_inbox(
-                    contact["id"], inbox["id"]) if inbox else None)
-                if conv:
-                    last_ts = message_repo.last_inbound_ts(conversation_id=conv["id"])
-        # ``by_human=True``: every caller of this guard is an OPERATOR action from
-        # the panel, so a provider that grants humans an extended window
-        # (Messenger/Instagram, ``human_window_hours``) is honoured here — while the
-        # agentic reply, which never passes through this guard, can't reach it.
-        if outbound.session_open(channel_id, last_ts, by_human=True):
-            return None
-        # Canal SEM template (Instagram/Messenger) não tem para onde mandar o
-        # operador: a conversa só reabre quando o cliente escreve. Mandá-lo
-        # procurar um "template aprovado" que não existe naquele canal é pior do
-        # que não dizer nada. Dirigido por CAPABILITY, nunca por nome de provider.
-        if outbound.supports(channel_id, "templates"):
-            msg = "Fora da janela de 24h: só é possível enviar um template aprovado."
-        else:
-            msg = ("Fora da janela de mensagens deste canal: aguarde o cliente "
-                   "responder para voltar a enviar mensagens.")
-        return _err(msg, status=409, data={"reason": "session_window_closed"})
+        return _err(verdict["message"], status=409, data={"reason": verdict["reason"]})
 
     def _media_limits_block(channel_id: str, kind: str, filename: str, size: int):
         """Guard for the media limits the CHANNEL declares (tamanho/formato).
@@ -913,19 +840,8 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.delete")
         if denied:
             return denied
-        def _delete():
-            data = contact_repo.get_by_phone(phone)
-            if data is None:
-                return False
-            contact_repo.delete(data["id"])
-            # Clear in-memory cache (all channel-variants)
-            agent_handler.drop_cached_contact(phone)
-            return True
-        found = await asyncio.to_thread(_delete)
-        if not found:
+        if not await contact_svc.delete_contact(agent_handler, ws_manager, phone):
             return _err("Contato não encontrado.", status=404)
-        logger.info("[Contact] Deleted contact %s", phone)
-        await ws_manager.broadcast("contact_deleted", {"phone": phone})
         return _ok({"message": "Contato apagado."})
 
     @app.post("/api/contacts/{phone}/archive")
@@ -978,153 +894,37 @@ def register_routes(app, deps):
 
     @app.post("/api/contacts/{phone}/send")
     async def send_to_contact(phone: str, body: dict, request: Request):
-        """Send a manual message to a contact (operator-initiated, no LLM)."""
+        """Send a manual message to a contact (operator-initiated, no LLM).
+
+        O corpo do envio (janela de 24h, filtros, JID real, @menções, dedupe de
+        eco, aborto do ciclo da IA, desvio de sandbox) vive em
+        ``MessagingService.send_text`` desde o refactor R-txt, para que a fachada
+        ``/api/v1`` chame EXATAMENTE a mesma função — duas implementações
+        divergiriam em silêncio. A rota mantém só o que é dela: a permissão, o
+        gate de inbox e o envelope legado ``{ok, data|error}``.
+        """
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
-        message = (body.get("message") or "").strip()
-        if not message:
-            return _err("Campo 'message' é obrigatório.")
-        # Optional: quote/reply to an existing message (GOWA msg_id).
-        reply_to = (body.get("reply_to") or "").strip() or None
-        # Operador logado (para exibir o nome no balão em vez de "Manual"). None em
-        # instalação legada/aberta → cai em "Manual".
         _u = current_user(request)
-        _uid = _u.get("id") if _u else None
-        _uname = _u.get("name") if _u else None
-
-        # Plugin filter: allow plugins to add signature/formatting/redact to operator sends
-        filtered = await apply_filter(
-            "filter.reply.part", message,
-            {"phone": phone, "index": 0, "total": 1, "source": "operator", "sent_by_name": _uname},
+        result = await messaging.send_text(
+            phone=phone,
+            message=body.get("message") or "",
+            conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"),
+            reply_to=body.get("reply_to"),
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None),
+            inbox_guard=lambda: _inbox_guard_veredict(
+                request, body.get("conversation_id"), body.get("channel_id")),
         )
-        if filtered is None:
-            return _err("Mensagem bloqueada por plugin.", status=400)
-        message = filtered
-
-        # Regra "ignorar abertura" (plugin): um filtro pode impedir que este envio do
-        # operador REABRA uma conversa fechada (mantém fechada quando o texto casa a
-        # regex). Sem plugin registrado, apply_filter devolve True → reopen=None (default).
-        _allow_reopen = await apply_filter(
-            "filter.conversation.before_reopen", True,
-            {"phone": phone, "role": "assistant", "text": message})
-        _reopen = False if not _allow_reopen else None
-
-        # Sandbox/test contact — never goes over GOWA (the number isn't real).
-        # Persist the operator message locally and broadcast it, no error.
-        if await asyncio.to_thread(_is_sandbox_contact, phone):
-            msg_data = await asyncio.to_thread(
-                agent_handler.save_operator_message, phone, message, status="operator",
-                reply_to_msg_id=reply_to,
-                sent_by_user_id=_uid, sent_by_name=_uname, reopen=_reopen,
-            )
-            await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
-            await emit_with_filter("message.sent", {
-                "phone": phone, "text": message, "msg_id": None,
-                "channel_id": body.get("channel_id") or "default",
-                "conversation_id": (msg_data or {}).get("conversation_id"),
-                "media_type": None, "media_path": None,
-                "source": "operator", "status": "operator",
-                "reply_to_msg_id": reply_to,
-                "ts": time.time(),
-            })
-            logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
-            return _ok({"message": "Mensagem enviada.", "msg_id": None})
-
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=body.get("conversation_id"),
-            channel_id=body.get("channel_id"))
-        if denied_inbox:
-            return denied_inbox
-
-        channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
-        _operator_took_over(channel_id, phone)
-        # Wire target = the JID the conversation actually receives from (fixes the BR
-        # 9th-digit ghost-send). `phone` stays the contact key for save/broadcast.
-        wire_phone = await asyncio.to_thread(
-            _wire_target, phone, body.get("conversation_id"))
-        block = await asyncio.to_thread(
-            _session_window_block, channel_id, body.get("conversation_id"), phone)
-        if block:
-            return block
-        # Resolve @Name / @todos -> real mentions for group targets, only on channels
-        # that support groups (Cloud is 1:1). `message` (friendly @Name) is saved/shown;
-        # `send_text` (inline @<number>) + mentions go on the wire.
-        send_text, mentions = message, None
-        if "@g.us" in phone and outbound.supports(channel_id, "groups"):
-            send_text, mentions = await asyncio.to_thread(
-                group_mentions.resolve_outgoing, phone, message)
-
-        # Plugin filter: WIRE-ONLY transform (e.g. signature) — reaches the contact
-        # but NOT the saved/broadcast copy (which keeps using `message`).
-        _wired = await apply_filter(
-            "filter.outbound.text", send_text,
-            {"phone": phone, "channel_id": channel_id, "source": "operator",
-             "sent_by_name": _uname, "index": 0, "total": 1},
-        )
-        if _wired is not None:
-            send_text = _wired
-
-        # Track sent message to filter echo-backs — key on the WIRE target (the echo
-        # comes back stamped with the real JID, not the saved phone).
-        state.recently_sent[f"{channel_id}:{wire_phone}:{send_text[:120]}"] = time.time()
-
-        # Send via the conversation's channel — always save message (status on failure)
-        send_failed = False
-        error_msg = ""
-        msg_id = None
-        try:
-            msg_id = await asyncio.to_thread(
-                _route_send_text, channel_id, wire_phone, send_text, mentions, reply_to)
-        except GOWASendError as e:
-            logger.error("[Send] Failed to send message to %s: %s", phone, e)
-            send_failed = True
-            error_msg = str(e)
-        except Exception as e:
-            logger.error("[Send] Failed to send message to %s: %s", phone, e)
-            send_failed = True
-            error_msg = str(e)
-
-        if send_failed:
-            msg_id = None
-
-        # Always save to contact memory (with status="failed" if send failed)
-        try:
-            msg_data = await asyncio.to_thread(
-                agent_handler.save_operator_message, phone, message,
-                status="failed" if send_failed else "operator",
-                msg_id=msg_id, reply_to_msg_id=reply_to, channel_id=channel_id,
-                sent_by_user_id=_uid, sent_by_name=_uname, reopen=_reopen,
-            )
-        except Exception as e:
-            logger.error("[Send] Failed to save message for %s: %s", phone, e)
-            return _err(f"Erro ao salvar mensagem: {e}", status=500)
-
-        if send_failed:
-            # Broadcast error event for frontend toast/error bubble
-            await _emit_send_error(ws_manager, phone, f"Falha ao enviar mensagem: {error_msg}")
-            return _err(f"Falha ao enviar mensagem: {error_msg}", status=500)
-
-        logger.info("[Send] Manual message to %s: %s", phone, message[:80])
-
-        # Broadcast to all WS clients
-        await ws_manager.broadcast("new_message", {
-            "phone": phone,
-            "channel_id": channel_id,
-            "message": msg_data,
-        })
-
-        # Plugin event: manual operator send
-        await emit_with_filter("message.sent", {
-            "phone": phone, "channel_id": channel_id, "text": message, "msg_id": msg_id,
-            "conversation_id": (msg_data or {}).get("conversation_id"),
-            "media_type": None, "media_path": None,
-            "source": "operator", "status": "operator",
-            "reply_to_msg_id": reply_to,
-            "ts": time.time(),
-        })
-
-        return _ok({"message": "Mensagem enviada.", "msg_id": msg_id})
+        if not result.get("ok"):
+            # ``data`` chega preenchido só onde o envelope legado o tinha (o
+            # ``reason`` do bloqueio de 24h, que o compositor lê); ``_err``
+            # ignora ``None``, então os demais erros mantêm a forma antiga.
+            return _err(result["message"], status=result.get("status", 400),
+                        data=result.get("data"))
+        return _ok({"message": result["message"], "msg_id": result.get("msg_id")})
 
     @app.post("/api/contacts/{phone}/messages/delete")
     async def delete_message(phone: str, body: dict, request: Request):
@@ -2540,78 +2340,17 @@ def register_routes(app, deps):
 
         Scalar fields use replace semantics (an empty string clears the field);
         a custom_attribute sent as null is removed. This is an explicit human
-        edit, distinct from the LLM auto-fill path (ContactMemory.update_info)."""
+        edit, distinct from the LLM auto-fill path (ContactMemory.update_info).
+
+        O corpo da edição (validação dos atributos, REPLACE dos escalares,
+        observações, emit ``contact.updated``) vive em
+        ``app.services.contact_service`` desde o plano de API, para que a fachada
+        ``/api/v1`` grave pelas MESMAS regras.
+        """
         denied = permission_denied(request, "contact.write")
         if denied:
             return denied
-        # Validate custom attributes up front so we can return a clean 400 (P50:
-        # unknown key → error; invalid value → error) before touching the row.
-        custom_attrs = body.get("custom_attributes")
-        valid_partial: dict = {}
-        if custom_attrs is not None:
-            if not isinstance(custom_attrs, dict):
-                return _err("custom_attributes deve ser um objeto.")
-            all_defs = await asyncio.to_thread(
-                ca_repo.list_definitions, "contact", True)  # include soft-deleted
-            defs = {d["attribute_key"]: d for d in all_defs if d.get("deleted_at") is None}
-            known_keys = {d["attribute_key"] for d in all_defs}
-            # Keys already stored on this contact but without any definition — e.g.
-            # `cw_id`/`cw_identifier` left behind by the Chatwoot migration. The panel
-            # re-sends the whole JSON on save; tolerating these avoids a 400 that would
-            # abort the entire save (name, email, tags). Still preserves P50 for a
-            # genuinely new + undefined key (typo from code) → 400.
-            stored = await asyncio.to_thread(contact_repo.get_by_phone, phone)
-            stored_keys = set((stored or {}).get("custom_attributes") or {})
-            for key, value in custom_attrs.items():
-                definition = defs.get(key)
-                if definition is None:
-                    # A value left behind by a DELETED attribute (soft-delete keeps
-                    # stored values, P49) or by the Chatwoot migration (never defined,
-                    # but already in the stored JSON) is tolerated — the frontend
-                    # re-sends it. Leave it untouched instead of blocking the save.
-                    # Only a key that is BOTH undefined AND not stored is a genuine
-                    # typo → 400 (P50).
-                    if key in known_keys or key in stored_keys:
-                        continue
-                    return _err(f"Atributo '{key}' não existe.", 400)  # P50
-                if value is None:
-                    valid_partial[key] = None  # explicit clear → set_values pops it
-                    continue
-                norm, err = validate_value(definition, value)
-                if err:
-                    return _err(err)
-                valid_partial[key] = norm
-
-        result_attrs: dict = {}
-
-        def _update():
-            nonlocal result_attrs
-            contact = agent_handler._get_contact(phone)
-            # Scalar fields: explicit human edit → replace semantics (an empty
-            # string clears the field). Only keys actually present in the body
-            # are written, so an absent field is left untouched while "" is an
-            # intentional clear. Distinct from update_info (LLM merge).
-            scalar_keys = ("name", "email", "profession", "company", "address")
-            scalar_fields = {k: body[k] for k in scalar_keys if k in body}
-            if scalar_fields:
-                contact.set_info_fields(scalar_fields)
-            # Observations: replace entire list (update_info only appends)
-            if "observations" in body:
-                new_obs = [
-                    o for o in body["observations"] if isinstance(o, str) and o.strip()
-                ]
-                contact.info["observations"] = new_obs
-                contact_repo.set_observations(contact.id, new_obs)
-            if custom_attrs is not None:
-                result_attrs = ca_repo.set_values(contacts_table, contact.id, valid_partial)
-            else:
-                result_attrs = ca_repo.get_values(contacts_table, contact.id)
-            return contact.info
-        info = await asyncio.to_thread(_update)
-        # Surface the persisted custom_attributes under `info` so the panel and the
-        # resolve guard read a single, reliable source (matches get_full_contact).
-        info = {**info, "custom_attributes": result_attrs}
-        await emit_with_filter("contact.updated", {
-            "phone": phone, "info": info, "custom_attributes": result_attrs, "ts": time.time(),
-        })
+        info, err = await contact_svc.update_info(agent_handler, phone, body)
+        if err:
+            return _err(err)
         return _ok(info)

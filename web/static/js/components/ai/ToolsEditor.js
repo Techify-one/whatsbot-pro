@@ -79,13 +79,20 @@ export function ToolForm({ editing, onSave, onCancel, busy }) {
   const [enabled, setEnabled] = useState(editing ? !!editing.enabled : false);
 
   const isNew = !editing;
+  const isPlugin = !!editing && editing.kind === 'plugin';
+  // Um tools.py de plugin declara VÁRIAS tools e as rows dividem o mesmo módulo:
+  // salvar propaga para as irmãs. Sem dizer isso, o Histórico de uma tool
+  // mostrando versões criadas ao editar outra seria inexplicável.
+  const siblings = (editing && editing.siblings) || [];
   const nameErr = isNew && name && !NAME_RE.test(name.trim())
     ? 'Use minúsculas, números e _ (começando por letra).' : '';
   const canSave = !busy && (editing || (name.trim() && !nameErr));
 
   function submit() {
     if (!canSave) return;
-    const dependencies = depsText.split('\n').map(s => s.trim()).filter(Boolean);
+    const dependencies = isPlugin
+      ? (editing.dependencies || [])
+      : depsText.split('\n').map(s => s.trim()).filter(Boolean);
     onSave(editing ? editing.name : name.trim(), {
       description: description.trim(),
       code,
@@ -116,6 +123,13 @@ export function ToolForm({ editing, onSave, onCancel, busy }) {
           <textarea class="wa-field w-full px-3 py-2 rounded-md text-[14px] resize-y" rows="2"
             value=${description} onInput=${(e) => setDescription(e.target.value)}></textarea>
         </div>
+        ${isPlugin ? html`
+          <div class="text-[12px] text-wa-secondary bg-wa-hover border border-wa-border rounded-md p-2">
+            Este é o módulo de tools do plugin
+            <code class="text-wa-text">${editing.plugin_id}</code>${siblings.length ? html`, compartilhado com ${siblings.map((n, i) => html`${i ? ', ' : ''}<code class="text-wa-text">${n}</code>`)} — salvar altera o código das ${siblings.length + 1}` : ''}.
+            Enquanto você não salvar, quem roda é o código do disco; depois de salvar, passa
+            a rodar este, <b>in-process</b>. Reinstalar o plugin não sobrescreve sua edição.
+          </div>` : null}
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Código Python</label>
           <textarea class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono resize-y" rows="14"
@@ -123,16 +137,19 @@ export function ToolForm({ editing, onSave, onCancel, busy }) {
             placeholder="def execute(ctx, args):\n    ..."
             value=${code} onInput=${(e) => setCode(e.target.value)}></textarea>
         </div>
+        ${isPlugin ? null : html`
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Dependências (pip, uma por linha)</label>
           <textarea class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono resize-y" rows="2"
             spellcheck="false"
             placeholder="httpx>=0.27,<0.28"
             value=${depsText} onInput=${(e) => setDepsText(e.target.value)}></textarea>
-        </div>
+        </div>`}
         <label class="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" checked=${enabled} onChange=${(e) => setEnabled(e.target.checked)} />
-          <span class="text-[14px] text-wa-text">Habilitada (executa código do banco)</span>
+          <span class="text-[14px] text-wa-text">${isPlugin
+            ? 'Habilitada (desligar tira a ferramenta da IA)'
+            : 'Habilitada (executa código do banco)'}</span>
         </label>
         <div class="text-[11px] text-amber-600">
           Salvar agenda um restart do worker para o instalador re-materializar o código.

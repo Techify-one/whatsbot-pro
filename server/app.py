@@ -6,6 +6,8 @@ import mimetypes
 import logging
 import os
 import re
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,13 +16,17 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.auth import rbac_enforced, resolve_request_token
+from server.api_keys import KEY_HEADER as API_KEY_HEADER, resolve_api_key
 from server.helpers import _get_web_dir
 from server.audit_listener import register_audit_listener
+from server.webhook_dispatcher import register_webhook_listener
 from server.audit_context import ActorCtx, set_current_actor, reset_current_actor
 from server.client_ip import audit_ip
 from server.state import MemoryLogHandler, ConnectionManager, AppState
-from server.background import audit_purge_loop, empty_conversation_sweep_loop
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes
+from server.background import (audit_purge_loop, empty_conversation_sweep_loop,
+                               webhook_delivery_loop)
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes, api_keys as api_keys_routes, webhooks_out as webhooks_out_routes
+from server.routes import v1 as v1_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
 from agent import ai_tool_installer
@@ -273,6 +279,23 @@ def create_app(
     except Exception as e:
         logger.warning("Built-in tools seed/register failed: %s", e)
 
+    # Tools de PLUGIN, o mesmo tratamento: semear a row a partir da fonte em
+    # disco do plugin e reconciliar a registração com ela. A posição é contrato:
+    # depois do registro do loader (que criou a baseline) e do reconcile das
+    # builtins (que mantém a precedência core > plugin), antes do installer
+    # isolado, antes do delete_orphans e — o ponto crítico — antes do
+    # refresh_tool_overrides, que é quem reconstrói a lista de schemas mandada ao
+    # LLM. Depois dele, uma edição nunca chegaria ao modelo, em silêncio.
+    try:
+        from agent import ai_plugin_tools
+        ai_plugin_tools.seed_plugin_tools(registry)
+        ai_plugin_tools.register_plugin_tool_overrides(registry, agent_handler)
+        _orfas = ai_plugin_tools.mark_orphan_rows(registry)
+        if _orfas:
+            logger.info("%d row(s) de tool de plugin sem plugin carregado", _orfas)
+    except Exception as e:
+        logger.warning("Plugin tools seed/register failed: %s", e)
+
     # ⚠️ Security gate: code-in-DB tools. RBAC (plano 03) e o runner isolado (P62/P67)
     # já existem — o código do banco roda num SUBPROCESSO one-shot isolado, NÃO mais
     # in-process. Mesmo assim a feature fica OFF por default; só roda com opt-in explícito.
@@ -336,6 +359,8 @@ def create_app(
         _set_plugin_runtime(ws_manager, _loop)
         _set_events_runtime(_loop, agent_handler)
         register_audit_listener()  # plano 07: core "*" listener for the audit trail
+        # Fase 8 do plano de API: subscriber "*" que ENFILEIRA os webhooks de saída.
+        register_webhook_listener()
         # plano 23 Fase C5 (Contract): conversation-lifecycle WS broadcasts are now
         # LISTENERS of the domain event (single source). The synchronous core
         # subscriber runs inside emit_with_filter, so the panel sees the same WS
@@ -389,6 +414,12 @@ def create_app(
         # but batch never persisted the 1st message). Core concern, always registered.
         supervisor.register(TaskSpec(
             "empty_conversation_sweep", lambda: empty_conversation_sweep_loop(deps),
+            policy=RestartPolicy.PERMANENT))
+        # Fase 8 do plano de API: entrega dos webhooks de SAÍDA. O subscriber do
+        # barramento só enfileira; o POST + HMAC + backoff vivem neste loop, fora
+        # do caminho da request. Concern do core, sempre registrado.
+        supervisor.register(TaskSpec(
+            "webhook_delivery", lambda: webhook_delivery_loop(deps),
             policy=RestartPolicy.PERMANENT))
         state.task_supervisor = supervisor
         # Shared subprocess service for plugins (plano 09 Fase 5). GOWA keeps its
@@ -558,10 +589,36 @@ def create_app(
         # English canonical routes + legacy PT aliases (kept so a hard reload on an
         # old bookmark still serves index.html; the frontend rewrites them to the
         # English path via redirectLegacyPath).
-        {"/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/protocolos", "/attendances", "/ai", "/channels", "/audit", "/wizard"}
+        {"/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/protocolos", "/attendances", "/ai", "/channels", "/audit", "/api-keys", "/wizard"}
         | {"/contatos", "/painel", "/atendimentos", "/auditoria"}
         | _PLUGIN_SPA_PATHS
     )
+
+    # ── Rate-limit das chaves de API (§4.3 do plano) ──────────────────────
+    # Bucket PRÓPRIO, chaveado no ID DA CHAVE. Nunca no bucket do login (uma
+    # integração legítima esgotaria o limite de um IP inteiro) e nunca em
+    # ``audit_ip``, que é autodeclarado pelo painel ⇒ forjável.
+    _API_KEY_WINDOW_SECONDS = 60
+    _API_KEY_MAX_CALLS = 600           # 10 req/s sustentados por chave
+
+    def _api_key_rate_limited(key_id: int):
+        """``JSONResponse`` 429 quando a chave estourou a janela, senão ``None``."""
+        now = time.time()
+        calls = state.api_key_calls.get(key_id)
+        if calls is None:
+            calls = deque(maxlen=_API_KEY_MAX_CALLS * 2)
+            state.api_key_calls[key_id] = calls
+        while calls and now - calls[0] > _API_KEY_WINDOW_SECONDS:
+            calls.popleft()
+        if len(calls) >= _API_KEY_MAX_CALLS:
+            logger.warning("Rate limit da chave de API %s atingido.", key_id)
+            return JSONResponse(
+                {"ok": False, "error": "Limite de chamadas da chave de API excedido."},
+                status_code=429,
+                headers={"Retry-After": str(_API_KEY_WINDOW_SECONDS)},
+            )
+        calls.append(now)
+        return None
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
@@ -597,6 +654,10 @@ def create_app(
         # open only until the first admin is bootstrapped (``/api/auth/`` is
         # exempt). ``rbac_enforce`` is a rigid override (normally redundant).
         request.state.user = None
+        # Procedência da identidade: a linha da chave quando a request entrou por
+        # ``X-Api-Key``, senão ``None`` (sessão de painel). Setada AQUI para que
+        # nenhuma rota precise de ``getattr`` com default.
+        request.state.api_key = None
         if path.startswith("/api/"):
             has_users = await asyncio.to_thread(user_repo.has_any)
             enforce = rbac_enforced(settings) or has_users
@@ -604,14 +665,33 @@ def create_app(
             token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
             # Resolve a present token even in open mode so per-permission gating
             # applies to voluntarily-logged-in users.
+            kind = None
             if token or enforce:
                 kind, user = await asyncio.to_thread(resolve_request_token, token)
                 request.state.user = user
-                if enforce and kind != "user":  # only a USER session passes
-                    return JSONResponse(
-                        {"ok": False, "error": "Não autenticado."},
-                        status_code=401,
-                    )
+
+            # ── Crachá alternativo: chave de API ──────────────────────────
+            # A chave resolve para o MESMO ``request.state.user`` que a sessão
+            # resolve. Feito isso aqui, RBAC, auditoria, escopo por inbox e o
+            # gating das rotas de plugin funcionam SEM ALTERAÇÃO — a chave "vira
+            # o usuário". Vale para todo ``/api/*``, inclusive
+            # ``/api/plugins/<id>/*`` e ``/api/v1/*`` (decisão D2 do plano).
+            raw_key = request.headers.get(API_KEY_HEADER, "")
+            if request.state.user is None and raw_key:
+                key_user, key_row = await asyncio.to_thread(resolve_api_key, raw_key)
+                if key_user:
+                    limited = _api_key_rate_limited(key_row["id"])
+                    if limited is not None:
+                        return limited
+                    request.state.user = key_user
+                    request.state.api_key = key_row
+                    kind = "user"   # crachá válido ⇒ identidade de usuário
+
+            if enforce and kind != "user":  # only a USER session/API key passes
+                return JSONResponse(
+                    {"ok": False, "error": "Não autenticado."},
+                    status_code=401,
+                )
 
         # Audit actor (plano 07): real user when logged in, else system. The bus
         # `*` listener reads this via contextvar (snapshotted into create_task).
@@ -623,11 +703,16 @@ def create_app(
         # a AUDITORIA pode usá-lo: por ser autodeclarado (forjável), o bucket de
         # rate-limit do login segue em `client_ip` (plano 86 · D4). Não unificar.
         _ip = audit_ip(request)
+        # Quando a request entrou por chave, o ATOR continua sendo o usuário dono
+        # (a ação é dele); ``actor_type="apikey"`` + ``api_key_id`` registram a
+        # PROCEDÊNCIA — por qual chave ela entrou (decisão D4 do plano).
+        _key = request.state.api_key
         _actor_token = set_current_actor(ActorCtx(
             id=(_u.get("id") if _u else None),
-            type=("user" if _u else "system"),
+            type=("apikey" if _key else ("user" if _u else "system")),
             label=(_u.get("name") or _u.get("email") if _u else None),
             ip=_ip, request_id=request.state.request_id,
+            api_key_id=(_key.get("id") if _key else None),
         ))
         try:
             return await call_next(request)
@@ -811,6 +896,11 @@ def create_app(
     admin_routes.register_routes(app, deps)
     ai_engine_routes.register_routes(app, deps)
     audit_routes.register_routes(app, deps)
+    api_keys_routes.register_routes(app, deps)
+    webhooks_out_routes.register_routes(app, deps)
+    # Fachada versionada para integrações externas (a chave X-Api-Key vale
+    # aqui e em todo /api/*, D2 — a autenticação é do middleware, não da rota).
+    v1_routes.register_routes(app, deps)
 
     # ── Plugin routers and static assets ──────────────────────────────
     for loaded in registry.loaded.values():

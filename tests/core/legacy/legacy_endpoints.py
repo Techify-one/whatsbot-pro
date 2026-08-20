@@ -2044,9 +2044,12 @@ with _get_engine().connect() as _conn:
     _role_keys = {r[0] for r in _conn.execute(_sa_select(_roles_t.c.key))}
     _perm_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_perms_t)).scalar()
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
+# 40 → 42 no plano de API: ``apikey.manage`` e ``webhook.manage``. As DUAS são
+# admin-only (não entram em ROLE_DEFAULTS), então ``_rp_count`` (gestor 35 +
+# atendente 5) segue 40 de propósito — é o que prova que nenhum papel as ganhou.
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 40 permissions", _perm_count == 40)
+check("RBAC seed -> 42 permissions", _perm_count == 42)
 check("RBAC seed -> role_permissions populated (gestor 35 + atendente 5)", _rp_count == 40)
 with _get_engine().connect() as _conn:
     _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
@@ -2086,7 +2089,7 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 40 permissions", len([p for p in _perms if p != "*"]) == 40)
+check("admin me -> all 42 permissions", len([p for p in _perms if p != "*"]) == 42)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
@@ -2157,8 +2160,8 @@ check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_adm
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 40 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 40)
+check("GET /api/roles -> 3 roles + 42 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 42)
 
 r = client.get("/api/users")
 check("GET /api/users (admin session) -> 200", r.status_code == 200)
@@ -2338,8 +2341,8 @@ _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
       "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 35)
-check("GET /api/roles -> admin shows all 40",
-      len(_by_key["admin"]["permission_keys"]) == 40)
+check("GET /api/roles -> admin shows all 42",
+      len(_by_key["admin"]["permission_keys"]) == 42)
 
 # Create a custom role
 r = client.post("/api/roles", json={

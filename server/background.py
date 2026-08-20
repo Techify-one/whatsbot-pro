@@ -340,3 +340,44 @@ async def empty_conversation_sweep_loop(deps):
         while slept < GHOST_SWEEP_INTERVAL and not state.stop_event.is_set():
             await asyncio.sleep(5)
             slept += 5
+
+
+WEBHOOK_TICK_SECONDS = 5
+WEBHOOK_PURGE_INTERVAL = 3600
+WEBHOOK_RETENTION_DAYS = 7
+
+
+async def webhook_delivery_loop(deps):
+    """Entrega os webhooks de SAÍDA pendentes (fase 8 do plano de API).
+
+    O subscriber ``*`` do barramento só ENFILEIRA (nada de rede no caminho da
+    request); quem faz o POST, assina com HMAC e re-agenda com backoff é este
+    loop. O tique é curto porque a fila normalmente está vazia — uma consulta
+    indexada por ``(status, next_attempt_at)`` que não devolve nada é barata.
+
+    Também limpa periodicamente as entregas já ENTREGUES; as ``dead`` ficam, são
+    o registro de que algo não chegou.
+    """
+    state = deps.state
+    from db.repositories import webhook_repo
+    from server import webhook_dispatcher
+
+    last_purge = 0.0
+    while not state.stop_event.is_set():
+        try:
+            await webhook_dispatcher.deliver_due()
+            now = time.time()
+            if now - last_purge > WEBHOOK_PURGE_INTERVAL:
+                last_purge = now
+                removed = await asyncio.to_thread(
+                    webhook_repo.purge_delivered,
+                    now - WEBHOOK_RETENTION_DAYS * 86400)
+                if removed:
+                    logger.info("[Webhook] %d entregas antigas removidas", removed)
+        except Exception as e:  # noqa: BLE001 — o loop nunca morre por uma falha
+            logger.warning("[Webhook] loop de entrega falhou: %s", e)
+
+        slept = 0
+        while slept < WEBHOOK_TICK_SECONDS and not state.stop_event.is_set():
+            await asyncio.sleep(1)
+            slept += 1

@@ -4,8 +4,8 @@
 //   - toggle on/off (Ativa)
 //   - "Editar": code-in-DB rows open the Python editor; core/plugin rows open the
 //     description/label override modal
-//   - "Histórico": code-in-DB rows only (version rollback)
-//   - NO delete (excluir) — kept off this screen by design
+//   - "Histórico": rows com código no banco (core, plugin e code-in-DB)
+//   - "Excluir": dirigido por dado (`deletable`, vindo da API), não por lista aqui
 // The old "Registradas" / "Code-in-DB" sub-tabs were removed in favour of this.
 
 import { h } from 'preact';
@@ -30,11 +30,6 @@ import { EditModal } from '../ToolsManager.js';
 import { ToolForm, HistoryModal, StatusBadge } from './ToolsEditor.js';
 
 const html = htm.bind(h);
-
-// Builtins com delete REAL liberado (plano 30 WS3/D2). Espelha
-// DELETABLE_BUILTINS em agent/ai_builtin_tools.py — o backend grava um
-// tombstone (config.deleted_builtin_tools) pra tool não voltar no boot.
-const DELETABLE_BUILTINS = new Set(['transferir_agente']);
 
 // Deep-link (Plano 24): ?q= reflete a busca (replace); ?history=1 é aditivo ao
 // path /ai/tools/{name} (o path é dono do editor aberto; a flag abre o histórico).
@@ -137,7 +132,12 @@ export default function ToolsUnified({ initialEntity }) {
         // (excluível); 'plugin' = tool de plugin (override-only).
         kind: code ? (code.kind || 'code') : (reg && reg.plugin_id ? 'plugin' : 'core'),
         registered: !!reg,
-        plugin_id: reg ? reg.plugin_id : null,
+        // De qualquer uma das duas fontes: a row de um plugin DESATIVADO não tem
+        // entrada no registry e perderia o chip de origem.
+        plugin_id: (reg && reg.plugin_id) || (code && code.plugin_id) || null,
+        // Política de exclusão publicada pela API (agent/ai_builtin_tools.is_deletable),
+        // em vez de uma allowlist copiada aqui, que sai de sincronia calada.
+        deletable: !!((code && code.deletable) || (reg && reg.deletable)),
         label: (reg && reg.current_label) || name,
         enabled: reg ? !!reg.enabled : !!(code && code.enabled),
         customized: reg ? !!(reg.has_override || reg.has_label_override) : false,
@@ -345,15 +345,18 @@ export default function ToolsUnified({ initialEntity }) {
       <div class="text-sm text-wa-secondary mb-3">
         Tools são as ações que a IA pode executar (salvar contato, transferir pra humano,
         plugins, código no banco…). Aqui você liga/desliga cada uma, ajusta a descrição que
-        vai pro modelo e edita o código das tools code-in-DB.
+        vai pro modelo e edita o código Python de cada tool.
       </div>
 
       <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-4">
         <div class="text-[13px] text-amber-700 dark:text-amber-400 font-medium">Tools com código no banco (ADM)</div>
         <div class="text-[12px] text-wa-secondary mt-0.5">
-          Tools code-in-DB executam código Python arbitrário do banco. Só rodam com o
-          kill-switch <code class="font-mono">ai_tools_code_enabled</code> ligado e nascem
-          DESABILITADAS. Salvar/ligar agenda um restart do worker.
+          Tools code-in-DB (as que você mesmo escreve) executam código Python arbitrário do
+          banco: só rodam com o kill-switch <code class="font-mono">ai_tools_code_enabled</code>
+          ligado, num subprocesso isolado, e nascem DESABILITADAS. Já a edição de uma tool
+          <b>core ou de plugin</b> roda sempre e <b>in-process</b> — não passa pelo
+          kill-switch nem pelo sandbox. Enquanto você não editar, vale o código do disco.
+          Salvar/ligar agenda um restart do worker.
         </div>
       </div>
 
@@ -395,9 +398,10 @@ export default function ToolsUnified({ initialEntity }) {
                     <div class="flex items-center gap-2 flex-wrap">
                       <code class="text-[14px] text-wa-text font-medium">${r.label}</code>
                       ${r.isCode ? html`<span class="text-[11px] text-wa-secondary">v${r.version}</span>` : null}
-                      ${r.isCode
-                        ? html`<${StatusBadge} status=${r.install_status} />`
-                        : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">${r.plugin_id || 'core'}</span>`}
+                      ${r.isCode ? html`<${StatusBadge} status=${r.install_status} />` : null}
+                      ${(r.plugin_id || !r.isCode)
+                        ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">${r.plugin_id || 'core'}</span>`
+                        : null}
                       ${r.enabled
                         ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-green-500/10 text-green-600">Habilitada</span>`
                         : html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Desabilitada</span>`}
@@ -436,14 +440,21 @@ export default function ToolsUnified({ initialEntity }) {
                     <button
                       onClick=${() => (r.isCode ? openCodeEdit(r) : setEditingOverride(r.name))}
                       class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
-                    >Editar</button>
+                    >${r.isCode ? 'Editar código' : 'Editar'}</button>
+                    ${(r.isCode && r.registered) ? html`
+                      <button
+                        onClick=${() => setEditingOverride(r.name)}
+                        title="Rótulo e descrição enviada ao modelo — sem mexer no código"
+                        class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
+                      >Descrição</button>
+                    ` : null}
                     ${r.isCode ? html`
                       <button
                         onClick=${() => openHistory(r)}
                         class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover transition-colors"
                       >Histórico</button>
                     ` : null}
-                    ${(r.kind === 'code' || DELETABLE_BUILTINS.has(r.name)) ? html`
+                    ${r.deletable ? html`
                       <button
                         onClick=${() => setConfirmDelete(r)}
                         disabled=${busy === r.name}
@@ -482,6 +493,8 @@ export default function ToolsUnified({ initialEntity }) {
           title="Excluir tool"
           message=${confirmDelete.kind === 'builtin'
             ? html`Excluir a tool core <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker. Esta ação é <b>definitiva pela interface</b> — ela não volta no próximo boot; para tê-la de volta, recrie-a como tool de código (ou remova-a da config <code>deleted_builtin_tools</code> direto no banco).`
+            : confirmDelete.kind === 'plugin'
+            ? html`Excluir a tool <code class="text-wa-text font-medium">${confirmDelete.name}</code>, do plugin <code class="text-wa-text font-medium">${confirmDelete.plugin_id}</code>? Isso agenda um restart do worker. Ela <b>não volta no próximo boot</b>, mesmo com o plugin ativo — para tê-la de volta, reinstale o plugin. As outras tools do plugin continuam funcionando.`
             : html`Excluir a tool <code class="text-wa-text font-medium">${confirmDelete.name}</code>? Isso agenda um restart do worker.`}
           confirmLabel="Excluir"
           danger=${true}

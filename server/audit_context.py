@@ -19,10 +19,13 @@ import dataclasses
 @dataclasses.dataclass(frozen=True)
 class ActorCtx:
     id: int | None = None
-    type: str = "system"          # system | user | ai
+    type: str = "system"          # system | user | ai | apikey
     label: str | None = None
     ip: str | None = None
     request_id: str | None = None
+    # Procedência: id da chave de API quando a request entrou por ``X-Api-Key``.
+    # O ator (id/label) continua sendo o USUÁRIO DONO — a ação é dele.
+    api_key_id: int | None = None
 
 
 _SYSTEM = ActorCtx()

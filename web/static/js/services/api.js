@@ -1170,6 +1170,54 @@ export async function checkAuth() {
 // `opts.silent` suprime o toast "Permissão negada." quando o chamador é um read
 // best-effort de fundo (ex.: tela de Conversas popular a lista de "Transferir"
 // para quem não tem `users.manage`). A tela de Usuários chama sem `silent`.
+// ── Chaves de API (plano "Sistema de API com chave por usuário") ───────────
+// O SEGREDO só existe na resposta de createApiKey — não há endpoint que o leia
+// de volta (o banco guarda apenas o hash Argon2).
+
+export async function getApiKeys(opts) {
+  return request('GET', '/api/api-keys', undefined, opts);
+}
+
+export async function createApiKey(data) {
+  return request('POST', '/api/api-keys', data, { silent: true });
+}
+
+export async function revokeApiKey(id) {
+  return request('DELETE', `/api/api-keys/${id}`);
+}
+
+// ── Webhooks de SAÍDA (fase 8) ────────────────────────────────────────────
+// ⚠️ Não confundir com o webhook de ENTRADA (`/api/webhook/...`), que é o
+// provedor nos chamando. Aqui é o contrário: nós chamando o integrador.
+
+export async function getWebhooks(opts) {
+  return request('GET', '/api/webhooks', undefined, opts);
+}
+
+export async function createWebhook(data) {
+  return request('POST', '/api/webhooks', data, { silent: true });
+}
+
+export async function updateWebhook(id, data) {
+  return request('PUT', `/api/webhooks/${id}`, data, { silent: true });
+}
+
+export async function testWebhook(id) {
+  return request('POST', `/api/webhooks/${id}/test`, undefined, { silent: true });
+}
+
+export async function rotateWebhookSecret(id) {
+  return request('POST', `/api/webhooks/${id}/rotate-secret`);
+}
+
+export async function deleteWebhook(id) {
+  return request('DELETE', `/api/webhooks/${id}`);
+}
+
+export async function getWebhookDeliveries(id, opts) {
+  return request('GET', `/api/webhooks/${id}/deliveries`, undefined, opts);
+}
+
 export async function getUsers(opts) {
   return request('GET', '/api/users', undefined, opts);
 }

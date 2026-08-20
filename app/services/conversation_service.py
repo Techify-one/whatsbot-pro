@@ -153,6 +153,45 @@ async def _emit_notice(conv: dict, event_type: str, *, actor_name: str | None = 
         logger.debug("conversation notice %s failed: %s", event_type, e)
 
 
+async def apply_labels(deps, conv: dict, names: list[str], *,
+                       actor_name: str | None = None) -> list[str]:
+    """Substitui as etiquetas DA CONVERSA e dispara os três efeitos, uma vez cada.
+
+    Mora aqui (e não na rota) porque a fachada ``/api/v1`` precisa das mesmas
+    consequências: sem isto, a v1 gravaria a etiqueta e o painel aberto não se
+    atualizaria (``conversation_labels_changed``), plugin nenhum saberia
+    (``conversation.labeled``) e o fio não ganharia o card de "etiqueta
+    adicionada/removida" — três divergências silenciosas de uma vez.
+
+    Devolve os nomes efetivamente aplicados (o repo resolve nome → linha, então
+    um nome inexistente simplesmente não aparece no resultado).
+    """
+    from db.repositories import conversation_label_repo as label_repo
+
+    conv_id = conv["id"]
+    previous = await asyncio.to_thread(label_repo.get_names_for_conversation, conv_id)
+    result = await asyncio.to_thread(
+        label_repo.set_for_conversation, conv_id, [str(x) for x in names])
+    result_names = [r["name"] for r in result]
+
+    try:
+        await deps.ws_manager.broadcast("conversation_labels_changed", {
+            "conversation_id": conv_id, "contact_id": conv.get("contact_id"),
+            "labels": result_names, "ts": time.time()})
+    except Exception as e:  # noqa: BLE001 — broadcast nunca falha a ação
+        logger.debug("conversation_labels_changed broadcast failed: %s", e)
+    await emit_with_filter("conversation.labeled", {
+        "conversation_id": conv_id, "contact_id": conv.get("contact_id"),
+        "labels": result_names, "ts": time.time()})
+
+    prev_set, now_set = set(previous), set(result_names)
+    for name in (now_set - prev_set):
+        await _emit_notice(conv, "conv_label_added", actor_name=actor_name, label=name)
+    for name in (prev_set - now_set):
+        await _emit_notice(conv, "conv_label_removed", actor_name=actor_name, label=name)
+    return result_names
+
+
 # ── Lifecycle ──────────────────────────────────────────────────────────────────
 
 async def create(deps, *, inbox_id: int, contact_id: int, contact_inbox_id: int,

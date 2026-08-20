@@ -16,7 +16,8 @@ from fastapi import Depends, Request
 from fastapi import UploadFile
 from fastapi.responses import StreamingResponse
 
-from db.repositories import config_repo, plugin_repo, rbac_repo, tool_override_repo
+from db.repositories import (config_repo, plugin_repo, rbac_repo, tool_override_repo,
+                             tool_repo)
 from plugins.manifest import (
     WHATSBOT_API_VERSION,
     find_manifest_file,
@@ -261,6 +262,22 @@ def register_routes(app, deps):
             # #2). Key lives OUTSIDE the 'plugin.gowa.' prefix just wiped above.
             if plugin_id == "gowa":
                 config_repo.set("gowa_uninstalled", "1")
+            # Rows editáveis das tools do plugin + as marcas de tombstone DELAS.
+            # A limpeza do tombstone é o que faz reinstalar o ``.zip`` devolver
+            # uma tool excluída; sem ela o plugin voltaria permanentemente
+            # incompleto, sem nenhuma UI para recuperar. Escopo pelos nomes das
+            # rows daquele plugin — nunca um wipe da chave, que ressuscitaria uma
+            # builtin deletada de propósito.
+            from agent import ai_builtin_tools, ai_plugin_tools
+            ai_tools_names = tool_repo.delete_for_plugin(plugin_id)
+            # As tools JÁ excluídas do plugin não têm mais row — os nomes delas
+            # vêm do registro de donos gravado no delete. Sem esta parte, uma
+            # tool excluída ficaria tombada para sempre e o plugin voltaria
+            # permanentemente incompleto.
+            tombadas = ai_plugin_tools.tombstoned_names_for(plugin_id)
+            tombstones_cleared = ai_builtin_tools.untombstone_tools(
+                list(ai_tools_names) + tombadas)
+            ai_plugin_tools.forget_tombstone_owners(tombadas)
             overrides_removed = tool_override_repo.delete_for_plugin(plugin_id)
             # RBAC perms declared by the plugin (plano "RBAC para Plugins"):
             # role_permissions/user_permissions grants cascade via FK.
@@ -269,6 +286,8 @@ def register_routes(app, deps):
                 "folder_removed": had_dir,
                 "tables_dropped": dropped,
                 "tool_overrides_removed": overrides_removed,
+                "ai_tools_removed": len(ai_tools_names),
+                "tombstones_cleared": tombstones_cleared,
                 "permissions_removed": perms_removed,
             }
 

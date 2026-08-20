@@ -48,6 +48,10 @@ class LoadedPlugin:
     plugin_dir: Path
     package_name: str
     tools: list[tuple[dict, callable]] = dataclasses.field(default_factory=list)
+    # Procedência do módulo de ``entry.tools`` — de onde ``agent.ai_plugin_tools``
+    # lê a fonte confiável para semear/reconciliar as rows editáveis em ai_tools.
+    # ``(nome_do_submódulo, caminho_no_disco)``; None quando o plugin não tem tools.
+    tools_module: tuple[str, str] | None = None
     prompt_fragments: list[callable] = dataclasses.field(default_factory=list)
     event_handlers: dict[str, callable] = dataclasses.field(default_factory=dict)
     # Each entry is either ``fn`` or ``(fn, priority:int)``.
@@ -249,6 +253,9 @@ def _entry_tools(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType
     tools_attr = getattr(mod, "CORE_TOOLS", None) or getattr(mod, "TOOLS", None)
     if not tools_attr:
         return
+    mod_file = getattr(mod, "__file__", None)
+    if mod_file:
+        loaded.tools_module = ((manifest.entry or {}).get("tools") or "tools", mod_file)
     for entry in tools_attr:
         if not isinstance(entry, tuple) or len(entry) != 2:
             logger.warning(

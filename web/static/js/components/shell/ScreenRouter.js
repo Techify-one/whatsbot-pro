@@ -24,6 +24,7 @@ import CustomAttributesManager from '../CustomAttributesManager.js';
 import RuntimePanel from '../RuntimePanel.js';
 import UsersManager from '../UsersManager.js';
 import AuditLog from '../AuditLog.js';
+import IntegrationsScreen from '../IntegrationsScreen.js';
 import AgentEngine from '../ai/AgentEngine.js';
 import { PageHeader } from './GearMenu.js';
 import { hasPermission } from '../../utils/permissions.js';
@@ -89,6 +90,16 @@ export function ScreenRouter({
     return html`<div class="w-full p-4">
         <${PageHeader} title="Usuários" onBack=${() => setTab('contacts')} />
         <${UsersManager} initialEntity=${entFor('users')} />
+      </div>`;
+  }
+  if (tab === 'api-keys') {
+    if (!hasPermission(currentUser, 'apikey.manage')
+        && !hasPermission(currentUser, 'webhook.manage')) {
+      return html`<${PermissionDenied} label="as integrações" />`;
+    }
+    return html`<div class="w-full p-4">
+        <${PageHeader} title="API e Webhooks" onBack=${() => setTab('contacts')} />
+        <${IntegrationsScreen} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'audit') {

@@ -114,7 +114,7 @@ O banco é **exclusivamente PostgreSQL** e a URL vem **exclusivamente da env `DA
 | `unread_msg_ids` | IDs de mensagens não lidas por contato |
 | `executions` | Tracking de execuções (webhook → resposta). Inclui `agent_key`, `total_tokens`, `total_cost_usd` (populados pelo writer a cada chamada de LLM) |
 | `execution_steps` | Passos de cada execução (tool calls, llm_request, etc.) |
-| `ai_agents` / `ai_variables` / `ai_tools` | Motor AGNO config-in-DB: agente, variáveis e tools com código Python no banco. O **prompt é inline em cada agente** (coluna `ai_agents.prompt`, texto livre próprio do agente — não reutilizável; `{placeholder}` resolvidos por `ai_variables`); editado no formulário do agente, não há mais aba/tabela de prompts compartilhados. `ai_tools` só é instalada/executada com `ai_tools_code_enabled=True` (kill-switch P62, default OFF) |
+| `ai_agents` / `ai_variables` / `ai_tools` | Motor AGNO config-in-DB: agente, variáveis e tools com código Python no banco. `ai_tools.kind` separa as três procedências (`builtin`/`plugin`/`code`) e `ai_tools.plugin_id` guarda o dono quando a tool vem de um plugin — ver "Tool editável pela tela". O **prompt é inline em cada agente** (coluna `ai_agents.prompt`, texto livre próprio do agente — não reutilizável; `{placeholder}` resolvidos por `ai_variables`); editado no formulário do agente, não há mais aba/tabela de prompts compartilhados. `ai_tools` só é instalada/executada com `ai_tools_code_enabled=True` (kill-switch P62, default OFF) |
 | `ai_prompts` / `ai_prompts_history` | **Legado** — eram templates de prompt reutilizáveis referenciados por `ai_agents.prompt_key`. Não são mais lidas na resolução do agente (o prompt agora é inline). Mantidas (não destrutivo) por compat; os endpoints `/api/ai/prompts*` continuam existindo mas não alimentam o motor |
 | `ai_agents_history` / `ai_tools_history` | Snapshot por versão (save) de cada agente/tool. O snapshot do agente inclui o `prompt` inline, então Histórico/Reverter cobrem o prompt |
 | `plugins` | Plugins descobertos no filesystem (id, version, enabled, load_error) |
@@ -539,7 +539,7 @@ Campos do payload do webhook GOWA: `body`, `from`, `sender_jid`, `chat_id`, `id`
 - Tratar respostas da API GOWA com fallback para nomes de campo alternativos (a API não é 100% consistente nos nomes)
 - Frontend: ES modules, componentes Preact em PascalCase, services/hooks em camelCase
 - **Tools do LLM (core)**: criar em `agent/tools/<name>.py` com (a) o schema dict (`<NAME>_TOOL = {"type": "function", ...}`) e (b) função `execute(ctx, args) -> str | None`. Adicionar a tupla `(SCHEMA, execute)` em `CORE_TOOLS` em `agent/tools/__init__.py`. O dispatch é genérico via registry em `AgentHandler` — nunca adicionar `if/elif` por nome de tool
-- **Tools de plugin**: viver em `storages/plugins/<id>/tools.py` no formato `CORE_TOOLS = [(schema, executor), ...]` e ser declaradas no manifest. NÃO mexer em `agent/tools/` ou no handler
+- **Tools de plugin**: viver em `storages/plugins/<id>/tools.py` no formato `CORE_TOOLS = [(schema, executor), ...]` e ser declaradas no manifest. NÃO mexer em `agent/tools/` ou no handler. ⚠️ O módulo de `entry.tools` **tem de ser livre de efeito colateral em import**: ele é semeado em `ai_tools` e, quando o operador edita o código pela tela, é **re-executado** in-process (ver "Tool editável pela tela"). Um módulo que sobe thread ou muta estado global no import faria isso duas vezes
 - **Contrato de tool (core OU plugin)**: toda tool registrada vira row em `tool_overrides` automaticamente (via `tool_override_repo.ensure` no `_register_tool`). O usuário pode customizar `description` e `display_label` na tela `/tools`. O `name` da tool é IDENTIDADE e NÃO deve ser renomeado depois de release — quebra histórico de `usage` (`call_type=<name>`) e overrides do usuário. Description em código é o **default**: escreva como instrução clara pro LLM, deve funcionar sem customização. O schema também aceita `"display_label": "..."` no dict raiz (fora de `function`) — o handler retira antes de mandar pro LLM, e o valor vira o default mostrado na UI
 - **Acesso a dados**: sempre via SQLAlchemy Core. Repos em `db/repositories/` usam `with get_engine().begin() as conn:` + statements de `db/tables`. Nunca usar `sqlite3` diretamente. Plugins acessam o banco via `from plugins.context import make_plugin_db` + `from sqlalchemy import text`
 
@@ -566,6 +566,84 @@ Dados de banco vivem no Postgres apontado por `DATABASE_URL`; no filesystem (rai
 - `statics/outbox/` — mídia enviada pelo operador
 - **Webhook payloads (debug)**: últimos 50 payloads raw do GOWA em memória, acessíveis via `GET /api/webhook-payloads`
 - **Contatos arquivados**: ao receber mensagem de um contato, o webhook consulta `gowa_client.is_chat_archived(jid)` e persiste `is_archived` na tabela `contacts`. A sidebar filtra por `?archived=true/false`. O status de archive é atualizado on-demand (não por polling)
+
+## API para integrações externas — chave por usuário (`X-Api-Key`)
+
+Até este plano o WhatsBot tinha UMA superfície de API (`/api/*`), feita para o painel Preact e autenticada por sessão opaca de navegador. Não havia como um sistema externo (CRM, automação) integrar de forma programática, identificável e auditável.
+
+**O insight que orienta o desenho: a chave é apenas um CRACHÁ novo que resolve para o mesmo `request.state.user` que uma sessão resolve.** Feito isso no middleware ([server/app.py](server/app.py), logo depois da tentativa de sessão), RBAC, auditoria (ator), escopo por inbox e o gating das rotas de plugin **funcionam sem alteração** — a chave "vira o usuário". [server/authz.py](server/authz.py) **não foi tocado**.
+
+- **Formato**: `wsk_live_<prefix>.<secret>` — cabeçalho `X-Api-Key`, separado do `Authorization` DE PROPÓSITO (o middleware nunca confunde crachá de sessão com crachá de chave). ⚠️ O separador é `.` e o prefixo é **hexadecimal**: `secrets.token_urlsafe` usa o alfabeto base64url, que inclui `_`, e enquanto `_` separava os campos ~1 em 3 chaves nascia "malformada" e era recusada aleatoriamente. `.` não pertence ao alfabeto, então o parsing é total ([server/api_keys.py](server/api_keys.py), travado por `test_generate_key_survives_the_base64url_alphabet`).
+- **O segredo NUNCA é persistido**: só o Argon2 `key_hash` em `api_keys`. Ele aparece **uma única vez**, na resposta de `POST /api/api-keys` — não há endpoint que o leia de volta. `prefix` é o pedaço público (indexado) por onde a linha é encontrada.
+- **Verificação**: o Argon2 é caro de propósito (~50-100ms), e uma integração faz muitas chamadas com a MESMA chave. Cacheamos só o resultado do **compare** por 60s; a **autorização não é cacheada** — a linha é relida do banco a cada request, então revogar/expirar vale na hora (travado por `test_verify_cache_does_not_bypass_revocation`).
+- **A chave vale em TODO `/api/*`** (D2), inclusive `/api/plugins/<id>/*`. Como `plugin_permission`/`core_permission` passam pelo mesmo `authz.acheck`, **toda rota de plugin já criada responde à chave sem uma linha de código no plugin**.
+- **Sem escopo POR CHAVE** (D3): a chave herda TODAS as permissões do dono. O controle é criar um **usuário dedicado** por integração — `users.custom_permissions=1` (os grants explícitos substituem papéis e desligam o short-circuit de admin) + membresia só nas caixas que ela deve enxergar. **A membresia de inbox vira o escopo de DADOS da chave automaticamente** (`visible_inbox_ids` já escopa contatos e conversas), sem nada de novo. A coluna `api_keys.scopes` existe nullable e SEM USO — deixa a porta aberta sem custo; adicionar escopo depois vira código, não migração (o ponto de enxerto seria `_rbac_allows`).
+- **Auditoria distingue a procedência** (D4): `actor_type="apikey"` + `audit_log.api_key_id`. O **ator continua sendo o usuário dono** (a ação é dele); a chave é por onde ela entrou. Propagado por `ActorCtx` → `audit_listener.record`/`audit_event_handler` → `audit_repo.add` (⚠️ quem escreve a linha é o REPO — mexer só no listener não grava nada). A tela `/audit` filtra por chave (`?api_key=<id>`) e resolve o rótulo mesmo depois de revogada (a revogação é SOFT).
+- **A única permissão nova é `apikey.manage`** (D5), e ela governa *emitir/revogar* chave, **nunca** *usar* a API: quem pode fazer algo no painel pode fazer via chave. É **admin-only** — NÃO entra em `ROLE_DEFAULTS` ([server/permissions.py](server/permissions.py)); o admin recebe pelo short-circuit de role.
+
+### Guardrails de emissão (o que D2+D3 tornam obrigatório)
+
+Como a chave vale em todo `/api/*` **e** herda tudo do dono, o controle inteiro se concentra no momento de emitir ([server/routes/api_keys.py](server/routes/api_keys.py)):
+
+1. **Chave para usuário `admin` exige `confirm: true` explícito** (409 `admin_owner_requires_confirm`) — é a única proteção que resta depois de tirar os escopos: chave de admin vazada = instalação inteira. Recusar de vez seria pior (há casos legítimos), mas nenhum deles é acidental.
+2. `apikey.manage` admin-only — um atendente não cunha chave com os próprios poderes.
+3. **Rate-limit com bucket PRÓPRIO por chave** (`state.api_key_calls`, 600 req/min por chave, 429). ⚠️ **Nunca** reaproveitar o bucket do login (uma integração legítima esgotaria o limite de um IP inteiro) e **nunca** derivá-lo de `audit_ip`, que é autodeclarado ⇒ forjável — ver [server/client_ip.py](server/client_ip.py).
+4. **`expires_at` preenchido por padrão** (1 ano); "sem validade" também exige `confirm`.
+
+### Fachada `/api/v1` (a superfície estável)
+
+Pacote [server/routes/v1/](server/routes/v1/) — **fino de propósito**: traduz HTTP ↔ os serviços/repos que já existem e **não** reimplementa regra. DTO próprio (status HTTP com significado + corpo direto, erro `{"error": {code, message}}`), NÃO o envelope `{ok, data|error}` da UI — que é bom para o Preact e ruim para um integrador.
+
+| Módulo | Cobre | Delega para |
+|---|---|---|
+| `v1/contacts.py` | listar/pesquisar (trigram), obter, criar, editar, excluir, etiquetas | `contact_repo` + [db/search/contact_search.py](db/search/contact_search.py) + `contact_service` |
+| `v1/messages.py` | enviar texto, ler thread paginada/ancorada, buscar na conversa, marcar lida | **`MessagingService.send_text`** + [db/search/message_search.py](db/search/message_search.py) |
+| `v1/conversations.py` | listar, filtrar (motor completo), contar, obter, resolver/reabrir, atribuir, IA, etiquetas | [db/filters/](db/filters/) + `conversation_service` |
+| `v1/catalog.py` | etiquetas (contato e conversa), atributos personalizados, canais/inboxes (**leitura**) | `tag_repo`, `custom_attribute_repo`, `channel_repo`, `inbox_repo` |
+
+- **Não existe chave `message.send`** no catálogo RBAC: o envio gateia em **`conversation.reply`**, e atributos em **`custom_attribute.manage`** (não `settings.*`). D5 proíbe catálogo novo.
+- `GET /api/v1/conversations/filter-schema` reexpõe `conv_filters.available_dimensions` — **o motor de filtros já se autodescreve**, então o integrador descobre as dimensões (inclusive os atributos personalizados DESTA instalação) sem documentação escrita à mão.
+- `GET /api/v1/openapi.json` devolve o esquema **só das rotas `/api/v1`**, pronto para codegen. Fica sob `/api/*` de propósito: o middleware o protege, então uma chave válida o lê e um anônimo não mapeia a superfície. É a alternativa sempre disponível ao `/docs` global, que segue atrás de `WHATSBOT_ENABLE_DOCS` e exporia a API inteira do painel.
+- **Etiqueta de conversa e atributo personalizado têm `PATCH`** (não só criar/apagar). Recriar NÃO é equivalente a editar: a identidade da etiqueta é o `id` (renomear preserva os vínculos com as conversas já etiquetadas) e a do atributo é `attribute_key` (os valores gravados nas entidades são indexados por ela). Por isso `attribute_key`/`type`/`applies_to` **não** se editam — mandá-los é ignorado, exceto num atributo `is_system`, onde renomear é 400 explícito. Toda escrita do registro de etiquetas faz broadcast de `conversation_labels_registry_changed`, senão a paleta do operador só vê a mudança depois de recarregar a tela.
+- Administração (usuários, papéis, configuração, motor de IA, auditoria, plugins, **escrita** de canal) fica **fora** da v1 (D6).
+- **Multicanal no envio**: o mesmo número pode ter conversa em várias caixas. O integrador escolhe por `conversation_id` (preferido) ou `channel_id`, e a resolução usa `get_open_for_contact_inbox` — **nunca** `get_open_for_contact`, que é contact-scoped e funde canais.
+
+### ⚠️ `MessagingService.send_text` — por que a extração NÃO era opcional
+
+Não existia função de serviço para enviar TEXTO: o envio do operador eram ~150 linhas dentro do handler `POST /api/contacts/{phone}/send`, carregando regras que **não podem ser duplicadas** — bloqueio da janela de 24h, `filter.reply.part` (cópia exibida) **e** `filter.outbound.text` (wire-only), `filter.conversation.before_reopen`, o JID real via `wire_target` (o ghost-send do 9º dígito), `@menções` de grupo, `state.recently_sent` chaveado no alvo de wire, `abort_ai_cycle` (calar o ciclo da IA em andamento — plano 96) e o desvio de sandbox. Uma segunda implementação em `/api/v1` mandaria mensagem fora da janela, para o JID errado, sem calar a IA — **e nada disso apareceria como erro**.
+
+O caminho tem precedente no próprio repo: o refactor **R14** já unificou a cauda das três rotas de mídia em `MessagingService.send_media`. **R-txt** faz o mesmo para texto, e as DUAS rotas — painel e v1 — chamam a mesma função. Junto subiram para o módulo cinco resolvedores que eram closures de `contacts.register_routes` e por isso não existiam para mais ninguém: `is_sandbox_contact`, `resolve_channel_id`, `wire_target`, `resolve_inbox_id` e `session_window_block` (este devolve um **veredito de domínio**; a rota do painel volta a montar o `_err(409)`). As closures antigas continuam existindo como atalho e **delegam** ao serviço.
+
+⚠️ **`inbox_guard` é um callable, não um flag.** O gate de inbox é chamado no MESMO ponto do handler original — depois do desvio de sandbox e antes de resolver o canal. **A ordem é contrato**: um contato de sandbox nunca passou pelo gate de inbox, e checá-lo antes mudaria o comportamento do painel.
+
+A escrita de CONTATO seguiu o mesmo caminho: [app/services/contact_service.py](app/services/contact_service.py) (`validate_custom_attributes` + `update_info` + `delete_contact`) preserva as duas tolerâncias que o handler tinha — atributo soft-deleted (P49) e chave herdada da migração Chatwoot são IGNORADAS, não recusadas, porque o painel reenvia o JSON inteiro no save e um 400 abortaria a gravação toda.
+
+### Webhooks de saída (push)
+
+Todo o resto da API é *pull*. Um CRM que precise saber "chegou mensagem" ou "conversa resolvida" teria de fazer polling — o único push era o `/ws`, que exige sessão de painel e não é escopado.
+
+- **Núcleo no core, no MESMO barramento** ([server/webhook_dispatcher.py](server/webhook_dispatcher.py)): um subscriber `*`, no molde do [server/audit_listener.py](server/audit_listener.py). Ele só faz o barato — confere a allowlist e **enfileira** uma linha por endpoint; **nada de rede no caminho da request**. Quem POSTa, assina e re-agenda é o loop supervisionado `webhook_delivery` ([server/background.py](server/background.py)).
+- **Eventos de plugin viajam de graça**: plugin emite no mesmo barramento, então `protocolos`, `retornos` e companhia entregam eventos sem escrever transporte nenhum. Um plugin que precise de formato de terceiro implementa o seu e não passa por aqui.
+- ⚠️ **`"*"` cobre apenas o conjunto CURADO** (`EXPORTABLE_EVENTS`), não "qualquer coisa do barramento". É o que impede que um endpoint cadastrado hoje comece a receber, num upgrade, um evento novo que ninguém revisou — e que `llm.after` (que leva o histórico da conversa e o prompt) ou `presence.changed`/`receipt.changed` (altíssimo volume) saiam da instalação por descuido. Evento de plugin precisa ser **nomeado**, direto ou por curinga (`protocolos.*`).
+- **Assinatura**: `X-Whatsbot-Signature-256: sha256=HMAC_SHA256(segredo, corpo)` sobre os **bytes exatos** enviados — re-serializar o JSON do outro lado quebra a comparação (mesma armadilha do webhook da Meta). O segredo aparece uma vez e é **rotacionável** (`POST /api/webhooks/{id}/rotate-secret`), justamente porque não é recuperável.
+- **Estado em TABELA, nunca em memória** (`webhook_endpoints` / `webhook_deliveries`): um toggle de plugin derruba o processo, e uma entrega pendente não pode morrer com ele. Retry com backoff 30s → 6h; esgotado, a entrega vira **dead-letter** e FICA na tabela (é o registro de que algo não chegou — só as `delivered` são expurgadas). 20 falhas seguidas desligam o endpoint automaticamente.
+- **`raw` e segredos nunca saem no corpo**: o `raw` do provedor pode carregar base64 de mídia inteira, e as chaves de segredo são removidas recursivamente antes de enfileirar.
+- ⚠️ **Não confundir com `/api/webhook/{provider}/{channel_id}`**, que é o webhook de **ENTRADA** (o provedor nos chamando). Aqui é o contrário.
+
+### Onde as coisas ficam
+
+| Peça | Arquivo |
+|---|---|
+| Lógica pura da chave (gerar/resolver/expirar) | [server/api_keys.py](server/api_keys.py) |
+| Persistência da chave | [db/repositories/api_key_repo.py](db/repositories/api_key_repo.py) |
+| Emitir/listar/revogar (painel) | [server/routes/api_keys.py](server/routes/api_keys.py) |
+| Fachada versionada | [server/routes/v1/](server/routes/v1/) |
+| Envio de texto compartilhado | `MessagingService.send_text` ([app/services/messaging_service.py](app/services/messaging_service.py)) |
+| Escrita de contato compartilhada | [app/services/contact_service.py](app/services/contact_service.py) |
+| Webhooks de saída | [server/webhook_dispatcher.py](server/webhook_dispatcher.py) + [db/repositories/webhook_repo.py](db/repositories/webhook_repo.py) + [server/routes/webhooks_out.py](server/routes/webhooks_out.py) |
+| Tela (abas Chaves de API / Webhooks) | [web/static/js/components/IntegrationsScreen.js](web/static/js/components/IntegrationsScreen.js) — rota `/api-keys` |
+| Migrações | `0064_api_keys`, `0065_outbound_webhooks` |
+| Testes | [tests/core/test_api_keys_unit.py](tests/core/test_api_keys_unit.py), [tests/core/test_webhook_dispatcher_unit.py](tests/core/test_webhook_dispatcher_unit.py), [tests/integration/test_api_key_auth.py](tests/integration/test_api_key_auth.py), [tests/integration/test_v1_facade.py](tests/integration/test_v1_facade.py) |
 
 ## Sistema de plugins
 
@@ -694,9 +772,31 @@ O vocabulário da Meta que o core carregava (categorias, formatos de cabeçalho,
 - **Cores / modo escuro**: a tela do plugin (`static/<id>.js`) DEVE ser legível no tema escuro. Use as classes semânticas `wa-*` (`bg-wa-bg`, `bg-wa-panel`, `text-wa-text`, `border-wa-border`, …) e `.wa-field` em inputs. Cores cruas (`bg-white`, `bg-green-50`, …) têm fallback no `custom.css`, mas hex inline e cores fora da lista coberta NÃO — teste com o modo escuro ligado. Ver "Tema e modo escuro (legibilidade)".
 - **Auditoria**: toda rota do plugin que MUDA configuração ou estado com dono chama `plugins.context.audit(...)`. Ver "Auditoria de plugins" abaixo e o guia [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md).
 
+### Tool editável pela tela (core E plugin)
+
+As tools que aparecem em **Configurações de IA → Tools** (`/ai/tools`) com `v1` + `instalada` + **Editar código / Histórico / Excluir** são as que têm linha em `ai_tools`. São três procedências, e a coluna `kind` as separa:
+
+| `kind` | Origem | Onde roda | Kill-switch |
+|---|---|---|---|
+| `builtin` | as 4 tools core, semeadas de `agent/tools/<name>.py` | in-process, `ToolContext` vivo | não |
+| `plugin` | `entry.tools` de qualquer plugin, semeada do `tools.py` dele | in-process, `ToolContext` vivo + módulos do próprio plugin | não |
+| `code` | escrita pelo operador na tela | **subprocesso isolado** | `ai_tools_code_enabled` (OFF por padrão) |
+
+O contrato é o mesmo para `builtin` e `plugin` ([agent/ai_builtin_tools.py](agent/ai_builtin_tools.py) e [agent/ai_plugin_tools.py](agent/ai_plugin_tools.py), com o compilador único em [agent/ai_tool_compile.py](agent/ai_tool_compile.py)):
+
+- a **baseline confiável é o disco**, registrada pelo loader/handler no boot e independente do banco;
+- **`version <= 1` (não editada) ⇒ o disco manda** e o código do banco NÃO é executado — ele é só o que a tela mostra;
+- **`version > 1` (editada por um humano com `agent.tools.manage`) ⇒ o código do banco é compilado e executado in-process**, sobrepondo a baseline;
+- edição que não compila ⇒ a baseline **fica** e a linha vai a `install_status='failed'` com o motivo visível;
+- **Excluir** grava um tombstone (`config.deleted_builtin_tools`, chave compartilhada pelas duas procedências) — sem ele o loader recontribuiria a tool a todo boot. A via de volta de uma tool de plugin é **reinstalar o plugin**, que limpa as marcas dele (o dono de uma tool já excluída fica anotado em `config.deleted_plugin_tool_owners`, porque a linha `ai_tools` que carregava o `plugin_id` já não existe).
+
+⚠️ **Duas armadilhas na hora de mexer nisso.** (1) O `exec` do código editado de plugin roda num namespace com `__name__`/`__package__` do pacote `whatsbot_plugins.<id>` — sem `__package__`, o `from . import logic` que quase todo `tools.py` tem levanta `ImportError` e a edição do operador falha **calada** (o reconcile volta para o disco). (2) O reconcile roda em [server/app.py](server/app.py) **antes** de `refresh_tool_overrides()`, que é quem reconstrói a lista de schemas mandada ao LLM; depois dele, a edição nunca chegaria ao modelo.
+
+Um `tools.py` costuma declarar VÁRIAS tools, e a identidade de uma linha é o **nome** da tool — então N tools viram N linhas com o mesmo código. Por isso **o módulo é a unidade de edição**: salvar uma propaga para as irmãs. Sem isso, o boot seguinte teria uma linha executando o módulo do banco e as irmãs o do disco, com dois objetos de módulo e uma constante editada valendo pela metade.
+
 ### Versionamento da API de plugins (`WHATSBOT_API_VERSION`)
 
-**Versão atual: `1.5.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
+**Versão atual: `1.6.0`** ([plugins/semver.py](plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
 
 ⚠️ **A constante ficou congelada em `1.0.0` por 93 dias** (2026-05-10 → 2026-08-11) enquanto a superfície crescia de 35 para 75 eventos e de 0 para 24 filtros. Consequência: o guard de compat nunca rejeitou nada e **nenhum plugin conseguia declarar de que core ele precisa** — o `whatsapp_cloud` teve de degradar fechado em runtime porque não tinha como exigir o `ctx.extras.signature_authenticated` do plano 84. A regra em prosa existia desde 2026-06-29 e foi violada 8 dias depois, em silêncio. Por isso a disciplina agora tem dente, não só texto.
 

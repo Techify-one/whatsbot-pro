@@ -26,6 +26,7 @@ export const CORE_ROUTES = {
   '/runtime': 'runtime',
   '/users': 'users',
   '/audit': 'audit',
+  '/api-keys': 'api-keys',
   '/ai': 'ai',
   // Alias legado: a tela virou a aba "Notificações e sons" de Configurações
   // Gerais (Dashboard.js abre nela ao ver este path / ?tab=sons).
@@ -46,6 +47,7 @@ export const CORE_TAB_PATHS = {
   runtime: '/runtime',
   users: '/users',
   audit: '/audit',
+  'api-keys': '/api-keys',
   ai: '/ai',
 };
 

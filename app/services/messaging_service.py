@@ -70,6 +70,141 @@ async def error_bubble(ws_manager, phone: str, content: str) -> None:
     })
 
 
+# ── Resolução de rota do envio do operador (R-txt) ────────────────────────────
+#
+# Estas cinco funções eram closures dentro de ``contacts.register_routes`` e por
+# isso NÃO existiam para nenhum outro chamador. Subiram para o módulo porque a
+# fachada ``/api/v1`` precisa das MESMAS regras — duplicá-las produziria a
+# divergência silenciosa que o plano descreve (mandar para o JID errado, fora da
+# janela de 24h, sem calar a IA). O comportamento é o mesmo byte a byte; só o
+# ``session_window_block`` mudou de FORMA (devolve um veredito de domínio em vez
+# de um ``JSONResponse``), e a rota volta a montar o ``_err`` a partir dele.
+
+
+def is_sandbox_contact(phone: str) -> bool:
+    """True para contato de teste/sandbox — o envio nunca vai ao provedor."""
+    from db.repositories import config_repo
+    from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
+    return bool(config_repo.get(f"{SANDBOX_CONTACT_PREFIX}{phone}"))
+
+
+def resolve_channel_id(phone: str, conversation_id=None, channel_id=None) -> str:
+    """Canal a que a conversa pertence (plano 11 D1).
+
+    A UI conversa-cêntrica passa ``conversation_id``; um ``channel_id`` explícito
+    é usado ao iniciar uma conversa NOVA em folha (ainda não existe linha de
+    conversa — quem escolhe é o seletor de caixa). Chamador legado (nenhum dos
+    dois) cai em ``"default"`` (GOWA), preservando o comportamento anterior.
+    Roteamento por CANAL, nunca por nome.
+    """
+    if conversation_id:
+        try:
+            conv = conversation_repo.get_with_channel(int(conversation_id))
+        except (TypeError, ValueError):
+            conv = None
+        if conv and conv.get("channel_id"):
+            return conv["channel_id"]
+    if channel_id:
+        return str(channel_id)
+    return "default"
+
+
+def wire_target(phone: str, conversation_id=None) -> str:
+    """Endereço REAL de envio (o JID de que a conversa recebe), não ``contacts.phone``.
+
+    ``contacts.phone`` pode divergir do JID da conta — o clássico 9º dígito
+    brasileiro. Um envio manual pelo ``phone`` cru ia para um JID FANTASMA (o
+    provedor devolve msg_id, o WhatsApp descarta em silêncio). Fallback para
+    ``phone`` em qualquer falha — nunca levanta.
+    """
+    if not conversation_id:
+        return phone
+    from db.repositories import contact_inbox_repo
+    try:
+        conv = conversation_repo.get(int(conversation_id))
+        ci_id = (conv or {}).get("contact_inbox_id")
+        if not ci_id:
+            return phone
+        ci = contact_inbox_repo.get(int(ci_id))
+        cand = ((ci or {}).get("source_jid") or (ci or {}).get("source_id") or "").strip()
+    except Exception:  # noqa: BLE001 — um tropeço de resolução nunca bloqueia o envio
+        return phone
+    if cand.endswith("@g.us"):
+        return cand
+    if cand.endswith("@s.whatsapp.net"):
+        digits = cand.split("@", 1)[0]
+        return digits if digits.isdigit() else phone
+    return phone
+
+
+def resolve_inbox_id(conversation_id=None, channel_id=None) -> int | None:
+    """Inbox alvo de uma escrita do operador (plano inboxes/canais §4.7).
+
+    Prefere a inbox da conversa; cai na inbox do canal quando a conversa está
+    nascendo. ``None`` quando indeterminável — e o chamador
+    (``can_access_inbox``) NEGA nesse caso para usuário escopado.
+    """
+    from db.repositories import inbox_repo
+    if conversation_id:
+        try:
+            conv = conversation_repo.get(int(conversation_id))
+        except (TypeError, ValueError):
+            conv = None
+        if conv:
+            return conv.get("inbox_id")
+    cid = str(channel_id) if channel_id else "default"
+    inbox = inbox_repo.get_by_channel(cid)
+    return inbox["id"] if inbox else None
+
+
+def session_window_block(outbound, channel_id, conversation_id, phone=None) -> dict | None:
+    """Veredito da janela de 24h da WhatsApp Cloud (plano 02 P17).
+
+    ``None`` = pode enviar — o que é SEMPRE o caso em canal sempre-aberto
+    (GOWA/Telegram, ``session_window_hours == 0``). Bloqueado ⇒
+    ``{"message": <PT-BR>, "reason": "session_window_closed"}``: a rota do painel
+    embrulha no ``_err(409)`` de sempre e a ``/api/v1`` devolve o seu próprio DTO.
+    Dirigido por CAPABILITY, nunca por nome de provider. Fora da janela só um
+    template aprovado passa — e canal SEM template ganha outro texto, porque
+    mandar o operador procurar um template que não existe é pior que não dizer
+    nada. A resposta agêntica (webhook) não passa por aqui e é inerentemente
+    dentro da janela, então nunca é afetada.
+
+    Sem ``conversation_id`` (conversa NOVA pelo modal "Nova conversa" — plano 21)
+    mas com ``phone``, resolve a conversa mais recente do contato NAQUELA inbox,
+    para honrar uma janela de 24h já aberta — senão um envio novo seria bloqueado
+    por engano no meio da janela.
+    """
+    from db.repositories import message_repo
+    caps = outbound.capabilities(channel_id)
+    if not getattr(caps, "session_window_hours", 0):
+        return None
+    last_ts = None
+    if conversation_id:
+        try:
+            last_ts = message_repo.last_inbound_ts(conversation_id=int(conversation_id))
+        except (TypeError, ValueError):
+            last_ts = None
+    elif phone:
+        from db.repositories import inbox_repo
+        contact = contact_repo.get_by_phone(phone)
+        if contact:
+            inbox = inbox_repo.get_by_channel(channel_id)
+            conv = (conversation_repo.get_latest_for_contact_inbox(
+                contact["id"], inbox["id"]) if inbox else None)
+            if conv:
+                last_ts = message_repo.last_inbound_ts(conversation_id=conv["id"])
+    # ``by_human=True``: todo chamador deste guard é ação de OPERADOR.
+    if outbound.session_open(channel_id, last_ts, by_human=True):
+        return None
+    if outbound.supports(channel_id, "templates"):
+        msg = "Fora da janela de 24h: só é possível enviar um template aprovado."
+    else:
+        msg = ("Fora da janela de mensagens deste canal: aguarde o cliente "
+               "responder para voltar a enviar mensagens.")
+    return {"message": msg, "reason": "session_window_closed"}
+
+
 # ── broadcast_and_emit (R-bc — generalized lift of conversations._broadcast) ──
 
 async def broadcast_and_emit(deps, ws_event: str, bus_event: str, payload: dict,
@@ -425,6 +560,204 @@ class MessagingService:
                 })
 
         return {"ok": True, "msg_id": msg_id, "media_path": rel_path}
+
+    # ── Operator text send (R-txt — o irmão de send_media para TEXTO) ────────
+
+    async def send_text(self, *, phone: str, message: str,
+                        conversation_id=None, channel_id=None,
+                        reply_to: str | None = None,
+                        sent_by_user_id: int | None = None,
+                        sent_by_name: str | None = None,
+                        inbox_guard=None) -> dict:
+        """Envia UMA mensagem de texto do operador e persiste/transmite/emite.
+
+        Era ~150 linhas dentro do handler ``POST /api/contacts/{phone}/send`` e
+        NÃO existia como função de serviço — então qualquer segunda superfície
+        (a fachada ``/api/v1``) teria de reimplementar regras que não podem
+        divergir: janela de 24h, ``filter.reply.part`` (cópia exibida) E
+        ``filter.outbound.text`` (wire-only), ``filter.conversation.before_reopen``,
+        o JID real via :func:`wire_target` (o ghost-send do 9º dígito), @menções
+        de grupo, o dedupe de eco ``state.recently_sent`` chaveado no alvo de
+        wire, ``abort_ai_cycle`` (calar o ciclo da IA em andamento — plano 96) e
+        o desvio de sandbox.
+
+        Mesmo precedente do refactor R14, que já unificou a cauda das três rotas
+        de mídia em :meth:`send_media`: as DUAS superfícies (painel e v1) chamam
+        esta função, e o comportamento do painel não muda.
+
+        ``inbox_guard`` é um callable ``async () -> dict | None`` chamado no
+        MESMO ponto em que o handler original checava o acesso à caixa — depois
+        do desvio de sandbox e antes de resolver o canal. A ordem é contrato: um
+        contato de sandbox nunca passou pelo gate de inbox.
+
+        Devolve ``{"ok": True, "msg_id", "conversation_id", "channel_id",
+        "message", "sandbox"}`` ou ``{"ok": False, "reason", "message",
+        "status"[, "data"]}`` — a rota mapeia para o envelope que ela já
+        devolvia. ``data`` só existe quando o envelope legado carregava um extra
+        (hoje: o ``{"reason": "session_window_closed"}`` do bloqueio de 24h).
+        """
+        from gowa.client import GOWASendError
+
+        outbound = self.outbound
+        ws_manager = self.ws_manager
+        state = self.state
+        agent_handler = self.agent_handler
+
+        message = (message or "").strip()
+        if not message:
+            return {"ok": False, "reason": "empty",
+                    "message": "Campo 'message' é obrigatório.", "status": 400}
+        reply_to = (reply_to or "").strip() or None
+
+        # Filtro de plugin: assinatura/formatação/redação no envio do operador.
+        filtered = await apply_filter(
+            "filter.reply.part", message,
+            {"phone": phone, "index": 0, "total": 1, "source": "operator",
+             "sent_by_name": sent_by_name},
+        )
+        if filtered is None:
+            return {"ok": False, "reason": "blocked_by_plugin",
+                    "message": "Mensagem bloqueada por plugin.", "status": 400}
+        message = filtered
+
+        # Regra "ignorar abertura": um filtro pode impedir que este envio REABRA
+        # uma conversa fechada. Sem plugin registrado ⇒ True ⇒ reopen=None (default).
+        _allow_reopen = await apply_filter(
+            "filter.conversation.before_reopen", True,
+            {"phone": phone, "role": "assistant", "text": message})
+        _reopen = False if not _allow_reopen else None
+
+        # Sandbox/contato de teste — nunca vai ao provedor (o número não é real).
+        if await asyncio.to_thread(is_sandbox_contact, phone):
+            msg_data = await asyncio.to_thread(
+                agent_handler.save_operator_message, phone, message, status="operator",
+                reply_to_msg_id=reply_to,
+                sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                reopen=_reopen,
+            )
+            await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+            await emit_with_filter("message.sent", {
+                "phone": phone, "text": message, "msg_id": None,
+                "channel_id": channel_id or "default",
+                "conversation_id": (msg_data or {}).get("conversation_id"),
+                "media_type": None, "media_path": None,
+                "source": "operator", "status": "operator",
+                "reply_to_msg_id": reply_to,
+                "ts": time.time(),
+            })
+            logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
+            return {"ok": True, "sandbox": True, "msg_id": None,
+                    "conversation_id": (msg_data or {}).get("conversation_id"),
+                    "channel_id": channel_id or "default",
+                    "message": "Mensagem enviada."}
+
+        if inbox_guard is not None:
+            denied = await inbox_guard()
+            if denied:
+                return denied
+
+        resolved_channel = await asyncio.to_thread(
+            resolve_channel_id, phone, conversation_id, channel_id)
+        abort_ai_cycle(self._deps, resolved_channel, phone)
+        # Alvo de wire = o JID de que a conversa realmente recebe (corrige o
+        # ghost-send do 9º dígito). ``phone`` segue sendo a chave de save/broadcast.
+        wire_phone = await asyncio.to_thread(wire_target, phone, conversation_id)
+        block = await asyncio.to_thread(
+            session_window_block, outbound, resolved_channel, conversation_id, phone)
+        if block:
+            # ``data`` é o EXTRA que o envelope do painel carregava neste caso
+            # específico (``{"reason": "session_window_closed"}``) — o compositor
+            # do frontend lê essa chave para decidir se oferece o fluxo de
+            # template. Só o bloqueio de janela a tinha; os demais erros deste
+            # handler nunca mandaram ``data``, e mandar agora mudaria a forma da
+            # resposta para clientes antigos.
+            return {"ok": False, "reason": block["reason"],
+                    "message": block["message"], "status": 409,
+                    "data": {"reason": block["reason"]}}
+
+        # @Nome / @todos → menção real, só em canal que suporta grupos. ``message``
+        # (com @Nome amigável) é o que se salva/exibe; ``send_text`` (com @<número>)
+        # + ``mentions`` vão no fio.
+        wire_text, mentions = message, None
+        if "@g.us" in phone and outbound.supports(resolved_channel, "groups"):
+            wire_text, mentions = await asyncio.to_thread(
+                group_mentions.resolve_outgoing, phone, message)
+
+        # Filtro WIRE-ONLY (ex.: assinatura): chega ao contato mas NÃO à cópia
+        # salva/transmitida (que continua usando ``message``).
+        _wired = await apply_filter(
+            "filter.outbound.text", wire_text,
+            {"phone": phone, "channel_id": resolved_channel, "source": "operator",
+             "sent_by_name": sent_by_name, "index": 0, "total": 1},
+        )
+        if _wired is not None:
+            wire_text = _wired
+
+        # Dedupe de eco — chaveado no alvo de WIRE (o eco volta carimbado com o
+        # JID real, não com o phone salvo).
+        state.recently_sent[f"{resolved_channel}:{wire_phone}:{wire_text[:120]}"] = time.time()
+
+        send_failed = False
+        error_msg = ""
+        msg_id = None
+        try:
+            res = await asyncio.to_thread(
+                outbound.send_text, resolved_channel, wire_phone, wire_text,
+                reply_to=reply_to, mentions=mentions)
+            if not res.ok:
+                raise GOWASendError(res.error or "Falha no envio")
+            msg_id = res.external_msg_id or ""
+        except GOWASendError as e:
+            logger.error("[Send] Failed to send message to %s: %s", phone, e)
+            send_failed = True
+            error_msg = str(e)
+        except Exception as e:  # noqa: BLE001 — preserva o handler original
+            logger.error("[Send] Failed to send message to %s: %s", phone, e)
+            send_failed = True
+            error_msg = str(e)
+
+        if send_failed:
+            msg_id = None
+
+        # Salva SEMPRE (com status="failed" quando o envio falhou).
+        try:
+            msg_data = await asyncio.to_thread(
+                agent_handler.save_operator_message, phone, message,
+                status="failed" if send_failed else "operator",
+                msg_id=msg_id, reply_to_msg_id=reply_to, channel_id=resolved_channel,
+                sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                reopen=_reopen,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("[Send] Failed to save message for %s: %s", phone, e)
+            return {"ok": False, "reason": "save_failed",
+                    "message": f"Erro ao salvar mensagem: {e}", "status": 500}
+
+        if send_failed:
+            await self.error_bubble(phone, f"Falha ao enviar mensagem: {error_msg}")
+            return {"ok": False, "reason": "send_failed",
+                    "message": f"Falha ao enviar mensagem: {error_msg}", "status": 500}
+
+        logger.info("[Send] Manual message to %s: %s", phone, message[:80])
+
+        await ws_manager.broadcast("new_message", {
+            "phone": phone,
+            "channel_id": resolved_channel,
+            "message": msg_data,
+        })
+        await emit_with_filter("message.sent", {
+            "phone": phone, "channel_id": resolved_channel, "text": message,
+            "msg_id": msg_id,
+            "conversation_id": (msg_data or {}).get("conversation_id"),
+            "media_type": None, "media_path": None,
+            "source": "operator", "status": "operator",
+            "reply_to_msg_id": reply_to,
+            "ts": time.time(),
+        })
+        return {"ok": True, "msg_id": msg_id, "sandbox": False,
+                "conversation_id": (msg_data or {}).get("conversation_id"),
+                "channel_id": resolved_channel,
+                "message": "Mensagem enviada."}
 
     # ── Reply Splitting & Sending ─────────────────────────────────────────────
 
