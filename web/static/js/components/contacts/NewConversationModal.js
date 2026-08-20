@@ -7,6 +7,7 @@ import { highlightComposerMarkup, toWhatsAppMarkup } from '../../utils/formatWha
 import { syncMirror } from '../../utils/composerMirror.js';
 import { TemplatePickerHost, templatePickerAvailable } from './TemplatePickerHost.js';
 import { useQuickReplies } from '../../hooks/useQuickReplies.js';
+import { replaceToken } from '../../services/composerTokens.js';
 import { avatarUrl } from './utils.js';
 import { DefaultAvatar } from './icons.js';
 import { channelPickerMeta } from '../../services/providerCatalog.js';
@@ -89,8 +90,22 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   // quebras de linha divergem e o cursor descola do fim do texto).
   const mirrorRef = useRef(null);
   useEffect(() => {
-    syncMirror(inputRef.current, mirrorRef.current);
+    const sync = () => syncMirror(inputRef.current, mirrorRef.current);
+    sync();
+    // Remede na frame seguinte, já com o layout final do modal (plano 132 · F4).
+    const raf = requestAnimationFrame(sync);
+    return () => cancelAnimationFrame(raf);
   }, [message]);
+
+  // Re-sincroniza quando a LARGURA muda sem o texto mudar — o modal anima ao
+  // abrir e acompanha o redimensionamento da janela. Ver Composer.js (F4).
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => syncMirror(inputRef.current, mirrorRef.current));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   // Autocomplete do campo "Para": busca contatos por NOME ou número (server-side,
   // cobre todos os contatos independente do filtro da sidebar). Escolher um item
   // preenche o número e dispara a verificação de WhatsApp já existente.
@@ -311,22 +326,45 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
     }
   }
 
+  // ⚠️ O splice é o MESMO do compositor do chat e erra do mesmo jeito quando o
+  // cursor se move depois de o menu abrir: `start` é congelado na abertura e o
+  // caret é lido vivo do DOM, então um clique noutro ponto fazia
+  // `slice(0,start) + insert + slice(pos)` duplicar ou APAGAR o trecho entre os
+  // dois. Por isso aqui usa a mesma `replaceToken` guardada do compositor
+  // (plano 132 · F5) — e lê valor e índice da MESMA fonte, o DOM vivo.
   function applyQuickReply(cand) {
     if (!cand || !quickReplyMenu) return;
     const el = inputRef.current;
-    const pos = (el && el.selectionStart != null) ? el.selectionStart : message.length;
-    const before = message.slice(0, quickReplyMenu.start);
-    const after = message.slice(pos);
-    const insert = cand.content;
-    setMessage(before + insert + after);
+    const cur = el ? el.value : message;
+    const pos = (el && el.selectionStart != null) ? el.selectionStart : cur.length;
+    const { value: newVal, caret } = replaceToken(cur, quickReplyMenu.start, pos, cand.content);
+    setMessage(newVal);
     setQuickReplyMenu(null);
     setTimeout(() => {
       if (el) {
         el.focus();
-        const caret = (before + insert).length;
         el.setSelectionRange(caret, caret);
       }
     }, 0);
+  }
+
+  // O menu segue o CARET, não só o texto — ver useComposer.js (plano 132 · F5).
+  // `select` só dispara em seleção de verdade, daí o clique e as teclas de
+  // navegação entrarem separados; ArrowUp/ArrowDown ficam de fora porque são a
+  // navegação do próprio menu.
+  const CARET_MOVE_KEYS = new Set([
+    'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown',
+  ]);
+  // Conservador como no chat: o caret que se move só FECHA ou reancora um menu
+  // já aberto — nunca abre um. Um "/algo" no meio de uma mensagem pronta não
+  // pode fazer o menu saltar só porque o operador clicou ali.
+  function syncMenuToCaret(el) {
+    if (!el || !quickReplyMenu) return;
+    updateQuickReplyMenu(el, el.value);
+  }
+  function onCaretMove(e) { syncMenuToCaret(e.target); }
+  function onCaretKeyUp(e) {
+    if (CARET_MOVE_KEYS.has(e.key)) syncMenuToCaret(e.target);
   }
 
   function onMessageInput(e) {
@@ -504,12 +542,18 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
                 class="wa-field pointer-events-none absolute inset-0 z-0 overflow-hidden box-border rounded-lg px-3 py-2 text-[14px] whitespace-pre-wrap break-words border border-transparent ${(!freeTextAllowed && !sessionLoading) ? 'opacity-60' : ''}"
                 dangerouslySetInnerHTML=${{ __html: highlightComposerMarkup(message) }}
               ></div>
+              <!-- autocorrect OFF — ver Composer.js (plano 132 · F6). -->
               <textarea
                 ref=${inputRef}
                 value=${message}
                 onInput=${onMessageInput}
+                onSelect=${onCaretMove}
+                onClick=${onCaretMove}
+                onKeyUp=${onCaretKeyUp}
+                onBlur=${() => setQuickReplyMenu(null)}
                 onKeyDown=${onTextKeyDown}
                 onScroll=${(e) => syncMirror(e.target, mirrorRef.current)}
+                autocorrect="off"
                 disabled=${!freeTextAllowed && !sessionLoading}
                 placeholder=${freeTextAllowed ? 'Escreva sua mensagem aqui...  (use / para respostas rápidas)' : 'Texto livre indisponível fora da janela de 24h — envie um template.'}
                 rows="4"

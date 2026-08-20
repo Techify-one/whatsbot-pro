@@ -50,10 +50,26 @@ export function detectQuickReplyToken(textBeforeCaret, caret) {
   return { query: m[1], start: caret - m[1].length - 1 };
 }
 
+// Um token válido é o gatilho ('@' ou '/') seguido SÓ de caracteres de token —
+// superset das duas regexes de detecção acima (`[\p{L}\p{N}_]*` da menção e
+// `[\w-]*` da resposta rápida). Espaço, pontuação ou quebra de linha na região
+// significam que ela deixou de ser um token e não é seguro substituí-la.
+const TOKEN_REGION_RE = /^[@/][\p{L}\p{N}_-]*$/u;
+
 /**
  * Replace the typed token (from `start` to `caret`) with `insert`, returning the
  * new value and the caret position after the insertion. Used by both @mention
  * (insert = "@Name ") and quick-reply (insert = the snippet) application.
+ *
+ * ⚠️ Os dois índices vêm de FONTES DIFERENTES e podem descrever coisas
+ * incompatíveis (plano 132 · F5): `start` é congelado quando o menu ABRE e
+ * `caret` é lido VIVO do DOM na hora de aplicar. Entre um e outro o operador
+ * pode ter clicado noutro ponto, colado texto ou tido o rascunho re-hidratado —
+ * e aí o splice ingênuo `slice(0,start) + insert + slice(caret)` DUPLICA (caret
+ * antes de start) ou APAGA (caret muito além) um trecho inteiro, calado. Por
+ * isso a substituição só acontece quando `[start, caret)` ainda é de fato um
+ * token; fora disso o valor sai INTACTO e o caret fica onde o operador o
+ * deixou. Perder a menção é irritante — comer o texto dele é o bug relatado.
  *
  * @param {string} value - full current input value.
  * @param {number} start - index of the trigger char.
@@ -63,6 +79,11 @@ export function detectQuickReplyToken(textBeforeCaret, caret) {
  */
 export function replaceToken(value, start, caret, insert) {
   const v = value || '';
+  const abort = { value: v, caret };
+  if (!Number.isInteger(start) || !Number.isInteger(caret)) return abort;
+  if (start < 0 || caret < 0 || start > caret) return abort;
+  if (start > v.length || caret > v.length) return abort;
+  if (!TOKEN_REGION_RE.test(v.slice(start, caret))) return abort;
   const before = v.slice(0, start);
   const after = v.slice(caret);
   return { value: before + insert + after, caret: (before + insert).length };

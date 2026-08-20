@@ -54,6 +54,7 @@ import { applyUploadLimits, limitsMessage, MAX_FILES_PER_DROP } from '../../../s
 import { checkMediaFile, limitsSummary, isAttachmentOfKind } from '../../../services/mediaLimits.js';
 import { captionTargetIndex } from '../../../services/composerSubmit.js';
 import { notify } from '../../../services/notify.js';
+import { toComposerNfc } from '../../../utils/composerPaste.js';
 
 /**
  * @param {Object} opts
@@ -297,9 +298,45 @@ export function useMediaUpload({
       const file = item.getAsFile();
       if (file) files.push(file);
     }
-    if (!files.length) return;
+    if (files.length) {
+      e.preventDefault();
+      requestFilesDrop(files, 'media');
+      return;
+    }
+
+    // ── Texto colado em NFD (plano 132 · F7) ───────────────────────────
+    //
+    // Mora aqui, e não num segundo handler, porque `onPaste` é UM só evento:
+    // dois ouvintes disputando o mesmo `preventDefault` seria bug de ordem.
+    // Colagem já em NFC — a esmagadora maioria — não é tocada e segue pelo
+    // caminho NATIVO do navegador, que é o que funciona hoje.
+    const raw = e.clipboardData?.getData?.('text/plain');
+    const nfc = toComposerNfc(raw);
+    if (nfc === raw) return;
+
+    const el = e.target;
+    if (!el || typeof el.value !== 'string') return;
     e.preventDefault();
-    requestFilesDrop(files, 'media');
+
+    // `insertText` insere no caret / substitui a seleção pelo caminho do próprio
+    // navegador: preserva a pilha de DESFAZER (um `el.value = …` a mataria) e
+    // dispara `input`, então o state do Preact se atualiza sozinho e não há
+    // aritmética de índice para errar — que é justamente como o splice do
+    // autocomplete errava (F5).
+    let ok = false;
+    try {
+      ok = document.execCommand('insertText', false, nfc);
+    } catch { ok = false; }
+    if (ok) return;
+
+    // Retaguarda para quem não suporta execCommand: como já demos
+    // preventDefault, deixar passar significaria PERDER a colagem.
+    const start = el.selectionStart != null ? el.selectionStart : el.value.length;
+    const end = el.selectionEnd != null ? el.selectionEnd : start;
+    el.value = el.value.slice(0, start) + nfc + el.value.slice(end);
+    const caret = start + nfc.length;
+    el.setSelectionRange(caret, caret);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
   // Audio path: the recorder hook produces { type:'audio', blob, filename, previewUrl }.
