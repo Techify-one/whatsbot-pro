@@ -2,10 +2,11 @@
 
 The setup wizard (frontend) connects WhatsApp, then triggers
 ``POST /api/setup/request-key`` which makes the WhatsBot send a WhatsApp
-message to the Techify provisioning number. The provisioning number is
-fetched at request time from Techify's ``/service_number`` endpoint (so it
-can be rotated without a client release). Techify creates an account +
-API key keyed by the sender's number. The wizard then polls
+message to the Techify provisioning number. O destino — número **e** frase —
+é buscado a cada pedido no ``/service_number`` da Techify, que é a fonte da
+verdade: os dois podem ser rotacionados sem release em cliente nenhum, caindo
+em env e depois em literal do código quando o endpoint está fora do ar. Techify
+creates an account + API key keyed by the sender's number. The wizard then polls
 ``GET /api/setup/key-status``, which in turn POSTs to Techify's
 ``/request-apikey`` endpoint (body ``{"number": ...}``) server-side and
 saves the key to the config once ready.
@@ -53,13 +54,21 @@ def register_routes(app, deps):
                 "Aguarde a conexão concluir e tente de novo."
             )
         if kind == "no_destination":
-            # O core não tem número embutido: sem destino configurado o wizard
-            # recusa em vez de mandar a mensagem para um número que ninguém
+            # Sem destino resolvido (env esvaziada ou seam abortado) o wizard
+            # recusa, em vez de mandar a mensagem para um número que ninguém
             # escolheu. A mensagem não cita plugin nenhum — o core não os conhece.
             return _err(
                 "Nenhum número de destino configurado para o provisionamento. "
                 "Configure o número que deve receber o pedido de conta e "
                 "tente de novo."
+            )
+        if kind == "no_message":
+            # Mesma lógica do caso acima, do outro lado do par: destino existe,
+            # frase não. Mandar mensagem vazia queimaria a única abertura de
+            # conversa que o WhatsApp concede com um contato novo.
+            return _err(
+                "Nenhuma mensagem de provisionamento configurada. "
+                "Configure a frase que deve ser enviada e tente de novo."
             )
         if kind == "send_failed":
             return _err(f"Não foi possível enviar a mensagem: {data['error']}")

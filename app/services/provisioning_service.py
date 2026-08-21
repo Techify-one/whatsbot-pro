@@ -2,10 +2,11 @@
 
 Owns the first-run setup-wizard provisioning flow previously inline in
 ``server/routes/setup.py``: resolving the connected WhatsApp number, fetching the
-current Techify provisioning number, disabling the AI for that contact, sending
-the provisioning message (with the reach-out-timelock manual fallback), arming the
-key polling, and polling Techify for the provisioned API key (saving it to config
-once ready).
+current Techify provisioning TARGET (destination number **and** the phrase to
+send — see :func:`fetch_provision_target`), disabling the AI for that contact,
+sending the provisioning message (with the reach-out-timelock manual fallback),
+arming the key polling, and polling Techify for the provisioned API key (saving it
+to config once ready).
 
 Branch by Abstraction — the routes resolve permission, then delegate the flow
 here. Behavior preserved byte-for-byte (legacy suite is the contract).
@@ -14,6 +15,7 @@ here. Behavior preserved byte-for-byte (legacy suite is the contract).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from urllib.parse import quote
@@ -49,39 +51,106 @@ def qr_data_uri(url: str) -> str:
         return ""
 
 
-async def fetch_provision_number() -> str:
-    """Resolve the destination of the provisioning message. ``""`` = none.
+@dataclasses.dataclass(frozen=True)
+class ProvisionTarget:
+    """Destino do provisionamento: para QUEM mandar e COM QUAL frase.
 
-    Order: ``GET /service_number`` → env ``TECHIFY_PROVISION_NUMBER`` (empty by
-    default) → ``filter.provisioning.number``, which has the LAST word and may
-    answer ``None``/``""`` to say there is no destination at all. No number is
-    hardcoded here, so an empty answer is a legitimate outcome and ``request_key``
-    refuses to send rather than pick a destination nobody chose.
-
-    The core does not validate the shape of what comes back — normalizing a phone
-    number belongs to whoever answers, exactly as it always did for the value
-    coming out of ``/service_number``.
+    Os dois campos andam juntos porque só fazem sentido juntos — a frase é o
+    gatilho que AQUELE número reconhece. Vazio em qualquer um dos dois significa
+    "não há destino" e o envio é recusado.
     """
-    source = "fallback"
-    number = TECHIFY_PROVISION_NUMBER
+
+    number: str
+    message: str
+
+
+async def _fetch_service_number() -> dict | None:
+    """``GET /service_number``. ``None`` = não deu para consultar (rede/HTTP/JSON).
+
+    Um dict (mesmo sem os campos) significa que o endpoint respondeu: aí a
+    ausência de um campo é informação, não falha de transporte.
+    """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(TECHIFY_SERVICE_NUMBER_URL)
         resp.raise_for_status()
         data = resp.json()
-        fetched = str(data.get("phone", "")).strip() if isinstance(data, dict) else ""
-        if fetched:
-            number, source = fetched, "service_number"
-        else:
-            logger.warning("Setup: /service_number returned no phone, using fallback")
     except Exception as e:
         logger.warning("Setup: failed to fetch service number (%s), using fallback", e)
+        return None
+    return data if isinstance(data, dict) else {}
+
+
+def _pick(remote: dict, key: str, fallback: str) -> tuple[str, str]:
+    """``(valor, origem)`` — o campo remoto vence; ausente/vazio cai no fallback.
+
+    Puro. Cada campo é resolvido SOZINHO: um endpoint que ainda não devolva
+    ``message`` continua ditando o ``phone``, e vice-versa.
+    """
+    value = str(remote.get(key) or "").strip()
+    return (value, "service_number") if value else (fallback, "fallback")
+
+
+async def fetch_provision_target() -> ProvisionTarget:
+    """Resolve para quem, e com qual frase, o pedido de conta é enviado.
+
+    Precedência, por campo e nesta ordem:
+
+    1. ``GET /service_number`` — a FONTE DA VERDADE. Responde
+       ``{"ok": true, "phone": "...", "message": "..."}``; trocar número ou frase
+       é editar essa resposta, sem release nem env em cliente nenhum.
+    2. env ``TECHIFY_PROVISION_NUMBER`` / ``TECHIFY_PROVISION_MESSAGE`` — override
+       por instalação.
+    3. literal em ``config/settings.py`` — a última rede, para o endpoint fora do
+       ar. É o que mantém o provisionamento de pé numa queda da Cloudflare.
+    4. ``filter.provisioning.number`` e ``filter.provisioning.message`` — os seams
+       de plugin, que têm a ÚLTIMA palavra sobre o que o core resolveu.
+
+    Os dois seams são simétricos de propósito: quem aponta o envio para outro
+    número (o ``criar_conta`` faz isso) precisa poder mandar junto a frase que
+    AQUELE destino reconhece — senão o override do número entrega uma mensagem
+    que o outro lado ignora em silêncio.
+
+    ``None``/``""`` em qualquer um dos dois ABORTA: o core devolve um alvo vazio e
+    ``request_key`` recusa o envio, em vez de mandar a frase para um número que
+    ninguém escolheu (ou mandar uma mensagem vazia para ele).
+
+    O core não valida o FORMATO do que volta — normalizar o telefone é de quem
+    responde, exatamente como sempre foi com o valor do ``/service_number``.
+    """
+    remote = await _fetch_service_number()
+    body = remote or {}
+    number, number_source = _pick(body, "phone", TECHIFY_PROVISION_NUMBER)
+    message, message_source = _pick(body, "message", TECHIFY_PROVISION_MESSAGE)
+    if remote is not None:
+        if number_source == "fallback":
+            logger.warning("Setup: /service_number returned no phone, using fallback")
+        if message_source == "fallback":
+            logger.info("Setup: /service_number returned no message, using fallback")
 
     chosen = await apply_filter(
         "filter.provisioning.number", number,
-        {"source": source, "message": TECHIFY_PROVISION_MESSAGE},
+        {"source": number_source, "message": message},
     )
-    return str(chosen or "").strip()
+    number = str(chosen or "").strip()
+    if not number:
+        # Sem destino não há o que perguntar sobre a frase: o envio já morreu aqui.
+        return ProvisionTarget(number="", message="")
+
+    chosen = await apply_filter(
+        "filter.provisioning.message", message,
+        {"source": message_source, "number": number},
+    )
+    return ProvisionTarget(number=number, message=str(chosen or "").strip())
+
+
+async def fetch_provision_number() -> str:
+    """Só o destino, para quem não precisa da frase. ``""`` = nenhum.
+
+    Mantida porque é o nome que a API 1.7.0 documentou como produtor do seam
+    ``filter.provisioning.number``. Ver :func:`fetch_provision_target`.
+    """
+    return (await fetch_provision_target()).number
 
 
 async def request_key(deps) -> tuple[str, dict]:
@@ -90,9 +159,12 @@ async def request_key(deps) -> tuple[str, dict]:
     Returns a ``(kind, data)`` tuple the route turns into a response:
       * ``("no_number", {})`` — the WhatsApp number isn't known yet (route → _err);
       * ``("no_destination", {})`` — nothing resolved a destination, so NOTHING is
-        sent (route → _err). Since 2026-08-20 this is a normal outcome, not an
-        edge case: the core has no built-in number, so an unconfigured install
-        (or a plugin that aborts the seam because its field is blank) lands here;
+        sent (route → _err). Chega-se aqui quando a env do número foi esvaziada ou
+        um plugin abortou ``filter.provisioning.number`` — o literal de
+        ``config/settings.py`` cobre a queda do endpoint;
+      * ``("no_message", {})`` — há destino, mas ninguém resolveu a frase (env
+        esvaziada ou ``filter.provisioning.message`` abortado). Também não envia:
+        mensagem vazia queima a única abertura de conversa com um contato novo;
       * ``("manual", {...})`` — reach-out timelock; the user must send by hand;
       * ``("send_failed", {"error": str})`` — the send failed (route → _err);
       * ``("sent", {"number": str})`` — provisioning message sent, polling armed.
@@ -110,7 +182,8 @@ async def request_key(deps) -> tuple[str, dict]:
     if not number:
         return ("no_number", {})
 
-    provision_number = await fetch_provision_number()
+    target = await fetch_provision_target()
+    provision_number = target.number
     if not provision_number:
         # No destination = no send. Nothing below this line may run: materializing
         # the contact and pausing its AI would create a ghost contact keyed by the
@@ -119,6 +192,13 @@ async def request_key(deps) -> tuple[str, dict]:
         logger.warning("Setup: no provisioning destination configured; "
                        "refusing to send the provisioning message")
         return ("no_destination", {})
+    if not target.message:
+        # Destino sem frase: mandar mensagem vazia gastaria a única abertura de
+        # conversa que o WhatsApp concede a um contato novo (o reach-out timelock
+        # é por contato) e o outro lado não teria gatilho nenhum para reconhecer.
+        logger.warning("Setup: no provisioning message resolved; "
+                       "refusing to send an empty provisioning message")
+        return ("no_message", {})
 
     # The Techify provisioning number is a support/automation contact — the bot
     # must never auto-reply to it. Force AI off for that contact before the message
@@ -148,7 +228,7 @@ async def request_key(deps) -> tuple[str, dict]:
 
     try:
         await asyncio.to_thread(
-            gowa_client.send_message, provision_number, TECHIFY_PROVISION_MESSAGE
+            gowa_client.send_message, provision_number, target.message
         )
     except GOWASendError as e:
         logger.error("Setup: failed to send provisioning message: %s", e)
@@ -159,7 +239,7 @@ async def request_key(deps) -> tuple[str, dict]:
             # hand the frontend everything it needs to guide that manual send —
             # once it goes out, the key lands in the config automatically.
             _arm_polling()
-            wa_link = wa_deep_link(provision_number, TECHIFY_PROVISION_MESSAGE)
+            wa_link = wa_deep_link(provision_number, target.message)
             logger.info(
                 "Setup: reach-out timelock; falling back to manual send, "
                 "polling key for %s", number,
@@ -168,7 +248,7 @@ async def request_key(deps) -> tuple[str, dict]:
                 "status": "manual",
                 "number": number,
                 "provision_number": provision_number,
-                "provision_message": TECHIFY_PROVISION_MESSAGE,
+                "provision_message": target.message,
                 "wa_link": wa_link,
                 "qr_data_uri": qr_data_uri(wa_link),
             })

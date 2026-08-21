@@ -1,17 +1,22 @@
-"""Seam ``filter.provisioning.number`` — o destino do provisionamento é plugável.
+"""Seams ``filter.provisioning.number`` e ``filter.provisioning.message``.
 
-O wizard de 1ª execução manda a frase de provisionamento para um número que o core
-resolvia sem alavanca em runtime: ``GET /service_number`` da Techify, caindo num
-literal embutido no código. Este seam (API 1.7.0) deixa um plugin apontar o envio
-para outro número — é o que o ``criar_conta`` usa para mandar o pedido de conta ao
-próprio atendimento — ou RECUSAR o envio quando ninguém configurou destino.
+O wizard de 1ª execução manda uma frase de provisionamento para um número. Os dois
+lados desse par são resolvidos CAMPO A CAMPO pelo core — ``GET /service_number``
+(fonte da verdade, devolve ``{phone, message}``) → env → literal do código — e
+cada um é então oferecido ao seu filtro, que tem a ÚLTIMA palavra (API 1.7.0 para
+o número, 1.8.0 para a mensagem).
 
-Os testes exercitam o CORE direto (sem plugin): registram um filtro em processo e
-chamam ``fetch_provision_number`` com a ida ao ``/service_number`` mockada. O que está travado aqui é o contrato do
-seam: ``None``/``""`` ABORTA — não há destino, e o core recusa o envio em vez de
-mandar a frase para o número que ele por acaso conhecia. O core também não tem
-mais número embutido (``TECHIFY_PROVISION_NUMBER`` nasce vazia) nem opina sobre o
-formato do que volta.
+Os testes exercitam o CORE direto (sem plugin): registram filtros em processo e
+chamam ``fetch_provision_target`` com a ida ao ``/service_number`` mockada. O que
+está travado aqui:
+
+* ``None``/``""`` em qualquer um dos dois ABORTA — o core recusa o envio em vez de
+  mandar a frase para um número que ninguém escolheu, ou uma mensagem vazia para
+  ele;
+* os campos são INDEPENDENTES — endpoint que só devolve ``phone`` não derruba a
+  frase, e vice-versa;
+* existe fallback embutido nos DOIS (a rede para o endpoint fora do ar);
+* o core não opina sobre o formato do que volta.
 
     venv/bin/python -m pytest tests/contracts/test_provisioning_number_filter.py -q
 """
@@ -19,7 +24,6 @@ formato do que volta.
 from __future__ import annotations
 
 import asyncio
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -28,8 +32,11 @@ from app.services import provisioning_service as svc
 from plugins import events as bus
 
 FILTER = "filter.provisioning.number"
+MSG_FILTER = "filter.provisioning.message"
 REMOTE = "5511111111111"
+REMOTE_MSG = "Frase publicada no endpoint"
 ENV_FALLBACK = svc.TECHIFY_PROVISION_NUMBER
+MSG_FALLBACK = svc.TECHIFY_PROVISION_MESSAGE
 
 
 def _resolve() -> str:
@@ -37,18 +44,23 @@ def _resolve() -> str:
     return asyncio.run(svc.fetch_provision_number())
 
 
+def _resolve_target() -> svc.ProvisionTarget:
+    return asyncio.run(svc.fetch_provision_target())
+
+
 @pytest.fixture
 def registered():
     """Registra filtros e limpa o bus no fim (o registry é global do processo)."""
     added: list = []
 
-    def _register(fn, priority: int = 100):
-        bus.register_filter("test_provisioning", FILTER, fn, priority)
+    def _register(fn, priority: int = 100, name: str = FILTER):
+        bus.register_filter("test_provisioning", name, fn, priority)
         added.append(fn)
         return fn
 
     yield _register
     bus._filters.pop(FILTER, None)
+    bus._filters.pop(MSG_FILTER, None)
 
 
 @pytest.fixture
@@ -91,10 +103,16 @@ def test_sem_filtro_e_sem_rede_cai_na_env(remote_down):
     assert _resolve() == ENV_FALLBACK
 
 
-def test_o_core_nao_tem_numero_embutido():
-    """Nenhum destino escrito no código: sem env, sem rede e sem filtro, ninguém
-    envia nada. Um literal aqui é um número que ninguém escolheu."""
-    assert svc.TECHIFY_PROVISION_NUMBER == "" or os.environ.get("TECHIFY_PROVISION_NUMBER")
+def test_o_core_tem_rede_embutida_para_os_dois_campos():
+    """Fallback no código é DELIBERADO (API 1.8.0, revertendo a 1.7.0).
+
+    Sem ele, uma queda do ``/service_number`` parava o provisionamento de todo
+    cliente novo — quem acabou de conectar o QR não tem env, não tem plugin e não
+    teria como pedir a própria chave. O literal não é a alavanca de mudança (essa
+    é o endpoint); é a última rede.
+    """
+    assert svc.TECHIFY_PROVISION_NUMBER, "número sem fallback embutido"
+    assert svc.TECHIFY_PROVISION_MESSAGE, "mensagem sem fallback embutido"
 
 
 # ── o override ───────────────────────────────────────────────────────────────
@@ -249,3 +267,158 @@ def test_a_rota_devolve_erro_acionavel_sem_destino():
     fonte = inspect.getsource(setup_routes.register_routes)
     assert "no_destination" in fonte
     assert "Nenhum número de destino configurado" in fonte
+
+
+# ── a mensagem: mesmo par, mesmas regras ─────────────────────────────────────
+@pytest.fixture
+def remote_full(monkeypatch):
+    """``/service_number`` devolve os DOIS campos — o contrato publicado."""
+    _fake_service_number(monkeypatch, {"ok": True, "phone": REMOTE,
+                                       "message": REMOTE_MSG})
+
+
+def test_endpoint_dita_numero_e_mensagem(remote_full):
+    """A fonte da verdade: trocar qualquer um dos dois é editar a resposta dele."""
+    alvo = _resolve_target()
+    assert (alvo.number, alvo.message) == (REMOTE, REMOTE_MSG)
+
+
+def test_campos_sao_independentes_endpoint_so_com_numero(remote_ok):
+    """Resposta legada (só ``phone``) NÃO derruba a frase: ela cai no fallback.
+
+    É o que mantém o provisionamento de pé enquanto o campo novo não é publicado.
+    """
+    alvo = _resolve_target()
+    assert (alvo.number, alvo.message) == (REMOTE, MSG_FALLBACK)
+
+
+def test_campos_sao_independentes_endpoint_so_com_mensagem(monkeypatch):
+    """E o simétrico: só ``message`` publicado ⇒ número no fallback."""
+    _fake_service_number(monkeypatch, {"ok": True, "message": REMOTE_MSG})
+    alvo = _resolve_target()
+    assert (alvo.number, alvo.message) == (ENV_FALLBACK, REMOTE_MSG)
+
+
+def test_endpoint_fora_do_ar_cai_nos_dois_literais(remote_down):
+    """O requisito que trouxe o fallback de volta (1.8.0): endpoint fora do ar e
+    o pedido de conta sai igual, com número E frase embutidos."""
+    alvo = _resolve_target()
+    assert alvo.number == ENV_FALLBACK and alvo.number
+    assert alvo.message == MSG_FALLBACK and alvo.message
+
+
+def test_filtro_troca_a_mensagem(remote_full, registered):
+    registered(lambda ctx, msg: "Outra frase", name=MSG_FILTER)
+    alvo = _resolve_target()
+    assert alvo.message == "Outra frase"
+    assert alvo.number == REMOTE, "trocar a frase não pode mexer no destino"
+
+
+def test_filtro_de_mensagem_recebe_o_numero_ja_decidido(remote_full, registered):
+    """A ordem é o ponto: quem reescreve a frase precisa saber para QUEM ela vai —
+    é assim que um plugin manda o gatilho que aquele destino reconhece."""
+    seen: dict = {}
+
+    def _spy(ctx, msg):
+        seen["message"] = msg
+        seen["extras"] = dict(getattr(ctx, "extras", None) or {})
+        return msg
+
+    registered(lambda ctx, number: "5599888887777")
+    registered(_spy, name=MSG_FILTER)
+    _resolve_target()
+    assert seen["message"] == REMOTE_MSG
+    assert seen["extras"]["source"] == "service_number"
+    assert seen["extras"]["number"] == "5599888887777"
+
+
+def test_o_filtro_de_numero_ja_ve_a_frase_final(remote_full, registered):
+    """O contrário do teste acima: a mensagem é resolvida ANTES, então quem
+    decide o destino enxerga a frase que de fato sairá."""
+    seen: dict = {}
+    registered(lambda ctx, number: seen.update(
+        message=(getattr(ctx, "extras", None) or {}).get("message")) or number)
+    _resolve_target()
+    assert seen["message"] == REMOTE_MSG
+
+
+@pytest.mark.parametrize("devolvido", [None, "", "   "])
+def test_mensagem_vazia_e_um_aborto(remote_full, registered, devolvido):
+    registered(lambda ctx, msg: devolvido, name=MSG_FILTER)
+    assert _resolve_target().message == ""
+
+
+def test_sem_destino_o_filtro_de_mensagem_nem_roda(remote_full, registered):
+    """Envio já morreu no número: perguntar a frase seria trabalho para o lixo —
+    e um plugin com efeito colateral no filtro rodaria à toa."""
+    chamou = []
+    registered(lambda ctx, number: None)
+    registered(lambda ctx, msg: chamou.append(msg) or msg, name=MSG_FILTER)
+    alvo = _resolve_target()
+    assert (alvo.number, alvo.message) == ("", "")
+    assert chamou == []
+
+
+def test_o_nome_da_mensagem_esta_no_catalogo():
+    assert MSG_FILTER in bus.KNOWN_FILTERS
+
+
+# ── o efeito: sem frase, o wizard também não manda nada ──────────────────────
+def test_sem_mensagem_nada_e_enviado(remote_full, registered):
+    """Mensagem vazia queimaria a única abertura de conversa que o WhatsApp
+    concede com um contato novo (o reach-out timelock é por contato)."""
+    registered(lambda ctx, msg: None, name=MSG_FILTER)
+    deps, enviados = _deps_espiao()
+
+    kind, data = asyncio.run(svc.request_key(deps))
+
+    assert kind == "no_message"
+    assert data == {}
+    assert enviados == []
+    assert deps.state.setup_key_number is None
+    assert deps.state.setup_key_requested_at is None
+
+
+def test_a_frase_enviada_e_a_do_endpoint(remote_full):
+    """O caminho feliz de ponta a ponta: o que a Cloudflare publicou é o que sai
+    no wire — sem passar pelo literal do código."""
+    deps, enviados = _deps_espiao()
+    deps.agent_handler = SimpleNamespace()  # _get_contact ausente ⇒ loga e segue
+
+    kind, _ = asyncio.run(svc.request_key(deps))
+
+    assert kind == "sent"
+    assert enviados == [(REMOTE, REMOTE_MSG)]
+
+
+def test_fallback_manual_mostra_a_frase_resolvida(remote_full):
+    """Bloqueio anti-spam do WhatsApp: o painel pede que o operador mande a frase
+    à mão. É o ÚNICO ponto em que ele vê o par — tem de ser o resolvido, não o
+    literal, senão ele copia um gatilho que o destino não reconhece."""
+    from gowa.client import GOWASendError
+
+    deps, _ = _deps_espiao()
+    deps.agent_handler = SimpleNamespace()
+
+    def _blocked(phone, text):
+        raise GOWASendError("bloqueado", error_type="reachout_timelock")
+
+    deps.gowa_client.send_message = _blocked
+
+    kind, data = asyncio.run(svc.request_key(deps))
+
+    assert kind == "manual"
+    assert data["provision_number"] == REMOTE
+    assert data["provision_message"] == REMOTE_MSG
+    assert data["wa_link"].startswith(f"https://wa.me/{REMOTE}?text=")
+    assert deps.state.setup_key_number, "polling precisa continuar armado"
+
+
+def test_a_rota_devolve_erro_acionavel_sem_mensagem():
+    import inspect
+
+    from server.routes import setup as setup_routes
+
+    fonte = inspect.getsource(setup_routes.register_routes)
+    assert "no_message" in fonte
+    assert "Nenhuma mensagem de provisionamento configurada" in fonte

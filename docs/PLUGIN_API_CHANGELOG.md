@@ -38,6 +38,74 @@ trata versão pura como compatibilidade por MAJOR — semântica oposta. **No
 
 ---
 
+## 1.8.0 — 2026-08-20 · `filter.provisioning.message` — a frase do provisionamento vem junto com o número (e os dois têm rede)
+
+**Aditiva no catálogo.** Um plugin que não registre o filtro novo não muda em
+nada. Muda, sim, o comportamento do core quando nada está configurado — ver
+"Reversão da 1.7.0" no fim.
+
+### O seam
+
+`filter.provisioning.message` — `str`. Produtor:
+[`app/services/provisioning_service.py`](../app/services/provisioning_service.py)
+`fetch_provision_target()` — o mesmo da 1.7.0, renomeado porque agora resolve o
+PAR. `fetch_provision_number()` continua existindo como atalho para quem só quer
+o destino.
+
+Simétrico ao `filter.provisioning.number`, e existe pelo mesmo motivo que ele:
+**a frase É o gatilho que o destino reconhece**. Um plugin que aponte o envio
+para outro número sem poder trocar a mensagem entrega um texto que o outro lado
+ignora em silêncio — o pior desfecho possível, porque nada falha visivelmente.
+
+Ordem dentro do produtor, que importa:
+
+1. a mensagem é resolvida **antes**, então `filter.provisioning.number` já recebe
+   a frase final em `ctx.extras["message"]`;
+2. o filtro de número roda e pode abortar;
+3. `filter.provisioning.message` só roda **se houver destino**, e recebe o número
+   já decidido em `ctx.extras["number"]`.
+
+`ctx.extras`: `{source ∈ {"service_number", "fallback"}, number}`. `None`/`""`
+**ABORTA** — `request_key` devolve `("no_message", {})` e a rota responde com erro
+acionável. Nada do caminho de envio roda: mensagem vazia queimaria a única
+abertura de conversa que o WhatsApp concede a um contato novo (o reach-out
+timelock é por contato).
+
+O core continua **não validando formato** e continua engolindo exceção de filtro
+(quem quer fail-closed captura a própria e devolve `None`).
+
+### Fora do catálogo, na mesma release
+
+**`/service_number` passou a ditar a frase.** O endpoint responde
+`{"ok": true, "phone": "...", "message": "..."}` e é a fonte da verdade dos dois
+campos: rotacionar número ou frase é editar essa resposta, sem release e sem env
+em cliente nenhum. Os campos são resolvidos de forma **independente** — uma
+resposta que ainda não traga `message` continua ditando o `phone`, e a frase cai
+no fallback. Antes disso o core lia só `phone` e descartava o resto.
+
+**Precedência por campo:** `/service_number` → env
+(`TECHIFY_PROVISION_NUMBER` / `TECHIFY_PROVISION_MESSAGE`, esta última é nova) →
+literal em `config/settings.py` → seam de plugin (última palavra).
+
+### Reversão da 1.7.0
+
+O literal embutido em `TECHIFY_PROVISION_NUMBER` (`"5513981744038"`), **retirado
+na 1.7.0**, voltou — e `TECHIFY_PROVISION_MESSAGE` ganhou override por env com o
+literal como default. A 1.7.0 argumentou que "um número escrito no código é um
+destino que ninguém escolheu"; a decisão de produto que a reverte é mais estreita
+e vem da operação: sem literal, **uma queda do endpoint parava o provisionamento
+de todo cliente novo** — quem acabou de conectar o QR não tem env, não tem plugin
+e não teria como pedir a própria chave.
+
+O desfecho `no_destination` **não sumiu**: continua valendo quando alguém esvazia
+a env ou quando um plugin aborta o seam. O que mudou é que ele deixou de ser o
+padrão de quem simplesmente não configurou nada.
+
+### Migração
+
+Nenhuma para plugin existente. Quem registrar o filtro novo declara
+`">=1.8,<2.0"`.
+
 ## 1.7.0 — 2026-08-20 · `filter.provisioning.number` — o destino do provisionamento é plugável (e deixa de ter reserva)
 
 **Aditiva no catálogo.** Um plugin que não registre o filtro não muda em nada.
