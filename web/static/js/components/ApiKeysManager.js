@@ -14,7 +14,7 @@
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
-import { getApiKeys, createApiKey, revokeApiKey, getUsers } from '../services/api.js';
+import { getApiKeys, createApiKey, revokeApiKey, getApiKeyOwners } from '../services/api.js';
 
 const html = htm.bind(h);
 
@@ -22,6 +22,29 @@ const TrashIcon = html`
   <svg viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
     <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
   </svg>`;
+
+/** Dica (ⓘ) que abre ao passar o mouse ou pelo teclado.
+
+Preferida a um parágrafo fixo abaixo do campo: a explicação é lida UMA vez e
+depois só empurra o formulário para baixo. `title` fica como reserva — cobre
+leitor de tela e o caso de a bolha ser cortada por algum contêiner. */
+function InfoHint({ text }) {
+  return html`
+    <span class="group relative inline-flex align-middle ml-1" tabindex="0"
+          role="note" aria-label=${text} title=${text}>
+      <svg viewBox="0 0 20 20" fill="currentColor"
+           class="w-[13px] h-[13px] text-wa-secondary hover:text-wa-teal cursor-help">
+        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9 9a1 1 0 012 0v4a1 1 0 11-2 0V9zm1-4a1 1 0 100 2 1 1 0 000-2z" clip-rule="evenodd" />
+      </svg>
+      <span class="pointer-events-none absolute left-0 top-[18px] z-20 w-[260px] rounded
+                   border border-wa-border bg-wa-panel px-2.5 py-1.5 text-[12px] leading-snug
+                   text-wa-text shadow-lg opacity-0 invisible
+                   group-hover:opacity-100 group-hover:visible
+                   group-focus:opacity-100 group-focus:visible transition-opacity">
+        ${text}
+      </span>
+    </span>`;
+}
 
 const TTL_OPTIONS = [
   ['30', '30 dias'],
@@ -70,7 +93,10 @@ function SecretBanner({ secret, onDismiss }) {
 
 export default function ApiKeysManager({ currentUser }) {
   const [keys, setKeys] = useState([]);
+  // Donos vêm da rota de chaves, já recortados pelo servidor: quem não tem
+  // users.manage recebe só a si mesmo. A tela não decide o recorte — ela o desenha.
   const [users, setUsers] = useState([]);
+  const [canChooseOthers, setCanChooseOthers] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [secret, setSecret] = useState('');
@@ -82,9 +108,16 @@ export default function ApiKeysManager({ currentUser }) {
 
   const load = async () => {
     setLoading(true);
-    const [k, u] = await Promise.all([getApiKeys(), getUsers()]);
+    const [k, u] = await Promise.all([getApiKeys(), getApiKeyOwners()]);
     if (k && k.ok) setKeys(k.data || []);
-    if (u && u.ok) setUsers((u.data && u.data.users) || u.data || []);
+    if (u && u.ok) {
+      const owners = (u.data && u.data.owners) || [];
+      setUsers(owners);
+      setCanChooseOthers(!!(u.data && u.data.can_choose_others));
+      // Um único dono possível ⇒ já vem escolhido: não há decisão a tomar, e um
+      // "Selecione…" obrigatório seria só um passo a mais para chegar ao mesmo lugar.
+      if (owners.length === 1) setUserId(String(owners[0].id));
+    }
     setLoading(false);
   };
 
@@ -128,7 +161,8 @@ export default function ApiKeysManager({ currentUser }) {
     load();
   };
 
-  const activeUsers = users.filter(u => u.is_active);
+  // Sem filtro de `is_active` aqui: /api/api-keys/owners já devolve só ativos e
+  // NÃO manda esse campo — filtrar por ele no cliente esvaziaria o seletor.
 
   return html`
     <div class="space-y-4">
@@ -153,11 +187,16 @@ export default function ApiKeysManager({ currentUser }) {
                    onInput=${e => setLabel(e.target.value)} />
           </label>
           <label class="flex-1 min-w-[200px]">
-            <span class="block text-[12px] text-wa-secondary mb-1">Usuário dono</span>
-            <select class="wa-field w-full rounded px-2 py-1.5 text-[14px]"
+            <span class="block text-[12px] text-wa-secondary mb-1">
+              Usuário dono
+              ${!canChooseOthers && html`<${InfoHint}
+                text="Você só pode emitir chave para você mesmo — emitir no nome de outra pessoa exige a permissão de gerenciar usuários." />`}
+            </span>
+            <select class="wa-field w-full rounded px-2 py-1.5 text-[14px] disabled:opacity-70"
+                    disabled=${!canChooseOthers}
                     value=${userId} onChange=${e => setUserId(e.target.value)}>
-              <option value="">Selecione…</option>
-              ${activeUsers.map(u => html`
+              ${canChooseOthers && html`<option value="">Selecione…</option>`}
+              ${users.map(u => html`
                 <option value=${u.id}>
                   ${u.name || u.email}${u.is_admin ? ' (administrador)' : ''}
                 </option>`)}

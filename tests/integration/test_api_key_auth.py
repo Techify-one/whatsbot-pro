@@ -177,6 +177,132 @@ def test_issuing_requires_apikey_manage(client, owner):
     assert r.status_code == 403
 
 
+# ── §4.0 — apikey.manage é permissão sobre SI MESMO ─────────────────────────
+#
+# A regra que estes testes travam: emitir/ver/revogar chave de OUTRO usuário
+# exige ``users.manage``. Sem isso, ``apikey.manage`` seria uma escalada silenciosa
+# — bastaria cunhar uma chave no nome de um admin para herdar a instalação.
+
+
+def _session(user):
+    """Sessão de painel para um usuário qualquer (devolve os headers)."""
+    token = generate_session_token()
+    session_repo.create(token, user["id"], user_agent="pytest", ip="127.0.0.1")
+    return token, {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def so_apikey():
+    """Ator com ``apikey.manage`` e NADA de ``users.manage``."""
+    user = _mk_user(custom_perms=["apikey.manage"])
+    token, headers = _session(user)
+    yield {"user": user, "headers": headers}
+    session_repo.delete(token)
+    user_repo.delete(user["id"])
+
+
+@pytest.fixture
+def apikey_e_users():
+    """Ator com ``apikey.manage`` + ``users.manage`` — pode escolher o dono."""
+    user = _mk_user(custom_perms=["apikey.manage", "users.manage"])
+    token, headers = _session(user)
+    yield {"user": user, "headers": headers}
+    session_repo.delete(token)
+    user_repo.delete(user["id"])
+
+
+@pytest.fixture
+def outro():
+    """Um terceiro usuário ativo, alvo das tentativas de emissão."""
+    user = _mk_user(custom_perms=["contact.read"])
+    yield user
+    user_repo.delete(user["id"])
+
+
+def test_emitir_para_outro_exige_users_manage(client, so_apikey, outro):
+    """O caso que motivou a regra: cunhar chave no nome alheio é escalada."""
+    r = client.post("/api/api-keys", headers=so_apikey["headers"],
+                    json={"label": "no nome do outro", "user_id": outro["id"]})
+    assert r.status_code == 403, r.text
+    assert r.json().get("data", {}).get("reason") == "owner_must_be_self"
+    assert api_key_repo.list_for_user(outro["id"]) == []
+
+
+def test_emitir_para_si_mesmo_basta_apikey_manage(client, so_apikey):
+    """A permissão continua servindo para o que ela promete."""
+    r = client.post("/api/api-keys", headers=so_apikey["headers"],
+                    json={"label": "minha integração",
+                          "user_id": so_apikey["user"]["id"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["key"].startswith("wsk_live_")
+
+
+def test_sem_user_id_o_dono_e_o_proprio_ator(client, so_apikey):
+    """Omitir o dono cai no ator — e esse caminho não pode ser barrado."""
+    r = client.post("/api/api-keys", headers=so_apikey["headers"],
+                    json={"label": "sem dono explícito"})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["user_id"] == so_apikey["user"]["id"]
+
+
+def test_com_users_manage_pode_escolher_outro_dono(client, apikey_e_users, outro):
+    """Quem cria usuários já podia fabricar esse poder pela porta da frente."""
+    r = client.post("/api/api-keys", headers=apikey_e_users["headers"],
+                    json={"label": "para o outro", "user_id": outro["id"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["user_id"] == outro["id"]
+
+
+def test_seletor_de_donos_so_traz_a_si_mesmo(client, so_apikey, outro):
+    """A rota que alimenta o seletor da tela aplica a MESMA régua do POST."""
+    r = client.get("/api/api-keys/owners", headers=so_apikey["headers"])
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["can_choose_others"] is False
+    assert [o["id"] for o in data["owners"]] == [so_apikey["user"]["id"]]
+
+
+def test_seletor_de_donos_traz_todos_com_users_manage(client, apikey_e_users, outro):
+    r = client.get("/api/api-keys/owners", headers=apikey_e_users["headers"])
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["can_choose_others"] is True
+    assert outro["id"] in [o["id"] for o in data["owners"]]
+
+
+def test_listagem_e_presa_as_proprias_chaves(client, so_apikey, outro):
+    """Ver a chave alheia entrega o inventário de integrações da instalação."""
+    _issue(outro["id"])
+    _issue(so_apikey["user"]["id"])
+    r = client.get("/api/api-keys", headers=so_apikey["headers"])
+    assert r.status_code == 200, r.text
+    donos = {row["user_id"] for row in r.json()["data"]}
+    assert donos == {so_apikey["user"]["id"]}
+
+
+def test_user_id_da_query_nao_burla_o_escopo(client, so_apikey, outro):
+    """O parâmetro da query não pode virar um enumerador de quem tem chave."""
+    _issue(outro["id"])
+    r = client.get(f"/api/api-keys?user_id={outro['id']}", headers=so_apikey["headers"])
+    assert r.status_code == 200, r.text
+    assert all(row["user_id"] == so_apikey["user"]["id"] for row in r.json()["data"])
+
+
+def test_revogar_chave_alheia_e_404(client, so_apikey, outro):
+    """404, não 403: um 403 confirmaria que a chave existe."""
+    _, row = _issue(outro["id"])
+    r = client.delete(f"/api/api-keys/{row['id']}", headers=so_apikey["headers"])
+    assert r.status_code == 404, r.text
+    assert api_key_repo.get(row["id"])["revoked_at"] is None
+
+
+def test_revogar_a_propria_chave_continua_valendo(client, so_apikey):
+    _, row = _issue(so_apikey["user"]["id"])
+    r = client.delete(f"/api/api-keys/{row['id']}", headers=so_apikey["headers"])
+    assert r.status_code == 200, r.text
+    assert api_key_repo.get(row["id"])["revoked_at"] is not None
+
+
 # ── §9.9 — auditoria distingue a procedência ────────────────────────────────
 
 _CORE_AUDIT_ID = "__core_audit__"

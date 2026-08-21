@@ -8,6 +8,12 @@ dono, então quem cunha chave escolhe poder.
 **Guardrails de emissão (§4)** — como a chave vale em todo ``/api/*`` e herda tudo
 do dono, o controle inteiro se concentra no momento de emitir:
 
+0. **emitir PARA OUTRO usuário exige ``users.manage``.** ``apikey.manage`` sozinho
+   é uma permissão sobre SI MESMO: cunha, lista e revoga apenas as próprias
+   chaves. Sem isso a permissão seria uma escalada silenciosa — quem a tivesse
+   emitiria uma chave no nome de um administrador e herdaria a instalação
+   inteira. Quem já pode *criar e editar usuários* (``users.manage``) já podia
+   fazer isso pela porta da frente, então para essa pessoa nada muda;
 1. chave para usuário com papel ``admin`` exige ``confirm: true`` explícito
    (chave de admin vazada = instalação inteira);
 2. ``apikey.manage`` fora de ``ROLE_DEFAULTS`` (ver ``server/permissions.py``);
@@ -28,7 +34,7 @@ from db import audit_actions
 from db.repositories import api_key_repo, user_repo
 from server import api_keys as keylib
 from server import audit_listener
-from server.authz import current_user
+from server.authz import check, current_user
 from server.deps import install_exception_handlers, require_permission
 from server.helpers import _err, _ok
 
@@ -48,14 +54,63 @@ def register_routes(app, deps):
         view["user_email"] = (owner or {}).get("email") or ""
         return view
 
+    def _pode_escolher_dono(request: Request) -> bool:
+        """``True`` quando o ator pode emitir/ver/revogar chave de OUTRO usuário.
+
+        A régua é ``users.manage`` — quem cria e edita usuários já consegue, pela
+        porta da frente, um usuário com as permissões que quiser. Para todo o
+        resto, ``apikey.manage`` vale sobre si mesmo e mais ninguém (§4.0)."""
+        return check(request, "users.manage")
+
+    def _escopo_de_leitura(request: Request) -> int | None:
+        """``user_id`` ao qual a listagem está presa, ou ``None`` para "todos"."""
+        if _pode_escolher_dono(request):
+            return None
+        actor = current_user(request)
+        return (actor or {}).get("id")
+
+    @app.get("/api/api-keys/owners",
+             dependencies=[Depends(require_permission("apikey.manage"))])
+    async def list_api_key_owners(request: Request):
+        """Donos que ESTE ator pode escolher ao emitir — a fonte do seletor da tela.
+
+        Existe porque ``GET /api/users`` é gateado por ``users.manage``: sem esta
+        rota, quem tem só ``apikey.manage`` recebia 403 e ficava com o seletor
+        vazio, sem conseguir emitir chave nem para si mesmo. Devolve a lista já
+        recortada pela mesma regra que o POST aplica, então a tela não decide
+        nada — ela só desenha o que o servidor autoriza."""
+        def _load():
+            actor = current_user(request)
+            todos = _pode_escolher_dono(request)
+            if todos:
+                users = [u for u in user_repo.list_all() if u.get("is_active")]
+            else:
+                eu = user_repo.get((actor or {}).get("id")) if actor else None
+                users = [eu] if eu and eu.get("is_active") else []
+            return {
+                "owners": [{"id": u["id"], "name": u.get("name") or "",
+                            "email": u.get("email") or "",
+                            "is_admin": bool(u.get("is_admin"))} for u in users],
+                "can_choose_others": bool(todos),
+            }
+
+        return _ok(await asyncio.to_thread(_load))
+
     @app.get("/api/api-keys",
              dependencies=[Depends(require_permission("apikey.manage"))])
     async def list_api_keys(request: Request, user_id: int | None = None,
                             include_revoked: bool = True):
-        """Lista as chaves (NUNCA o segredo — ele só existiu na criação)."""
+        """Lista as chaves (NUNCA o segredo — ele só existiu na criação).
+
+        Sem ``users.manage`` a listagem é PRESA às chaves do próprio ator: ver a
+        chave alheia não vaza o segredo, mas entrega o inventário de integrações
+        da instalação — e o ``user_id`` da query viraria um enumerador de quem
+        tem chave. O recorte acontece aqui, não no filtro do cliente."""
+        preso_a = _escopo_de_leitura(request)
+        alvo = preso_a if preso_a is not None else user_id
         def _load():
-            rows = (api_key_repo.list_for_user(user_id, include_revoked=include_revoked)
-                    if user_id else
+            rows = (api_key_repo.list_for_user(alvo, include_revoked=include_revoked)
+                    if alvo else
                     api_key_repo.list_all(include_revoked=include_revoked))
             users_by_id = {u["id"]: u for u in user_repo.list_all()}
             return [_owner_view(r, users_by_id) for r in rows]
@@ -81,6 +136,19 @@ def register_routes(app, deps):
             return _err("user_id inválido.")
         if target_id is None:
             return _err("Informe o usuário dono da chave.")
+
+        # Guardrail §4.0 — ``apikey.manage`` é permissão sobre SI MESMO. Emitir no
+        # nome de outra pessoa é escalar para as permissões dela (e, no caso de um
+        # admin, para a instalação inteira), então exige ``users.manage`` — quem já
+        # pode fabricar o usuário que quiser. A comparação é com o ator da
+        # requisição; nenhum campo do corpo participa da decisão.
+        if not _pode_escolher_dono(request):
+            eu = (actor or {}).get("id")
+            if eu is None or target_id != eu:
+                return _err(
+                    "Você só pode emitir chave de API para você mesmo. Emitir no "
+                    "nome de outro usuário exige a permissão de gerenciar usuários.",
+                    status=403, data={"reason": "owner_must_be_self"})
 
         owner = await asyncio.to_thread(user_repo.get, target_id)
         if owner is None:
@@ -155,6 +223,12 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(api_key_repo.get, key_id)
         if row is None:
             return _err("Chave não encontrada.", 404)
+        # Mesma régua da emissão (§4.0): sem ``users.manage``, só as próprias chaves.
+        # 404 em vez de 403 de propósito — um 403 confirmaria que a chave existe.
+        if not _pode_escolher_dono(request):
+            eu = (current_user(request) or {}).get("id")
+            if eu is None or row.get("user_id") != eu:
+                return _err("Chave não encontrada.", 404)
         if row.get("revoked_at"):
             return _ok(keylib.public_view(row))
         await asyncio.to_thread(api_key_repo.revoke, key_id)

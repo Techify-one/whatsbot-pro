@@ -1178,6 +1178,13 @@ export async function getApiKeys(opts) {
   return request('GET', '/api/api-keys', undefined, opts);
 }
 
+// Donos que o ATOR pode escolher ao emitir. Rota própria porque /api/users é
+// gateado por users.manage: quem tem só apikey.manage tomava 403 e ficava sem
+// conseguir emitir nem para si mesmo. O recorte é do servidor.
+export async function getApiKeyOwners(opts) {
+  return request('GET', '/api/api-keys/owners', undefined, opts);
+}
+
 export async function createApiKey(data) {
   return request('POST', '/api/api-keys', data, { silent: true });
 }
