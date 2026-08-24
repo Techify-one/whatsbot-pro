@@ -44,7 +44,10 @@ function MediaWithFallback({ kind, src, isLocalBlob, alt, className, style, onCl
 // message carries no recognized media (the bubble then renders plain text).
 //
 // Behavior-preserving extraction of the inline media branches in the bubble.
-export function MediaContent({ message, displayContent, fmt }) {
+// `selectionMode` chega só para o player de áudio (plano 138 · P3): em modo
+// seleção a linha inteira é o alvo do clique ([MessageBubble.js:62]), e um
+// scrubber vivo criaria uma faixa de 20px onde clicar não marca a mensagem.
+export function MediaContent({ message, displayContent, fmt, selectionMode = false }) {
   const m = message;
   // A legenda do cliente (coluna `media_caption`; linha legada cai no content
   // com os guards conservadores de `mediaCaptionOf`).
@@ -63,7 +66,7 @@ export function MediaContent({ message, displayContent, fmt }) {
   }
   if (m.media_type === 'audio') {
     return html`
-      <${AudioPlayer} src=${m.media_path} isLocalBlob=${m._isLocalBlob} />
+      <${AudioPlayer} src=${m.media_path} isLocalBlob=${m._isLocalBlob} disabled=${selectionMode} />
       ${caption
         ? html`<span class="block text-[12px] text-wa-secondary italic" dangerouslySetInnerHTML=${{ __html: fmt(caption)}}></span>`
         : null}
