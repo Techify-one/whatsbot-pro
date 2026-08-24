@@ -585,14 +585,24 @@ def create_app(
         for s in loaded.manifest.screens
         if s.get("path", "").startswith("/")
     }
-    _SPA_PATHS = (
-        # English canonical routes + legacy PT aliases (kept so a hard reload on an
-        # old bookmark still serves index.html; the frontend rewrites them to the
-        # English path via redirectLegacyPath).
-        {"/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions", "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users", "/conversations", "/protocolos", "/attendances", "/ai", "/channels", "/audit", "/api-keys", "/wizard"}
-        | {"/contatos", "/painel", "/atendimentos", "/auditoria"}
-        | _PLUGIN_SPA_PATHS
+    # FONTE ÚNICA dos paths fixos da SPA: alimenta a isenção de auth (_SPA_PATHS)
+    # E o registro das rotas que devolvem index.html (o loop em "Frontend routes").
+    # Eram DUAS listas mantidas à mão e elas divergiram — /api-keys estava só na
+    # isenção e /sounds em lugar nenhum, então um F5 nessas telas caía no
+    # {"detail":"Not Found"} do router (não há catch-all). Toda tela nova
+    # declarada em CORE_ROUTES (web/static/js/components/shell/routing.js) precisa
+    # entrar AQUI; a paridade é travada por tests/core/test_spa_routes_parity.py.
+    _CORE_SPA_PATHS = (
+        "/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions",
+        "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users",
+        "/conversations", "/protocolos", "/attendances", "/audit", "/ai",
+        "/channels", "/api-keys", "/sounds", "/wizard",
+        # Legacy PT aliases (kept so a hard reload on an old bookmark still serves
+        # index.html; the frontend rewrites them to the English path via
+        # redirectLegacyPath).
+        "/contatos", "/painel", "/atendimentos", "/auditoria",
     )
+    _SPA_PATHS = set(_CORE_SPA_PATHS) | _PLUGIN_SPA_PATHS
 
     # ── Rate-limit das chaves de API (§4.3 do plano) ──────────────────────
     # Bucket PRÓPRIO, chaveado no ID DA CHAVE. Nunca no bucket do login (uma
@@ -789,30 +799,10 @@ def create_app(
 
     # ── Frontend routes ────────────────────────────────────────────────
 
-    @app.get("/")
-    @app.get("/contacts")
-    @app.get("/dashboard")
-    @app.get("/sandbox")
-    @app.get("/costs")
-    @app.get("/executions")
-    @app.get("/plugins")
-    @app.get("/quick-replies")
-    @app.get("/custom-attributes")
-    @app.get("/runtime")
-    @app.get("/users")
-    @app.get("/conversations")
-    # /protocolos = path canônico da aba do plugin protocolos; /attendances é alias.
-    @app.get("/protocolos")
-    @app.get("/attendances")
-    @app.get("/audit")
-    @app.get("/ai")
-    @app.get("/channels")
-    @app.get("/wizard")
-    # Legacy PT aliases (frontend redirects them to the English paths on load).
-    @app.get("/contatos")
-    @app.get("/painel")
-    @app.get("/atendimentos")
-    @app.get("/auditoria")
+    # Os paths FIXOS (/, /contacts, /api-keys, /sounds, aliases PT…) são
+    # registrados pelo loop logo abaixo a partir de _CORE_SPA_PATHS — a mesma
+    # tupla que isenta do gate de auth. Aqui ficam só os PARAMETRIZADOS, que
+    # dependem da assinatura de ``index``.
     @app.get("/contacts/{contact_id:int}")
     @app.get("/conversations/{conversation_id:int}")
     @app.get("/executions/{execution_id:int}")
@@ -852,16 +842,22 @@ def create_app(
             return FileResponse(str(index_file))
         return JSONResponse({"error": "Frontend not found"}, status_code=404)
 
-    # Register dynamic SPA paths declared by plugin manifests so the frontend
-    # router gets the same index.html on hard reload of those URLs.
-    async def _plugin_spa_index():
+    # Register the fixed core SPA paths + the dynamic ones declared by plugin
+    # manifests, so the frontend router gets the same index.html on hard reload
+    # (direct URL / F5) of any of those URLs.
+    async def _spa_index():
         index_file = web_dir / "index.html"
         if index_file.exists():
             return FileResponse(str(index_file))
         return JSONResponse({"error": "Frontend not found"}, status_code=404)
 
-    for _spa_path in _PLUGIN_SPA_PATHS:
-        app.add_api_route(_spa_path, _plugin_spa_index, methods=["GET"])
+    for _spa_path in (*_CORE_SPA_PATHS, *_PLUGIN_SPA_PATHS):
+        app.add_api_route(_spa_path, _spa_index, methods=["GET"])
+
+    # Exposto para o teste de paridade (tests/core/test_spa_routes_parity.py)
+    # comparar com as rotas do frontend sem re-parsear este arquivo.
+    app.state.core_spa_paths = _CORE_SPA_PATHS
+    app.state.spa_paths = _SPA_PATHS
 
     # ── Register route modules ─────────────────────────────────────────
     # Order matters: webhook must be registered before sandbox so
