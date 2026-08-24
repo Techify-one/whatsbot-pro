@@ -178,6 +178,8 @@ declarativo. Veja as screens `config: true` em
 
 Cada tool é um par `(schema, executor)`. O executor recebe `ToolContext` (ver [plugins/context.py](../../plugins/context.py)) e retorna `str | None` (string vira `tool` reply no follow-up; `None` usa o default).
 
+⚠️ **Só definições no topo do arquivo — nada de efeito colateral no import** (thread, task, escrita em banco, mutação de estado global). Este módulo é re-executado in-process quando o operador edita a tool pela tela `/ai/tools`. Inicialização vai em `entry.lifecycle`. Ver "Contrato de tools" no fim deste documento.
+
 ```python
 import logging
 import time
@@ -547,3 +549,21 @@ Por isso:
 - **`display_label`** (opcional, no nível do dict raiz, fora de `function`) é o rótulo legível mostrado em `/tools`. O handler retira esse campo antes de mandar pro LLM (não vai pra OpenAI). Use português, curto. Ex: `"display_label": "Salva Dados do Contato"`.
 - Quando o plugin é deletado pela UI, todas as overrides daquele plugin somem junto (`delete_for_plugin` no DELETE do plugin).
 - Convenção de naming: `<plugin_id>_<verbo>` (ex: `lembretes_create`, `orders_search`) — evita colisão e ajuda o usuário a saber de que plugin a tool veio.
+
+### A tool também é EDITÁVEL pela tela (e isso impõe uma regra ao seu módulo)
+
+Além da row em `tool_overrides`, toda tool de `entry.tools` ganha uma row em **`ai_tools`** (`kind='plugin'`, `plugin_id=<id>`), **semeada sozinha no boot a partir do seu `tools.py` em disco** — você não insere nada no banco, não escreve migration e não declara nada a mais no manifest. É isso que faz a tool aparecer em **Configurações de IA → Tools** (`/ai/tools`) com as MESMAS opções das tools do core: liga/desliga, **Editar código**, **Histórico** e **Excluir**.
+
+⚠️ **Por isso o módulo de `entry.tools` tem de ser LIVRE DE EFEITO COLATERAL NO IMPORT.** Quando o operador salva uma edição pela tela, o código do banco é compilado e **re-executado in-process**, sobrepondo o que está em disco. Um módulo que sobe thread, abre conexão, agenda task ou muta estado global **no import** faria isso duas vezes. Mantenha o topo do arquivo só com definições:
+
+- ✅ imports, constantes, os dicts de schema, as funções `execute_*`, o `CORE_TOOLS`;
+- 🚫 `threading.Thread(...).start()`, `asyncio.create_task(...)`, escrita em banco, registro em singleton do core, mutação de variável de outro módulo.
+
+Trabalho de inicialização vai para `entry.lifecycle` (`setup(ctx)` + `ctx.spawn_task`), nunca para o `tools.py`.
+
+Mais duas consequências que valem lembrar:
+
+- **A unidade de edição é o MÓDULO, não a tool.** Um `tools.py` com 3 tools vira 3 rows com o MESMO código; salvar uma propaga para as irmãs. Não escreva o arquivo supondo que cada tool possa divergir sozinha.
+- **Enquanto ninguém editar (`version <= 1`), o disco é que manda** — o código do banco é só o que a tela exibe. Depois da 1ª edição humana, o banco vence. Excluir pela tela grava um tombstone; a via de volta é **reinstalar o `.zip`** do plugin.
+
+Detalhes do mecanismo (as três procedências `builtin`/`plugin`/`code`, o compilador único, o tombstone) estão em **"Tool editável pela tela (core E plugin)"** no [CLAUDE.md](../../CLAUDE.md).
