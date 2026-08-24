@@ -75,7 +75,19 @@ logger = logging.getLogger(__name__)
 # tiver env nem ``/service_number``. Plugin que precise do seam declara
 # ``">=1.7,<2.0"``; quem só quer degradar (o registro de um nome desconhecido é
 # WARNING, não erro) continua em ``">=1.0,<2.0"``.
-WHATSBOT_API_VERSION = "1.7.0"
+# 1.8.0: ADITIVA no catálogo — seam ``filter.provisioning.message`` (str), irmão
+# simétrico do ``filter.provisioning.number`` da 1.7.0 e aplicado no mesmo
+# produtor, agora chamado ``fetch_provision_target``. Existe porque a frase É o
+# gatilho que o destino reconhece: um plugin que aponte o envio para outro número
+# sem poder trocar a mensagem entrega um texto que o outro lado ignora em
+# silêncio. Mesma semântica de aborto (``None``/``""`` ⇒ o core recusa o envio).
+# Na mesma release, e FORA do catálogo: ``/service_number`` passou a ditar também
+# a frase (campo ``message``, resolvido independentemente do ``phone``), e os
+# literais de número e mensagem voltaram a existir em ``config/settings.py`` como
+# última rede para o endpoint fora do ar — "nenhum destino" deixou de ser o
+# desfecho padrão de quem não tem env. Plugin que precise do seam declara
+# ``">=1.8,<2.0"``; quem só quer degradar continua em ``">=1.0,<2.0"``.
+WHATSBOT_API_VERSION = "1.8.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

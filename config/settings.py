@@ -18,28 +18,41 @@ LLM_API_BASE_URL = os.environ.get(
     "LLM_API_BASE_URL", "https://llm.techify.one/api/v1"
 ).rstrip("/")
 
-# Techify account provisioning — used by the first-run setup wizard. The
-# WhatsBot fetches the current provisioning number from TECHIFY_SERVICE_NUMBER_URL
-# and sends a WhatsApp message to it, Techify creates an account + API key, and
-# the wizard polls TECHIFY_REQUEST_APIKEY_URL (keyed by the connected WhatsApp
-# number) until the key is ready. Once the account is created the key stays
-# downloadable for ~1 minute.
+# Techify account provisioning — used by the first-run setup wizard. The WhatsBot
+# fetches the current provisioning DESTINATION (number *and* message) from
+# TECHIFY_SERVICE_NUMBER_URL, sends that WhatsApp message to that number, Techify
+# creates an account + API key, and the wizard polls TECHIFY_REQUEST_APIKEY_URL
+# (keyed by the connected WhatsApp number) until the key is ready. Once the
+# account is created the key stays downloadable for ~1 minute.
 #
-# ⚠️ TECHIFY_PROVISION_NUMBER is the fallback for when /service_number is
-# unreachable, and it is EMPTY unless the environment sets it (it was the literal
-# "5513981744038" until 2026-08-20). A number baked into the core is a destination
-# nobody chose: with nothing configured, the provisioning message left silently
-# for it instead of the wizard saying there is no destination. With no destination
-# resolved the send is now REFUSED with an actionable error — see
-# ``provisioning_service.request_key`` ("no_destination").
+# The endpoint answers ``{"ok": true, "phone": "...", "message": "..."}`` and is
+# the SOURCE OF TRUTH for both fields: trocar o número ou a frase é editar a
+# resposta dele — sem release e sem env em cliente nenhum. Os dois campos são
+# resolvidos de forma INDEPENDENTE (endpoint → env → literal abaixo), então uma
+# resposta que ainda não traga ``message``, ou o endpoint fora do ar, não impede o
+# provisionamento: aquele campo cai no fallback e o pedido sai igual.
+#
+# ⚠️ Os literais abaixo são a ÚLTIMA rede, para quando o endpoint está fora do
+# ar — NÃO são a alavanca de mudança (mexer aqui exige release em cada
+# instalação). O literal do número, retirado na API 1.7.0, VOLTOU na 1.8.0 por
+# decisão de produto: sem ele, uma queda do endpoint parava o provisionamento de
+# todo cliente novo. "Nenhum destino" continua sendo
+# um desfecho possível — hoje só quando alguém esvazia a env ou um plugin aborta
+# o seam — e nesse caso o envio é RECUSADO com erro acionável, nunca mandado para
+# um número que ninguém escolheu. A ordem de precedência completa, incluindo os
+# seams de plugin, está em ``app/services/provisioning_service.fetch_provision_target``.
 TECHIFY_SERVICE_NUMBER_URL = os.environ.get(
     "TECHIFY_SERVICE_NUMBER_URL", "https://llm.techify.one/service_number"
 ).rstrip("/")
-TECHIFY_PROVISION_NUMBER = os.environ.get("TECHIFY_PROVISION_NUMBER", "").strip()
+TECHIFY_PROVISION_NUMBER = os.environ.get(
+    "TECHIFY_PROVISION_NUMBER", "5513981744038"
+).strip()
 TECHIFY_REQUEST_APIKEY_URL = os.environ.get(
     "TECHIFY_REQUEST_APIKEY_URL", "https://llm.techify.one/request-apikey"
 ).rstrip("/")
-TECHIFY_PROVISION_MESSAGE = "Quero Criar conta e receber minha Chave de API"
+TECHIFY_PROVISION_MESSAGE = os.environ.get(
+    "TECHIFY_PROVISION_MESSAGE", "Quero Criar conta e receber minha Chave de API"
+).strip()
 
 
 _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {

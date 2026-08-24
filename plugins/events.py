@@ -184,16 +184,29 @@ KNOWN_FILTERS: set[str] = {
     "filter.outbound.text",
     # AuthZ ABAC seam
     "filter.authz.decision",
-    # Onboarding / provisionamento: ``filter.provisioning.number`` — str. O core
-    # resolve o destino da mensagem de provisionamento (``/service_number`` → env
-    # ``TECHIFY_PROVISION_NUMBER``, que nasce VAZIA — não há número embutido) e
-    # oferece o resultado ao filtro, que tem a última palavra. ``None``/``""``
-    # ABORTA: sem destino o core RECUSA o envio e o wizard responde com erro
-    # acionável, em vez de mandar a frase para o número que ele por acaso
-    # conhecia. O core não valida o formato do que volta — normalizar é de quem
-    # responde. ``ctx.extras`` traz ``{source ∈ {service_number, fallback},
-    # message}``. Produtor: ``app/services/provisioning_service.py``.
-    "filter.provisioning.number",
+    # Onboarding / provisionamento — PAR SIMÉTRICO, ambos ``str``. O core resolve
+    # o destino da mensagem de provisionamento CAMPO A CAMPO (``/service_number``,
+    # que devolve ``{phone, message}`` e é a fonte da verdade → env
+    # ``TECHIFY_PROVISION_NUMBER``/``TECHIFY_PROVISION_MESSAGE`` → literal do
+    # código, a rede para o endpoint fora do ar) e oferece cada resultado ao seu
+    # filtro, que tem a última palavra.
+    #
+    # ``None``/``""`` em QUALQUER um dos dois ABORTA: o core RECUSA o envio e o
+    # wizard responde com erro acionável, em vez de mandar a frase para um número
+    # que ninguém escolheu — ou uma mensagem vazia para ele. O core não valida
+    # formato — normalizar o telefone é de quem responde.
+    #
+    # Os dois existem porque quem troca o número precisa poder trocar a frase
+    # junto: a mensagem É o gatilho que o destino reconhece, e um override só do
+    # número entrega uma frase que o outro lado ignora em silêncio. O ``message``
+    # é resolvido ANTES, então ``filter.provisioning.number`` já vê a frase final
+    # em ``ctx.extras``; o de mensagem só roda se houver destino, e recebe o
+    # número já decidido.
+    #
+    # ``ctx.extras``: ``{source ∈ {service_number, fallback}, message}`` no de
+    # número; ``{source, number}`` no de mensagem. Produtor dos dois:
+    # ``app/services/provisioning_service.fetch_provision_target``.
+    "filter.provisioning.number", "filter.provisioning.message",
     # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.
     # ``filter.conversation.before_status`` was RELOCATED from the route into
     # ``conversation_service``; ``filter.conversation.before_assign`` is new.
