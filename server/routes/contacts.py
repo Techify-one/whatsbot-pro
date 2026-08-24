@@ -1287,7 +1287,7 @@ def register_routes(app, deps):
                 msg_id = None
             if msg_id:
                 # Prefixed — same format ``_ingest_echo`` looks up (o id cru nunca
-                # casava). Ver o gotcha "Echo do próprio envio" no CLAUDE.md.
+                # casava). Ver o gotcha "Echo do próprio envio" em docs/OPERACAO.md.
                 state.processed_messages.add(f"{channel_id}:{msg_id}")
 
             try:

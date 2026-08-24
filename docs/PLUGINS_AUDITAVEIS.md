@@ -289,3 +289,30 @@ tabela: a ação nova aparece no filtro **assim que a primeira linha for gravada
 | Plugin de canal (`channel:<id>`) | `storages/plugins/telegram/routes.py`, `.../whatsapp_cloud/routes.py` |
 | Config global de plugin de canal | [assets/plugin_examples/gowa/routes.py](../assets/plugin_examples/gowa/routes.py) → `/alert-settings` |
 | Segredo revelado (exceção ao GET) | `storages/plugins/website/routes.py` → `/reveal-hmac` |
+
+---
+
+## Apêndice — resumo migrado do `CLAUDE.md` (plano 139)
+
+> O `CLAUDE.md` carrega hoje só a regra curta e o link para este guia. O texto abaixo é o
+> que ele trazia antes do corte — o contrato do seam `audit()`, o write path e as regras
+> de escopo. Mantido aqui verbatim para não se perder.
+
+### Auditoria de plugins
+
+A trilha (`audit_log`, tela `/audit`) é dirigida pelo bus: o listener `*` ([server/audit_listener.py](../server/audit_listener.py)) confere cada evento contra a allowlist `AUDITABLE_EVENTS` ([db/audit_actions.py](../db/audit_actions.py)). Essa allowlist é a **vocabulário do CORE** — plugin não a edita (o core não conhece plugin por nome, mesmo princípio dos canais/RBAC). O plugin registra as próprias ações pelo seam `audit()`:
+
+```python
+from plugins.context import audit
+audit("protocolos", "config.geral", before=antes, after=depois)
+# → ação  protocolos.config.geral   recurso  plugin:protocolos   ator: usuário logado
+```
+
+- **Contrato** ([plugins/context.py](../plugins/context.py) `audit()`): a ação é namespaceada com o id do plugin (`namespaced_action`) e validada contra `PLUGIN_ACTION_RE` (`<plugin_id>.<recurso>.<verbo>`; fora do formato ⇒ WARNING e a linha é descartada, a rota segue). `resource_type` default `"plugin"`, `resource_id` default = id do plugin (o filtro "ID do recurso" lista tudo daquele plugin). Fire-and-forget, nunca levanta, respeita o master `audit_enabled`. O ator sai do `ContextVar` da request (o usuário logado) — `actor_type="ai"/"system"` só para autor não-humano (executor externo, job).
+- **Write path** ([server/audit_listener.py](../server/audit_listener.py) `record()`): o ÚNICO caminho de escrita fora do listener. Aplica o gate global + resolução de ator; um ator forçado (`ai`) não herda id/rótulo do humano da request.
+- **Segredo nunca entra**: o `audit_repo` mascara por NOME de chave (rede de segurança, não licença) — o plugin registra `{"secret_definido": True}`, não o valor. Conteúdo já versionado (prompt de agente, código de tool) entra como PONTEIRO (`{key, version}`), não como cópia.
+- **Plugin de CANAL grava no CANAL**: um provider (gowa/telegram/whatsapp_cloud/website/facebook_messenger/instagram) passa `resource_type="channel", resource_id=<channel_id>` — as ações dele são sobre um canal, e assim caem no MESMO recurso dos eventos `channel.*` do core: **um filtro por canal devolve a história inteira** (criado/editado/desconectado pelo core + webhook redirecionado/Página assinada pelo plugin). Config que não é por canal (ex.: o alerta de desconexão do `gowa`, global) mantém o default `plugin:<id>`.
+- **Settings declarativas já são auditadas** pelo core (`plugin.settings.changed` → `plugin.settings_update`, com diff): plugin que só tem `settings.py` (ex.: `guarda_ia`) não precisa de nada.
+- **O que auditar**: configuração, mudança de estado com dono (fechar/atribuir/aprovar), escrita em recurso do core, ação com efeito externo. **O que não**: GET/listagem, teste de conexão, preferência pessoal por-usuário, evento de alto volume.
+- **CONVERSA NUNCA ENTRA NA TRILHA** (regra dura): enviar/receber mensagem num canal não gera linha nenhuma — nem envio do operador, nem resposta da IA, nem inbound do cliente, nem reação/edição/recibo/presença. O histórico de `messages` já é esse registro. Ficam fora da allowlist de propósito: `message.*`, `presence.changed`, `receipt.changed` e `channel.status_changed` (read que roda a cada poll). Travado por `test_audit_ignores_message_traffic` (webhook inbound + envio do operador ⇒ `audit_log` intacta) e `test_audit_message_events_stay_out_of_allowlist`.
+- Guia completo + checklist: [docs/PLUGINS_AUDITAVEIS.md](../docs/PLUGINS_AUDITAVEIS.md). Plugins que já usam: `protocolos` (config + operação), `melhorias` (aprovações + executor com ator `ai`), `vendas_ia` (`/seed`), e os 6 providers de canal (`gowa` alerta de desconexão; `telegram`/`whatsapp_cloud`/`facebook_messenger`/`instagram` webhook+assinatura; `website` revelação do segredo HMAC).

@@ -35,7 +35,7 @@ shared ``ai_tools`` table.
 
 CHARACTERIZED BUG / DOCS-vs-REALITY GAP (captured, not fixed)
 ────────────────────────────────────────────────────────────
-CLAUDE.md and the Plano-23 brief describe ``ai_tools_code_enabled`` as
+CLAUDE.md (table of ``ai_*`` tables) and the Plano-23 brief describe ``ai_tools_code_enabled`` as
 "default OFF". The CALL SITE reads ``settings.get("ai_tools_code_enabled", False)``
 (fallback False) which LOOKS off-by-default. But ``DEFAULT_CONFIG`` in
 ``config/settings.py`` seeds the key to ``True`` and ``Settings.get`` falls back to

@@ -198,7 +198,7 @@ def test_classify_group_no_mention(build_app):
 def test_classify_newsletter_discarded(build_app):
     """classify_jid → newsletter (@newsletter): DISCARDED on the live path.
 
-    PARITY (plano 23 Fase F2): the CLAUDE.md-documented ``allowed_jid_types``
+    PARITY (plano 23 Fase F2): the ``allowed_jid_types`` documented in CLAUDE.md/docs/CANAIS.md
     discard (runtime fallback for a channel with no saved key =
     person/person_lid/group — ``channels.jid.DEFAULT_ALLOWED_JID_TYPES``, NOT the
     create-time descriptor default, which drops ``group``) now runs on the generic

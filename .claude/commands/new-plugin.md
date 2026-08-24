@@ -15,8 +15,8 @@ Use `AskUserQuestion` para coletar (ou inferir do `$ARGUMENTS`):
 5. **Precisa injetar conteúdo no system prompt?** (ex: cardápio). Se sim, descreva o que injetar.
 6. **Tabelas no banco**: lista de `{name, columns}` (sem o prefixo, vou adicionar). Pode ser vazia.
 7. **Settings declaráveis** (Pydantic Valves) — campos configuráveis pelo usuário. **Toda configuração do plugin vive na aba de configuração DO PRÓPRIO plugin** (botão "Configurar" em `/plugins`), NUNCA numa aba nova do painel de Configurações do core. Escolha: (a) `settings.py` com `class Settings(BaseModel)` → form auto-gerado; e/ou (b) uma screen `config: true` com UI custom. Pode ser vazio se o plugin não tem o que configurar.
-8. **Events que o plugin observa** (fire-and-forget, paralelo): lista de nomes a assinar — ex: `message.received`, `message.sent`, `llm.after`, `tool.after`, `*` (catch-all). Pode ser vazia. Use `plugins/events.py::KNOWN_EVENTS` como fonte executável; a tabela do `CLAUDE.md` é guia de payloads, não catálogo exaustivo.
-9. **Filters que o plugin intercepta** (síncronos, podem modificar ou abortar): lista de nomes a interceptar — ex: `filter.message.before_save`, `filter.reply.part`, `filter.system_prompt`, `filter.tool.args`. Retornar `None` aborta a ação. Pode ser vazia. Use `plugins/events.py::KNOWN_FILTERS` como catálogo executável e `CLAUDE.md` para tipos/contexto.
+8. **Events que o plugin observa** (fire-and-forget, paralelo): lista de nomes a assinar — ex: `message.received`, `message.sent`, `llm.after`, `tool.after`, `*` (catch-all). Pode ser vazia. Use `plugins/events.py::KNOWN_EVENTS` como fonte executável; a tabela de `docs/PLUGIN_BUS.md` é guia de payloads, não catálogo exaustivo.
+9. **Filters que o plugin intercepta** (síncronos, podem modificar ou abortar): lista de nomes a interceptar — ex: `filter.message.before_save`, `filter.reply.part`, `filter.system_prompt`, `filter.tool.args`. Retornar `None` aborta a ação. Pode ser vazia. Use `plugins/events.py::KNOWN_FILTERS` como catálogo executável e `docs/PLUGIN_BUS.md` para tipos/contexto.
 10. **Controle de acesso (RBAC)**: "Quais funcionalidades têm controle de acesso? Para cada uma, quais ações (ver/editar/excluir)?" → gera o bloco `rbac:` no manifest. Convenção forte de chaves: `view`/`edit`/`delete`. Pode ser vazia (plugin acessível a todos, como hoje).
 
 Se o usuário escreveu tudo no `$ARGUMENTS`, deduza e confirme com **uma** pergunta de validação.
@@ -135,7 +135,7 @@ ou incompatível faz o core pular o `frontend_extends` (fail-closed).
 ⚠️ **`plugin_services_version` (frontend) ≠ `uses_services` (backend)** — nomes
 parecidos, superfícies sem relação nenhuma.
 
-**`entry.services` — API interna plugin→plugin** (ver CLAUDE.md §"API interna
+**`entry.services` — API interna plugin→plugin** (ver `docs/PLUGINS.md` e o CLAUDE.md §"API interna
 plugin→plugin"). O módulo exporta `SERVICES = {"op": callable, ...}` e,
 opcionalmente, `SERVICES_VERSION` (semver da SUA superfície, mora no código) e
 `SERVICES_ALLOW` (tupla de ids autorizados; vazio = qualquer plugin carregado).
@@ -338,7 +338,7 @@ logger = logging.getLogger(__name__)
 def on_message_received(ctx, payload: dict) -> None:
     # ctx: EventContext — ctx.handler, ctx.plugin_id, ctx.plugin_db,
     #                     ctx.event_name (importante p/ catch-all "*"), ctx.emitted_at
-    # payload: dict tipado conforme o evento (ver tabela em CLAUDE.md)
+    # payload: dict tipado conforme o evento (ver tabela em docs/PLUGIN_BUS.md)
     if payload.get("is_group"):
         return  # filtra cedo
     logger.info("[<id>] %s disse: %s", payload["phone"], payload["text"])
@@ -354,7 +354,7 @@ EVENT_HANDLERS = {
 }
 ```
 
-**Eventos comuns** (catálogo executável completo em `plugins/events.py::KNOWN_EVENTS`):
+**Eventos comuns** (catálogo executável completo em `plugins/events.py::KNOWN_EVENTS`; payloads em `docs/PLUGIN_BUS.md`):
 
 - Mensagem: `message.received` (pre-DB), `message.saved` (post-DB, **use este pra ler do DB**), `message.sent`, `message.any`, `message.reaction`, `message.edited`, `message.revoked`, `message.deleted`
 - Conexão/grupo: `presence.changed`, `receipt.changed`, `group.participants_changed`, `group.joined`, `call.received`, `connection.changed`, `chat.archived`
@@ -392,7 +392,7 @@ FILTERS = {
 }
 ```
 
-**Filters disponíveis** (tabela completa com tipo do `value` e `ctx.extras` em `CLAUDE.md`):
+**Filters disponíveis** (tabela completa com tipo do `value` e `ctx.extras` em `docs/PLUGIN_BUS.md`):
 
 | Filter | `value` | `None` faz |
 |---|---|---|
@@ -452,7 +452,7 @@ CREATE INDEX IF NOT EXISTS plugin_<id>_items_created_at
 
 Componente Preact + HTM com `default export`. Usar imports do importmap (`preact`, `preact/hooks`, `htm`). Receber `apiBase` como prop.
 
-**Cores / modo escuro (obrigatório):** a tela tem que ser legível nos temas claro E escuro. Use as classes semânticas `wa-*` para superfícies/textos/bordas — `bg-wa-bg`, `bg-wa-panel` (cards), `text-wa-text`, `text-wa-secondary`, `border-wa-border`, `bg-wa-hover`, `bg-wa-teal` (botão), `text-white` (texto sobre botão colorido). Em `<input>`/`<textarea>`/`<select>` use a classe `.wa-field` (fundo cinza + texto preto). NÃO use cores cruas de fundo/texto (`bg-white`, `text-gray-*`, hex inline) confiando no padrão claro — no escuro vira texto claro sobre fundo claro = ilegível. Sempre ligue o modo escuro (engrenagem → "Modo escuro") e confira o contraste. Detalhes em CLAUDE.md → "Tema e modo escuro (legibilidade)".
+**Cores / modo escuro (obrigatório):** a tela tem que ser legível nos temas claro E escuro. Use as classes semânticas `wa-*` para superfícies/textos/bordas — `bg-wa-bg`, `bg-wa-panel` (cards), `text-wa-text`, `text-wa-secondary`, `border-wa-border`, `bg-wa-hover`, `bg-wa-teal` (botão), `text-white` (texto sobre botão colorido). Em `<input>`/`<textarea>`/`<select>` use a classe `.wa-field` (fundo cinza + texto preto). NÃO use cores cruas de fundo/texto (`bg-white`, `text-gray-*`, hex inline) confiando no padrão claro — no escuro vira texto claro sobre fundo claro = ilegível. Sempre ligue o modo escuro (engrenagem → "Modo escuro") e confira o contraste. Detalhes em `docs/FRONTEND.md`.
 
 **Importante (auth):** quando o usuário configura uma senha no app, a API exige `Authorization: Bearer <token>` em **todas** as chamadas `/api/*`. O token fica em `localStorage` sob a chave `whatsbot_token`. Plugin precisa anexar esse header — senão a tela mostra `Não autenticado.` quando o app está protegido por senha. O helper abaixo cobre isso e também captura 401 pra disparar o evento de logout do core (`whatsbot:unauthorized`):
 

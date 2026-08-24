@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Toda mudança na superfície declarada da API de plugins bumpa este número, e o
 # número nunca viaja sem a prosa: a entrada correspondente vai em
 # ``docs/PLUGIN_API_CHANGELOG.md``. O que conta como MAJOR/MINOR/PATCH está lá e
-# no CLAUDE.md ("Versionamento da API de plugins"); quem faz valer é
+# no CLAUDE.md ("Versionamento da API de plugins", resumo); quem faz valer é
 # ``tests/contracts/test_plugin_api_surface.py``, que compara a superfície viva
 # com ``tests/goldens/plugin_api_surface.json`` e SE RECUSA a regenerar o
 # snapshot enquanto esta constante não tiver andado.

@@ -29,3 +29,6 @@ data/
 plans/
 CLAUDE.md
 README.md
+
+# Base de teste de modelos — nunca entra na imagem
+bench/

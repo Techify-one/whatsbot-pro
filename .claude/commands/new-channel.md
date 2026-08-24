@@ -36,7 +36,7 @@ Antes de gerar, **leia**:
 - [telegram/src/channels.py](../../../whatsbot-pro-plugins/plugins/telegram/src/channels.py) — melhor referência de provider credential-only por long-poll (`bot_id` derivado do token nos DOIS hooks de identidade; descriptor com `post_create.autoconfigure`).
 - [whatsapp_cloud/src/channels.py](../../../whatsbot-pro-plugins/plugins/whatsapp_cloud/src/channels.py) — referência de provider por webhook + templates (identidade no create via `phone_number_id`; descriptor com `post_create.webhook_url`; janela de 24h).
 - [channels/providers/gowa_channel.py](channels/providers/gowa_channel.py) — referência de provider QR/linked-device (identidade só pós-conexão via `account_identity`; descriptor com `config_fields` `generated`/`multiselect` e `needs_qr`).
-- `CLAUDE.md` → seções **"Contrato de identidade de conta / dedup de canais (plano 32)"** e **"Provider de canal (plugin) — plano 33"**.
+- `docs/CANAIS.md` → **"Contrato de identidade de conta / dedup de canais (plano 32)"** e **"Provider de canal (plugin) — plano 33"** (o `CLAUDE.md` tem só o resumo).
 
 ## Passo 3 — Gerar a estrutura
 
@@ -192,7 +192,7 @@ CHANNEL_PROVIDERS = [<ClassName>Channel]
 - Se `post_create` for `webhook_url`, o core já mostra a URL — nada a gerar além do descriptor.
 - `required_credentials` (capabilities) e os campos `required` do descriptor DEVEM bater.
 - **Sempre** implemente `contact_type()` retornando um tipo coerente com o canal (`"whatsapp"` para providers de WhatsApp, `"telegram"`, ou um tipo próprio). É o que marca cada contato criado pelo canal (`contacts.contact_type`) e alimenta o filtro por tipo. Sem override, os contatos herdam `"outros"`.
-- Modo escuro: se gerar `static/<id>.js`, use classes `wa-*`/`.wa-field` (ver regra em CLAUDE.md).
+- Modo escuro: se gerar `static/<id>.js`, use classes `wa-*`/`.wa-field` (regra no CLAUDE.md, detalhe em `docs/FRONTEND.md`).
 
 ### routes.py — RBAC + auditoria (OBRIGATÓRIO se gerar rotas)
 

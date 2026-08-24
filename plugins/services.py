@@ -32,8 +32,8 @@ route. The security boundary is "nothing leaves the process" — see the note on
 
 Auditing is NOT done here: the registry knows no semantics and some ops are
 high volume. The PROVIDER audits, per operation with an external effect
-(``plugins.context.audit``), following the ``CLAUDE.md`` §"Auditoria de plugins"
-rule.
+(``plugins.context.audit``), following the ``docs/PLUGINS_AUDITAVEIS.md`` rule
+(summarised in ``CLAUDE.md`` §"Auditoria e RBAC").
 """
 
 from __future__ import annotations

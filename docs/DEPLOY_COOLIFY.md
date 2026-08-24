@@ -91,3 +91,11 @@ SELECT key, value FROM config WHERE key LIKE 'plugin.%' ORDER BY key;
 Fonte dos `.zip`: o repositório `whatsbot-pro-plugins` (`plugins/<id>/<id>.zip`).
 Configure o Persistent Storage **antes** de recuperar, senão os plugins somem de
 novo no próximo redeploy.
+
+---
+
+## Persistência de `statics/` e `storages/` — o gotcha completo
+
+> Por que o Dockerfile **não** declara `VOLUME`, o que quebra num redeploy sem Persistent
+> Storage e a salvaguarda de boot: ver o gotcha `statics/ precisa de pasta persistente no
+> deploy` em [OPERACAO.md](OPERACAO.md), migrado do `CLAUDE.md` no plano 139.

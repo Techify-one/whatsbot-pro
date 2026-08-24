@@ -6,7 +6,8 @@ Se `$ARGUMENTS` estiver vazio ou vago demais para planejar, faça 2–4 pergunta
 
 ## Passo 0 — Estude o padrão antes de escrever
 
-1. Leia o `CLAUDE.md` da raiz (arquitetura, convenções, gotchas). O plano DEVE respeitar essas regras.
+1. Leia o `CLAUDE.md` da raiz (arquitetura, convenções, gotchas) **e os guias de `docs/` das áreas afetadas** — o `CLAUDE.md` carrega a regra curta, o porquê está no guia (ver o Índice no topo dele). O plano DEVE respeitar essas regras.
+   ⚠️ **A documentação do que o plano fizer vai no guia de `docs/`, não no `CLAUDE.md`** — lá cabem até ~2 linhas (a regra + o aviso ⚠️). O arquivo é lido em toda requisição e tem teto travado por `tests/contracts/test_docs_hygiene.py` (plano 139).
 2. Liste `docs-planos/` e leia 1–2 planos recentes (maior número, ex: `24-plano-*`) como **referência de formato e profundidade** — imite a estrutura deles. Para um esforço grande, veja `23-plano-refatoracao-00-mestre.md` (padrão mestre + sub-planos + waves).
 3. Descubra o **próximo número**: maior prefixo `NN-` em `docs-planos/` → use `NN+1`. Nome do arquivo: `docs-planos/<NN>-plano-<slug-kebab-curto>.md`. Para esforço grande, gere um mestre `<NN>-plano-<slug>-00-mestre.md` + sub-planos `<NN>-plano-<slug>-0X-<area>.md` com um **Índice dos sub-planos** no mestre.
 

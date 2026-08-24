@@ -49,3 +49,19 @@ plano-importacao-historico-chatwoot/
 # Runbook de merge de contatos duplicados (nome civil + telefone de clientes REAIS,
 # host do banco de produção — nunca versionar; o repositório é público)
 plano-merge-contatos-duplicados/
+
+# Documentação de análise do banco (dicionário de dados, receitas de SQL) e o diagrama
+# fonte do Excalidraw — o repositório é PÚBLICO e esse material descreve o schema e as
+# regras internas com detalhe suficiente para virar mapa de ataque. Fica só local.
+docs/analises/
+docs/excalidraw/
+
+# Base de teste de modelos (plano bench). Contém transcrições REAIS de clientes
+# (nome, CNPJ, e-mail, telefone), prompts de produção na íntegra e resultados de
+# benchmark. O repositório é PÚBLICO — nada daqui pode subir, nunca.
+bench/
+
+# Dumps do debug_bus exportados para a raiz (logs_<dia>.jsonl). Carregam payload
+# CRU de webhook — telefone, nome e mensagem de clientes REAIS. O repositório é
+# PÚBLICO; nunca versionar.
+logs_*.jsonl

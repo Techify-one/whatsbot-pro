@@ -512,3 +512,37 @@ nenhum commit) e bumpa `PLUGIN_SERVICES_VERSION` 1.0→2.0; `7443fb2` leva a 2.1
 Nascimento do sistema de plugins (`1678c99`): manifest, loader, migrations com
 prefixo obrigatório, tools, prompts, telas e settings declarativas. O bus de
 eventos e filtros chegou no dia seguinte, já sem bump.
+
+---
+
+## Apêndice — política de versionamento (migrada do `CLAUDE.md`, plano 139)
+
+> O que está DENTRO da superfície versionada, a tabela MAJOR/MINOR/PATCH, o fluxo quando o
+> guard fica vermelho e a história do congelamento em `1.0.0` por 93 dias.
+
+### Versionamento da API de plugins (`WHATSBOT_API_VERSION`)
+
+**Versão atual: `1.7.0`** ([plugins/semver.py](../plugins/semver.py) — fonte única; `plugins/manifest.py` é re-export por valor). Changelog: [docs/PLUGIN_API_CHANGELOG.md](../docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](../tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
+
+⚠️ **A constante ficou congelada em `1.0.0` por 93 dias** (2026-05-10 → 2026-08-11) enquanto a superfície crescia de 35 para 75 eventos e de 0 para 24 filtros. Consequência: o guard de compat nunca rejeitou nada e **nenhum plugin conseguia declarar de que core ele precisa** — o `whatsapp_cloud` teve de degradar fechado em runtime porque não tinha como exigir o `ctx.extras.signature_authenticated` do plano 84. A regra em prosa existia desde 2026-06-29 e foi violada 8 dias depois, em silêncio. Por isso a disciplina agora tem dente, não só texto.
+
+**Dentro da superfície versionada** (mudou ⇒ bump): os catálogos do bus (`KNOWN_EVENTS`, `KNOWN_FILTERS`, `EXPERIMENTAL_FILTERS`, `_LIFECYCLE_EVENTS`, `_DISPATCH_ONLY_KEYS`) e a semântica de cada filtro (tipo do valor, o que `None` faz, `ctx.extras`) · os símbolos públicos de [plugins/context.py](../plugins/context.py) e os campos dos contextos · o schema do manifest, as regexes de validação e as 9 chaves de `_ENTRY_SPECS` **em ordem** · [channels/base.py](../channels/base.py) + [channels/events.py](../channels/events.py) · as convenções de host (prefixo `plugin_<id>_`, namespace `whatsbot_plugins.<id>`, mounts `/api/plugins/<id>` e `/plugins/<id>/static`, isenção `/public/`, prefixo `plugin.<id>.` de config, chave RBAC, `PLUGIN_ACTION_RE`, `TEARDOWN_TIMEOUT_SEC`).
+
+**Fora**: `db.repositories` e os demais módulos do core que plugins importam — são dependência real, **não API declarada**, e a proteção deles continua sendo o import defensivo (ver o aviso em "O que fica no core e o que vai pro plugin"); e o frontend, que tem números próprios (`FRONTEND_API_VERSION`, `PLUGIN_SERVICES_VERSION` em [web/static/js/plugins/api.js](../web/static/js/plugins/api.js)) e falha de forma **assimétrica** — lá, incompatível pula o `frontend_extends`; aqui, incompatível faz o plugin **deixar de existir**. **Nunca sincronize os valores.** Seam que um plugin publica para outro (`filter.retornos.*`, `protocolos.*`) é versionado pelo `version` do plugin publicador.
+
+O teste de pertinência é mecânico: **está dentro se existe um snapshot que falha quando aquilo muda**. Querer mover algo para dentro custa escrever o snapshot.
+
+| Nível | Gatilho |
+|---|---|
+| **MAJOR** | remover/renomear nome de catálogo **com produtor vivo**; mudar o tipo do valor de um filtro ou a semântica do `None`; remover/renomear símbolo público, campo de dataclass, chave de `entry` ou convenção de host; tornar obrigatório campo opcional do manifest; tornar abstrato método de `Channel` que tinha default. **Derruba os 36 manifests do parque de uma vez** (todos declaram `">=1.0,<2.0"`), inclusive o `gowa` bundled — é tranche que republica os ZIPs com ordem de deploy, não decisão de commit |
+| **MINOR** | acrescentar nome ao catálogo (**no mesmo commit do call site**), símbolo, campo com default, chave de `entry`, capability, método com default; alargar `ctx.extras`; ampliar quando um evento existente é emitido |
+| **PATCH** | correção que não muda a forma; retirar nome de catálogo **sem produtor vivo** (exige varredura repo-wide + changelog + teste de WARNING) |
+
+Exceção: seam em `EXPERIMENTAL_FILTERS` pode sair sem MAJOR — o contrato em [plugins/events.py](../plugins/events.py) já diz que ele pode se mover até se formar.
+
+**Fluxo quando o guard fica vermelho** (ele imprime estes 3 passos na falha):
+1. bump em [plugins/semver.py](../plugins/semver.py);
+2. entrada no topo de `docs/PLUGIN_API_CHANGELOG.md` — o heading `## X.Y.Z — data` precisa ser o **primeiro** heading de versão do arquivo (o apêndice histórico usa `###` de propósito);
+3. `UPDATE_PLUGIN_API_SURFACE=1 venv/bin/python -m pytest tests/contracts/test_plugin_api_surface.py`.
+
+A regeneração **se recusa a rodar** enquanto a constante não tiver andado — é isso que torna a disciplina aplicável em vez de documentada. A env é deliberadamente separada do `UPDATE_GOLDENS` usado em massa nos goldens de caracterização, que varreria a superfície da API junto.
