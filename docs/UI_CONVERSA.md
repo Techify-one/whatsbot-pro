@@ -17,6 +17,20 @@ Eventos do ciclo de vida do atendimento são registrados **no fio da conversa** 
 - **Call sites**: rotas de conversa via `_emit_notice` em [server/routes/conversations.py](../server/routes/conversations.py) (resolve o autor do `current_user`); tags em [server/routes/tags.py](../server/routes/tags.py); toggle-ai por contato em [server/routes/contacts.py](../server/routes/contacts.py); automáticos no `add_message` ([agent/memory.py](../agent/memory.py), via `conversation_repo.resolve_for_contact_ex` que sinaliza `created`/`reopened`) e no envio da resposta da IA ([server/routes/webhook.py](../server/routes/webhook.py), `_maybe_emit_ai_takeover`).
 - **Painel-only**: `conversation_event` é excluído do contexto do LLM ([message_repo.py](../db/repositories/message_repo.py)), do preview/última-mensagem da sidebar ([contact_repo.py](../db/repositories/contact_repo.py) e [conversation_repo.py](../db/repositories/conversation_repo.py) `_PREVIEW_EXCLUDED`) e não conta como não-lida (não entra em `unread_msg_ids`). Render como chip centralizado em [ContactDetail.js](../web/static/js/components/contacts/ContactDetail.js); skip de preview em [Contacts.js](../web/static/js/components/contacts/Contacts.js).
 
+## De quem é a bolha: autoria NÃO sai do estado de entrega (plano 143)
+
+O rótulo do remetente (e a cor dele) vem de **`isOperatorMessage(m)`**, um predicado puro em [messageView.js](../web/static/js/services/messageView.js), coberto por `node --test`. Consumidores: [MessageBubble.js:37](../web/static/js/components/contacts/MessageBubble.js#L37) (a bolha) e [ContactDetail.js:736-741](../web/static/js/components/contacts/ContactDetail.js#L736-L741) (a citação) — eram duas cópias da mesma regra.
+
+⚠️ **Nunca derive a autoria de `status === 'operator'`.** A coluna `status` é o estado de **entrega**. Quando o provedor recusa a mensagem e avisa por webhook, `mark_failed_by_msg_id` sobrescreve `'operator'` por `'failed'` ([message_repo.py:695](../db/repositories/message_repo.py#L695), `_FAILABLE_STATUSES` em [:692](../db/repositories/message_repo.py#L692)) — a função irmã `update_status_by_msg_id` **recusa** fazer isso de propósito ([:634-637](../db/repositories/message_repo.py#L634-L637)), mas o caminho de falha não. Lendo autoria daquele campo, o painel caía no `else` do rótulo e assinava **"IA"** toda mensagem manual de atendente que falhou: em produção, **409** linhas `assistant/failed` em 7 dias, das quais só **7** tinham `sent_by_name`. Verde, com a cor da IA, no exato momento em que o operador mais precisa saber quem tentou mandar o quê.
+
+O que sobrevive à sobrescrita é a **marca de autoria** (`sent_by_user_id` / `sent_by_name`), e é ela que o predicado consulta: `status === 'operator'` **ou** (falhou **e** tem marca de autoria).
+
+⚠️ **A segunda metade da condição é obrigatória.** Uma resposta da **IA** que falha também tem `status='failed'`; aceitar `isFailed` sozinho faria a IA assinar "Manual" — um rótulo errado trocado por outro. Há caso de teste dedicado para isso.
+
+⚠️ **Nada disso se conserta no backend.** `failed` é o estado de entrega **correto**; quem estava lendo autoria de um campo de entrega era o painel. Não mexa em `mark_failed_by_msg_id` nem em `_FAILABLE_STATUSES`.
+
+Corolário para quem **produz** mensagem: automação que envia pelo painel deve gravar `sent_by_name` (o snapshot de nome sobrevive sem usuário; `sent_by_user_id` é FK para `users` e fica `None`). O plugin `protocolos` assina `"Automação"`; sem isso a bolha diz "Manual" no caminho feliz e "IA" no de falha.
+
 ## Rascunho de mensagem por conversa (compositor)
 
 O texto digitado no compositor **pertence à conversa** e sobrevive à troca de conversa, como no WhatsApp/Chatwoot: digitou "Oi" na `/conversations/123`, foi atender a `/124` e voltou → o "Oi" continua lá. É **pessoal e por-dispositivo**: nada vai para o servidor.

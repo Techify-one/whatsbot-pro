@@ -175,6 +175,28 @@ Terceiro canal entre plugins, ao lado do **barramento** (broadcast, "aconteceu a
 - **Compatibilidade com core anterior**: um core sem a linha `"services"` em `_ENTRY_SPECS` nunca consulta `entry.services` e nunca importa o módulo — por isso o `services.py` do provedor tem de ser **FOLHA** (nenhum outro módulo dele o importa; helper compartilhado vai para os módulos vizinhos). No consumidor, o import é sempre defensivo: `try: from plugins import services / except: _services = None` — import duro no topo de um módulo que o loader importa = o plugin não carrega, falha muda no boot.
 - **Quem usa hoje**: `trackify` publica a superfície completa do CDP (`SERVICES_VERSION = "1.0.0"`, 18 ops: status, eventos, jornada, compras, assinaturas, identidade, campos, escrita, cadastro, consentimento) e é o **único ponto que fala com o CDP**; `protocolos` a consome para entregar `track_protocolo_*` (antes era assinatura de barramento). O `_emit_bus` do `protocolos` **continua emitindo** — o emit sobra como sinal de observabilidade para quem assina `"*"` (`debug_bus`); o que mudou foi só o caminho de ENTREGA.
 
+### Plugin que envia sozinho: o gate da janela é DELE (plano 143)
+
+Um plugin que chame `outbound.send_text` direto não passa por nenhuma das guardas que o painel tem. Dois plugins hoje enviam assim e **os dois pulam quando a janela está fechada** — mas por predicados **deliberadamente diferentes**, e unificá-los seria regressão nos dois sentidos:
+
+| | `retornos` (`actions.janela_aberta`) | `protocolos` (`logic._evaluation_window_open`) |
+|---|---|---|
+| Predicado | **24 h fixas, uniformes em todo canal** — abandonou `session_open` de propósito | **`session_open(channel_id, last_inbound_ts, by_human=True)`** — por capability |
+| Objetivo | não **incomodar** cliente frio, mesmo onde o envio funcionaria | não **produzir erro** — só faz sentido onde o provedor recusa |
+| Na dúvida | **fail-closed** (o mal dele é incomodar) | **fail-open** (o mal dele seria deixar de avaliar quem podia) |
+| Fora da janela | nota privada de aviso | **igual** |
+| Desligável | `respeitar_janela_24h` | `respeitar_janela` + `avisar_janela_fechada` |
+
+⚠️ **Não unifique.** A regra fixa do `retornos` aplicada à avaliação calaria os canais com `session_window_hours=0` (GOWA, Telegram, site), onde ela hoje é entregue sem uma falha sequer. A regra por capability do `protocolos` aplicada ao `retornos` voltaria a incomodar cliente frio no WhatsApp comum. Há teste dedicado a esse caso nos dois plugins.
+
+Três detalhes que valem para qualquer plugin que copie o padrão:
+
+- **`message_repo` não é superfície versionada** (a regra do `CLAUDE.md` é explícita: `db.repositories` fica de fora de propósito). O import é **local e defensivo**, e o gate inteiro degrada para o comportamento anterior se qualquer peça faltar — nunca calar o envio por um `AttributeError`.
+- **Nota privada, nunca `role="error"`.** O ponto de pular é remover ruído vermelho do fio; trocar um card de erro por outro é não ter feito nada.
+- **Gate é variável de decisão, não `return`.** Um `return` cedo mata também o que vinha depois — no `protocolos`, a nota privada do link interno, que é painel-only e nunca dependeu de janela nenhuma.
+
+O mecanismo da janela em si (o que a Meta aceita e quando) está em [CANAIS_META.md](CANAIS_META.md).
+
 ### Onde vive o código de um plugin (NÃO confundir)
 
 Nada sincroniza estes pontos automaticamente. Um mesmo plugin pode ter conteúdos diferentes em cada um, inclusive **com o mesmo número de versão** — já aconteceu com o `protocolos` (duas cópias distintas ambas marcadas `1.17.0`). Ao comparar versões, compare o CONTEÚDO, nunca só o número.

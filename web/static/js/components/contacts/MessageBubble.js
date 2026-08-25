@@ -4,7 +4,7 @@ import { formatBubbleTime } from './utils.js';
 import { SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon } from './icons.js';
 import { MediaContent } from './MediaContent.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
-import { senderColor } from '../../services/messageView.js';
+import { senderColor, isOperatorMessage } from '../../services/messageView.js';
 
 const html = htm.bind(h);
 
@@ -34,7 +34,10 @@ export function MessageBubble({
   const isUser = m.role === 'user';
   const isFailed = m._status === 'failed' || m.status === 'failed';
   const isSending = m._status === 'sending';
-  const isOperator = !isUser && m.status === 'operator';
+  // plano 143: NÃO derive a autoria do estado de entrega. A recusa do provedor
+  // sobrescreve 'operator' → 'failed' e fazia toda mensagem manual falhada
+  // assinar "IA"; o predicado consulta a marca de autoria, que sobrevive.
+  const isOperator = isOperatorMessage(m);
 
   // In groups, the backend prefixes user content with "[Sender Name]: text"
   // for LLM context. Strip the prefix here and use the sender name as label.

@@ -198,6 +198,35 @@ export function cardStateKey(m, index) {
  * @param {boolean} isOperator
  * @returns {string}
  */
+/**
+ * A mensagem é de um ATENDENTE HUMANO (envio manual pelo painel ou por automação
+ * que assina), e não da IA?
+ *
+ * ⚠️ Não basta olhar `status === 'operator'`. `status` é o estado de ENTREGA da
+ * linha: quando o provedor recusa por webhook, `mark_failed_by_msg_id`
+ * (db/repositories/message_repo.py) sobrescreve 'operator' por 'failed' — a
+ * função irmã `update_status_by_msg_id` recusa fazer isso de propósito, mas o
+ * caminho de falha não. Lendo autoria daquele campo, o painel assinava como "IA"
+ * toda mensagem manual que falhou (plano 143: 409 casos em 7 dias).
+ *
+ * O que sobrevive à sobrescrita é a marca de autoria — e é ela que decide aqui.
+ *
+ * ⚠️ A segunda metade da condição é obrigatória: sem exigir a marca de autoria,
+ * uma resposta da IA que falha passaria a assinar "Manual" — um rótulo errado
+ * trocado por outro.
+ *
+ * @param {{role?: string, status?: string, _status?: string,
+ *          sent_by_user_id?: any, sent_by_name?: string|null}} m
+ * @returns {boolean}
+ */
+export function isOperatorMessage(m) {
+  if (!m || m.role === 'user') return false;
+  if (m.status === 'operator') return true;
+  const failed = m.status === 'failed' || m._status === 'failed';
+  if (!failed) return false;
+  return m.sent_by_user_id != null || !!m.sent_by_name;
+}
+
 export function senderColor(isUser, isOperator) {
   // IA usa uma variável CSS (--wa-ai-label) que fica CLARA no modo escuro e escura
   // no claro — a cor inline não responderia ao tema sozinha. user→azul, operator→âmbar.

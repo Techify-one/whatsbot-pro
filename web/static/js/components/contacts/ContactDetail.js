@@ -34,7 +34,7 @@ import { useChatDayHeader } from './hooks/useChatDayHeader.js';
 import { PILL_TRAVEL } from '../../services/chatDayHeader.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
-import { senderColor, quotedMediaText, cardStateKey, isCollapsibleCard } from '../../services/messageView.js';
+import { senderColor, quotedMediaText, cardStateKey, isCollapsibleCard, isOperatorMessage } from '../../services/messageView.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { transitionAfterOutput } from '../../services/outputTransition.js';
 import { submitPlan, isAudioOnly } from '../../services/composerSubmit.js';
@@ -733,10 +733,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     const dn = isGroupChat
       ? (contact.group_name || phone)
       : (info && info.name ? info.name.replace(/^~/, '') : phone);
+    // plano 143: a autoria vem de `isOperatorMessage`, não de `status === 'operator'`
+    // — a falha de envio sobrescreve o status e apagava a autoria (ver messageView.js).
+    const qIsOperator = isOperatorMessage(qmsg);
     const senderLabel = sandbox
       ? (qIsUser ? 'Você' : 'IA')
-      : (qIsUser ? (qSender || dn) : (qmsg.status === 'operator' ? (qmsg.sent_by_name || 'Manual') : 'IA'));
-    const sColor = senderColor(qIsUser, qmsg.status === 'operator');
+      : (qIsUser ? (qSender || dn) : (qIsOperator ? (qmsg.sent_by_name || 'Manual') : 'IA'));
+    const sColor = senderColor(qIsUser, qIsOperator);
     return { senderLabel, senderColor: sColor, fromMe, snippet: (text || '').replace(/\s+/g, ' ').slice(0, 140) };
   }
 
