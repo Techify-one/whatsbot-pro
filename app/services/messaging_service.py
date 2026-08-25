@@ -1766,6 +1766,32 @@ class MessagingService:
             await aend_execution(exec_id, error="cancelled")
             raise
         except Exception as exc:
+            # ⚠️ Este ``except`` cobre o ciclo INTEIRO do inbound — o save da
+            # mensagem do cliente incluído — e até o plano 141 ele era MUDO: o
+            # erro só existia dentro de ``executions.error``, tabela que ninguém
+            # abre sem já desconfiar de alguma coisa. Foi exatamente por isso que
+            # a destruição de TODO o inbound 1:1 dos canais GOWA durou 6 dias em
+            # produção em vez de minutos. Agora tem duas saídas visíveis: ``ERROR``
+            # no log e um card no painel.
+            logger.exception("[Batch] Falha no ciclo de inbound de %s (canal %s)",
+                             phone, channel_id)
+            # ⚠️ ORDEM PROPOSITAL: o aviso sai ANTES de ``aend_execution``.
+            # A bolha é só broadcast; ``aend_execution`` é ESCRITA NO BANCO — e
+            # quando a causa da falha é justamente o banco (o caso do plano 141),
+            # ela levanta também e levaria junto o único sinal que o atendente
+            # teria. O aviso não persiste por esse mesmo motivo: num ciclo que
+            # falhou ao escrever, gravar o aviso seria repetir a causa.
+            # Avisar também não pode mascarar o erro original: try/except próprio.
+            try:
+                await self.error_bubble(
+                    phone,
+                    "⚠️ Não foi possível registrar a mensagem recebida deste "
+                    "contato. Ela pode não aparecer no histórico — confira o "
+                    "WhatsApp antes de responder.")
+            except Exception:
+                logger.exception(
+                    "[Batch] Falha ao emitir a bolha de erro de inbound para %s",
+                    phone)
             await aend_execution(exec_id, error=str(exc))
         finally:
             # Always clear the "IA respondendo" hint (success, cancel, or error),

@@ -210,3 +210,256 @@ def test_missing_provider_ts_falls_back_to_now(build_app):
     # Perto de "agora" (2020+), nunca 0.0/epoch 1970. BASE+1000 << now().
     assert row["ts"] > BASE + 1000, (
         f"event.ts=0.0 deveria cair em time.time(); ts gravado={row['ts']}")
+
+
+# ── Plano 141 — o formato REAL do GOWA (RFC 3339) não pode destruir a mensagem ──
+#
+# A fixture acima injeta ``timestamp`` como float, mas o GOWA de produção manda
+# uma STRING RFC 3339 em 100% dos webhooks. Esse buraco na fixture é o que deixou
+# o plano 129 passar verde enquanto, em produção, TODO inbound 1:1 dos canais
+# GOWA morria no INSERT (``InvalidTextRepresentation``) e a mensagem do cliente
+# era destruída em silêncio — 6 dias, ~zero mensagens ``role='user'``.
+
+def _rfc3339(epoch: float) -> str:
+    """Epoch → a MESMA forma que o GOWA manda: ``2026-08-24T17:43:58Z``."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_gowa_rfc3339_timestamp_is_persisted_not_dropped(build_app):
+    """REGRESSÃO do incidente: payload GOWA com ``timestamp`` RFC 3339 tem de
+    persistir a mensagem, com o epoch CORRETO. Vermelho antes do plano 141."""
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0})
+    phone = _new_phone()
+    cid, conv = _seed_conversation(built, phone)
+
+    iso_id = f"iso_{uuid.uuid4().hex[:12]}"
+    _post_gowa(built, phone, iso_id, "mensagem com carimbo ISO", ts=_rfc3339(BASE + 500))
+
+    row = next((r for r in message_repo.get_by_conversation(conv)
+                if r.get("msg_id") == iso_id), None)
+    assert row is not None, (
+        "a mensagem do cliente com timestamp RFC 3339 foi DESTRUÍDA — é o "
+        "incidente do plano 141 (InvalidTextRepresentation engolido no batch)")
+    assert row["ts"] == pytest.approx(BASE + 500), (
+        f"o carimbo real do provedor tem de ser preservado; ts gravado={row['ts']}")
+
+
+def test_gowa_garbage_timestamp_never_costs_the_message(build_app):
+    """Carimbo ININTERPRETÁVEL vira ``time.time()`` — nunca perde a mensagem e
+    nunca grava 1970. Falha de carimbo ≠ perda de mensagem (D3)."""
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0})
+    phone = _new_phone()
+    cid, conv = _seed_conversation(built, phone)
+
+    bad_id = f"bad_{uuid.uuid4().hex[:12]}"
+    _post_gowa(built, phone, bad_id, "carimbo torto", ts="não é uma data")
+
+    row = next((r for r in message_repo.get_by_conversation(conv)
+                if r.get("msg_id") == bad_id), None)
+    assert row is not None, "carimbo ruim NUNCA pode custar a mensagem do cliente"
+    assert row["ts"] > BASE + 1000, f"deveria cair em time.time(); ts={row['ts']}"
+
+
+def test_inbound_event_coerces_ts_for_any_provider():
+    """CONTRATO (I3): nem um provider de plugin de terceiro consegue injetar um
+    ``ts`` não-float — a coerção mora na dataclass, não só no parser do GOWA."""
+    from channels.events import InboundEvent
+    for raw in ["2026-08-24T17:43:58Z", "abc", None, 7, True, {"a": 1}]:
+        ev = InboundEvent(channel_id="c", provider="qualquer", ts=raw)
+        assert isinstance(ev.ts, float), f"ts={raw!r} não foi coagido: {ev.ts!r}"
+
+
+def test_epoch_helper_reads_both_forms_and_never_guesses_timezone():
+    """O helper aceita epoch E RFC 3339, e trata string NAIVE como UTC.
+
+    ⚠️ ``.timestamp()`` de um datetime naive assume hora LOCAL — em BRT isso
+    desloca o carimbo em 3h (a armadilha que já mordeu na migração dos
+    agendamentos de retorno). O naive tem de ser carimbado como UTC de propósito.
+    """
+    from gowa.inbound import _epoch
+    assert _epoch("2026-08-24T17:43:58Z") == 1787593438.0
+    assert _epoch("2026-08-24T17:43:58+00:00") == 1787593438.0
+    assert _epoch("2026-08-24T14:43:58-03:00") == 1787593438.0
+    assert _epoch("2026-08-24T17:43:58") == 1787593438.0, "naive tem de ser lido como UTC"
+    assert _epoch(1787593438) == 1787593438.0
+    assert _epoch("1787593438") == 1787593438.0
+    for bad in ("", None, "lixo", True, {"a": 1}):
+        assert _epoch(bad) == 0.0, f"{bad!r} deveria virar 0.0 (→ time.time() a jusante)"
+
+
+# ── F5 — os outros TRÊS saves do plano 129, com o payload que quebrou ────────
+#
+# ⚠️ O plano 129 abriu QUATRO caminhos de save que passaram a repassar o ``ts``
+# do provedor. O incidente do plano 141 só foi observado no M3/M4 (texto 1:1)
+# porque os canais GOWA de produção não aceitam grupo e ~99% do tráfego deles é
+# grupo — descartado no portão de JID ANTES do ponto que quebra. Os outros três
+# estavam igualmente quebrados, só que DORMENTES. Cobrir apenas o que sangrou
+# deixaria três minas armadas: basta um operador marcar "grupo" no canal.
+
+def test_m5_media_batch_survives_rfc3339_timestamp(build_app):
+    """M5 — mídia no batch ([messaging_service] ``ts=item["ts"]``).
+
+    O item da fila carrega o ``ts`` cru até o save, então a mídia do cliente
+    morria no mesmo INSERT que o texto — e aqui a perda é ainda mais silenciosa,
+    porque a exceção cai no ``except`` do orquestrador DEPOIS de a fila ter sido
+    consumida (o que a F4 acabou de tornar visível)."""
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0})
+    phone = _new_phone()
+    img_id = f"img_{uuid.uuid4().hex[:12]}"
+
+    r = built.client.post("/api/webhook/gowa/default", json={
+        "event": "message", "payload": {
+            "from": f"{phone}@s.whatsapp.net", "id": img_id,
+            "from_name": "Cliente Teste",
+            "timestamp": _rfc3339(BASE + 700),
+            "image": {"path": "statics/media/foto.jpg", "caption": "olha isso"}}})
+    assert r.status_code == 200, r.text
+    _drain(built, "default", phone)
+
+    contact = contact_repo.get_by_phone(phone)
+    assert contact is not None, "o inbound de mídia precisa ter materializado o contato"
+    row = next((m for m in message_repo.get_all(contact["id"])
+                if m.get("msg_id") == img_id), None)
+    assert row is not None, (
+        "a MÍDIA do cliente com timestamp RFC 3339 foi destruída no batch (M5)")
+    assert row["media_type"] == "image", row
+    assert row["ts"] == pytest.approx(BASE + 700), (
+        f"o carimbo real do provedor tem de sobreviver ao batch; ts={row['ts']}")
+
+
+def test_m6_group_without_mention_survives_rfc3339_timestamp(build_app):
+    """M6 — grupo sem @menção ([message_ingest_service] ``ts=event.ts``).
+
+    ⚠️ **É o caminho dormente de maior estrago.** Ele salva no histórico sem
+    rodar o agente; em produção ficou encoberto só porque os canais GOWA nascem
+    **sem `group` marcado** (``GOWA_DEFAULT_JID_TYPES``). Um clique no
+    ``JidTypePicker`` teria transformado o incidente de "o 1:1 sumiu" em "o
+    grupo inteiro sumiu"."""
+    group_jid = f"12036311111{uuid.uuid4().int % 10**4:04d}@g.us"
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": True,                      # sem @menção não dispara mesmo assim
+        "message_batch_delay": 0,
+        "group_reply_mode": "mention_only",
+    })
+    grp_id = f"grp_{uuid.uuid4().hex[:12]}"
+    r = built.client.post("/api/webhook/gowa/default", json={
+        "event": "message", "payload": {
+            "chat_id": group_jid, "from": "5511970000050@s.whatsapp.net",
+            "id": grp_id, "body": "mensagem no grupo sem mencionar o bot",
+            "from_name": "Participante",
+            "timestamp": _rfc3339(BASE + 800)}})
+    assert r.status_code == 200, r.text
+    _drain(built, "default", group_jid)
+
+    contact = contact_repo.get_by_phone(group_jid)
+    assert contact is not None, "o grupo precisa ter sido materializado"
+    row = next((m for m in message_repo.get_all(contact["id"])
+                if m.get("msg_id") == grp_id), None)
+    assert row is not None, (
+        "a mensagem de GRUPO com timestamp RFC 3339 foi destruída (M6)")
+    assert row["ts"] == pytest.approx(BASE + 800), (
+        f"o carimbo real do provedor tem de ser preservado; ts={row['ts']}")
+
+
+def test_m7_outgoing_echo_survives_rfc3339_timestamp(build_app):
+    """M7 — eco do próprio envio ([message_ingest_service] ``ts=event.ts``).
+
+    O eco (``is_from_me``) é o que traz de volta a mensagem que o operador
+    mandou pelo CELULAR. Quebrado, o painel perdia justamente o histórico que só
+    existe fora dele — e sem nenhum sinal, porque ninguém espera bolha nova ao
+    responder pelo aparelho."""
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0})
+    phone = _new_phone()
+    echo_id = f"echo_{uuid.uuid4().hex[:12]}"
+
+    r = built.client.post("/api/webhook/gowa/default", json={
+        "event": "message", "payload": {
+            "from": f"{phone}@s.whatsapp.net", "id": echo_id,
+            "body": "respondi pelo celular", "from_name": "Cliente Teste",
+            "is_from_me": True,
+            "timestamp": _rfc3339(BASE + 900)}})
+    assert r.status_code == 200, r.text
+    _drain(built, "default", phone)
+
+    contact = contact_repo.get_by_phone(phone)
+    assert contact is not None, "o eco precisa ter materializado o contato"
+    row = next((m for m in message_repo.get_all(contact["id"])
+                if m.get("msg_id") == echo_id), None)
+    assert row is not None, (
+        "o ECO do próprio envio com timestamp RFC 3339 foi destruído (M7)")
+    assert row["role"] == "assistant" and row["status"] == "operator", row
+    assert row["ts"] == pytest.approx(BASE + 900), (
+        f"o carimbo real do provedor tem de ser preservado; ts={row['ts']}")
+
+
+# ── F4 — a falha de save do inbound deixa de ser silenciosa ─────────────────
+
+def test_f4_inbound_save_failure_leaves_a_trace(build_app, caplog):
+    """Uma exceção no ciclo de inbound tem de produzir LOG e CARD, não silêncio.
+
+    ⚠️ Este é o teste que mede a lição do incidente, não o bug. O defeito de
+    tipo foi corrigido em três camadas; o que fez ele durar **6 dias em vez de
+    minutos** foi outra coisa: o ``except`` do orquestrador engolia tudo, e o
+    erro só existia dentro de ``executions.error`` — tabela que ninguém abre sem
+    já estar desconfiado. Enquanto isso o painel mostrava uma conversa aberta e
+    vazia, indistinguível de um cliente que só abriu o chat e não digitou.
+
+    Note que o alvo aqui é genérico de propósito: qualquer falha no ciclo, não
+    só a de carimbo. É o próximo defeito neste trecho que este teste protege.
+    """
+    import logging
+    from unittest.mock import patch
+
+    built = build_app(["gowa"], settings_overrides={
+        "auto_reply": False, "message_batch_delay": 0})
+    phone = _new_phone()
+
+    ws = built.app.state.deps.ws_manager
+    seen: list[tuple[str, dict]] = []
+    original = ws.broadcast
+
+    async def _recording(event, data=None):
+        seen.append((event, data or {}))
+        return await original(event, data)
+
+    boom = RuntimeError("save do inbound explodiu (simulação do plano 141)")
+    with patch.object(ws, "broadcast", _recording), \
+            patch("db.repositories.message_repo.add", side_effect=boom), \
+            caplog.at_level(logging.ERROR):
+        r = built.client.post("/api/webhook/gowa/default", json={
+            "event": "message", "payload": {
+                "from": f"{phone}@s.whatsapp.net",
+                "id": f"f4_{uuid.uuid4().hex[:12]}",
+                "body": "mensagem que o save vai recusar",
+                "from_name": "Cliente Teste",
+                "timestamp": _rfc3339(BASE + 1000)}})
+        assert r.status_code == 200, r.text
+        _drain(built, "default", phone)
+
+    # (b) o log grita — e IDENTIFICA o ciclo de inbound.
+    # ⚠️ Um `any(levelno >= ERROR)` genérico NÃO serve aqui: o ciclo já emite
+    # ERROR incidental por outros motivos, então a asserção larga passa mesmo
+    # sem a correção e não protege nada. O que precisa existir é a linha que
+    # diz QUAL contato e QUAL canal ficaram sem a mensagem — é com ela que
+    # alguém encontra o problema no dia seguinte, não com um traceback solto.
+    culpado = [rec for rec in caplog.records
+               if rec.levelno >= logging.ERROR
+               and "ciclo de inbound" in rec.getMessage()]
+    assert culpado, (
+        "a falha do ciclo de inbound não deixou registro NOMEADO em ERROR — é "
+        "exatamente assim que o incidente do plano 141 durou 6 dias. ERROs "
+        f"vistos: {[r.getMessage()[:60] for r in caplog.records if r.levelno >= logging.ERROR]}")
+    assert phone in culpado[0].getMessage(), (
+        f"o log tem de dizer de QUEM era a mensagem: {culpado[0].getMessage()!r}")
+
+    # (c) o atendente vê
+    cards = [d for ev, d in seen
+             if ev == "new_message" and (d.get("message") or {}).get("role") == "error"]
+    assert cards, (
+        "nenhuma bolha de erro foi emitida: para o atendente, a mensagem do "
+        f"cliente simplesmente não existiu. Eventos vistos: {[e for e, _ in seen]}")

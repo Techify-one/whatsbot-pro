@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from sqlalchemy import (and_, case as sa_case, delete as sa_delete, insert as sa_insert,
@@ -11,6 +12,8 @@ from sqlalchemy import (and_, case as sa_case, delete as sa_delete, insert as sa
 from db.engine import get_engine
 from db.repositories._mapping import coerce_json
 from db.tables import messages
+
+logger = logging.getLogger(__name__)
 
 
 def add(contact_id: int, role: str, content: str, *,
@@ -37,7 +40,22 @@ def add(contact_id: int, role: str, content: str, *,
     depois pela descrição/transcrição da IA e deixa de ser separável. NULL =
     mídia sem legenda (ou mensagem que não é mídia).
     """
-    ts = ts or time.time()
+    # ⚠️ Última linha de defesa (plano 141): ``ts = ts or time.time()`` PARECE um
+    # guard de tipo e não é — qualquer string não-vazia é truthy e atravessava
+    # até o INSERT, onde ``messages.ts`` (Float) levantava
+    # ``InvalidTextRepresentation`` e a mensagem do cliente era destruída.
+    # Carimbo ruim NUNCA pode custar a mensagem: aqui ele vira ``time.time()``
+    # (nunca ``0.0``, que jogaria a linha para 1970 no topo do fio) + warning.
+    if ts is None or isinstance(ts, bool):
+        ts = time.time()
+    else:
+        try:
+            ts = float(ts) or time.time()
+        except (TypeError, ValueError):
+            logger.warning(
+                "[message_repo] ts inválido (%r) para contact_id=%s role=%s — "
+                "carimbando com o horário atual", ts, contact_id, role)
+            ts = time.time()
     with get_engine().begin() as conn:
         result = conn.execute(sa_insert(messages).values(
             contact_id=contact_id,

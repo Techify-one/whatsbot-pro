@@ -27,12 +27,56 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
 
 from channels.events import InboundEvent
 from channels.jid import phone_from_ack_payload
 from agent import group_mentions
 
 logger = logging.getLogger(__name__)
+
+
+
+# ── Timestamp do provedor (plano 141) ─────────────────────────────────────
+# ⚠️ O GOWA manda ``timestamp`` como string RFC 3339 ("2026-08-24T17:43:58Z"),
+# NÃO como epoch — 1.447/1.447 capturas de produção na mesma forma. Repassar o
+# valor cru fazia o INSERT em ``messages.ts`` (double precision) levantar
+# ``InvalidTextRepresentation``, e a exceção era engolida no orquestrador do
+# batch DEPOIS de a fila em memória já ter sido consumida: a mensagem do cliente
+# era destruída em silêncio (6 dias de inbound perdido em produção).
+#
+# ⚠️ Fuso: uma string SEM ``Z``/offset vira ``datetime`` naive, e ``.timestamp()``
+# de um naive assume hora LOCAL — em BRT isso desloca o carimbo em 3h. Por isso
+# o naive é explicitamente carimbado como UTC aqui, nunca deixado adivinhar.
+def _epoch(value) -> float:
+    """``value`` (epoch numérico, string numérica ou RFC 3339) → epoch float.
+
+    Nunca levanta: valor ininterpretável vira ``0.0``, que a cadeia a jusante
+    já traduz em ``time.time()`` (``0.0`` gravado direto poria a mensagem em
+    1970 e ela afundaria para sempre no topo do fio — plano 129).
+    """
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return 0.0
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning("[GOWA] timestamp ininterpretável: %r", value)
+            return 0.0
+        if dt.tzinfo is None:            # naive ⇒ UTC explícito, nunca hora local
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    logger.warning("[GOWA] timestamp de tipo inesperado: %r", value)
+    return 0.0
 
 
 # ── Media detection ───────────────────────────────────────────────────────
@@ -499,7 +543,7 @@ def parse_gowa_inbound(body: dict, *, channel_id: str = "default", client=None,
                     external_msg_id=data.get("id", ""),
                     chat_id=react_phone,
                     sender_id=_phone_from_jid(data.get("from", "")),
-                    ts=data.get("timestamp") or 0.0,
+                    ts=_epoch(data.get("timestamp")),
                     media_extras={
                         "emoji": data.get("reaction", ""),
                         "reacted_message_id": data.get("reacted_message_id", ""),
@@ -512,7 +556,7 @@ def parse_gowa_inbound(body: dict, *, channel_id: str = "default", client=None,
                     chat_id=_phone_from_jid(data.get("chat_id", "") or data.get("from", "")),
                     sender_id=_phone_from_jid(data.get("from", "")),
                     text=data.get("body", "") or data.get("content", ""),
-                    ts=data.get("timestamp") or 0.0,
+                    ts=_epoch(data.get("timestamp")),
                     media_extras={
                         "original_message_id": data.get("original_message_id", ""),
                         "is_from_me": bool(data.get("is_from_me", False)),
@@ -523,7 +567,7 @@ def parse_gowa_inbound(body: dict, *, channel_id: str = "default", client=None,
                     external_msg_id=data.get("id", ""),
                     chat_id=_phone_from_jid(data.get("chat_id", "") or data.get("from", "")),
                     sender_id=_phone_from_jid(data.get("from", "")),
-                    ts=data.get("timestamp") or 0.0,
+                    ts=_epoch(data.get("timestamp")),
                     media_extras={
                         "revoked_message_id": data.get("revoked_message_id", ""),
                         "revoked_from_me": bool(data.get("revoked_from_me", False)),
@@ -534,7 +578,7 @@ def parse_gowa_inbound(body: dict, *, channel_id: str = "default", client=None,
         return [_ev(kind="deleted",
                     chat_id=_phone_from_jid(data.get("chat_id", "") or data.get("from", "")),
                     sender_id=_phone_from_jid(data.get("from", "")),
-                    ts=data.get("timestamp") or 0.0,
+                    ts=_epoch(data.get("timestamp")),
                     media_extras={
                         "deleted_message_id": data.get("deleted_message_id", ""),
                         "original_content": data.get("original_content", ""),
@@ -731,6 +775,6 @@ def _parse_message(data: dict, *, channel_id: str, client, bot_phone: str,
         group_name=group_name or None,
         can_send=can_send,
         is_archived=is_archived,
-        ts=data.get("timestamp") or 0.0,
+        ts=_epoch(data.get("timestamp")),
         raw=data,
     )]

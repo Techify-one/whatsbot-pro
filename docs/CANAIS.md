@@ -87,3 +87,67 @@ Cada contato registra o **tipo herdado do canal que o materializou**, gravado em
 - **Exibição**: marca (chip colorido) abaixo do nome/telefone no painel do contato ([ContactInfoPanel.js](../web/static/js/components/contacts/ContactInfoPanel.js)) e em cada linha da tela Contatos ([ContactsListScreen.js](../web/static/js/components/ContactsListScreen.js)). O catálogo de rótulo/cor por tipo mora em [web/static/js/services/contactTypes.js](../web/static/js/services/contactTypes.js) (`contactTypeMeta`), tolerante a tipos novos/desconhecidos.
 - **Filtro**: dimensão `contact_type` ("Tipo de contato", multi-select eq/ne) nos dois construtores de filtro — [ConversationFilterDialog.js](../web/static/js/components/contacts/ConversationFilterDialog.js) (hub de atendimentos) e [ContactFilterDialog.js](../web/static/js/components/contacts/ContactFilterDialog.js) (tela Contatos). Avaliação client-side via `clauseMatches` ([conversationRows.js](../web/static/js/services/conversationRows.js)) sobre as rows já carregadas (o campo `contact_type` vem no payload de `list_contacts` e no detalhe).
 - **Provider novo**: implemente `contact_type()` (ver `/new-channel`); sem override os contatos herdam `"outros"`.
+
+
+## O `ts` do inbound: por que ele é coagido em três camadas (plano 141)
+
+**Incidente (2026-08-18 → 2026-08-25, produção).** O operador relatou "tem uma
+conversa que abriu porém não tem nada nela". Não era uma conversa: era **todo o
+inbound 1:1 dos canais GOWA** sendo destruído havia 6 dias.
+
+O plano 129 passou a persistir o timestamp REAL do provedor
+(`ts = event.ts or None`) — desenho certo, guard incompleto: protegia contra
+**ausente/zero**, nunca contra **tipo**. Dos cinco providers, quatro coagiam o
+valor num `_to_float()` local. O quinto — o GOWA, o único que mora no core —
+repassava cru, e é o único que manda **string RFC 3339** (`"2026-08-24T17:43:58Z"`)
+em vez de epoch: 1.447 de 1.447 webhooks capturados na mesma forma.
+
+A cadeia da destruição:
+
+| # | Passo | Estado do `ts` |
+|---|---|---|
+| 1 | `gowa/inbound.py` monta o `InboundEvent` | **str** — sem coerção |
+| 2 | A dataclass aceita calada (`ts: float` é anotação, não enforcement) | **str** |
+| 3 | O item entra na fila do batch | **str** |
+| 4 | O batch é **consumido** (`pending_messages.pop`) **antes** do save | item já saiu da memória |
+| 5 | `message_repo.add`: `ts = ts or time.time()` | **str não-vazia é truthy ⇒ PASSA** |
+| 6 | INSERT em `messages.ts` (`Float`) | 💥 `InvalidTextRepresentation` |
+| 7 | Exceção engolida no orquestrador → só `executions.error` | **mensagem perdida** |
+
+⚠️ **O passo 5 é a armadilha central.** `ts = ts or time.time()` *parece* um guard
+de tipo e não é.
+
+⚠️ **O passo 4 é o que torna a falha irrecuperável.** O `pop` antes do save é
+intencional (plano 33 F6), mas significa que qualquer exceção depois dele destrói
+o item — não há retry possível sem duplicar mensagem.
+
+**O que mascarou por 6 dias:** os canais GOWA têm `allowed_jid_types` sem
+`group` (default de criação desde o plano 103), e ~99% do tráfego deles é grupo —
+descartado no portão de JID **antes** do ponto de crash. O portão não é o bug: é
+o anestésico. Marcar `group` teria transformado 1 mensagem/semana em centenas/dia.
+
+### A correção
+
+1. **Parser** — `_epoch(value)` em [gowa/inbound.py](../gowa/inbound.py) entende
+   epoch numérico, string numérica e RFC 3339; nunca levanta; ininterpretável
+   vira `0.0`, que a cadeia a jusante já traduz em `time.time()`.
+2. **Contrato** — `InboundEvent.__post_init__` ([channels/events.py](../channels/events.py))
+   força `ts` a float. Fecha a **classe**, não só este payload — inclusive para
+   provider de plugin de terceiro, que o core não revisa.
+3. **Repositório** — `message_repo.add` tenta `float(ts)` e, falhando, loga
+   `warning` e carimba `time.time()`. **Falha de carimbo nunca custa a mensagem.**
+
+⚠️ **O fallback é `time.time()`, nunca `0.0`.** Gravar `0.0` põe a mensagem em
+1970 e ela afunda para sempre no topo do fio (a thread ordena por `(ts, id)`).
+
+⚠️ **Fuso.** `datetime.fromisoformat` devolve objeto **naive** para uma string sem
+`Z`/offset, e `.timestamp()` de um naive assume **hora local** — em BRT isso
+desloca o carimbo em 3h. O helper carimba o naive como UTC de propósito. É a
+mesma armadilha que já mordeu na migração dos agendamentos de retorno.
+
+**Efeito visível a plugins:** `parsed_msg["ts"]` em `filter.message.before_save`
+passa de `str` para `float` nos canais GOWA. É correção, não regressão — todo
+consumidor já esperava número.
+
+Rede: `tests/integration/test_inbound_provider_ts_ordering.py` (os quatro testes
+do plano 141 falham sem a correção e passam com ela).

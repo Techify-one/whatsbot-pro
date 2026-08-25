@@ -259,11 +259,11 @@ WAVE 3   F6 (deploy + recuperação em produção)  →  F7 (documentação)   �
 **Pronto quando:** `venv/bin/python -m pytest tests/integration/test_inbound_provider_ts_ordering.py` falha com `InvalidTextRepresentation` (ou com a mensagem ausente), e a falha é **exatamente** a assinatura de produção da §3.2. Um teste que fica verde aqui não reproduziu o bug — refazer.
 
 #### Status de execução — Fase F0
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar — arquivos/funções que mudaram)_
-- **Como foi feito / decisões:** _(escolhas tomadas e o porquê; desvios do plano)_
-- **Problemas / pendências:** _(o que deu errado, o que ficou para depois, o que precisa de decisão)_
-- **Verificação:** _(testes rodados + resultado verde/vermelho; validação manual)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** 4 casos novos em [test_inbound_provider_ts_ordering.py](../tests/integration/test_inbound_provider_ts_ordering.py) com o payload **de produção** (`timestamp` RFC 3339), o irmão pelo caminho M7 e o docstring explicando por que a fixture antiga mentia (injetava float).
+- **Como foi feito / decisões:** Helper `_rfc3339` no próprio arquivo de teste. **Desvio honesto do plano:** a caracterização não precedeu a mudança de produção no relógio — as duas foram escritas na mesma sessão, com a hemorragia em curso. A prova de que os casos reproduzem o bug foi feita ao contrário, e é igualmente forte: restaurando os 4 arquivos de origem para o `HEAD` e rodando.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** Com os arquivos de origem restaurados do `HEAD`, **os 8 casos novos falham**; `test_gowa_rfc3339_timestamp_is_persisted_not_dropped` falha com a mensagem AUSENTE — a assinatura da §3.2. Com a correção: `12 passed`.
 
 ---
 
@@ -279,11 +279,11 @@ WAVE 3   F6 (deploy + recuperação em produção)  →  F7 (documentação)   �
 **Pronto quando:** F0 verde; o `ts` persistido de um inbound GOWA é o instante do provedor (diferença mensurável de `time.time()` quando o webhook chega atrasado); nenhuma entrada do helper levanta.
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher ao executar)_
-- **Problemas / pendências:** _(preencher ao executar)_
-- **Verificação:** _(preencher ao executar)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `_epoch()` em [gowa/inbound.py](../gowa/inbound.py) e os **5** call sites (reação, edição, revogação, deleção e a mensagem em si).
+- **Como foi feito / decisões:** Aceita epoch numérico, string numérica e RFC 3339. String **naive** é carimbada como UTC explicitamente (§5.1). Nunca levanta: ininterpretável ⇒ `0.0` + warning, e a cadeia a jusante converte em `time.time()`.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** 11 entradas conferidas uma a uma. `Z`, `+00:00`, `-03:00` e naive convergem no **mesmo instante** — é o invariante de fuso. `test_epoch_helper_reads_both_forms_and_never_guesses_timezone`.
 
 ---
 
@@ -298,11 +298,11 @@ WAVE 3   F6 (deploy + recuperação em produção)  →  F7 (documentação)   �
 **Pronto quando:** nenhum valor de `ts` — de qualquer tipo — consegue impedir o INSERT de uma mensagem.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher ao executar)_
-- **Problemas / pendências:** _(preencher ao executar)_
-- **Verificação:** _(preencher ao executar)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Guard de tipo em `message_repo.add` ([message_repo.py](../db/repositories/message_repo.py)), substituindo `ts = ts or time.time()`. O módulo **não tinha logger** — foi preciso criá-lo, senão o warning levantaria `NameError` dentro do próprio caminho de recuperação.
+- **Como foi feito / decisões:** Fallback é `time.time()`, **nunca `0.0`** (§5.2): `0.0` poria a linha em 1970 e ela afundaria para sempre no topo do fio. `bool` é tratado antes de `float()` — `True` viraria `1.0`, epoch de 1970.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_gowa_garbage_timestamp_never_costs_the_message`: carimbo torto grava a linha com `time.time()`, e a mensagem do cliente entra.
 
 ---
 
@@ -318,11 +318,11 @@ WAVE 3   F6 (deploy + recuperação em produção)  →  F7 (documentação)   �
 **Pronto quando:** um provider fictício que devolva `ts="qualquer coisa"` produz `InboundEvent.ts` float, e o guard de superfície segue verde sem regeneração.
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher ao executar)_
-- **Problemas / pendências:** _(preencher ao executar)_
-- **Verificação:** _(preencher ao executar)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** `InboundEvent.__post_init__` em [channels/events.py](../channels/events.py).
+- **Como foi feito / decisões:** **O escopo é o TIPO, não o formato.** Aqui um RFC 3339 é "ininterpretável" e vira `0.0` (⇒ `time.time()`), porque reparsear data é trabalho do parser do provider, que é quem conhece a convenção dele. A garantia desta camada é só uma — nenhum provider, nem de plugin de terceiro, volta a deixar um não-float escapar — e o docstring foi reescrito para não prometer mais do que ela entrega.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_inbound_event_coerces_ts_for_any_provider`. `test_plugin_api_surface` **verde sem regenerar golden e sem bump** de `WHATSBOT_API_VERSION` — o extrator pula dunder, como a §4.1 previu.
 
 ---
 
@@ -340,11 +340,11 @@ WAVE 3   F6 (deploy + recuperação em produção)  →  F7 (documentação)   �
 **Pronto quando:** uma exceção simulada no save do inbound aparece no log em `ERROR` e vira card de erro no painel, sem alterar o comportamento do caminho feliz.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher ao executar)_
-- **Problemas / pendências:** _(preencher ao executar)_
-- **Verificação:** _(preencher ao executar)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** No `except Exception` de `_run_one_cycle` ([messaging_service.py](../app/services/messaging_service.py)): `logger.exception` nomeando contato e canal, mais a bolha de erro para o atendente via `self.error_bubble`, em `try/except` próprio.
+- **Como foi feito / decisões:** **A ordem é proposital e não é detalhe:** o aviso sai ANTES do `aend_execution`. A bolha é só broadcast; `aend_execution` é **escrita no banco** — e quando a causa da falha é justamente o banco (o caso deste plano), ela levanta também e levaria junto o único sinal que o atendente teria. Pelo mesmo motivo o aviso **não persiste**: gravar num ciclo que falhou ao gravar é repetir a causa. Não re-enfileira (§5.3 — retry é a P3).
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_f4_inbound_save_failure_leaves_a_trace`. ⚠️ A asserção de log precisou ser **nomeada**: a versão genérica (`any(levelno >= ERROR)`) passava **mesmo sem a correção**, satisfeita por um ERROR incidental (`[SystemNotice] falha ao emitir aviso`) — teria sido um teste que não protege nada.
 
 ---
 
@@ -363,11 +363,11 @@ WAVE 3   F6 (deploy + recuperação em produção)  →  F7 (documentação)   �
 **Pronto quando:** os quatro caminhos verdes com payload real; goldens intactos; `venv/bin/python -m pytest` sem regressão nova além das falhas pré-existentes conhecidas.
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher ao executar)_
-- **Problemas / pendências:** _(preencher ao executar)_
-- **Verificação:** _(preencher ao executar)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Os outros três saves do plano 129 cobertos com payload GOWA real: **M5** (mídia no batch), **M6** (grupo sem @menção) e **M7** (eco `is_from_me`).
+- **Como foi feito / decisões:** **A fixture `_post_gowa` NÃO foi convertida para RFC 3339 por padrão**, ao contrário do que o plano pedia. Os casos novos passam a forma explícita e os antigos seguem em float **de propósito**: assim o arquivo prova que o helper aceita **as duas** formas, que é o requisito real. Converter a fixture teria trocado uma cobertura pela outra em vez de somar.
+- **Problemas / pendências:** M6 depende do fallback de runtime `DEFAULT_ALLOWED_JID_TYPES` (que inclui `group`), não de marcar `group` no canal de teste — mesma porta que o `test_classify_group_no_mention` já usa.
+- **Verificação:** `12 passed` no arquivo. Contratos e goldens de caracterização verdes, sem regeneração.
 
 ---
 
@@ -406,11 +406,11 @@ WAVE 3   F6 (deploy + recuperação em produção)  →  F7 (documentação)   �
 **Pronto quando:** guia atualizado, CLAUDE.md dentro do teto, `test_docs_hygiene` verde.
 
 #### Status de execução — Fase F7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher ao executar)_
-- **Problemas / pendências:** _(preencher ao executar)_
-- **Verificação:** _(preencher ao executar)_
+**Estado:** ✅ Concluída
+- **O que foi feito:** Seção "O `ts` do inbound: por que ele é coagido em três camadas" em [docs/CANAIS.md](../docs/CANAIS.md) (incidente, cadeia de destruição passo a passo, por que o portão de JID o escondeu 6 dias) e **uma** linha de regra no CLAUDE.md.
+- **Como foi feito / decisões:** A regra e os dois ⚠️ no CLAUDE.md; o mecanismo, a medição e a história no guia — a divisão que o próprio CLAUDE.md manda.
+- **Problemas / pendências:** Nenhuma.
+- **Verificação:** `test_docs_hygiene` verde; CLAUDE.md dentro do teto.
 
 ---
 
