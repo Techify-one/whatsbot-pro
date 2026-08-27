@@ -244,6 +244,28 @@ const AI_CONTENT_PREFIXES = [
   '[Conteúdo do documento]',
 ];
 
+// O carimbo de autor que o inbound de GRUPO põe no `content` ("[Fulano]: ") —
+// não há coluna de remetente, o nome da bolha sai daqui. Gêmeo do
+// `_SENDER_PREFIX_RE` de server/transcription.py.
+const SENDER_PREFIX_RE = /^\[[^\]\n]+\]: /;
+
+/**
+ * `true` quando o rótulo extraído de um `[X]: ` é da IA, não uma pessoa.
+ *
+ * Linha LEGADA de imagem em grupo: a descrição era colada ANTES do "[Fulano]: "
+ * e engolia o autor, então `stripGroupPrefix` devolvia "Descrição da imagem"
+ * como se fosse o remetente — e a bolha assinava com isso. O produtor foi
+ * corrigido (o autor volta a vir primeiro), mas as linhas já gravadas
+ * continuam no banco.
+ *
+ * @param {string|null} label
+ * @returns {boolean}
+ */
+export function isAiContentLabel(label) {
+  if (typeof label !== 'string') return false;
+  return AI_CONTENT_PREFIXES.some((p) => p === `[${label}]`);
+}
+
 // Placeholders que o backend grava quando a mídia não tem legenda nenhuma. Não
 // são texto do cliente — o balão já desenha a própria mídia.
 const MEDIA_PLACEHOLDERS = new Set([
@@ -282,6 +304,19 @@ export function mediaCaptionOf(message, displayContent) {
     ? displayContent
     : (message.content || '');
   if (typeof body !== 'string' || !body) return '';
+  // Grupo: o autor ("[Fulano]: ") vem NA FRENTE do bloco da IA. Superfícies que
+  // não descontam o prefixo antes de chamar (preview da sidebar, citação) veem
+  // o content cru — sem esta linha o guard abaixo não casaria e a descrição
+  // vazaria como se fosse legenda do cliente. Só desconta quando o que sobra É
+  // bloco da IA; legenda normal de grupo continua intocada.
+  const senderMatch = body.match(SENDER_PREFIX_RE);
+  if (senderMatch) {
+    const rest = body.slice(senderMatch[0].length);
+    // Mídia sem legenda em grupo: o content é SÓ o carimbo de autor, que é
+    // rótulo de bolha e não legenda.
+    if (!rest.trim()) return '';
+    if (AI_CONTENT_PREFIXES.some((p) => rest.startsWith(p))) return '';
+  }
   if (AI_CONTENT_PREFIXES.some((p) => body.startsWith(p))) return '';
   for (const p of AI_CONTENT_PREFIXES) {
     const at = body.indexOf('\n' + p);
