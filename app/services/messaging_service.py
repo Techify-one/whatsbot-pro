@@ -47,6 +47,7 @@ from server.helpers import parse_split_reply
 from server.transcription import (
     maybe_transcribe,
     format_media_content,
+    split_sender_prefix,
     placeholder_for_unrenderable,
 )
 from plugins.events import apply_filter, emit_with_filter
@@ -1543,6 +1544,13 @@ class MessagingService:
             # ── Media items (each handled individually) ─────
             for item in media_items:
                 text = item.get("text", "")
+                # Em grupo o ``text`` começa com o ``"[Fulano]: "`` que o painel
+                # usa como rótulo da bolha (não há coluna de remetente). A
+                # descrição da IMAGEM é colada prefix-first, então sem separar o
+                # nome aqui ele ia parar na 2ª linha e a bolha passava a assinar
+                # "Descrição da imagem" — ou o nome do grupo.
+                sender_prefix, caption_text = (
+                    split_sender_prefix(text) if contact.is_group else ("", text))
                 image_path = item.get("image_path")
                 audio_path = item.get("audio_path")
                 document_path = (item.get("media_path")
@@ -1633,7 +1641,9 @@ class MessagingService:
                     if audio_path:
                         new_content = format_media_content("audio", transcription)
                     elif image_path:
-                        new_content = format_media_content("image", transcription, text)
+                        new_content = format_media_content(
+                            "image", transcription, caption_text,
+                            sender_prefix=sender_prefix)
                     elif document_path:
                         new_content = format_media_content("document", transcription, text)
                     else:
@@ -1700,7 +1710,9 @@ class MessagingService:
                     else:
                         llm_text = llm_text or "[Áudio recebido]"
                 elif image_path and transcription:
-                    llm_text = format_media_content("image", transcription, text)
+                    llm_text = format_media_content(
+                        "image", transcription, caption_text,
+                        sender_prefix=sender_prefix)
                 elif document_path and transcription:
                     llm_text = format_media_content("document", transcription, text)
 

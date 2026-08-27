@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   SYSTEM_CARD_VARIANTS, isSystemCardRole, senderColor, quotedMediaText,
   isCollapsibleRole, collapsedPreview, cardStateKey, mediaCaptionOf,
-  isOperatorMessage,
+  isOperatorMessage, isAiContentLabel,
 } from './messageView.js';
 
 test('isSystemCardRole: all panel-only roles recognized', () => {
@@ -267,4 +267,44 @@ test('cardStateKey: _id=0 is a valid id (not falsy-skipped)', () => {
 
 test('cardStateKey: empty msg_id falls through to role:ts', () => {
   assert.equal(cardStateKey({ msg_id: '', role: 'transcription', ts: 7 }, 2), 'rt:transcription:7');
+});
+
+// ── carimbo de autor de grupo ("[Fulano]: ") ─────────────────────────
+// Não há coluna de remetente: o autor viaja no `content` e o painel o extrai
+// para o cabeçalho da bolha. Ele fica NA FRENTE do bloco da IA, então as
+// superfícies que leem o content cru (preview da sidebar, citação) precisam
+// descontá-lo antes de decidir o que é legenda do cliente.
+
+test('mediaCaptionOf: carimbo de autor sozinho não é legenda', () => {
+  assert.equal(mediaCaptionOf({ content: '[Luísa Maira]: ' }), '');
+  assert.equal(mediaCaptionOf({ content: '[Luísa Maira]:   ' }), '');
+});
+
+test('mediaCaptionOf: descrição da IA atrás do autor não vaza', () => {
+  assert.equal(
+    mediaCaptionOf({ content: '[Luísa Maira]: [Descrição da imagem]: duas janelas' }),
+    '',
+  );
+  assert.equal(
+    mediaCaptionOf({ content: '[Luísa Maira]: [Descrição da imagem]: duas janelas\nolha isso' }),
+    '',
+  );
+});
+
+test('mediaCaptionOf: legenda normal de grupo segue intocada', () => {
+  assert.equal(mediaCaptionOf({ content: '[Luísa Maira]: olha isso' }),
+               '[Luísa Maira]: olha isso');
+  // A bolha desconta o autor antes de chamar (displayContent).
+  assert.equal(mediaCaptionOf({ content: '[Luísa Maira]: olha isso' }, 'olha isso'),
+               'olha isso');
+});
+
+test('isAiContentLabel: só os rótulos da IA, nunca um nome de pessoa', () => {
+  for (const label of ['Descrição da imagem', 'Transcrição do áudio',
+                       'Conteúdo do documento']) {
+    assert.equal(isAiContentLabel(label), true, label);
+  }
+  for (const label of ['Luísa Maira', 'Descrição', '', null, undefined]) {
+    assert.equal(isAiContentLabel(label), false, String(label));
+  }
 });

@@ -1,6 +1,6 @@
 # Plano 133 — Login da Escola (LMS) vira plugin: o link de acesso sai pelo canal do WhatsBot, não pela Evolution
 
-> **Status:** PLANEJADO — nada implementado · **Data:** 2026-08-20 · **Escopo:** médio (plugin novo; **zero** mudança no core; o LMS só é tocado na fase de limpeza)
+> **Status:** F1–F6 EXECUTADAS (2026-08-24) — plugin escrito, testado (82 testes) e empacotado em `whatsbot-pro-plugins`; F0/F7/F8/F9 pendentes (infra, staging, cutover e limpeza do LMS) · **Data:** 2026-08-20 · **Escopo:** médio (plugin novo; **zero** mudança no core — confirmado: `git status` do core limpo; o LMS só é tocado na fase de limpeza)
 > **Origem:** pedido do usuário — transformar a automação de login por WhatsApp do LMS (`/opt/lms`, branch `main`, `8db74bb`) num plugin do WhatsBot Pro, com a **entrega da mensagem pelos canais do WhatsBot** em vez da Evolution API.
 > **Método:** leitura do código real dos dois lados; todo `arquivo:linha` abaixo foi verificado em 2026-08-20. LMS em `/opt/lms`; core em `~/opt/whatsbot-pro`; plugins em `~/opt/whatsbot-pro-plugins`. Plugin de referência: `criar_conta` 2.1.0 (frase-gatilho → chamada externa → resposta pelo canal da própria conversa).
 > **O quê/porquê:** hoje o LMS é, ele próprio, um mini-bot de WhatsApp: recebe webhook da Evolution numa rota pública, resolve o aluno, aprova o código de login e manda o link chamando a API da Evolution direto (`/opt/lms/backend/src/services/evolutionService.ts:27`). Isso deixa o LMS com uma responsabilidade que é do WhatsBot (falar com o cliente), duplica a camada de entrega e amarra o fluxo a um provedor só. Depois deste plano, o LMS volta a ser dono apenas de **aluno, token e código**; quem conversa é o canal do WhatsBot.
@@ -16,8 +16,8 @@
 | D2 ✅ (2026-08-20) | O **número** do WhatsApp que atende o login é configurado no plugin; **só o canal que tiver aquele número responde** | Resolução por `channels.own_phone` / `channels.account_identity` (`db/tables.py:281` e `:287`). Nenhum casamento ⇒ **fail-closed**: plugin inerte, nunca "chuta" o canal único |
 | D3 ✅ (2026-08-20) | O gatilho é **o código de login + uma lista de frases**, nunca catch-all | O `loginHandler` do LMS é catch-all (`matches: () => true`, `/opt/lms/backend/src/services/messageHandlers/loginHandler.ts:283`). Portar isso sequestraria TODA mensagem de qualquer contato que exista como aluno, e a IA/atendente nunca mais responderiam esses contatos |
 | D4 ✅ (2026-08-20) | A automação da Evolution **fica no ar em paralelo** e só é removida depois do cutover validado | F9 é uma fase separada, com PR próprio no LMS |
-| D5 (proposta, confirmar) | A resposta é enviada **sempre**, sem exigir o gate de IA da conversa | O aluno está parado na tela de login esperando o link; calar por causa de um atendente atribuído quebraria o fluxo. Fica um toggle `respeitar_gate_ia`, default `false` |
-| D6 (proposta, confirmar) | O plugin **assume o turno**: grava a mensagem do aluno e a resposta, e aborta o pipeline | Mesmo desenho do `criar_conta` (`plugins/criar_conta/src/filters.py:112`): devolver `None` em `filter.message.before_save` impede save do lote **e** chamada ao LLM |
+| D5 ✅ (2026-08-24) | A resposta é enviada **sempre**, sem exigir o gate de IA da conversa | O aluno está parado na tela de login esperando o link; calar por causa de um atendente atribuído quebraria o fluxo. Fica um toggle `respeitar_gate_ia`, default `false` |
+| D6 ✅ (2026-08-24) | O plugin **assume o turno**: grava a mensagem do aluno e a resposta, e aborta o pipeline | Mesmo desenho do `criar_conta` (`plugins/criar_conta/src/filters.py:112`): devolver `None` em `filter.message.before_save` impede save do lote **e** chamada ao LLM |
 | D7 ✅ | **Zero mudança no core do WhatsBot** | Tudo no plugin, imports defensivos, tabela `plugin_lms_login_*` — regra do `CLAUDE.md` §"O que fica no core e o que vai pro plugin" |
 | D8 ✅ | O **front do LMS não muda** | `LoginPage.tsx`, o polling de status e a tabela `login_codes` continuam iguais. Em produção muda **um setting**: `whatsapp_login_link` passa a apontar para o número do WhatsBot |
 
@@ -240,42 +240,42 @@ Regras duras do plugin: nunca responde em grupo; nunca responde em canal diferen
 2. Liberar a rota de rede do container do WhatsBot até o Postgres do LMS (Coolify) e confirmar com um `SELECT 1`.
 3. Definir qual canal/número vai atender o login.
 
-**Status de execução:** NÃO INICIADA · **Bloqueia:** F2 em diante · **Dono:** usuário
+**Status de execução:** NÃO INICIADA · **Bloqueia:** F7 em diante (não bloqueou F1–F6: as queries foram validadas contra um Postgres de teste com o schema real do LMS recriado num schema próprio) · **Dono:** usuário
 
 ### F1 — Esqueleto do plugin
 `/new-plugin` no `whatsbot-pro` gerando `plugins/lms_login/` com manifesto, `settings.py`, `conf.py` (cache 30 s + variantes BR) e `migrations/001_initial.sql`. Sem lógica de negócio ainda; o plugin carrega, aparece no card e é inerte.
 
-**Status de execução:** NÃO INICIADA
+**Status de execução:** ✅ CONCLUÍDA (2026-08-24). `~/opt/whatsbot-pro-plugins/plugins/lms_login/` com `plugin.yaml` (`entry: filters + settings`, `migrations`), `conf.py` (cache 30 s, variantes BR, gatilho, templates — tudo puro), `settings.py` e `migrations/001_initial.sql`. ⚠️ **Desvio obrigatório do §3.7:** o migrator valida o prefixo `plugin_<id>_` também em `CREATE INDEX` ([plugins/migrator.py:41](../plugins/migrator.py#L41)), então o índice proposto `idx_plugin_lms_login_requests_phone_ts` seria RECUSADO — o nome real é `plugin_lms_login_requests_phone_ts`.
 
 ### F2 — `lms.py`: leitura e escrita no LMS
 Engine, as quatro queries de §3.4, decisão pura `(aluno, código, site_url) → status + variáveis da mensagem`. Nenhum import do core.
 
-**Status de execução:** NÃO INICIADA
+**Status de execução:** ✅ CONCLUÍDA (2026-08-24). Módulo folha (só `sqlalchemy`), engine própria com `connect_timeout=5`/`statement_timeout=8s`/`prepare_threshold=None`, as quatro queries de §3.4 e a decisão PURA `decide()` com os sete desfechos. Acrescentado `smoke_test()` (mitigação do R1): valida conexão, as três tabelas, as colunas e o `GRANT` de `UPDATE` em `login_codes`. `dsn_from` carrega a senha e nunca é logado; `fingerprint()` é a identidade da conexão SEM a senha.
 
 ### F3 — `delivery.py` + `filters.py`: entrega no canal
 Resolução do canal pelo número (§3.3), envio pelo `OutboundRouter`, marcação dos caches de eco, `save_and_broadcast`, e o `filter.message.before_save` com os cortes baratos na ordem de §3.2.
 
-**Status de execução:** NÃO INICIADA
+**Status de execução:** ✅ CONCLUÍDA (2026-08-24). Resolução do canal por `own_phone`/`account_identity` (`kind='phone'`) com variantes BR e cache de 30 s — nenhum canal casando **ou mais de um** deixa o plugin inerte; envio pelo `OutboundRouter` com marcação dos dois caches de eco; `save_and_broadcast` com `conversation_id`; `close_conversation` pelo `conversation_service` (toggle `encerrar_conversa`). O filtro corta na ordem: grupo/**mídia**/texto vazio → gatilho (puro) → configuração → canal → contato → anti-abuso → LMS → envio → trilha. ⚠️ O corte por **mídia** não estava no plano e é obrigatório: assumir o turno de uma mensagem com anexo perderia o anexo, já que o pipeline que o gravaria é justamente o que abortamos.
 
 ### F4 — Anti-abuso, auditoria e trilha
 Cooldown por telefone, tabela `plugin_lms_login_requests`, `audit("lms_login", "acesso.enviar", ...)`.
 
-**Status de execução:** NÃO INICIADA
+**Status de execução:** ✅ CONCLUÍDA (2026-08-24). Módulo `store.py` (a mais do que os 5 arquivos de §3.1: a tabela do plugin não é nem configuração nem canal) com `cooldown_verdict()` PURA devolvendo `ok`/`warn`/`silent`. **P3:** estourado o limite, o aluno recebe `msg_limite_excedido` UMA vez por janela; as repetições seguintes são recusadas em SILÊNCIO — senão uma rajada de entrada viraria uma rajada de saída no próprio número. Linhas com status `cooldown`/`error`/`ai_blocked` não realimentam o teto (quem insistisse ficaria preso para sempre). `audit("lms_login", "acesso.enviar", ...)` com `resource_id` no default (`plugin:lms_login`) — não é plugin de canal, e quem investiga quer todas as entregas numa lista só.
 
 ### F5 — Testes
 `python3 scripts/test_plugins.py lms_login`. Puros: casamento de gatilho (código, frase, ruído), variantes BR, render de template, decisão a partir de linhas simuladas, resolução de canal por número. **Mais um teste que sobe o app pelo loader real e injeta um inbound** — teste que só importa o módulo por caminho continua verde com a costura arrancada.
 
-**Status de execução:** NÃO INICIADA
+**Status de execução:** ✅ CONCLUÍDA (2026-08-24). **82 testes verdes** em duas execuções seguidas (`python3 scripts/test_plugins.py lms_login`). Puros: gatilho (frase, frase+código anexado, código sozinho, sem acento/caixa, ruído), variantes BR, templates, os sete desfechos de `decide`, DSN/fingerprint, anti-abuso, casamento de canal. Contra **Postgres de verdade** (schema `lms_login_test` com o DDL real das migrations 001/009/040 do LMS): aprovação atômica, expiração pelo relógio do banco, código já consumido, aluno pelo 9º dígito, revogado, `site_url` ausente, override, banco fora do ar e o teste de fumaça. Costura: filtro registrado pelo loader real com prioridade < 100 e **dois testes ponta a ponta pela rota `/api/webhook/gowa/default`** — um com gatilho (entrega o link e grava as bolhas) e um sem (o ingest segue intacto). Mais o formulário pelo endpoint real e o mascaramento de `password` na trilha.
 
 ### F6 — Empacotar e publicar
 `python3 scripts/build_plugins.py lms_login`, `--check`, entrada em `catalog.json`, `lms_login.json` e no README do repo de plugins. Fonte, testes, metadados e ZIP no mesmo commit.
 
-**Status de execução:** NÃO INICIADA
+**Status de execução:** ✅ CONCLUÍDA (2026-08-24). `lms_login.zip` (9 arquivos, 28.649 bytes, sha256 `623daca5…`) gerado e conferido com `--check`; sem testes dentro. `lms_login.json`, entrada em `catalog.json` e linha na tabela do `README.md` do repositório de plugins. **Falta o commit/push** — aguardando o seu ok.
 
 ### F7 — Validação em staging
 Importar o `.zip`, configurar, parear o número de teste e percorrer os 7 casos de §3.6 com a LoginPage real (código gerado pela tela, redirect do navegador ao final).
 
-**Status de execução:** NÃO INICIADA
+**Status de execução:** NÃO INICIADA (depende da F0)
 
 ### F8 — Cutover em produção
 Trocar o setting `whatsapp_login_link` do LMS para o número do WhatsBot (`/opt/lms/backend/migrations/017_add_whatsapp_login_link.sql` é só o seed; o valor vivo está na tabela `settings`). Monitorar `plugin_lms_login_requests` e `webhook_logs`.
@@ -309,17 +309,10 @@ Tela de histórico dos envios para o suporte ("o aluno diz que não recebeu"); c
 ## 6. Perguntas em aberto
 
 - **P1 — Rede e credencial (bloqueante):** o Postgres do LMS aceita conexão do container do WhatsBot? O role `lms_whatsbot` será criado como em §3.4?
-- **P2 — Frases-gatilho:** além de "Me envie o Link da Escola da Automação" (texto atual do `wa.me`), quais entram no default?
-- **P3 — Anti-abuso:** 6 envios/hora por telefone com 60 s entre eles serve? Ao estourar: silêncio ou mensagem "aguarde um instante"?
-- **P4 — `whatsapp_student_not_found`:** manter o disparo (o plugin faria POST no `webhook_url` do LMS) ou basta a linha em `plugin_lms_login_requests`? Decidir com:
-  ```sql
-  SELECT value FROM settings WHERE key = 'webhook_url';
-  SELECT created_at, http_status, succeeded, error_message
-    FROM webhook_logs WHERE event_type = 'whatsapp_student_not_found'
-    ORDER BY created_at DESC LIMIT 20;
-  ```
-  Sem linhas ou tudo com `succeeded = false` ⇒ evento morto, não reproduzir.
-- **P5 — D5/D6:** confirmar "responde sempre" (gate de IA desligado por padrão) e "o plugin assume o turno".
+- **P2 ✅ (2026-08-24) — Frases-gatilho:** só a frase atual do `wa.me`. O casamento é por **CONTÉM**, aparado, sem diferenciar caixa **nem acento** — igualdade exata não serviria, porque a `LoginPage` anexa `\n\nCodigo de login: NNNNNN` ao MESMO texto. Outras frases entram pela tela, uma por linha.
+- **P3 ✅ (2026-08-24) — Anti-abuso:** 6/hora com 60 s entre eles (ambos configuráveis, 0 desliga). Ao estourar: mensagem "aguarde um instante" UMA vez por janela, depois silêncio.
+- **P4 ✅ (2026-08-24) — `whatsapp_student_not_found`:** NÃO reproduzido. Basta a linha `status='student_not_found'` em `plugin_lms_login_requests` mais a bolha no atendimento. Consequência: o role `lms_whatsbot` fica exatamente como em §3.4 (sem `INSERT` em `webhook_logs`).
+- **P5 ✅ (2026-08-24) — D5/D6:** confirmados como propostos. `respeitar_gate_ia` nasce `false` e o plugin assume o turno (grava a bolha do aluno, responde e devolve `None`).
 
 ---
 

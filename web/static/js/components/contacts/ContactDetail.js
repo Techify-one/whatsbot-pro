@@ -34,7 +34,7 @@ import { useChatDayHeader } from './hooks/useChatDayHeader.js';
 import { PILL_TRAVEL } from '../../services/chatDayHeader.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
-import { senderColor, quotedMediaText, cardStateKey, isCollapsibleCard, isOperatorMessage } from '../../services/messageView.js';
+import { senderColor, quotedMediaText, cardStateKey, isCollapsibleCard, isOperatorMessage, isAiContentLabel } from '../../services/messageView.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { transitionAfterOutput } from '../../services/outputTransition.js';
 import { submitPlan, isAudioOnly } from '../../services/composerSubmit.js';
@@ -726,7 +726,11 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     let qSender = null;
     if (qIsUser && isGroupChat && typeof text === 'string') {
       const { sender, text: stripped } = stripGroupPrefix(text);
-      if (sender != null) { qSender = sender; text = stripped; }
+      // Mesmo guard da bolha: numa linha LEGADA de imagem descrita, o bloco da
+      // IA vinha na frente e engolia o autor — "Descrição da imagem" não é
+      // remetente, e manter o content intacto deixa `quotedMediaText` (via
+      // `mediaCaptionOf`) reconhecê-lo e mostrar o rótulo da mídia.
+      if (sender != null && !isAiContentLabel(sender)) { qSender = sender; text = stripped; }
     }
     text = quotedMediaText(qmsg, text);
     const fromMe = sandbox ? qIsUser : !qIsUser;

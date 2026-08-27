@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from plugins.events import apply_filter
 
@@ -120,7 +121,28 @@ def modes_for(settings, media_kind: str) -> set[str]:
     return {"received"}
 
 
-def format_media_content(media_kind: str, transcription: str, text: str = "") -> str:
+# O prefixo com que o inbound de GRUPO carimba o autor da mensagem dentro do
+# ``content`` (``gowa/inbound.py``: ``"[Fulano]: <texto>"``). Não há coluna de
+# remetente — o painel extrai o nome daqui (``stripGroupPrefix``), então ele tem
+# de continuar sendo o PRIMEIRO elemento do content mesmo depois da reescrita da
+# IA. O casamento exige ``"]: "``, então rótulos como ``"[Documento recebido:
+# x.pdf]"`` ou ``"[Imagem enviada]"`` não passam por remetente.
+_SENDER_PREFIX_RE = re.compile(r"^(\[[^\]\n]+\]: )")
+
+
+def split_sender_prefix(text: str | None) -> tuple[str, str]:
+    """Separa o ``"[Fulano]: "`` de grupo do resto do texto.
+
+    Devolve ``(prefixo, resto)``; ``("", text)`` quando não há prefixo. Puro —
+    não sabe se a conversa é grupo, quem decide é o chamador.
+    """
+    body = text or ""
+    m = _SENDER_PREFIX_RE.match(body)
+    return (m.group(1), body[m.end():]) if m else ("", body)
+
+
+def format_media_content(media_kind: str, transcription: str, text: str = "",
+                         *, sender_prefix: str = "") -> str:
     """Combine an existing text body with a media transcription/description.
 
     Single source of the ``[Transcrição]/[Descrição]/[Conteúdo]`` prefixing used
@@ -132,13 +154,21 @@ def format_media_content(media_kind: str, transcription: str, text: str = "") ->
 
     With an empty ``text`` (all media-only sites) the result is just the prefixed
     transcription, identical to the previous inline code.
+
+    ⚠️ ``sender_prefix`` (o ``"[Fulano]: "`` de grupo, via
+    :func:`split_sender_prefix`) é reposto NA FRENTE de tudo. Só a imagem precisa
+    dele: ela é a única cuja junção é prefix-first, então o bloco da IA empurrava
+    o nome do autor para a 2ª linha e a bolha passava a assinar "Descrição da
+    imagem" (ou o nome do grupo). Áudio/documento são text-first — o prefixo já
+    sobrevive naturalmente e o chamador não precisa passar nada.
     """
     prefix = f"{_MEDIA_PREFIX[media_kind]}{transcription}"
-    if not text:
-        return prefix
     if media_kind == "image":
-        return f"{prefix}\n{text}"
-    return f"{text}\n{prefix}"
+        body = f"{prefix}\n{text}" if text else prefix
+        return f"{sender_prefix}{body}"
+    if not text:
+        return f"{sender_prefix}{prefix}" if sender_prefix else prefix
+    return f"{sender_prefix}{text}\n{prefix}"
 
 
 # Media kinds the panel knows how to render on its own (see
