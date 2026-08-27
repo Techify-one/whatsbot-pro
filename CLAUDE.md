@@ -508,7 +508,7 @@ O inbound é convertido em `parsed_msg` (`media_type` + `media_path` + `media_ex
 
 Use o slash command **`/new-plugin`** (ou **`/new-channel`** para um provider). Ele gera a estrutura em `../whatsbot-pro-plugins/plugins/<id>/`, com fonte em `src/` e testes fora do artefato.
 
-- **Export**: `GET /api/plugins/<id>/export` devolve `.zip` da pasta (sem `__pycache__/` e `.db`).
+- **Export**: `GET /api/plugins/<id>/export` devolve `.zip` da pasta (sem `__pycache__/` e `.db`), nomeado `<id>-<versao>-plugin.zip` — cai em `<id>-plugin.zip` se o manifesto não for legível (inclusive quando o `whatsbot_api_version` é incompatível com o core rodando). O nome do arquivo NÃO participa do import, que lê o `id` do manifesto de dentro do zip.
 - **Import**: `POST /api/plugins/import` exige manifest único na raiz, checa colisão de `id` e path traversal, extrai em `storages/plugins/<id>/` e deixa `enabled=0` até o usuário ativar.
 - **Build publicado**: no repositório `whatsbot-pro-plugins`, `python3 scripts/build_plugins.py <id>|--all`; `--check` valida que o `.zip` corresponde byte a byte a `src/`.
 
