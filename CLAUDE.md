@@ -15,7 +15,7 @@ Este arquivo carrega a **regra**; o **porquê** (histórico, medições, o que e
 | motor AGNO, agentes, roteamento, gate do humano, transcrição | [docs/IA.md](docs/IA.md) |
 | compositor, bandeja de anexo, thread, rascunho, sidebar | [docs/UI_CONVERSA.md](docs/UI_CONVERSA.md) |
 | endpoint REST, evento WebSocket, chave de API (`X-Api-Key`), fachada `/api/v1`, webhook de saída | [docs/API_REST.md](docs/API_REST.md) |
-| tema, contraste, modo escuro | [docs/FRONTEND.md](docs/FRONTEND.md) |
+| tema, contraste, modo escuro, **largura/transbordo de coluna flex (`min-w-0`)** | [docs/FRONTEND.md](docs/FRONTEND.md) |
 | deploy, persistência de disco, IP atrás de proxy, echo do provider | [docs/OPERACAO.md](docs/OPERACAO.md) · [docs/DEPLOY_COOLIFY.md](docs/DEPLOY_COOLIFY.md) |
 | rodar ou escrever teste | [docs/TESTES.md](docs/TESTES.md) |
 | auditoria de plugin · versão da API de plugins · modelo de dados | [docs/PLUGINS_AUDITAVEIS.md](docs/PLUGINS_AUDITAVEIS.md) · [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md) · [docs/MODELO_DE_DADOS.md](docs/MODELO_DE_DADOS.md) |
