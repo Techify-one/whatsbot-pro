@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import Depends, Request
+from fastapi import Depends, File, Form, Request, UploadFile
 
 from db.repositories import (contact_repo, conversation_repo, inbox_repo,
                              message_repo)
@@ -158,6 +158,206 @@ def register_routes(app, deps):
                 "conversation_id": result.get("conversation_id"),
                 "channel_id": result.get("channel_id"),
                 "sandbox": result.get("sandbox", False)}
+
+
+    # ── Envio de MÍDIA (plano 151 · F5) ──────────────────────────────────────
+    #
+    # Duas rotas, não uma: o FastAPI não declara um corpo que seja
+    # ``multipart/form-data`` E ``application/json`` com parâmetros tipados, e
+    # despachar na mão por ``Content-Type`` sobre um ``Request`` cru mentiria no
+    # ``openapi.json`` — que é valor DECLARADO desta fachada ("pronto para
+    # codegen"). Duas rotas mantêm o schema honesto.
+
+    async def _send_media(request: Request, *, phone: str, kind: str,
+                          data: bytes, filename: str | None,
+                          content_type: str | None, caption: str,
+                          conversation_id, channel_id) -> dict:
+        """Cauda comum das duas rotas — valida, resolve o alvo e delega.
+
+        Chama ``MessagingService.send_media_upload``, a MESMA função das quatro
+        rotas do painel (R-media). Uma segunda implementação mandaria para o JID
+        errado, fora da janela do canal, sem calar a IA — e nada disso apareceria
+        como erro.
+        """
+        from app.services.messaging_service import MEDIA_KINDS
+
+        if not phone:
+            raise V1Error("Campo 'phone' é obrigatório.", code="missing_field")
+        if kind not in MEDIA_KINDS:
+            raise V1Error(
+                "Campo 'kind' inválido. Use um de: " + ", ".join(MEDIA_KINDS) + ".",
+                code="invalid_kind")
+        if kind == "audio" and (caption or "").strip():
+            # Recusar em vez de descartar em silêncio: ``/send/audio`` é nota de
+            # voz (PTT) e o protocolo não carrega legenda. Aceitar-e-descartar
+            # faria o integrador descobrir pelo relato do cliente, não na 1ª
+            # chamada. (O painel não tem esse campo, então lá não há como errar.)
+            raise V1Error(
+                "Áudio é enviado como nota de voz e não aceita legenda. "
+                "Envie a legenda como uma mensagem de texto separada.",
+                code="caption_not_supported")
+        if not data:
+            raise V1Error("O arquivo está vazio.", code="empty_file")
+
+        try:
+            conv_id, chan_id = await asyncio.to_thread(
+                _resolve_target, phone, conversation_id, channel_id)
+        except AmbiguousTarget as e:
+            raise V1Error(
+                "Este contato tem conversa aberta em mais de uma caixa. Informe "
+                "'conversation_id' ou 'channel_id' para escolher por onde enviar.",
+                status=409, code="ambiguous_target", details={"options": e.options})
+        if conversation_id and conv_id is None:
+            raise not_found("Conversa não encontrada.")
+
+        async def _inbox_guard():
+            from app.services.messaging_service import resolve_inbox_id
+            inbox_id = await asyncio.to_thread(resolve_inbox_id, conv_id, chan_id)
+            from server import authz
+            if not authz.can_access_inbox(request, inbox_id):
+                return {"ok": False, "reason": "inbox_forbidden", "status": 403,
+                        "message": "Sem acesso a esta caixa de entrada."}
+            return None
+
+        user = getattr(request.state, "user", None)
+        result = await messaging.send_media_upload(
+            phone=phone, kind=kind, data=data, filename=filename,
+            content_type=content_type, caption=caption,
+            conversation_id=conv_id, channel_id=chan_id,
+            sent_by_user_id=(user.get("id") if user else None),
+            sent_by_name=(user.get("name") if user else None),
+            inbox_guard=_inbox_guard)
+        if not result.get("ok"):
+            raise V1Error(result["message"], status=result.get("status", 400),
+                          code=result.get("reason") or "send_failed")
+        return {"sent": True, "msg_id": result.get("msg_id"),
+                "conversation_id": result.get("conversation_id"),
+                "channel_id": result.get("channel_id"),
+                "kind": result.get("kind"),
+                "media_path": result.get("media_path"),
+                "sandbox": result.get("sandbox", False)}
+
+    @app.post(f"{V1_PREFIX}/messages/media", status_code=201, tags=["messages"],
+              summary="Enviar mídia (upload multipart)",
+              dependencies=[Depends(require("conversation.reply"))])
+    async def send_media_message(
+        request: Request,
+        file: UploadFile = File(...),
+        phone: str = Form(""),
+        kind: str = Form(""),
+        caption: str = Form(""),
+        filename: str = Form(""),
+        conversation_id: str = Form(""),
+        channel_id: str = Form(""),
+    ):
+        """Envia imagem, áudio, documento ou vídeo pelos MESMOS trilhos do painel.
+
+        Corpo `multipart/form-data`: `file` (o arquivo), `phone`, `kind`
+        (`image` · `audio` · `document` · `video`), `caption` (opcional; **não**
+        aceita em `audio`), `filename` (opcional — o nome que o destinatário vê;
+        default: o nome da parte enviada), `conversation_id` **ou** `channel_id`
+        (recomendado em instalação multicanal).
+
+        ⚠️ **`kind` é seu, e nunca é deduzido do tipo do arquivo.** Mandar um
+        `.png` com `kind=document` entrega a imagem **como arquivo**, sem
+        recompressão — é assim que se preserva a qualidade de um certificado, um
+        comprovante ou uma arte. Com `kind=image` a mesma foto é recomprimida
+        pelo WhatsApp. Os dois caminhos existem de propósito.
+
+        Respostas notáveis: **409** `session_window_closed` (fora da janela num
+        canal Meta) e `ambiguous_target` (o número tem conversa aberta em mais de
+        uma caixa); **413**/**415** quando o canal declara limite de tamanho ou
+        formato para aquele `kind`; **403** quando o dono da chave não é membro
+        da caixa de destino.
+        """
+        return await _send_media(
+            request, phone=(phone or "").strip(), kind=(kind or "").strip(),
+            data=await file.read(),
+            filename=(filename or "").strip() or file.filename,
+            content_type=file.content_type, caption=caption or "",
+            conversation_id=conversation_id, channel_id=channel_id)
+
+    @app.post(f"{V1_PREFIX}/messages/media/link", status_code=201, tags=["messages"],
+              summary="Enviar mídia por URL ou base64",
+              dependencies=[Depends(require("conversation.reply"))])
+    async def send_media_link(body: dict, request: Request):
+        """Mesma entrega da rota multipart, para quem já tem o arquivo em outro lugar.
+
+        Corpo JSON: `phone`, `kind`, **`url` OU `content_base64`** (nunca os
+        dois), `filename` (**obrigatório** — ver abaixo), `caption`,
+        `content_type`, `conversation_id`/`channel_id`.
+
+        ⚠️ **`filename` é obrigatório aqui.** O tipo que o WhatsApp anuncia ao
+        destinatário sai da extensão desse nome; sem ela o arquivo chega como
+        anexo genérico (`application/octet-stream`) e o cliente não consegue
+        abri-lo com um duplo clique.
+
+        **A URL é buscada pelo servidor, com guards.** Só `http`/`https`,
+        redirecionamento **não** é seguido, o teto de tamanho vale durante o
+        download (não no `Content-Length` declarado), timeout de 10 s, e todo
+        endereço interno é recusado — rede privada, loopback e o endpoint de
+        metadados da nuvem. Uma URL bloqueada devolve **400 `blocked_host`**, não
+        um 500.
+
+        Prefira o multipart quando o arquivo estiver em memória (é o caso de um
+        Worker que acabou de gerar um PDF): `url` exige o arquivo publicamente
+        alcançável e `content_base64` infla o corpo em ~33%.
+        """
+        import base64
+        import mimetypes
+
+        from server.upload_limits import (MAX_UPLOAD_BYTES, base64_exceeds,
+                                          too_large_message)
+
+        phone = (body.get("phone") or "").strip()
+        if not phone:
+            raise V1Error("Campo 'phone' é obrigatório.", code="missing_field")
+        name = (body.get("filename") or "").strip()
+        if not name:
+            raise V1Error(
+                "Campo 'filename' é obrigatório (a extensão dele define o tipo "
+                "que o destinatário vê).", code="missing_field")
+
+        url = (body.get("url") or "").strip()
+        encoded = (body.get("content_base64") or "").strip()
+        if url and encoded:
+            raise V1Error("Informe 'url' OU 'content_base64', nunca os dois.",
+                          code="conflicting_source")
+        if not url and not encoded:
+            raise V1Error("Informe 'url' ou 'content_base64'.", code="missing_field")
+
+        content_type = (body.get("content_type") or "").strip() or None
+        if encoded:
+            # O teto é medido no COMPRIMENTO DA STRING: decodificar para depois
+            # medir já colocou o arquivo inteiro na RAM, que é o que o teto
+            # existe para impedir. Este caminho não passa pelo middleware de
+            # upload (o corpo é JSON, não multipart).
+            if base64_exceeds(encoded):
+                raise V1Error(too_large_message(), status=413, code="too_big")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError):
+                raise V1Error("'content_base64' não é base64 válido.",
+                              code="invalid_base64") from None
+        else:
+            from app.services.remote_media import (RemoteMediaError, TOO_BIG,
+                                                   fetch_remote_media)
+            try:
+                data, observed = await fetch_remote_media(
+                    url, max_bytes=MAX_UPLOAD_BYTES)
+            except RemoteMediaError as e:
+                raise V1Error(e.message,
+                              status=(413 if e.reason == TOO_BIG else 400),
+                              code=e.reason) from None
+            content_type = content_type or observed
+
+        content_type = content_type or mimetypes.guess_type(name)[0]
+        return await _send_media(
+            request, phone=phone, kind=(body.get("kind") or "").strip(),
+            data=data, filename=name, content_type=content_type,
+            caption=body.get("caption") or "",
+            conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"))
 
     @app.get(f"{V1_PREFIX}/conversations/{{conv_id}}/messages", tags=["messages"],
              summary="Ler a thread de uma conversa (paginada)",

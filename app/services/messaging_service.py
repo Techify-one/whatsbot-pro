@@ -35,6 +35,8 @@ import random
 import time
 from dataclasses import dataclass
 
+from pathlib import Path
+
 from channels import ai_settings
 from db.repositories import agent_repo, contact_repo, conversation_repo, message_repo
 from agent import group_mentions
@@ -44,6 +46,7 @@ from server.execution import (
     astamp_execution_channel, aset_execution_texts, set_current_contact_id,
 )
 from server.helpers import parse_split_reply
+from server.upload_names import unique_media_name
 from server.transcription import (
     maybe_transcribe,
     format_media_content,
@@ -204,6 +207,105 @@ def session_window_block(outbound, channel_id, conversation_id, phone=None) -> d
         msg = ("Fora da janela de mensagens deste canal: aguarde o cliente "
                "responder para voltar a enviar mensagens.")
     return {"message": msg, "reason": "session_window_closed"}
+
+
+def media_limits_block(outbound, channel_id: str, kind: str, filename: str,
+                       size: int) -> dict | None:
+    """Veredito dos limites que o CANAL declara para ``kind`` (plano 151 · I3).
+
+    Irmão exato de :func:`session_window_block`: ``None`` = pode enviar, e o
+    bloqueio devolve ``{"message", "reason", "status"}`` — um veredito de
+    DOMÍNIO, não um ``JSONResponse``. Era uma closure em ``contacts.py`` que já
+    embrulhava no ``_err``, forma que a fachada ``/api/v1`` não tem como mapear
+    (ela tem DTO próprio).
+
+    Dirigido por capability, nunca por nome de provider: canal que não declara
+    limite para o kind (GOWA/Telegram) nunca é bloqueado. Roda ANTES de o upload
+    ir para o disco, então um envio bloqueado não deixa órfão em
+    ``statics/outbox/``.
+    """
+    from channels import media_limits as _media_limits
+    verdict = _media_limits.validate_upload(
+        filename, size, outbound.capabilities(channel_id), kind)
+    if verdict.ok:
+        return None
+    return {"message": verdict.message, "reason": verdict.reason,
+            "status": 413 if verdict.reason == _media_limits.TOO_BIG else 415}
+
+
+# ── A tabela por-``kind`` do envio de mídia (plano 151 · §2.2) ───────────────
+#
+# Isto É a regra, e por isso mora num lugar só. Cada rota de mídia do painel
+# montava seis parâmetros diferentes para a MESMA chamada de :meth:`send_media`;
+# a fachada ``/api/v1`` seria a quinta cópia. Duas cópias de uma tabela como esta
+# divergem em silêncio — o precedente no repo são as duas de ``send_template``,
+# que só foram reunidas no plano 119.
+#
+# ``body(caption, safe_name) -> (content, emit_text)``:
+#   * ``content``   — o que é PERSISTIDO e vira a bolha do painel;
+#   * ``emit_text`` — o texto do evento ``message.sent`` (plugin lê daqui).
+# Os dois divergem de propósito no áudio e no documento.
+_MEDIA_KIND_SPEC: dict[str, dict] = {
+    "image": {
+        "default_ext": ".png", "fallback_name": "img.png",
+        "error_label": "imagem", "transcribe": True,
+        "send_caption": True, "send_filename": False,
+        "body": lambda caption, name: (caption, caption),
+    },
+    "audio": {
+        # Nota de voz (PTT): ``/send/audio`` não aceita legenda, então a legenda
+        # NÃO é repassada — e o texto emitido é vazio, não "[Áudio]" (um plugin
+        # que leia ``text`` não deve receber um rótulo de UI).
+        "default_ext": ".ogg", "fallback_name": "voice.ogg",
+        "error_label": "áudio", "transcribe": True,
+        "send_caption": False, "send_filename": False,
+        "body": lambda caption, name: ("[Áudio]", ""),
+    },
+    "document": {
+        # A legenda NÃO substitui o rótulo: ela é anexada, para a bolha do painel
+        # continuar dizendo QUAL arquivo foi enviado.
+        "default_ext": ".bin", "fallback_name": "arquivo",
+        "error_label": "documento", "transcribe": False,
+        "send_caption": True, "send_filename": True,
+        "body": lambda caption, name: (
+            f"[Documento enviado: {name}]"
+            + (f"\n{caption.strip()}" if caption.strip() else ""),
+            caption),
+    },
+    "video": {
+        "default_ext": ".mp4", "fallback_name": "video.mp4",
+        "error_label": "vídeo", "transcribe": False,
+        "send_caption": True, "send_filename": False,
+        "body": lambda caption, name: (caption or "[Vídeo]", caption),
+    },
+}
+
+MEDIA_KINDS = tuple(_MEDIA_KIND_SPEC)
+
+
+def _unlink(path: Path) -> None:
+    """Remove um upload que acabou de ser recusado (sem órfão em ``statics/outbox``)."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _replace_outbox_file(new_dest: Path, transcoded: str, original: Path) -> Path:
+    """Move o arquivo recodificado para a outbox e descarta o upload original.
+
+    ``os.replace`` falha entre sistemas de arquivos diferentes (o ``ffmpeg``
+    escreve no ``tempdir`` do SO, que pode estar em outro device) — daí o
+    fallback para ``shutil.move``.
+    """
+    import os
+    import shutil
+    try:
+        os.replace(transcoded, new_dest)
+    except OSError:
+        shutil.move(transcoded, str(new_dest))
+    _unlink(original)
+    return new_dest
 
 
 # ── broadcast_and_emit (R-bc — generalized lift of conversations._broadcast) ──
@@ -560,7 +662,207 @@ class MessagingService:
                     },
                 })
 
-        return {"ok": True, "msg_id": msg_id, "media_path": rel_path}
+        # ``conversation_id`` é ADITIVO (plano 151 · I2): já estava em mãos
+        # (``_saved``, usado no emit acima) e a fachada ``/api/v1`` precisa dele
+        # no DTO de resposta. O painel ignora a chave.
+        return {"ok": True, "msg_id": msg_id, "media_path": rel_path,
+                "conversation_id": (_saved or {}).get("conversation_id")}
+
+    # ── Operator media UPLOAD (R-media — o preparo, plano 151 · F2) ─────────
+
+    async def send_media_upload(self, *, phone: str, kind: str, data: bytes,
+                                filename: str | None = None,
+                                content_type: str | None = None,
+                                caption: str = "",
+                                conversation_id=None, channel_id=None,
+                                sent_by_user_id: int | None = None,
+                                sent_by_name: str | None = None,
+                                inbox_guard=None) -> dict:
+        """Prepara e envia UMA mídia do operador — o irmão de :meth:`send_text`.
+
+        :meth:`send_media` (R14) já unificava a CAUDA (send → persist →
+        broadcast → emit). O que continuava copiado quatro vezes em
+        ``contacts.py`` era o **preparo**: desvio de sandbox, resolução de canal,
+        tomada humana, alvo de wire, janela de 24h, limites do canal, gravação em
+        disco, transcode de áudio/vídeo e — o pior — a tabela de SEIS parâmetros
+        que variam por ``kind``. Uma segunda cópia dessa tabela divergiria em
+        silêncio; foi o que aconteceu com ``send_template`` até o plano 119.
+
+        ⚠️ **``kind`` é do CHAMADOR e nunca é inferido do MIME.** É o que permite
+        mandar uma imagem como ``document`` — ``/send/file`` é ``documentMessage``
+        e não recomprime, então a foto chega com a qualidade original. O painel já
+        funciona assim (a zona "Arquivo" do compositor manda ``sendMode:'file'``);
+        inferir do ``content_type`` faria o oposto do que o operador pediu.
+
+        ⚠️ **A ordem é contrato** e é a das rotas de mídia do painel, que difere
+        da de :meth:`send_text`: aqui o ``inbox_guard`` vem ANTES do desvio de
+        sandbox (no texto vem depois). Inverter muda o status de um contato de
+        sandbox numa caixa alheia de 403 para 200.
+
+        Devolve ``{"ok": True, "msg_id", "media_path", "conversation_id",
+        "channel_id", "kind", "sandbox"}`` ou ``{"ok": False, "reason",
+        "message", "status"[, "data"][, "provider_error"]}``. ``provider_error``
+        é o texto CRU do provedor, que a rota de vídeo inspeciona para traduzir o
+        código 131053 numa dica acionável.
+        """
+        spec = _MEDIA_KIND_SPEC.get(kind)
+        if spec is None:
+            return {"ok": False, "reason": "invalid_kind", "status": 400,
+                    "message": ("Tipo de mídia inválido. Use um de: "
+                                + ", ".join(sorted(_MEDIA_KIND_SPEC)) + ".")}
+
+        outbound = self.outbound
+        caption = caption or ""
+
+        # 1) gate de caixa — PRIMEIRO, como nas rotas do painel (ver o ⚠️ acima).
+        if inbox_guard is not None:
+            denied = await inbox_guard()
+            if denied:
+                return denied
+
+        # 2) sandbox: fica local, nunca vai ao provedor (o número não é real).
+        is_sandbox = await asyncio.to_thread(is_sandbox_contact, phone)
+
+        # 3) canal → tomada humana → alvo de wire (o JID REAL da conversa).
+        resolved_channel = await asyncio.to_thread(
+            resolve_channel_id, phone, conversation_id, channel_id)
+        abort_ai_cycle(self._deps, resolved_channel, phone)
+        wire_phone = await asyncio.to_thread(wire_target, phone, conversation_id)
+
+        # 4) janela de 24h ANTES de gravar (envio bloqueado não deixa órfão).
+        if not is_sandbox:
+            block = await asyncio.to_thread(
+                session_window_block, outbound, resolved_channel,
+                conversation_id, phone)
+            if block:
+                return {"ok": False, "reason": block["reason"], "status": 409,
+                        "message": block["message"],
+                        "data": {"reason": block["reason"]}}
+
+        # 5) preparo por kind: limites → grava → valida/transcodifica.
+        safe_name = Path(filename or "arquivo").name
+        prepared = await self._prepare_media_file(
+            spec, kind, data, filename=filename, safe_name=safe_name,
+            content_type=content_type, channel_id=resolved_channel,
+            is_sandbox=is_sandbox)
+        if not prepared["ok"]:
+            return prepared
+        dest = prepared["dest"]
+
+        # 6) a tabela por-kind — UM lugar só (§2.2 do plano 151).
+        content, emit_text = spec["body"](caption, safe_name)
+        result = await self.send_media(
+            channel_id=resolved_channel, phone=phone, kind=kind, dest=dest,
+            is_sandbox=is_sandbox, content=content, emit_text=emit_text,
+            caption=(caption if spec["send_caption"] else ""),
+            filename=(safe_name if spec["send_filename"] else None),
+            error_label=spec["error_label"], transcribe=spec["transcribe"],
+            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+            wire_phone=wire_phone)
+
+        if not result["ok"]:
+            verb = "Falha" if result.get("kind") == "send" else "Erro"
+            return {"ok": False, "reason": "send_failed", "status": 500,
+                    "message": f"{verb} ao enviar {spec['error_label']}: "
+                               f"{result.get('error')}",
+                    "provider_error": result.get("error") or ""}
+
+        return {"ok": True, "msg_id": result.get("msg_id"),
+                "media_path": result.get("media_path"),
+                "conversation_id": result.get("conversation_id"),
+                "channel_id": resolved_channel, "kind": kind,
+                "sandbox": is_sandbox}
+
+    async def _prepare_media_file(self, spec, kind: str, data: bytes, *,
+                                  filename: str | None, safe_name: str,
+                                  content_type: str | None, channel_id: str,
+                                  is_sandbox: bool) -> dict:
+        """Grava o upload e o valida contra o que o CANAL declara.
+
+        ⚠️ **As ordens de áudio e vídeo são diferentes de propósito — não
+        "harmonize".** Áudio: um canal que declara ``AudioLimits`` (codec-aware)
+        precisa do arquivo em disco para o ``ffprobe``, então grava→valida→
+        recodifica; um canal com ``MediaLimits`` simples (ou nenhum) faz o
+        bloqueio BARATO antes de gravar. Vídeo sempre grava antes, porque a
+        validação dele é sempre por ``ffprobe``. Unificar as duas quebra o
+        transcode de uma delas.
+
+        Devolve ``{"ok": True, "dest": Path}`` ou o mesmo dict de erro de
+        :meth:`send_media_upload`.
+        """
+        from channels import (audio_transcode, audio_validate,
+                              video_transcode, video_validate)
+
+        outbound = self.outbound
+        outbox = Path(self._deps.statics_outbox_dir)
+        size = len(data)
+
+        # Nome usado no CHEQUE DE LIMITE (extensão + tamanho). Para documento é o
+        # nome saneado — que é também o que o destinatário vê e o que define o
+        # MIME no fio.
+        limit_name = safe_name if kind == "document" else (
+            filename or spec["fallback_name"])
+
+        caps = outbound.capabilities(channel_id) if not is_sandbox else None
+        alimits = (audio_validate.audio_limits(caps)
+                   if kind == "audio" and caps is not None else None)
+
+        # Bloqueio barato ANTES de gravar. Vídeo nunca passa por aqui (a política
+        # dele é ``video_validate``, que inspeciona codec); áudio só quando o
+        # canal NÃO declarou ``AudioLimits``.
+        if not is_sandbox and kind != "video" and alimits is None:
+            block = media_limits_block(outbound, channel_id, kind, limit_name, size)
+            if block:
+                return {"ok": False, "reason": block["reason"],
+                        "status": block["status"], "message": block["message"],
+                        "data": {"reason": block["reason"]}}
+
+        # O nome EM DISCO vem do MIME validado, nunca do nome do cliente
+        # (``.html``/``.svg`` servidos same-origin = XSS armazenado — plano 64).
+        dest = outbox / unique_media_name(
+            content_type, (safe_name if kind == "document" else filename),
+            default_ext=spec["default_ext"])
+        await asyncio.to_thread(dest.write_bytes, data)
+
+        if kind == "audio" and alimits is not None:
+            verdict = await asyncio.to_thread(
+                audio_validate.validate_audio, str(dest), caps)
+            if not verdict.ok:
+                # Recodifica para o container/codec que ESTE canal declarou
+                # (ex.: Ogg/Vorbis → Ogg/Opus, o único ogg que a Meta aceita).
+                transcoded = await asyncio.to_thread(
+                    audio_transcode.transcode_to_limits, str(dest), alimits)
+                if transcoded:
+                    dest = _replace_outbox_file(
+                        outbox / f"{int(time.time() * 1000)}{Path(transcoded).suffix}",
+                        transcoded, dest)
+                else:
+                    _unlink(dest)
+                    status = 413 if verdict.reason == audio_validate.TOO_BIG else 415
+                    return {"ok": False, "reason": verdict.reason, "status": status,
+                            "message": verdict.message,
+                            "data": {"reason": verdict.reason}}
+
+        if kind == "video" and not is_sandbox:
+            verdict = await asyncio.to_thread(
+                video_validate.validate_video, str(dest), caps)
+            if not verdict.ok:
+                limits = video_validate.video_limits(caps)
+                transcoded = await asyncio.to_thread(
+                    video_transcode.transcode_to_limits, str(dest), limits)
+                if transcoded:
+                    dest = _replace_outbox_file(
+                        outbox / unique_media_name("video/mp4", "video.mp4",
+                                                   default_ext=".mp4"),
+                        transcoded, dest)
+                else:
+                    _unlink(dest)
+                    status = 413 if verdict.reason == video_validate.TOO_BIG else 415
+                    return {"ok": False, "reason": verdict.reason, "status": status,
+                            "message": verdict.message,
+                            "data": {"reason": verdict.reason}}
+
+        return {"ok": True, "dest": dest}
 
     # ── Operator text send (R-txt — o irmão de send_media para TEXTO) ────────
 

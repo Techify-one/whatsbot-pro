@@ -94,7 +94,7 @@ Pacote [server/routes/v1/](../server/routes/v1/) — **fino de propósito**: tra
 | Módulo | Cobre | Delega para |
 |---|---|---|
 | `v1/contacts.py` | listar/pesquisar (trigram), obter, criar, editar, excluir, etiquetas | `contact_repo` + [db/search/contact_search.py](../db/search/contact_search.py) + `contact_service` |
-| `v1/messages.py` | enviar texto, ler thread paginada/ancorada, buscar na conversa, marcar lida | **`MessagingService.send_text`** + [db/search/message_search.py](../db/search/message_search.py) |
+| `v1/messages.py` | enviar texto, **enviar mídia** (multipart e URL/base64), ler thread paginada/ancorada, buscar na conversa, marcar lida | **`MessagingService.send_text`** + **`MessagingService.send_media_upload`** + [db/search/message_search.py](../db/search/message_search.py) |
 | `v1/conversations.py` | listar, filtrar (motor completo), contar, obter, resolver/reabrir, atribuir, IA, etiquetas | [db/filters/](../db/filters/) + `conversation_service` |
 | `v1/catalog.py` | etiquetas (contato e conversa), atributos personalizados, canais/inboxes (**leitura**) | `tag_repo`, `custom_attribute_repo`, `channel_repo`, `inbox_repo` |
 
@@ -114,6 +114,88 @@ O caminho tem precedente no próprio repo: o refactor **R14** já unificou a cau
 ⚠️ **`inbox_guard` é um callable, não um flag.** O gate de inbox é chamado no MESMO ponto do handler original — depois do desvio de sandbox e antes de resolver o canal. **A ordem é contrato**: um contato de sandbox nunca passou pelo gate de inbox, e checá-lo antes mudaria o comportamento do painel.
 
 A escrita de CONTATO seguiu o mesmo caminho: [app/services/contact_service.py](../app/services/contact_service.py) (`validate_custom_attributes` + `update_info` + `delete_contact`) preserva as duas tolerâncias que o handler tinha — atributo soft-deleted (P49) e chave herdada da migração Chatwoot são IGNORADAS, não recusadas, porque o painel reenvia o JSON inteiro no save e um 400 abortaria a gravação toda.
+
+### Envio de mídia pela v1 — imagem, áudio, documento, vídeo (e imagem COMO documento)
+
+Duas rotas, as duas gateadas em **`conversation.reply`** (não há permissão nova — D5) e as duas delegando a **`MessagingService.send_media_upload`**, a mesma função das quatro rotas de mídia do painel:
+
+| Rota | Corpo | Para quem |
+|---|---|---|
+| `POST /api/v1/messages/media` | `multipart/form-data`: `file`, `phone`, `kind`, `caption?`, `filename?`, `conversation_id?`/`channel_id?` | **caminho primário** — quem tem os bytes em mãos (um Worker que acabou de gerar o PDF: `FormData` + `fetch`, sem infraestrutura extra) |
+| `POST /api/v1/messages/media/link` | `application/json`: `phone`, `kind`, **`url` XOR `content_base64`**, `filename` (**obrigatório**), `caption?`, `content_type?`, `conversation_id?`/`channel_id?` | quem já tem o arquivo num endereço (CRM, Windmill, bucket público) |
+
+Resposta (201): `{sent, msg_id, conversation_id, channel_id, kind, media_path, sandbox}`.
+
+#### ⚠️ `kind` é do CHAMADOR e NUNCA é inferido do MIME
+
+`kind` ∈ `image` · `audio` · `document` · `video`; valor fora disso é **400 `invalid_kind`**, nunca um palpite.
+
+É essa decisão que entrega **"imagem como arquivo"**: um `.png` enviado com `kind=document` sai por `/send/file` do GOWA (`documentMessage`), que **não recomprime** — a foto chega com a qualidade original. O mesmo arquivo com `kind=image` é recomprimido pelo WhatsApp. Os dois caminhos existem de propósito, e é o integrador que escolhe:
+
+```bash
+# certificado do aluno, com a qualidade preservada
+curl -X POST https://SEU-HOST/api/v1/messages/media \
+  -H "X-Api-Key: wsk_live_xxxx.yyyy" \
+  -F file=@certificado.pdf \
+  -F phone=5511999999999 \
+  -F kind=document \
+  -F 'caption=Seu certificado do curso 🎓'
+```
+
+O painel funciona pela mesma regra: quem decide é o **gesto** (a zona "Foto ou vídeo" × a zona "Arquivo" do compositor — `classifyFile(file, sendMode)`), não o tipo do arquivo. Inferir o `kind` do `Content-Type` "por conveniência" mata o recurso e o faz em silêncio.
+
+#### A tabela por-`kind` (uma só, em `_MEDIA_KIND_SPEC`)
+
+| `kind` | conteúdo persistido / bolha | legenda repassada ao canal | `filename` no fio | transcreve |
+|---|---|---|---|---|
+| `image` | a legenda | ✅ | — | ✅ (se o canal marcou "Enviadas") |
+| `audio` | `[Áudio]` | ❌ — é nota de voz (PTT), o protocolo não carrega legenda | — | ✅ |
+| `document` | `[Documento enviado: <nome>]` + legenda | ✅ | ✅ o nome original | ❌ |
+| `video` | a legenda, ou `[Vídeo]` | ✅ | — | ❌ |
+
+Mandar `caption` com `kind=audio` é **400 `caption_not_supported`** — aceitar-e-descartar faria o integrador descobrir o problema pelo relato do cliente, não na primeira chamada.
+
+⚠️ **`filename` define o tipo que o destinatário vê.** O MIME que vai ao provedor sai de `mimetypes.guess_type()` sobre esse nome, não do conteúdo; sem extensão o arquivo chega como `application/octet-stream` e não abre com duplo clique. Por isso ele é **obrigatório** na rota `/link` e recomendado na multipart (onde cai no nome da parte). O nome **em disco** é outro: reescrito a partir do MIME validado (`unique_media_name`), com extensão executável neutralizada para `.bin` — é a defesa contra XSS armazenado do plano 64.
+
+#### A URL é buscada pelo servidor — e isso é SSRF por construção
+
+`POST /media/link` com `url` faz o servidor abrir uma conexão escolhida pelo chamador. Sem guard, uma chave com apenas `conversation.reply` viraria scanner da rede interna e leitor do endpoint de metadados da nuvem. [app/services/remote_media.py](../app/services/remote_media.py) aplica seis regras, cada uma com teste próprio:
+
+| # | Regra | Por quê |
+|---|---|---|
+| G1 | só `http`/`https` (**400 `bad_scheme`**) | `file://`/`gopher://` leem disco e falam protocolos internos |
+| G2 | redirecionamento **não** é seguido (**400 `bad_status`**) | redirect é o bypass clássico: o alvo público responde `302` para `127.0.0.1` |
+| G3 | recusa loopback, RFC1918, link-local, CGNAT, ULA IPv6 e `169.254.169.254` (**400 `blocked_host`**) | é o guard que impede a escalada |
+| G4 | teto aplicado no **streaming** (**413 `too_big`**) | `Content-Length` é declarado pelo servidor remoto — mentir nele é trivial |
+| G5 | timeout de 10 s | uma URL que pendura prende um worker |
+| G6 | tudo vira erro de domínio | alvo inalcançável é entrada inválida (400), nunca bug do WhatsBot (500) |
+
+⚠️ **G3 é sobre o IP, não sobre o nome.** `localhost.meudominio.com` é um host público registrado que resolve para `127.0.0.1`; recusar por substring não pega isso. O host é resolvido, **todos** os endereços são checados (registro duplo público+privado é recusado) e a conexão é feita contra o IP já aprovado, com `Host:` e SNI originais — o que também fecha a janela de DNS rebinding entre a checagem e o connect.
+
+#### Teto de tamanho: 50 MB nos três caminhos
+
+⚠️ **O teto de upload é por LISTA DE CAMINHOS** (`_UPLOAD_PATH_RE` em [server/upload_limits.py](../server/upload_limits.py)) — uma rota de upload nova que não entre nessa regex **não tem teto nenhum** e carrega o corpo inteiro para a RAM do processo. Acrescentar a rota lá é parte de shipá-la.
+
+O caminho `content_base64` **não passa** por esse middleware (o corpo é JSON, não multipart), então tem teto próprio: `base64_exceeds`, medido no **comprimento da string**, antes de decodificar — decodificar para depois medir já é ter o arquivo inteiro na memória. As duas fronteiras coincidem: o integrador recusa no mesmo tamanho de arquivo, tenha escolhido a forma que tiver.
+
+#### Erros que valem conhecer
+
+| Status | `code` | Quando |
+|---|---|---|
+| 400 | `invalid_kind` · `caption_not_supported` · `empty_file` · `missing_field` · `conflicting_source` · `invalid_base64` | entrada malformada |
+| 400 | `bad_scheme` · `blocked_host` · `bad_status` · `unreachable` | a URL do `/link` (G1–G6) |
+| 403 | `forbidden` · `inbox_forbidden` | sem `conversation.reply`, ou a caixa de destino não é do dono da chave |
+| 409 | `ambiguous_target` | o número tem conversa aberta em mais de uma caixa — informe `conversation_id` ou `channel_id` |
+| 409 | `session_window_closed` | fora da janela de 24h num canal Meta |
+| 413 / 415 | `too_big` · `bad_format` | o canal declara limite de tamanho/formato para aquele `kind` |
+
+⚠️ **`media_path` é relativo a esta instância.** O armazenamento de mídia é per-instância por design; sem pasta persistente no deploy a mídia enviada vira 404 depois de um redeploy — ver o gotcha em [docs/OPERACAO.md](OPERACAO.md).
+
+#### O refactor que tornou isso possível (R-media)
+
+O envio de mídia já funcionava por API antes disto (as rotas do painel aceitam `X-Api-Key`); o que não existia era **na superfície versionada**, e o que existia estava **copiado quatro vezes**. `send_media` (R14) já unificava a cauda — send → persist → broadcast → `message.sent`; o que continuava duplicado era o **preparo**: sandbox, canal, tomada humana (`abort_ai_cycle`), alvo de wire, janela de 24h, limites do canal, gravação, transcode de áudio/vídeo, e a tabela de seis parâmetros por `kind`. **R-media** subiu tudo isso para `MessagingService.send_media_upload`; as quatro rotas do painel delegam e a v1 é a quinta chamadora, não a quinta cópia.
+
+⚠️ **A ordem do preparo é contrato, e difere da de `send_text`**: em mídia o `inbox_guard` vem **antes** do desvio de sandbox (no texto vem depois). ⚠️ **As ordens de preparo de áudio e vídeo são diferentes de propósito** — áudio bloqueia barato *antes* de gravar quando o canal não declara `AudioLimits`; vídeo sempre grava antes porque precisa do `ffprobe`. "Harmonizar" as duas quebra o transcode de uma delas.
 
 ### Webhooks de saída (push)
 
@@ -136,6 +218,9 @@ Todo o resto da API é *pull*. Um CRM que precise saber "chegou mensagem" ou "co
 | Emitir/listar/revogar (painel) | [server/routes/api_keys.py](../server/routes/api_keys.py) |
 | Fachada versionada | [server/routes/v1/](../server/routes/v1/) |
 | Envio de texto compartilhado | `MessagingService.send_text` ([app/services/messaging_service.py](../app/services/messaging_service.py)) |
+| Envio de mídia compartilhado (R-media) | `MessagingService.send_media_upload` + `_MEDIA_KIND_SPEC` ([app/services/messaging_service.py](../app/services/messaging_service.py)) |
+| Busca SSRF-safe de URL (rota `/link`) | [app/services/remote_media.py](../app/services/remote_media.py) |
+| Teto de upload (50 MB) | [server/upload_limits.py](../server/upload_limits.py) — `_UPLOAD_PATH_RE`, `base64_exceeds` |
 | Escrita de contato compartilhada | [app/services/contact_service.py](../app/services/contact_service.py) |
 | Webhooks de saída | [server/webhook_dispatcher.py](../server/webhook_dispatcher.py) + [db/repositories/webhook_repo.py](../db/repositories/webhook_repo.py) + [server/routes/webhooks_out.py](../server/routes/webhooks_out.py) |
 | Tela (abas Chaves de API / Webhooks) | [web/static/js/components/IntegrationsScreen.js](../web/static/js/components/IntegrationsScreen.js) — rota `/api-keys` |

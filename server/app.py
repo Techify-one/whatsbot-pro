@@ -739,7 +739,7 @@ def create_app(
             raw_len = request.headers.get("content-length")
             try:
                 if raw_len is not None and int(raw_len) > MAX_UPLOAD_BYTES:
-                    return too_large_response()
+                    return too_large_response(path=request.url.path)
             except ValueError:
                 pass
         return await call_next(request)
