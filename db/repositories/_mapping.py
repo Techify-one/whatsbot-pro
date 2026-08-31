@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Iterable, Mapping
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,10 @@ _AI_CONTENT_PREFIXES = (
     "[Conteúdo do documento]",
 )
 
+# O carimbo de autor do inbound de grupo ("[Fulano]: "), gêmeo do
+# ``_SENDER_PREFIX_RE`` de ``server/transcription.py``.
+_SENDER_PREFIX_RE = re.compile(r"^\[[^\]\n]+\]: ")
+
 # Só os tipos que a IA de fato reescreve (imagem/áudio/documento). Vídeo,
 # sticker & cia. seguem no caminho legado (``content[:80]``) de propósito: o
 # content deles nunca é reescrito, então não há o que vazar e mudar o rótulo
@@ -147,6 +152,19 @@ def caption_from_content(content: str | None) -> str:
         return ""
     if body.startswith(_AI_CONTENT_PREFIXES):
         return ""
+    # Grupo: o autor viaja como ``"[Fulano]: "`` NA FRENTE do bloco da IA (não há
+    # coluna de remetente — ver ``server/transcription.py``). Sem descontá-lo, o
+    # guard acima não casa e a descrição vazaria para a lista de conversas. Só
+    # desconta quando o que sobra É bloco da IA: texto normal de grupo segue
+    # aparecendo com o nome de quem falou, como sempre apareceu.
+    _m = _SENDER_PREFIX_RE.match(body)
+    if _m:
+        _rest = body[_m.end():]
+        # Mídia sem legenda em grupo: o content é SÓ o carimbo de autor
+        # ("[Fulano]: "), que é rótulo de bolha, não legenda — devolvê-lo faria a
+        # lista de conversas mostrar "[Fulano]:" no lugar de "📷 Imagem".
+        if not _rest.strip() or _rest.startswith(_AI_CONTENT_PREFIXES):
+            return ""
     for prefix in _AI_CONTENT_PREFIXES:
         at = body.find("\n" + prefix)
         if at != -1:

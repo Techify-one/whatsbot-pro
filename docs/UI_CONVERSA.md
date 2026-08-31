@@ -31,6 +31,24 @@ O que sobrevive à sobrescrita é a **marca de autoria** (`sent_by_user_id` / `s
 
 Corolário para quem **produz** mensagem: automação que envia pelo painel deve gravar `sent_by_name` (o snapshot de nome sobrevive sem usuário; `sent_by_user_id` é FK para `users` e fica `None`). O plugin `protocolos` assina `"Automação"`; sem isso a bolha diz "Manual" no caminho feliz e "IA" no de falha.
 
+## Quem falou no grupo: o autor viaja DENTRO do `content`
+
+Não existe coluna de remetente em `messages` — `sent_by_name` é do **atendente**, não do participante. O autor de uma mensagem de grupo é carimbado pelo inbound como o prefixo `"[Fulano]: "` no próprio `content` ([gowa/inbound.py:718](../gowa/inbound.py#L718)) e o painel o extrai de volta com `stripGroupPrefix` ([composerTokens.js:145](../web/static/js/services/composerTokens.js#L145)) para desenhar o cabeçalho da bolha. **Sem o prefixo, o rótulo cai em `displayName`** — que num grupo é `contact.group_name`, ou seja, **o nome do grupo assinando a mensagem do participante**.
+
+Dois furos, os dois exclusivos de **imagem**, corrigidos juntos:
+
+**1. Imagem recebida sem legenda não gerava texto nenhum.** Em `_extract_media` ([gowa/inbound.py:129-250](../gowa/inbound.py#L129-L250)) áudio, vídeo, sticker e documento fazem `if not text: text = "[X recebido]"` — sempre há em que pendurar o prefixo. A imagem só preenchia `text` com a legenda (ou com `"[Imagem enviada]"` quando `is_from_me`), então uma foto recebida sem legenda salvava `content=''`. Em produção: a única mensagem de mídia de grupo do banco sem o carimbo era exatamente uma imagem (`8/8` áudios e `7/7` vídeos tinham). O prefixo agora é emitido **pelado** (`"[Fulano]: "`) quando há `media_type` e não há texto.
+
+**2. A descrição da IA engolia o autor.** `format_media_content` junta a imagem **prefix-first** (`"<bloco da IA>\n<texto>"`), ao contrário de áudio/documento, que são text-first — por isso o áudio sempre preservou o autor (`"[FocusTIC]: [Áudio recebido]\n[Transcrição do áudio]: …"`) e a imagem não. O `"[Fulano]: "` ia para a 2ª linha e o `stripGroupPrefix` passava a ler **"Descrição da imagem"** como se fosse o remetente — era o que assinava as 13 imagens de grupo descritas no banco. O call site do batch separa o carimbo com `split_sender_prefix` e o repõe na frente de tudo ([transcription.py](../server/transcription.py)).
+
+⚠️ **O carimbo tem de ser o PRIMEIRO elemento do `content`.** Quem escreve dentro do `content` de uma mídia de grupo (transcrição, descrição, extração de documento) reanexa o `"[Fulano]: "` na frente — nunca deixe um bloco da IA antes dele.
+
+⚠️ **Quem lê o `content` cru desconta o carimbo antes de decidir o que é legenda.** `mediaCaptionOf` ([messageView.js](../web/static/js/services/messageView.js)) e o gêmeo em Python `caption_from_content` ([_mapping.py](../db/repositories/_mapping.py)) tratam dois casos: carimbo **sozinho** (mídia sem legenda ⇒ vazio, senão a lista de conversas mostraria `"[Fulano]:"` no lugar de "📷 Imagem") e carimbo **seguido de bloco da IA** (⇒ vazio, senão a descrição vazaria como se fosse texto do cliente). Legenda normal de grupo segue intocada.
+
+⚠️ **Linhas legadas continuam no banco** com a descrição na frente. Para elas o guard `isAiContentLabel` ([MessageBubble.js](../web/static/js/components/contacts/MessageBubble.js)) impede que "Descrição da imagem" seja usada como nome de pessoa: sem autor recuperável, o content fica intacto (assim `mediaCaptionOf` ainda o reconhece como bloco da IA) e o rótulo cai no nome do grupo.
+
+Cobertura: [tests/contracts/test_group_sender_label.py](../tests/contracts/test_group_sender_label.py) (parser, composição e preview) + `messageView.test.js` (`node --test`).
+
 ## Rascunho de mensagem por conversa (compositor)
 
 O texto digitado no compositor **pertence à conversa** e sobrevive à troca de conversa, como no WhatsApp/Chatwoot: digitou "Oi" na `/conversations/123`, foi atender a `/124` e voltou → o "Oi" continua lá. É **pessoal e por-dispositivo**: nada vai para o servidor.

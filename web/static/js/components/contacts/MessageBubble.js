@@ -4,7 +4,7 @@ import { formatBubbleTime } from './utils.js';
 import { SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon } from './icons.js';
 import { MediaContent } from './MediaContent.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
-import { senderColor, isOperatorMessage } from '../../services/messageView.js';
+import { senderColor, isOperatorMessage, isAiContentLabel } from '../../services/messageView.js';
 
 const html = htm.bind(h);
 
@@ -45,7 +45,14 @@ export function MessageBubble({
   let groupSender = null;
   if (isUser && isGroup && typeof m.content === 'string') {
     const { sender, text } = stripGroupPrefix(m.content);
-    if (sender != null) { groupSender = sender; displayContent = text; }
+    // `isAiContentLabel`: numa linha LEGADA de imagem descrita, o bloco da IA
+    // ficava na frente e engolia o autor — o "remetente" extraído seria
+    // "Descrição da imagem". Nesse caso não há autor a mostrar: mantemos o
+    // content intacto (assim `mediaCaptionOf` ainda reconhece o bloco da IA e
+    // não o desenha como legenda) e o rótulo cai no nome do grupo, como antes.
+    if (sender != null && !isAiContentLabel(sender)) {
+      groupSender = sender; displayContent = text;
+    }
   }
 
   // Which side the bubble sits on. In sandbox you ARE the customer,

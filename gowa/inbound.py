@@ -715,8 +715,18 @@ def _parse_message(data: dict, *, channel_id: str, client, bot_phone: str,
             logger.warning("[gowa.inbound] member lookup failed for %s: %s", chat_jid, e)
             lookup = {}
         sender_label = lookup.get(individual_phone) or from_name or individual_phone
-        display_text = (f"[{sender_label}]: {group_mentions.apply_incoming(lookup, text)}"
-                        if text else "")
+        # ⚠️ O nome de quem falou no grupo NÃO tem coluna própria: ele viaja
+        # embutido no ``content``, como o prefixo ``"[Nome]: "`` que o painel
+        # extrai de volta (``stripGroupPrefix``). Uma mídia sem legenda tem
+        # ``text`` vazio — e a IMAGEM é a única que não ganha placeholder em
+        # ``_extract_media`` —, então sem o prefixo PELADO abaixo a bolha perdia
+        # a identidade do remetente e o cabeçalho caía no NOME DO GRUPO.
+        if text:
+            display_text = f"[{sender_label}]: {group_mentions.apply_incoming(lookup, text)}"
+        elif media_type:
+            display_text = f"[{sender_label}]: "
+        else:
+            display_text = ""
         mentioned = _is_bot_mentioned(text, data, bot_phone, bot_name)
         if group_mode == "never" or (group_mode == "mention_only" and not mentioned):
             trigger_ai = False
