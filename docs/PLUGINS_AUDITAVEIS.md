@@ -84,6 +84,27 @@ def _audit(action: str, **kw) -> None:
         pass
 ```
 
+⚠️ **Se o plugin audita em mais de um arquivo, o `try/except` tem de ser ÚNICO —
+num módulo folha.** Proteger só o `routes.py` é cinto sem calça: ele importa os
+irmãos (`from . import consent, …`) e, se um deles fizer
+`from plugins.context import audit` **duro**, o `ImportError` estoura lá e o
+plugin inteiro deixa de carregar — a proteção do `routes.py` nunca chega a rodar.
+Foi o caso do `trackify` (plano 148): `consent.py`, `services.py` e
+`lifecycle.py` auditavam com import duro. O conserto é um `src/_audit.py` que não
+importa nada do próprio plugin, com a **mesma assinatura** de
+`plugins.context.audit` (`audit(plugin_id, action, **kw)`) — assim os call sites
+trocam só a linha do `import`, sem risco de erro de aridade — e o `routes.py`
+mantém o `_audit(action, **kw)` acima como atalho. `plugin_permission` continua
+no import duro: é avaliado pelo decorator em tempo de import e não tem degradação
+sensata.
+
+A faixa de risco é real, não teórica: `plugins.context.audit` nasceu em
+2026-07-27, um mês DEPOIS do `plugin_permission` — e um manifesto que declare
+`whatsbot_api_version: ">=1.0,<2.0"` aceita cores dessa faixa. Um teste que
+prove isso está em `plugins/trackify/tests/` (`..._carrega_num_core_anterior...`):
+apaga o atributo de `plugins.context` e importa os módulos de `entry:` num
+pacote novo.
+
 E em cada rota que muda algo:
 
 ```python
@@ -114,10 +135,25 @@ Três regras de ouro:
 | Criar/editar/excluir objeto compartilhado (visualização de equipe, campo) | Mensagem de chat / evento de alto volume |
 | Ação que dispara efeito externo (semear agentes, re-login de executor) | Cache, invalidação, retry técnico |
 | **Entregar um segredo em claro** ao operador (ver §6) | Tráfego de cliente final (widget, visitante) |
+| **Exportar dado sensível em massa** (baixar um dump) | Abrir a tela que mostra esse mesmo dado |
 
-A última linha é a exceção deliberada ao "GET não audita": uma rota que REVELA um
-segredo (ex.: `GET /reveal-hmac` do plugin `website`) registra **quem viu** — o
-valor, obviamente, nunca entra na linha.
+As duas últimas linhas são a exceção deliberada ao "GET não audita", e são a
+mesma exceção: quando a resposta **revela** em vez de listar, a trilha registra
+**quem viu**.
+
+- Um segredo: `GET /reveal-hmac` do plugin `website`. O valor, obviamente, nunca
+  entra na linha.
+- Um dump: `GET /download` do plugin `debug_bus`, que despeja em JSONL tudo o que
+  a captura persistiu — telefones, texto de conversa, payloads crus do provedor e
+  o system prompt mandado ao LLM. Registre **quem baixou e quantas linhas**; o
+  conteúdo, jamais. É por isso que ligar a captura também audita: quem a ligou e
+  quem levou o resultado embora são duas perguntas diferentes, e as duas serão
+  feitas.
+
+O que separa esta exceção de um log de navegação é o verbo. *Abrir a tela* que
+pagina o mesmo dado continua fora — ela é uma listagem, e auditá-la afogaria a
+trilha. *Baixar o arquivo inteiro* é um ato único, raro e irreversível: o dado
+saiu da instalação.
 
 Critério prático: **se alguém puder perguntar "quem mexeu nisso?" daqui a três
 meses, tem que estar na trilha.** Se a resposta for "ninguém liga", fora.
@@ -196,8 +232,21 @@ quê. Config do plugin que **não** é por canal (ex.: o alerta de desconexão d
 O core mascara (`***`) valores cujas **chaves** casam a denylist de
 [db/repositories/audit_repo.py](../db/repositories/audit_repo.py) (`api_key`,
 `token`, `password`, `secret`, `credentials`, …). Isso é uma rede de segurança,
-**não** uma licença: uma chave de nome inocente (`proxy_url`, `dsn`,
-`page_id`) passa em claro.
+**não** uma licença: uma chave de nome inocente (`proxy_url`, `page_id`) passa
+em claro.
+
+⚠️ **O casamento é por nome EXATO, não por substring** — e isso já custou um
+vazamento real. O `vendas_ia` guardava a conexão com o banco do Nexus na chave
+`nexus_dsn`, uma string que carrega a **senha do banco de produção**. Nenhuma
+entrada da lista casava esse nome, então ela entrou em claro na trilha e ficou
+legível na tela `/audit` **por semanas** — ao lado, na mesma linha, de um
+`openrouter_api_key` corretamente mascarado, o que fazia a trilha *parecer*
+higienizada. `nexus_dsn`, `dsn`, `database_url` e `connection_string` entraram na
+denylist no plano 149·F8; acrescentar um nome ali conserta a trilha de **todos**
+os plugins de uma vez, e é o primeiro passo sempre que um segredo novo aparece.
+
+Isso não substitui a regra abaixo: a denylist é o que pega o descuido, não o que
+autoriza mandar o segredo.
 
 Regra do plugin: **não coloque o segredo no payload.** Registre que ele mudou:
 

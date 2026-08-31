@@ -94,17 +94,22 @@ def _all_timezones() -> list[dict]:
 
 @router.get("/alert-settings", dependencies=[core_permission("channel.manage")])
 async def get_alert_settings(request: Request, tz: str = ""):
-    """Configuração atual do alerta + auto-detecta o fuso do navegador.
+    """Configuração atual do alerta + o fuso detectado do navegador (SÓ LEITURA).
 
     A URL do painel NÃO é capturada aqui: ela é a variável global do core
     ``public_base_url`` (capturada no 1º acesso ao painel), lida direto pelo loop de
-    alerta. O fuso do navegador (query ``tz``) é persistido para o loop usar sem o
-    usuário precisar escolher. O token continua mascarado."""
+    alerta. O token continua mascarado.
+
+    ⚠️ ESTE GET NÃO ESCREVE NADA (plano 148 §4.10). O fuso do navegador (query
+    ``tz``) era persistido aqui: só de ABRIR a aba, o horário exibido em todo
+    alerta mudava — sem o operador salvar nada e sem dono na trilha. Auditar o GET
+    seria pior (viraria log de navegação), então a escrita saiu. O fuso detectado
+    continua voltando em ``timezone_auto``, a tela pré-preenche o seletor com ele e
+    o valor entra em ``disconnect_alert_timezone`` pelo PUT — que JÁ é auditado.
+    """
     detected_tz = tz.strip() if _valid_tz(tz.strip()) else ""
 
     def _load():
-        if detected_tz:
-            config_repo.set(_CFG + "disconnect_alert_timezone_auto", detected_tz)
         token = (_get("disconnect_alert_bot_token", "") or "").strip()
         try:
             interval = int(_get("disconnect_alert_interval_min", 15) or 15)
@@ -112,7 +117,13 @@ async def get_alert_settings(request: Request, tz: str = ""):
             interval = 15
         base = str(config_repo.get("public_base_url", "") or "").rstrip("/")
         tz_manual = str(_get("disconnect_alert_timezone", "") or "")
-        tz_auto = str(_get("disconnect_alert_timezone_auto", "") or "") or detected_tz or _DEFAULT_TZ
+        # ⚠️ SUGESTÃO ≠ EFETIVO, e a diferença nasceu quando este GET parou de
+        # escrever. ``tz_auto`` é o que a TELA usa para pré-selecionar o seletor,
+        # e por isso ainda cai no fuso do navegador; o fuso que o ALERTA usa é só
+        # o que está SALVO. Somar o detectado no "efetivo" faria a resposta jurar
+        # America/Manaus enquanto o alerta imprime America/Sao_Paulo.
+        tz_auto_salvo = str(_get("disconnect_alert_timezone_auto", "") or "")
+        tz_auto = tz_auto_salvo or detected_tz or _DEFAULT_TZ
         return {
             "enabled": bool(_get("disconnect_alert_enabled", False)),
             "bot_token_set": bool(token),
@@ -120,8 +131,10 @@ async def get_alert_settings(request: Request, tz: str = ""):
             "panel_url_effective": base,         # variável global do core (só leitura)
             "interval_min": interval,
             "timezone": tz_manual,               # override manual do fuso (vazio = automático)
-            "timezone_auto": tz_auto,            # fuso detectado do navegador
-            "timezone_effective": tz_manual or tz_auto,  # fuso que o alerta vai usar
+            "timezone_auto": tz_auto,            # SUGESTÃO para o seletor da tela
+            # Espelha, campo a campo, ``alerts._resolve_tz_name()`` — o que o loop
+            # de alerta realmente imprime. Nada de detected_tz aqui.
+            "timezone_effective": tz_manual or tz_auto_salvo or _DEFAULT_TZ,
             "timezones": _all_timezones(),       # lista completa (IANA) para o seletor
         }
     data = await asyncio.to_thread(_load)
@@ -135,6 +148,9 @@ def _alert_audit_view() -> dict:
         "chat_id": str(_get("disconnect_alert_chat_id", "") or ""),
         "interval_min": _get("disconnect_alert_interval_min", None),
         "timezone": str(_get("disconnect_alert_timezone", "") or ""),
+        # O fuso EFETIVO é o manual acima ou, vazio ele, este automático. Sem a
+        # segunda chave o diff do PUT esconde qual horário o alerta passa a usar.
+        "timezone_auto": str(_get("disconnect_alert_timezone_auto", "") or ""),
         "bot_token_definido": bool(_get("disconnect_alert_bot_token", "")),
     }
 
@@ -183,8 +199,10 @@ async def alert_test(payload: dict = Body(default={})):
         if not token or token == _MASK:
             token = (_get("disconnect_alert_bot_token", "") or "").strip()
         chat_id = str(payload.get("chat_id") or "").strip() or str(_get("disconnect_alert_chat_id", "") or "").strip()
-        return token, chat_id
-    token, chat_id = await asyncio.to_thread(_resolve)
+        # Snapshot do "antes" no MESMO hop de thread, ANTES de qualquer escrita:
+        # a migração de supergrupo abaixo troca o chat_id salvo em config.
+        return token, chat_id, _alert_audit_view()
+    token, chat_id, before = await asyncio.to_thread(_resolve)
     if not token or not chat_id:
         return {"ok": False, "error": "Informe o token do bot e o chat_id."}
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -202,10 +220,24 @@ async def alert_test(payload: dict = Body(default={})):
             if new_id:
                 new_id = str(new_id)
                 await asyncio.to_thread(config_repo.set, _CFG + "disconnect_alert_chat_id", new_id)
+                # A config JÁ mudou — registra AQUI, antes do reenvio. Se o retry
+                # estourar, o ``except`` devolve erro mas o chat_id novo continua
+                # salvo, e a trilha tem de contar isso. O ``after`` é derivado do
+                # snapshot (nada de reler o banco dentro do ``try``, onde uma
+                # falha viraria a mensagem enganosa "Falha ao contatar o Telegram").
+                # ⚠️ Este é o caminho RARO (o operador clicando "Testar alerta").
+                # O comum é o loop de fundo, e ele grava a MESMA ação com ator
+                # ``system`` — ver ``alerts._tg_call``. Cobrir só um dos dois
+                # faria /audit sugerir que o destino nunca mudou.
+                _audit("alerta.chat_id_migrado", before=before,
+                       after={**before, "chat_id": new_id})
                 resp = await client.post(url, json={**body, "chat_id": new_id})
                 data = resp.json()
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": f"Falha ao contatar o Telegram: {e}"}
+    except Exception:  # noqa: BLE001
+        # O texto de uma exceção httpx costuma carregar a request URL
+        # ``https://api.telegram.org/bot{token}/sendMessage``. Refleti-la na
+        # resposta anularia o mascaramento que o GET faz de propósito.
+        return {"ok": False, "error": "Falha ao contatar o Telegram."}
     if not data.get("ok"):
         return {"ok": False, "error": data.get("description") or "Erro do Telegram."}
     return {"ok": True}

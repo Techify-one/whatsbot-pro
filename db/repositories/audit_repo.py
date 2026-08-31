@@ -18,10 +18,18 @@ from db.tables import audit_log
 
 # Keys whose values are replaced by "***" before persisting (recursive). Names
 # confirmed as real secrets in the project (config/settings.py, plano 03).
+#
+# The match is on the EXACT key name (lowercased), never a substring — so a
+# secret under a name nobody listed here goes into the trail in the clear. That
+# is how a connection string carrying a production database password sat next to
+# a properly redacted ``openrouter_api_key`` for weeks (plano 149·F8): the key
+# was ``nexus_dsn``, which no entry matched. Anything holding a DSN belongs in
+# this set, and adding a name here fixes the trail for EVERY plugin at once.
 _SECRET_KEYS = frozenset({
     "openrouter_api_key", "access_token", "api_key", "apikey", "password",
     "password_hash", "token", "secret", "credentials", "authorization",
     "verify_token", "client_secret", "private_key",
+    "nexus_dsn", "dsn", "database_url", "connection_string",
 })
 _REDACTED = "***"
 
