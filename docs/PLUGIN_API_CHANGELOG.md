@@ -38,6 +38,50 @@ trata versão pura como compatibilidade por MAJOR — semântica oposta. **No
 
 ---
 
+## Sem bump — 2026-08-28 · `message.saved`/`batch_text` passa a ser 1 evento por MENSAGEM (plano 146)
+
+**Nenhum nome mudou, e por isso `WHATSBOT_API_VERSION` continua `1.8.0`.** O que
+mudou é **quantas vezes** um evento já existente é emitido — comportamento, não
+forma. A entrada existe porque um assinante pode ter assumido a cardinalidade
+antiga, e nada no golden falharia se ele estivesse errado.
+
+### O que mudou
+
+O batch de recepção juntava N mensagens de texto do cliente numa **única linha**
+de `messages`, sob o `msg_id` da última, e emitia **um** `message.saved` com
+`source="batch_text"` levando o texto **combinado**. Agora cada mensagem tem a sua
+linha — com o seu `msg_id`, o seu `reply_to_msg_id` e o seu `ts` do provedor — e o
+seu próprio evento, com o **seu** texto.
+
+Isso alinha `batch_text` ao `batch_media`, que **sempre** emitiu um evento por
+item. A assimetria é que era a exceção.
+
+### Por que mudou
+
+O `msg_id` das mensagens engolidas nunca era persistido: existia só como
+`supersedes` num evento de WebSocket, para o painel colapsar as bolhas otimistas.
+Uma citação apontando para qualquer mensagem que não fosse a última do batch ficava
+**órfã para sempre** ("Mensagem original indisponível"), e a resposta escrita entre
+as duas subia acima delas. Em produção: 2.128 citações, **33 órfãs**, ~1 por dia
+desde que a captura de citação existe.
+
+### O que revisar no seu handler
+
+| Padrão | Efeito | Ação |
+|---|---|---|
+| Idempotente por conversa (get-or-create, upsert) | Correto; paga N× o custo | nenhuma |
+| **Alternante** — cancela num evento, re-arma no seguinte | **Quebra**: o 2º evento desfaz o 1º | guard de "já agi neste turno", **em tabela** (o toggle do plugin derruba o processo) |
+| Regex sobre o texto | O `re.search` deixa de ver o bloco inteiro: antes uma frase que casasse suprimia o batch todo, agora cada mensagem responde por si | reavaliar a regra |
+| Observador / log | Mais linhas | nenhuma |
+
+Os quatro assinantes reais do parque foram auditados antes do envio
+(`protocolos` idempotente, `retornos` no padrão alternante mas com
+`on_reply='reset'` em produção, `telegram` sai no primeiro guard para texto,
+`debug_bus` observador). ⚠️ **O caso alternante já era alcançável no core
+anterior** por um batch de duas mídias — não é um risco que este plano criou.
+
+---
+
 ## 1.8.0 — 2026-08-20 · `filter.provisioning.message` — a frase do provisionamento vem junto com o número (e os dois têm rede)
 
 **Aditiva no catálogo.** Um plugin que não registre o filtro novo não muda em

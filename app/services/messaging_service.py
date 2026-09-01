@@ -1683,13 +1683,22 @@ class MessagingService:
             except Exception:
                 pass
 
+            # plano 146: ``text_items`` guarda o ITEM INTEIRO de cada mensagem de
+            # texto — é dele que sai a identidade de cada linha (msg_id, reply_to,
+            # ts do provedor). ``text_parts``/``text_msg_ids`` continuam existindo
+            # só como material do ``combined``, que é o texto do CICLO (log +
+            # ``executions.input_text``), nunca mais o conteúdo de uma linha.
+            #
+            # ⚠️ Até o plano 146 havia aqui um ``text_reply_to``/``text_ts_last``
+            # que guardavam o valor do ÚLTIMO item: as N mensagens viravam UMA
+            # linha carimbada com a identidade da última, e o ``msg_id`` das
+            # anteriores era DESCARTADO. Toda citação que apontasse para uma
+            # mensagem engolida ficava órfã para sempre ("Mensagem original
+            # indisponível") — 33 casos em produção, ~1/dia. Não volte a derivar
+            # escalares do último item aqui.
             text_parts: list[str] = []
             text_msg_ids: list[str] = []
-            text_reply_to: str | None = None
-            # plano 129 M4: o ts REAL do provedor do ÚLTIMO item de texto — coerente
-            # com ``last_msg_id = text_msg_ids[-1]`` (a linha combinada herda a
-            # identidade do último item). ``None`` cai em ``time.time()`` no save.
-            text_ts_last: float | None = None
+            text_items: list[dict] = []
             media_items: list[dict] = []
             for item in items:
                 if (item.get("image_path") or item.get("audio_path")
@@ -1699,11 +1708,7 @@ class MessagingService:
                     text_parts.append(item.get("text", ""))
                     if item.get("msg_id"):
                         text_msg_ids.append(item["msg_id"])
-                    if item.get("ts"):
-                        text_ts_last = item["ts"]
-                    # Best-effort: the combined batch quotes the last quoted item.
-                    if item.get("reply_to_msg_id"):
-                        text_reply_to = item["reply_to_msg_id"]
+                    text_items.append(item)
 
             combined_preview = "\n".join(t for t in text_parts if t)
             await atrack_step("batch_accumulated", {
@@ -1738,39 +1743,60 @@ class MessagingService:
                 if combined:
                     logger.info("[Batch] Processing %d text messages from %s: %s",
                                 len(text_parts), phone, combined[:80])
-                    last_msg_id = text_msg_ids[-1] if text_msg_ids else None
-                    # Regra "ignorar abertura" (plugin): mantém a conversa fechada se a
-                    # mensagem recebida casar a regex (ela ainda foi salva/exibida). Sem
-                    # plugin registrado → apply_filter devolve True → reopen=None (default).
-                    _allow_reopen = await apply_filter(
-                        "filter.conversation.before_reopen", True,
-                        {"phone": phone, "role": "user", "text": combined})
-                    saved = contact.add_message("user", combined, msg_id=last_msg_id,
-                                        reply_to_msg_id=text_reply_to,
-                                        reopen=(False if not _allow_reopen else None),
-                                        ts=(text_ts_last or None))  # plano 129 M4
-                    # plano 57: re-emite um new_message AUTORITATIVO pós-save (com o _id/ts
-                    # reais da linha) — fecha a janela "broadcast-antes-do-save" em que a 1ª
-                    # mensagem de uma conversa nova (ou quem abre na janela t=0↔save) nunca
-                    # renderiza ao vivo. `supersedes` = os msg_ids que o batch combinou nesta
-                    # única linha, p/ o front colapsar as bolhas otimistas das anteriores.
-                    # Defensivo: nunca quebra o save/IA.
-                    try:
-                        await ws_manager.broadcast("new_message", {
+                    # plano 146 — UMA LINHA POR MENSAGEM QUE O CLIENTE MANDOU.
+                    #
+                    # A mescla continua existindo, mas onde ela serve: o ``combined``
+                    # acima é a entrada do CICLO (um turno, uma chamada de LLM, uma
+                    # resposta). O histórico registra o que o cliente de fato fez.
+                    # Este laço é o espelho do ramo de mídia logo abaixo, que sempre
+                    # gravou uma linha por item — **copie a forma dali, não invente
+                    # outra**. Sem isto, o ``msg_id`` de toda mensagem menos a última
+                    # era descartado e a citação a ela ficava órfã (conversa 10886).
+                    saved = None
+                    for _item in text_items:
+                        _item_text = _item.get("text", "")
+                        if not _item_text:
+                            # Espelha o ``"\n".join(t for t in text_parts if t)``:
+                            # item vazio nunca virou conteúdo e continua não virando.
+                            continue
+                        # Regra "ignorar abertura" (plugin): mantém a conversa fechada se a
+                        # mensagem recebida casar a regex (ela ainda foi salva/exibida). Sem
+                        # plugin registrado → apply_filter devolve True → reopen=None (default).
+                        # plano 146: avaliada POR MENSAGEM — antes o regex via o bloco
+                        # inteiro, e uma frase que casasse suprimia a reabertura do batch todo.
+                        _allow_reopen = await apply_filter(
+                            "filter.conversation.before_reopen", True,
+                            {"phone": phone, "role": "user", "text": _item_text})
+                        saved = contact.add_message(
+                            "user", _item_text,
+                            msg_id=_item.get("msg_id"),
+                            reply_to_msg_id=_item.get("reply_to_msg_id"),
+                            reopen=(False if not _allow_reopen else None),
+                            ts=(_item.get("ts") or None))  # plano 129 M4 / 146
+                        # plano 57: re-emite um new_message AUTORITATIVO pós-save (com o _id/ts
+                        # reais da linha) — fecha a janela "broadcast-antes-do-save" em que a 1ª
+                        # mensagem de uma conversa nova (ou quem abre na janela t=0↔save) nunca
+                        # renderiza ao vivo. Defensivo: nunca quebra o save/IA.
+                        # plano 146: SEM ``supersedes`` — cada mensagem tem o seu próprio
+                        # msg_id e reconcilia com a própria bolha otimista, como a mídia.
+                        # (``build_inbound_saved_message`` mantém o parâmetro: linhas
+                        # mescladas legadas e um rollback do core ainda dependem dele.)
+                        try:
+                            await ws_manager.broadcast("new_message", {
+                                "phone": phone, "channel_id": channel_id,
+                                "message": build_inbound_saved_message(saved),
+                            })
+                        except Exception:
+                            logger.exception("[Batch] falha ao re-emitir new_message pós-save para %s", phone)
+                        await emit_with_filter("message.saved", {
                             "phone": phone, "channel_id": channel_id,
-                            "message": build_inbound_saved_message(saved, supersedes=text_msg_ids),
+                            "text": _item_text, "msg_id": _item.get("msg_id"),
+                            "conversation_id": (saved or {}).get("conversation_id"),
+                            "media_type": None, "media_path": None,
+                            "is_group": contact.is_group,
+                            "source": "batch_text",
+                            "ts": time.time(),
                         })
-                    except Exception:
-                        logger.exception("[Batch] falha ao re-emitir new_message pós-save para %s", phone)
-                    await emit_with_filter("message.saved", {
-                        "phone": phone, "channel_id": channel_id,
-                        "text": combined, "msg_id": last_msg_id,
-                        "conversation_id": (saved or {}).get("conversation_id"),
-                        "media_type": None, "media_path": None,
-                        "is_group": contact.is_group,
-                        "source": "batch_text",
-                        "ts": time.time(),
-                    })
                     if (self.ai_may_speak(contact, channel_id)
                             and self._abort_epoch(channel_id, phone) == abort_epoch):
                         if not agent_handler.api_key:

@@ -181,6 +181,8 @@ Mensagens recebidas no WhatsApp são entregues em tempo real via webhook do GOWA
 
 **NÃO usa polling** — o auto-reply por polling foi removido. Toda recepção de mensagens é via webhook.
 
+⚠️ **A mescla do batch é a entrada da IA, NUNCA a linha do banco** (plano 146): o histórico grava **uma linha por mensagem do cliente**, com o `msg_id`/`reply_to_msg_id`/`ts` de cada uma — derivar "o `msg_id` da última" deixava a citação órfã para sempre (33 casos, ~1/dia) e a resposta acima do que ela citava. `message.saved`/`batch_text` é **1 evento por mensagem**. Incidente e o porquê de `dropSuperseded` continuar no código: [docs/UI_CONVERSA.md](docs/UI_CONVERSA.md).
+
 ## Canais → [docs/CANAIS.md](docs/CANAIS.md)
 
 Canais são **plugins de 1ª classe**: cada provider se autodescreve por `provider_descriptor()` ([channels/base.py](channels/base.py)) e as superfícies do core — formulário, pós-criação, chips/filtros, card, mascaramento de credencial, catálogo do cliente — **não o conhecem por nome**. Adicionar provider = shipar um plugin; a UI não muda. Use `/new-channel`, que gera um provider correto por construção.

@@ -49,6 +49,68 @@ Dois furos, os dois exclusivos de **imagem**, corrigidos juntos:
 
 Cobertura: [tests/contracts/test_group_sender_label.py](../tests/contracts/test_group_sender_label.py) (parser, composição e preview) + `messageView.test.js` (`node --test`).
 
+## O batch mescla para a IA, não para o histórico (plano 146)
+
+Quando o cliente manda várias mensagens em poucos segundos, o orquestrador espera
+`message_batch_delay` (3 s por padrão) e junta os textos com `\n` — isso continua
+valendo, e é o que dá à IA **um turno, uma chamada de LLM, uma resposta**. O que
+mudou no plano 146 é **onde essa mescla vive**: ela é a entrada do ciclo
+(`combined` → log e `executions.input_text`), e deixou de ser a linha do banco.
+
+⚠️ **O histórico grava uma linha por mensagem que o cliente mandou**, cada uma com
+o seu `msg_id`, o seu `reply_to_msg_id` e o seu `ts` do provedor — exatamente como
+o ramo de mídia sempre fez. O laço está em
+[messaging_service.py](../app/services/messaging_service.py), no ramo `Text batch`,
+e é **cópia da forma do ramo de mídia logo abaixo**. Não volte a derivar
+"o `msg_id` da última", "o `ts` da última", "o `reply_to` da última".
+
+### O incidente que fixou a regra
+
+Antes disso as N mensagens viravam **uma** linha carimbada com a identidade da
+**última**, e o `msg_id` das anteriores era descartado no save — ele só existia
+como `supersedes` num evento de WebSocket, para o painel colapsar as bolhas
+otimistas. Consequências, as duas visíveis no mesmo print da conversa **10886**:
+
+1. **A citação ficava órfã para sempre.** O atendente clicava "Responder" na
+   primeira das duas frases; o `reply_to_msg_id` apontava para um id que não
+   existe em `messages`, a hidratação não achava nada e a bolha desenhava
+   **"Mensagem original indisponível"**. Medição em produção (28/08/2026): 2.128
+   mensagens com citação, **33 órfãs**, todas nativas, a primeira em 22/07 — o dia
+   em que o plano 75 passou a capturar a citação inbound. **~1 por dia desde que o
+   recurso existe.**
+2. **A resposta subia acima do que ela citava.** A linha combinada herdava o `ts`
+   da última frase, então uma resposta escrita *entre* as duas mensagens do
+   cliente ficava com `ts` menor que o da linha e renderizava antes dela.
+
+Era também por isso que o operador via **certo ao vivo e mesclado ao reabrir**: ao
+vivo sobravam as bolhas otimistas de t=0 até o autoritativo chegar; ao reabrir, o
+`GET` devolvia a linha única do banco.
+
+### Sem retroatividade — e por que `dropSuperseded` continua no código
+
+As linhas já mescladas ficam como estão: **não há backfill possível**, porque o
+`msg_id` engolido não existe em nenhuma tabela nem em log (o payload cru do webhook
+só vive em memória, últimos 50). As 33 citações órfãs de produção permanecem
+órfãs.
+
+🚫 **Não apague `dropSuperseded` nem o ramo `supersedes` de `mergeBufferedMessages`
+([messages.js](../web/static/js/services/messages.js)) como código morto.** O
+parâmetro de `build_inbound_saved_message` também fica. Duas razões: as linhas
+mescladas legadas continuam no banco, e um rollback do core tem de encontrar o
+cliente preparado — um autoritativo sem `supersedes` é no-op no cliente, mas um
+cliente sem a maquinaria diante de um core antigo volta a mostrar bolha duplicada.
+
+### O que muda para a IA
+
+O batch chama `aprocess_message(phone, combined, save_user_message=False, …)`, e
+com `save_user_message=False` o argumento `text` é **descartado** — o modelo lê
+**só o histórico do banco**. Ou seja: quem mesclava para a IA era a **linha**, não
+o argumento. Com uma linha por mensagem, o modelo passa a ver **N turnos `user`
+consecutivos** em vez de um turno colado. Conteúdo e ordem idênticos; muda a forma
+e a contagem da janela. `max_context_messages` foi **mantido em 10** — a mescla
+acontece em ~1 a cada 10 turnos, e subir o padrão encareceria todo turno para
+resolver um caso em dez (o override por canal já existe para quem precisar).
+
 ## Rascunho de mensagem por conversa (compositor)
 
 O texto digitado no compositor **pertence à conversa** e sobrevive à troca de conversa, como no WhatsApp/Chatwoot: digitou "Oi" na `/conversations/123`, foi atender a `/124` e voltou → o "Oi" continua lá. É **pessoal e por-dispositivo**: nada vai para o servidor.

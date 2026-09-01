@@ -106,11 +106,17 @@ export function optimisticDupIndex(message, list) {
 
 /**
  * Drop, from `messages`, the optimistic bubbles that an authoritative combined
- * row supersedes (plano 57). A batch joins N inbound messages into ONE row under
- * the LAST message's `msg_id`; the earlier per-message `msg_id`s arrive in
- * `supersedes`, so their individual t=0 bubbles are collapsed into the combined
- * row (which then reconciles in place by its own `msg_id`). Returns the SAME
- * array reference when nothing is removed (cheap no-op for the common case).
+ * row supersedes (plano 57). A batch USED TO join N inbound messages into ONE row
+ * under the LAST message's `msg_id`; the earlier per-message `msg_id`s arrived in
+ * `supersedes`, so their individual t=0 bubbles were collapsed into the combined
+ * row. Returns the SAME array reference when nothing is removed (cheap no-op).
+ *
+ * ⚠️ Plano 146: the text batch no longer merges — it saves one row per client
+ * message, so a live authoritative arrives WITHOUT `supersedes` and this is a
+ * no-op on the hot path. It is KEPT on purpose: the rows already merged stay in
+ * the database forever (no backfill is possible — the swallowed `msg_id`s were
+ * discarded at save time), and a rollback of the core must find the client ready
+ * for them. Do not delete this as dead code.
  *
  * @param {ChatMessage[]} messages
  * @param {string[]|undefined} supersedes
@@ -135,6 +141,11 @@ export function dropSuperseded(messages, supersedes) {
  * it superseded — so a conversation opened mid-batch never shows an orphan bubble
  * alongside the DB's combined row. Order preserved: history first, then the
  * surviving buffered messages.
+ *
+ * ⚠️ Plano 146: with the text batch no longer merging, the `supersedes` branch is
+ * only reached by rows merged BEFORE that plan. The per-msg_id dedup below is what
+ * carries the current path: N authoritative copies reconcile with their own N
+ * optimistic bubbles, and none is dropped.
  *
  * @param {ChatMessage[]} existing - messages from the REST fetch.
  * @param {ChatMessage[]} pending - buffered WS messages (pre + during fetch).
