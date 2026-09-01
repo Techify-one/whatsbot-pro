@@ -82,6 +82,31 @@ anterior** por um batch de duas mídias — não é um risco que este plano crio
 
 ---
 
+## Sem bump — 2026-08-25 · contrato de ROTINA DE IA (plano 142), entre plugins
+
+**Nada mudou nesta superfície.** `WHATSBOT_API_VERSION` continua `1.8.0`, e a
+entrada existe só para que a próxima sessão não procure aqui um contrato que
+nunca esteve aqui.
+
+O plano 142 criou um contrato novo — o **descritor de rotina** (`rotina_descriptor`,
+`rotina_candidatos`, `rotina_briefing`, `rotina_aplicar`), pelo qual um plugin declara
+uma rotina de IA agendada e o `rotinas_ia` a executa sem conhecê-la. Ele é **entre
+plugins**, não entre core e plugin: nasce e morre dentro do seam `entry.services`, que
+já existe desde a 1.2.0.
+
+Por isso ele é versionado pelo `SERVICES_VERSION` de quem publica (e por um campo
+`contrato` no próprio descritor, que o motor compara por MAJOR), exatamente como diz a
+seção "Não está aqui" no fim deste arquivo. Nenhum símbolo do core mudou, nenhum nome
+entrou em `KNOWN_EVENTS`/`KNOWN_FILTERS`, e o golden de superfície não se move.
+
+O que mudou nos plugins, para referência: `protocolos` publicou
+`atualizar_campos_protocolo` (`SERVICES_VERSION` 1.1.0 → **1.2.0**, MINOR — op nova) e
+acrescentou `conversas_do_protocolo` ao retorno de `contexto_atendimento` (chave nova,
+aditiva). Contrato completo em [docs/PLUGINS.md](PLUGINS.md).
+
+
+---
+
 ## 1.8.0 — 2026-08-20 · `filter.provisioning.message` — a frase do provisionamento vem junto com o número (e os dois têm rede)
 
 **Aditiva no catálogo.** Um plugin que não registre o filtro novo não muda em

@@ -177,6 +177,63 @@ Terceiro canal entre plugins, ao lado do **barramento** (broadcast, "aconteceu a
 - **Compatibilidade com core anterior**: um core sem a linha `"services"` em `_ENTRY_SPECS` nunca consulta `entry.services` e nunca importa o módulo — por isso o `services.py` do provedor tem de ser **FOLHA** (nenhum outro módulo dele o importa; helper compartilhado vai para os módulos vizinhos). No consumidor, o import é sempre defensivo: `try: from plugins import services / except: _services = None` — import duro no topo de um módulo que o loader importa = o plugin não carrega, falha muda no boot.
 - **Quem usa hoje**: `trackify` publica a superfície completa do CDP (`SERVICES_VERSION = "1.0.0"`, 18 ops: status, eventos, jornada, compras, assinaturas, identidade, campos, escrita, cadastro, consentimento) e é o **único ponto que fala com o CDP**; `protocolos` a consome para entregar `track_protocolo_*` (antes era assinatura de barramento). O `_emit_bus` do `protocolos` **continua emitindo** — o emit sobra como sinal de observabilidade para quem assina `"*"` (`debug_bus`); o que mudou foi só o caminho de ENTREGA.
 
+### Rotina de IA agendada — o contrato do `rotinas_ia` (plano 142)
+
+Uma **rotina** é um agente de IA que roda de tempos em tempos sobre os atendimentos, sem falar com o cliente: ele lê, decide e escreve num campo. O plugin `rotinas_ia` é o **motor** — ele não conhece nenhuma rotina por nome.
+
+> **A regra:** o plugin **DECLARA** a rotina; o motor **AVALIA** e executa. É a mesma assimetria de `provider_descriptor()` nos canais — declarar é livre, executar é do motor. Um `if rotina_key ==` dentro do motor é bug de arquitetura, não atalho.
+
+A pergunta que essa regra responde é do operador, e é a razão de o contrato existir: *"se amanhã eu tiver um plugin totalmente diferente e precisar de uma rotina de IA nele, vou ter que mexer no motor?"*. Não. O plugin novo publica um descritor pelo seam `entry.services`, e o motor o descobre por `services.describe()` ([plugins/services.py](../plugins/services.py)) — sem lista fixa, sem conhecer o id de ninguém.
+
+**As cinco operações que a rotina publica** (só `rotina_descriptor` e `rotina_aplicar` são obrigatórias):
+
+| Op | Quem chama | O que faz |
+|---|---|---|
+| `rotina_descriptor()` | o motor, a cada tick | identidade, tools, rótulos das decisões e o `config_schema` declarativo |
+| `rotina_candidatos(rotina_key, candidatos, config)` | o motor, antes da varredura | **restringe** a lista do motor (uma marca-d'água, por exemplo) |
+| `rotina_briefing(rotina_key, alvo, config)` | o motor, antes da rodada | a mensagem que abre o turno, já com o contexto |
+| `rotina_aplicar(rotina_key, alvo, decisao, config)` | o motor, DEPOIS da rodada, **só se a decisão foi `aplicado`** | executa a decisão e devolve `{ok, decisao, motivo, dados}` |
+| `rotina_resultado(rotina_key, alvo, decisao, config)` | o motor, para **TODO** alvo avaliado (motor ≥ 1.1.0) | contabilidade da rotina: carimbar marca-d'água, avisar na conversa. O envelope é ignorado — não reclassifica a decisão já contada |
+| `rotina_problemas(rotina_key, config)` | o motor, no `/status` e **antes de varrer** (motor ≥ 1.2.0) | os avisos de configuração da rotina: `{problemas: [...], impeditivos: [...]}` |
+
+⚠️ **`impeditivos` é o subconjunto que faz o motor NÃO varrer**, e a distinção é o que separa "esta configuração não funciona para ninguém" de "isto aqui será descartado". A rotina de fechamento com o rótulo obrigatório *Atendente* sem valor fixo é o primeiro caso: em produção ela produziu **uma chamada de LLM por atendimento para que todas fossem recusadas na última linha**, todos os dias, desde que foi ligada. O segundo caso — um valor fixo apontando para rótulo apagado — não pode calar a rotina, porque ela trabalha perfeitamente com ele. A guarda é **fail-open em toda degradação** (op ausente, envelope ruim, exceção) e **não grava a execução**: gravar queimaria o horário no índice único, e quem corrigisse a configuração cinco minutos depois ficaria sem passada até o dia seguinte.
+
+⚠️ **O `config_schema` diz à tela o que mostrar, incluindo em campo de widget próprio.** O tipo `campos_fixos` renderiza um formulário dos rótulos reais do Protocolos (a lista vem do `GET /campos` do motor, então rótulo novo aparece sem deploy), e **quais escopos e filtros** ele usa são chaves declaradas pela rotina (`escopos`, `somente_atalho`, `chave_ignorados`) — nunca deduzidas do nome dela. Chave desconhecida degrada sozinha num motor anterior, então acrescentar uma **não** sobe o piso de `whatsbot_api_version`.
+
+⚠️ **Cada rótulo tem TRÊS estados, e o terceiro é uma chave separada.** "A IA decide" (ausente), "valor fixo" (`campos_fixos`) e **"não preencher"** (`campos_ignorados`). O terceiro existe porque um rótulo pode ter OUTRO dono — a etapa comercial é carimbada por outra rotina, com guardas de só-avançar e de não sobrescrever vendedor, e um segundo escritor passaria por cima de todas elas. São duas chaves, e não um valor-sentinela dentro de uma, porque qualquer sentinela colidiria com um texto legítimo do operador. ⚠️ **Rótulo obrigatório nunca é ignorado**, mesmo que a configuração peça: sem valor ele reprova o fechamento, e obedecer transformaria uma escolha de tela num bloqueio total e silencioso — a tela não oferece a opção e o backend a descarta.
+
+⚠️ **`rotina_aplicar` NÃO serve de gancho para "já olhei para este alvo".** Ela só roda quando o modelo decidiu agir, então os desfechos *leu e manteve*, *confiança abaixo do mínimo* e *não chamou ferramenta nenhuma* não passam por lá. Uma marca-d'água construída sobre ela fica sempre vazia nesses três casos, e o mesmo atendimento volta a custar uma chamada de LLM em **todo horário, para sempre**, sem uma única mensagem nova. É para isso que existe `rotina_resultado`.
+
+**As três que o MOTOR publica**, para a tool da rotina (`entry.services` do `rotinas_ia`, `SERVICES_ALLOW` vazio de propósito — uma allowlist ali teria de nomear cada rotina futura):
+
+| Op | Para quê |
+|---|---|
+| `alvo_atual()` | o atendimento em avaliação, ou `None` fora de um ciclo |
+| `registrar_decisao(decisao, motivo, dados)` | a tool DECLARA o que decidiu — não escreve nada |
+| `post_note(alvo, corpo, autor)` | nota privada no fio (motor ≥ 1.1.0): resolve o canal pelo `conversation_id`, grava pelo `agent_handler` e emite o `new_message` |
+
+⚠️ **"Teve movimento" não é "teve novidade".** O core chama `touch_activity` em **toda** mensagem gravada, de qualquer papel e de qualquer autor — então um disparo do plugin de retornos, um card painel-only ou a própria nota que a rotina acabou de escrever empurram o `last_activity_at` e reabrem a avaliação de todo mundo. Uma marca-d'água que compare esse campo se realimenta. O critério que funciona é o **autor** (`messages.sent_by_name`), não a direção: o retorno automático assina o nome dele, a IA de atendimento não assina nada (tem `agent_key`) e o vendedor assina o próprio. ⚠️ E a régua **não pode ser "só mensagem do cliente"**: uma proposta apresentada *pelo atendimento* é justamente o que faz o lead avançar de etapa.
+
+⚠️ **`SERVICES_ALLOW` sem o id do motor torna a rotina invisível EM SILÊNCIO.** O proxy volta *falsy* ([plugins/services.py](../plugins/services.py), a checagem de `provider.allow`), sem erro e sem exceção — o sintoma é "minha rotina não aparece" e mais nada. Por isso o motor **lista o plugin mesmo assim**, com o campo `problema` preenchido dizendo qual linha falta, e a tela o mostra em vermelho. É o erro mais fácil de cometer neste contrato.
+
+⚠️ **A descoberta usa `acall`, nunca `call`.** Uma rotina de terceiro pode declarar `async def rotina_descriptor`, e `call()` na thread do event loop devolve `WRONG_CONTEXT` para op assíncrona — a rotina sumiria em silêncio. Do outro lado, as duas ops DO MOTOR são **síncronas** de propósito: a tool roda na thread do loop (o AGNO chama `handler._dispatch_tool` direto), onde só `call()` é possível.
+
+**O que o motor NÃO delega** — e é por isso que uma rotina de terceiro é segura:
+
+1. as três camadas que impedem tocar atendimento humano (SELECT com `assignee_user_id IS NULL`, `recheck_target` imediatamente antes de escrever, tools amarradas ao alvo por `ContextVar`);
+2. o agendamento, o teto por passada e a idempotência do horário;
+3. a trilha de execução e a tela;
+4. a rodada headless **com as tools restritas às que a rotina declarou** — nenhuma rotina alcança `transfer_to_human` nem qualquer tool de envio.
+
+A rotina pode **restringir** os candidatos e **anotar** cada um (o `etapa_comercial` devolve o `protocolo_id` que já resolveu), mas não pode alargar a lista nem reescrever um campo do SELECT do motor: o resultado é interseccionado por `conversation_id` e os campos do motor vencem na fusão. Sem isso, a primeira camada de proteção viraria decoração.
+
+**Vários horários por dia.** A chave de idempotência é `(rotina, data, horário)`, não a data — o plugin `fechamento_ia`, que este motor substitui, tinha um horário só, e com a chave em data a segunda passada do dia era recusada em silêncio pelo índice único parcial. Entre horários vencidos, vale o **mais recente**: `catchup_minutes` existe para o servidor que estava fora no minuto exato, não para reprocessar o dia inteiro.
+
+**A tela é declarativa.** O `config_schema` do descritor é renderizado sem o motor conhecer nenhum campo — mesmo padrão do `config_fields` do descritor de canal e do `PluginSettingsForm`. Tipo desconhecido degrada para texto em vez de sumir, então uma rotina escrita para um motor mais novo continua configurável no que ele entende.
+
+**Rotinas hoje:** `fechamento` (interna ao motor, portada 1:1 do `fechamento_ia`) e `classificar_etapa` (plugin `etapa_comercial` — o primeiro consumidor externo, ver [docs/IA.md](IA.md)). A interna passa pelo MESMO caminho de descoberta e normalização das externas, de propósito: um contrato que a implementação de referência não usa é um contrato que ninguém testou.
+
+
 ### Plugin que envia sozinho: o gate da janela é DELE (plano 143)
 
 Um plugin que chame `outbound.send_text` direto não passa por nenhuma das guardas que o painel tem. Dois plugins hoje enviam assim e **os dois pulam quando a janela está fechada** — mas por predicados **deliberadamente diferentes**, e unificá-los seria regressão nos dois sentidos:

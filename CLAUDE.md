@@ -9,10 +9,10 @@ Este arquivo carrega a **regra**; o **porquê** (histórico, medições, o que e
 | Vai mexer em… | Leia antes |
 |---|---|
 | evento/filtro de plugin, payload do bus, media type | [docs/PLUGIN_BUS.md](docs/PLUGIN_BUS.md) + [plugins/events.py](plugins/events.py) (catálogo executável) |
-| sistema de plugins, RBAC, `entry.services`, override de UI, regra core-vs-plugin | [docs/PLUGINS.md](docs/PLUGINS.md) |
+| sistema de plugins, RBAC, `entry.services`, **rotina de IA agendada**, override de UI, regra core-vs-plugin | [docs/PLUGINS.md](docs/PLUGINS.md) |
 | provider de canal, descriptor, dedup de conta, proxy, JID, limites de mídia | [docs/CANAIS.md](docs/CANAIS.md) |
 | Messenger/Instagram, janelas de 24h/7d/IA, alertas da conta Meta | [docs/CANAIS_META.md](docs/CANAIS_META.md) |
-| motor AGNO, agentes, roteamento, gate do humano, transcrição | [docs/IA.md](docs/IA.md) |
+| motor AGNO, agentes, roteamento, gate do humano, transcrição, **etapa comercial** | [docs/IA.md](docs/IA.md) |
 | compositor, bandeja de anexo, thread, rascunho, sidebar | [docs/UI_CONVERSA.md](docs/UI_CONVERSA.md) |
 | endpoint REST, evento WebSocket, chave de API (`X-Api-Key`), fachada `/api/v1`, webhook de saída | [docs/API_REST.md](docs/API_REST.md) |
 | tema, contraste, modo escuro, **largura/transbordo de coluna flex (`min-w-0`)** | [docs/FRONTEND.md](docs/FRONTEND.md) |
@@ -484,6 +484,10 @@ Terceiro canal entre plugins, ao lado do **barramento** ("aconteceu algo") e dos
 - ⚠️ O registro acontece em `create_app`, **antes** do `setup()` — uma op não pode depender de estado criado no `setup()`; se depender, devolve `DISABLED`, nunca quebra.
 - ⚠️ O `services.py` do provedor tem de ser **FOLHA** (nenhum outro módulo dele o importa) e o import no consumidor é sempre **defensivo** — senão o plugin não carrega num core anterior.
 - **`as_plugin` é FALSIFICÁVEL**: é contabilidade de alcance, não fronteira de segurança. A fronteira real é "nada sai do processo". **Auditoria é do PROVEDOR**, por operação com efeito externo.
+
+### Rotina de IA agendada (`rotinas_ia`) → [docs/PLUGINS.md](docs/PLUGINS.md)
+
+Agente de IA que roda de tempos em tempos sobre os atendimentos, sem falar com o cliente. **O plugin DECLARA a rotina (`rotina_descriptor`), o motor AVALIA e executa** — descoberta por `services.describe()`, sem lista fixa; plugin novo nunca adapta o motor. ⚠️ **Esquecer `rotinas_ia` no `SERVICES_ALLOW` da rotina a torna invisível EM SILÊNCIO** (o proxy volta falsy, sem erro) — por isso o motor lista o plugin com o diagnóstico em vez de omiti-lo.
 
 ### Events e Filters (bus do plugin) → [docs/PLUGIN_BUS.md](docs/PLUGIN_BUS.md)
 

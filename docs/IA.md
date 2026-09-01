@@ -92,6 +92,42 @@ Além da lista-negra de ROLES fixa do repo (`transcription`, `tool_call`, `syste
 
 ---
 
+## Classificação automática da etapa comercial (plano 142)
+
+A IA carimba sozinha a etapa do funil de cada atendimento **conduzido por ela**. Não é um gancho no caminho quente: é uma **rotina de IA agendada** (ver o contrato em [docs/PLUGINS.md](PLUGINS.md)), executada pelo plugin `rotinas_ia` algumas vezes por dia. Latência para o cliente: **zero**.
+
+**Onde o dado mora — e por que não foi preciso criar nada.** A etapa já era um campo de OPÇÃO do escopo *protocolo* do plugin `protocolos` (em produção, "Temperatura", com nove opções `E1…E9`). O que faltava não era campo: era (a) as **definições** de cada opção, (b) um **caminho de escrita** para a IA fora do popup "Resolver atendimento", e (c) um **executor**. Zero migration no `protocolos`, zero coluna nova.
+
+**Por que não classificar dentro do turno de atendimento.** Três razões, em ordem de peso:
+
+1. `max_context_messages` é 10 em produção — o agente do turno vê as últimas dez mensagens, e "a etapa mais avançada que o lead alcançou" depende de fatos que já saíram dessa janela;
+2. o escopo do agente é a CONVERSA, e a etapa é do PROTOCOLO (que agrupa vários ciclos, possivelmente em conversas diferentes);
+3. o prompt do agente comercial já é uma máquina de estados de 44 mil caracteres — a classificação competiria com ela.
+
+**As definições são DADO, não prompt.** As nove etapas são descritas em `option_descriptions` do próprio campo, editáveis pelo operador na tela do `protocolos` e entregues ao modelo pela op `field_defs`. Nenhuma etapa é descrita dentro do prompt de um agente, e **nenhuma é nomeada em código**: acrescentar, renomear ou reordenar uma etapa é configuração, não deploy.
+
+**A ordem do funil é a ordem do array `options`.** É o que permite à guarda "só avançar" existir sem o `protocolos` saber o que é funil comercial: ele sabe que uma opção mais à frente no array vem depois (`logic.indice_da_opcao`).
+
+**Quem decide se a escrita acontece é a op do `protocolos`, não a rotina.** `atualizar_campos_protocolo` (`SERVICES_VERSION` 1.2.0) grava campo de protocolo **sem resolver o atendimento**, com as guardas ligadas por padrão:
+
+| Guarda | O que recusa |
+|---|---|
+| `somente_avancar` | valor cujo índice em `options` é menor que o atual — a regressão indevida |
+| `nao_sobrescrever_humano` | a última linha do livro de mudanças para aquele rótulo é de um `user` |
+| (sempre) | valor fora de `options` — ⚠️ indispensável, porque `_coerce_extra` **não** valida `select` de valor único contra a lista |
+| `valores_fora_de_escala` | isenta da ordem os valores que não são etapa de venda (reembolso, suporte), **dos dois lados** |
+
+⚠️ **A política mora na OPERAÇÃO, não em quem chama.** Se ficasse no chamador, o próximo escritor automático a reinventaria com outro critério — ou esqueceria. A tela continua **sem guarda nenhuma**: correção humana para baixo é sempre legítima, e a IA não a desfaz (a guarda de humano-vence garante isso na passada seguinte).
+
+Recusa é **resultado normal**, não erro: vira `mantido` com o motivo legível no histórico de execuções (`etapa anterior → etapa nova`, motivo do modelo, confiança, veredito da guarda, protocolo, conversa e agente responsável).
+
+**O que economiza token.** Uma marca-d'água por protocolo (`plugin_etapa_comercial_marcas`): candidato cujo `last_activity_at` não passou da última classificação é pulado **antes** de qualquer chamada de LLM. Com 4–5 passadas por dia, a maioria dos protocolos não recebeu mensagem nenhuma entre uma e outra. Some-se a isso que `active_agent_key` é zerado na transferência para humano, então o universo instantâneo de conversas "com a IA no comando" é de dezenas, não de milhares.
+
+⚠️ **A lista de regex que corta o histórico do classificador é PRÓPRIA, não a global `ai_history_exclude_patterns`.** O que o agente de atendimento deve ignorar é frequentemente o oposto do que o classificador quer ler: a nota "🤖 Retorno automático acionou a IA. Instrução: …" é obrigatória para o atendimento e ruído para o classificador; a nota "📣 Lead de anúncio · Campanha: …" é o contrário. O módulo [agent/history_filter.py](../agent/history_filter.py) é reusado (`matches`/`filter_rows`), mas nunca o `load_compiled()`, que lê a chave global. `herdar_lista_global` existe para quem quiser as duas e nasce desligado.
+
+**Notas privadas chegam ao LLM** — `private_note` não está na lista de roles excluídos do contexto ([db/repositories/message_repo.py](../db/repositories/message_repo.py)) e vira `[Nota privada do operador]: …` ([agent/memory.py](../agent/memory.py)). É o que faz uma automação externa conseguir informar uma compra confirmada sem nenhuma mudança de core. ⚠️ Essa nota precisa nascer com `ai_read` **falso** (o default): uma nota que a IA lê dispararia um turno e ela responderia ao cliente.
+
+
 ## Tool editável pela tela (core E plugin)
 
 As tools que aparecem em **Configurações de IA → Tools** (`/ai/tools`) com `v1` + `instalada` + **Editar código / Histórico / Excluir** são as que têm linha em `ai_tools`. São três procedências, e a coluna `kind` as separa:
