@@ -1,6 +1,6 @@
 # Plano 146 — A mescla do batch vira entrada da IA, não linha do histórico
 
-> **Status:** PLANEJAMENTO · **Data:** 2026-08-28 · **Escopo:** médio (core: 1 arquivo quente; plugins: 2 a auditar; sem migration, sem bump de `WHATSBOT_API_VERSION`)
+> **Status:** ✅ EXECUTADO (código, testes, docs e plugin) · **Data:** 2026-08-28 · **Auditoria adversarial + correções:** 2026-09-01 · **Escopo:** médio (core: 1 arquivo quente; plugins: 2 a auditar; sem migration, sem bump de `WHATSBOT_API_VERSION`)
 > **Origem:** relato do operador sobre a conversa **10886** de produção — o atendente clicou com o botão direito em "Responder" numa mensagem do cliente e a bolha citada saiu **"Mensagem original indisponível"**, acima da mensagem que ela citava. **Método:** leitura do código com `arquivo:linha` verificados + consulta **somente-leitura** ao banco de produção pelo cofre (a credencial fica fora deste documento — repositório público).
 > **O quê/porquê:** o batch de recepção junta N mensagens de texto do cliente numa **única linha** de `messages`, sob o `msg_id` da **última**. Os `msg_id` das demais **nunca são persistidos** — existem só como `supersedes` num evento de WebSocket. Toda citação que aponte para uma mensagem engolida fica **órfã para sempre**. Este plano mantém a mescla onde ela serve (o ciclo da IA: um turno, uma resposta) e devolve ao histórico uma linha por mensagem real.
 >
@@ -185,11 +185,11 @@ WAVE 3  F7 (documentação)
 **Pronto quando:** A, B e C verdes; D vermelho com a mensagem "Mensagem original indisponível" reproduzida em teste. `venv/bin/python -m pytest tests/integration/test_batch_message_identity.py` roda no Postgres de teste.
 
 #### Status de execução — Fase F0.1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28)
+- **O que foi feito:** `tests/integration/test_batch_message_identity.py` (398 linhas) com os casos A (N linhas), B (N eventos `batch_text`), C (autoritativo) e D (a citação à primeira mensagem).
+- **Como foi feito / decisões:** Os casos nasceram descrevendo a mescla e foram INVERTIDOS junto com a F1.
+- **Problemas / pendências:** ⚠️ O arquivo nasceu **untracked** e só entrou no git no commit da F1 — então a inversão A/B/C **não é auditável no histórico**, ao contrário do que a R8 pedia. ⚠️ Nenhuma asserção distingue "2 mensagens num batch" de "2 batches de 1": todas continuariam verdes se a mescla nunca tivesse acontecido (risco de falso-verde). Sem cobertura para `reply_to_msg_id` por linha, para `executions.input_text` e para o `continue` de item vazio.
+- **Verificação:** `venv/bin/python -m pytest tests/integration/test_batch_message_identity.py` no Postgres de teste.
 
 ---
 
@@ -207,11 +207,11 @@ WAVE 3  F7 (documentação)
 **Pronto quando:** tabela preenchida com o veredito de cada plugin (`seguro` / `precisa de guard` / `muda de comportamento`), e P1 marcada ✅ com data.
 
 #### Status de execução — Fase F0.2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28) — **com furos descobertos depois**
+- **O que foi feito:** Auditoria dos assinantes de `message.saved`; P1 decidida em **(a)**.
+- **Como foi feito / decisões:** Varredura de `EVENT_HANDLERS` em `storages/plugins/`: `protocolos` (idempotente), `retornos` (alternante → F6), `telegram` (sai no 1º guard para texto), `debug_bus` (observador).
+- **Problemas / pendências:** 🔴 **A varredura foi incompleta — três furos, achados na auditoria adversarial de 2026-09-01:** (1) o **5º assinante** nunca foi visto: `server/webhook_dispatcher.py` assina `"*"` e `message.saved` está em `EXPORTABLE_EVENTS`, então todo webhook de SAÍDA cadastrado passa a receber N entregas HTTP por batch, cada uma com texto parcial; (2) no `protocolos`, o R2 foi avaliado só em `on_inbound` — a mesma regex é lida em `suppress_ai_on_ignored` (`filter.llm.messages`, logic.py:6118), que pega a ÚLTIMA mensagem `user` do histórico: antes essa "última" era o bloco mesclado inteiro, hoje é só a última frase, então **a IA passa a responder onde antes calava**; (3) a idempotência do `protocolos` foi avaliada como SEQUENCIAL, mas o bus despacha com `asyncio.create_task` (plugins/events.py:472) — os dois eventos do mesmo batch correm em paralelo, e a migration 002 do plugin **derruba** o índice `plugin_protocolos_atend_unique`, deixando o get-or-create do ciclo como check-then-insert sem trava.
+- **Verificação:** Leitura dos quatro `events.py` instalados. ⚠️ A varredura deveria ter incluído o CORE (`grep -rn 'EVENT_HANDLERS\|subscribe' server/ app/`), não só `storages/plugins/`.
 
 ---
 
@@ -240,11 +240,11 @@ WAVE 3  F7 (documentação)
 - No painel: mandar duas mensagens seguidas do WhatsApp, recarregar a conversa (F5) e ver **duas bolhas**, não uma.
 
 #### Status de execução — Fase F1
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28)
+- **O que foi feito:** O laço por item no ramo `Text batch` de `app/services/messaging_service.py` (M1–M5): `text_items` substitui `text_reply_to`/`text_ts_last`, e cada mensagem vira uma linha com o SEU `msg_id`, `reply_to_msg_id` e `ts`.
+- **Como foi feito / decisões:** Cópia da forma do ramo de mídia logo abaixo, como a M2 mandava. `combined` continua existindo para o log e `executions.input_text`. O `new_message` autoritativo passou a sair sem `supersedes`.
+- **Problemas / pendências:** 🔴 **Efeito colateral não previsto pelo plano, corrigido em 2026-09-01:** `message_repo.get_context` (a leitura que alimenta o LLM) ordenava só por `ts DESC`. O `ts` do provedor tem resolução de SEGUNDO, então duas mensagens do mesmo segundo passaram a ser duas linhas com `ts` IDÊNTICO e ordem indefinida — o modelo podia ler os dois turnos `user` trocados. Desempate por `id` acrescentado em `get_context`, `get_context_by_conversation`, `get_last` e `get_last_user_message`. ⚠️ As 7 subqueries de `db/repositories/conversation_query.py` (preview da sidebar) têm o MESMO empate e **continuam sem desempate**.
+- **Verificação:** Suíte completa verde exceto as 3 falhas pré-existentes (cadeia do Alembic ×2 + matriz de auditoria — idênticas no `HEAD` sem este patch) e `test_f4`, que passa isolada (flake de ordem).
 
 ---
 
@@ -260,11 +260,11 @@ WAVE 3  F7 (documentação)
 **Pronto quando:** os três verdes; e uma consulta manual na conversa 10886 do ambiente de desenvolvimento reproduz o cenário do print com a citação resolvida.
 
 #### Status de execução — Fase F2
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28)
+- **O que foi feito:** `test_reply_quoting_first_batch_message_resolves`, `test_quoted_target_outside_page_is_hydrated` e `test_quoted_target_that_never_existed_still_falls_back`.
+- **Como foi feito / decisões:** O 3º prova que o fallback "Mensagem original indisponível" NÃO sumiu — ele continua correto para alvo que nunca existiu.
+- **Problemas / pendências:** ⚠️ O critério original falava em "consulta manual na conversa 10886": isso é inatingível por construção (a D3 proíbe backfill e a linha mesclada segue mesclada). Lido como **reencenar** o cenário em dev. ⚠️ O teste da citação faz a mesma asserção do teste A e **não exercita `_attach_quoted`** — apagar o `message_repo.add` da resposta o deixaria verde.
+- **Verificação:** Incluídos na suíte de integração.
 
 ---
 
@@ -279,11 +279,11 @@ WAVE 3  F7 (documentação)
 **Pronto quando:** ordem `A → resposta → B` provada em teste; suíte do plano 129 verde.
 
 #### Status de execução — Fase F3
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28)
+- **O que foi feito:** Cobertura da ordem A → resposta → B, o 2º defeito do relato.
+- **Como foi feito / decisões:** Asserção sobre a sequência lida do repositório.
+- **Problemas / pendências:** Ver o desempate por `id` registrado na F1 — sem ele a própria ordem que esta fase testa era indefinida no empate de segundo.
+- **Verificação:** Incluído na suíte de integração.
 
 ---
 
@@ -300,11 +300,11 @@ WAVE 3  F7 (documentação)
 **Pronto quando:** o comportamento do modelo com batch de 2 mensagens está coberto por teste, e a escolha sobre `max_context_messages` está escrita.
 
 #### Status de execução — Fase F4
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28) — P2 = (a), P3 = (a)
+- **O que foi feito:** `test_ai_context_shows_two_consecutive_user_turns`. `app/services/agent_run_service.py` **não foi tocado** e `max_context_messages` **continua 10**.
+- **Como foi feito / decisões:** P2 (a): N turnos `user` consecutivos, sem mecanismo novo. P3 (a): manter 10 — a mescla acontece em ~1 a cada 10 turnos e subir o padrão encareceria todo turno.
+- **Problemas / pendências:** ⚠️ O teste lê `ContactMemory.get_context_messages`, não passa por `run_turn`: `_encode_history_for_split` fica descoberto.
+- **Verificação:** Incluído na suíte de integração.
 
 ---
 
@@ -320,11 +320,11 @@ WAVE 3  F7 (documentação)
 **Pronto quando:** `node --test web/static/js/services/messages.test.js` verde e o teste manual das duas bolhas confere ao vivo e após recarregar.
 
 #### Status de execução — Fase F5
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28)
+- **O que foi feito:** 4 casos novos em `web/static/js/services/messages.test.js`; `dropSuperseded` e o ramo `supersedes` de `mergeBufferedMessages` MANTIDOS (M7/R6), com o porquê no comentário.
+- **Como foi feito / decisões:** A maquinaria fica porque as linhas mescladas legadas continuam no banco e um rollback do core precisa encontrar o cliente preparado.
+- **Problemas / pendências:** ⚠️ Achado de 2026-09-01, **em aberto**: com a conversa aberta ENTRE a 1ª e a 2ª mensagem, o buffer pode conter o otimista da 2ª antes dos autoritativos da 1ª e da 2ª, e `mergeBufferedMessages` pode devolvê-las fora de ordem. Some ao recarregar. ⚠️ Nenhum caso novo exercita o buffer MISTO (otimista + autoritativo do mesmo batch).
+- **Verificação:** `node --test web/static/js/services/messages.test.js` — **40/40**.
 
 ---
 
@@ -343,11 +343,11 @@ WAVE 3  F7 (documentação)
 **Pronto quando:** teste do plugin verde; zip publicado; `retornos` instalado no dev com a versão nova.
 
 #### Status de execução — Fase F6
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28) — publicada e **em produção**
+- **O que foi feito:** Guard de re-armação no `retornos`: `_REARM_GUARD_SECONDS = 15.0` + `_cancelado_por_resposta_agora`, ancorado no marcador `_MOTIVO_ON_REPLY_CANCEL` em `last_error`. Sem tabela nova.
+- **Como foi feito / decisões:** Publicado como **1.20.1** e hoje em **1.21.0** no repositório de plugins; instalado em `storages/plugins/` ANTES do commit do core, como a ordem de deploy exigia.
+- **Problemas / pendências:** ⚠️ O guard é **unidirecional**: protege cancelar→re-armar, mas não armar→cancelar no mesmo batch. ⚠️ A janela de 15 s é maior que o `message_batch_delay` (3 s), então ela também alcança batches DISTINTOS — o comentário do código afirma o contrário. Em produção o risco é inalcançável hoje: as duas configurações usam `on_reply='reset'` e estão inativas.
+- **Verificação:** `python3 scripts/test_plugins.py retornos` — **111 Python + 33 JS**, exit 0. `plugins` de produção confirma `retornos` 1.21.0 ativo.
 
 ---
 
@@ -365,11 +365,11 @@ WAVE 3  F7 (documentação)
 **Pronto quando:** os quatro documentos atualizados e `test_docs_hygiene.py` verde.
 
 #### Status de execução — Fase F7
-**Estado:** ⬜ Não iniciada
-- **O que foi feito:** _(preencher ao executar)_
-- **Como foi feito / decisões:** _(preencher)_
-- **Problemas / pendências:** _(preencher)_
-- **Verificação:** _(preencher)_
+**Estado:** ✅ Executada (2026-08-28), revisada em 2026-09-01
+- **O que foi feito:** `CLAUDE.md` (a regra em 1 linha), `docs/UI_CONVERSA.md` (o incidente e o porquê de `dropSuperseded`), `docs/PLUGIN_BUS.md` (cardinalidade) e `docs/PLUGIN_API_CHANGELOG.md` (entrada sem bump).
+- **Como foi feito / decisões:** A regra ficou no `CLAUDE.md`; o mecanismo, a medição e os números de produção no guia.
+- **Problemas / pendências:** 🔴 **Em aberto — o bump.** A tabela de política do próprio changelog (linha 25) lista como **MINOR**: *"ampliar o conjunto de situações em que um evento existente é emitido"*, que é exatamente o que aconteceu. A entrada nova afirma "sem bump" 18 linhas abaixo dela. **Decidir se `WHATSBOT_API_VERSION` vai a 1.9.0.** ⚠️ Também não documentado: a mudança de cardinalidade do webhook de SAÍDA (`docs/API_REST.md`), a nova semântica de `filter.conversation.before_reopen` (N avaliações, texto por mensagem) e a cardinalidade de `message.persisted`, que também foi de 1 para N.
+- **Verificação:** Corrigidos em 2026-09-01: o passo 3 do `CLAUDE.md` ainda dizia que as mensagens "são juntadas em uma só" (contradizendo o ⚠️ sete linhas abaixo) e a docstring de `build_inbound_saved_message` ainda descrevia a mescla no presente. `tests/contracts/test_docs_hygiene.py` e `test_plugin_api_surface.py` verdes.
 
 ---
 
@@ -392,14 +392,14 @@ WAVE 3  F7 (documentação)
 ## 6 — Perguntas em aberto
 
 **P1 — `message.saved` deve disparar N vezes, ou N vezes + 1 agregado?**
-⏸️ **ABERTA — decidir na F0.2.**
+✅ **DECIDIDA na F0.2 (2026-08-28): (a)** — N eventos, sem agregado.
 Contexto: hoje `batch_text` emite 1 por batch e `batch_media` emite 1 por item. Assinantes reais: `protocolos`, `retornos`, `telegram`, `debug_bus` (§2.7).
 (a) **N eventos, sem agregado** — o evento passa a descrever o que aconteceu de fato, e a cardinalidade fica igual à da mídia. Custo: R1 e R2.
 (b) **N eventos + 1 agregado com `source` novo** (ex. `batch_text_combined`) — preserva os assinantes atuais intactos. Custo: dois vocabulários para o mesmo fato, para sempre, e um nome novo de catálogo (MINOR no changelog).
 **Recomendação: (a).** A (b) preserva exatamente o acoplamento que este plano existe para desfazer, e os dois assinantes de risco precisam de ajuste de qualquer forma — R1 é um bug latente que a mídia já podia disparar hoje.
 
 **P2 — o que o modelo deve ver: N turnos `user` ou um turno combinado?**
-⏸️ **ABERTA — decidir na F4.**
+✅ **DECIDIDA na F4 (2026-08-28): (a)** — N turnos `user` consecutivos; `agent_run_service.py` não foi tocado.
 Contexto: §2.5 — o `combined` passado ao handler é ignorado; quem mescla para a IA é a linha do banco.
 (a) **N turnos `user` consecutivos** — nenhum mecanismo novo; é exatamente o que o modelo já vê hoje quando dois batches acontecem sem resposta da IA entre eles. Custo: consumo da janela (R4).
 (b) **Colapsar turnos `user` consecutivos ao montar o contexto** — mantém a entrada do modelo byte a byte igual à de hoje. Custo: colapsa também mensagens que **não** eram do mesmo batch e que hoje o modelo vê separadas — muda comportamento fora do escopo.
@@ -407,7 +407,7 @@ Contexto: §2.5 — o `combined` passado ao handler é ignorado; quem mescla par
 **Recomendação: (a).** É a única que não inventa mecanismo, e a forma "N mensagens seguidas do cliente" já é rotina no histórico. A (b) só se a F4 medir degradação real de resposta.
 
 **P3 — `max_context_messages` sobe?**
-⏸️ **ABERTA — decidir na F4 item 4, depois da P2.**
+✅ **DECIDIDA na F4 (2026-08-28): (a)** — `max_context_messages` mantido em 10.
 Se a P2 = (a), a janela efetiva encolhe ~10 % em conversas com mescla. (a) manter 10 e observar; (b) subir o padrão. **Recomendação: (a)** — subir o padrão encarece **todo** turno para resolver um caso em dez; o override por canal já existe para quem precisar.
 
 ---
@@ -438,15 +438,31 @@ Se a P2 = (a), a janela efetiva encolhe ~10 % em conversas com mescla. (a) mante
 
 ## 8 — Checklist de verificação
 
-- [ ] `venv/bin/python -m pytest` verde no Postgres de teste (`WHATSBOT_TEST_DB_URL`), sem suíte concorrente
-- [ ] `venv/bin/python -m pytest tests/integration/characterization/` verde **sem edição** (todos os casos mandam 1 mensagem por batch)
-- [ ] `venv/bin/python -m pytest tests/contracts/` verde — incluindo `test_docs_hygiene.py` e `test_plugin_api_surface.py`
-- [ ] `node --test web/static/js/services/messages.test.js` verde
-- [ ] Runner do plugin: `python3 scripts/test_plugins.py retornos` verde no repositório de plugins
-- [ ] Duas mensagens seguidas do WhatsApp → **duas** bolhas ao vivo **e** após F5
-- [ ] Responder (botão direito) à **primeira** das duas → a citação mostra o texto certo, e só o dela
-- [ ] A resposta escrita entre as duas renderiza **entre** elas após recarregar
-- [ ] Nenhuma migration nova; `WHATSBOT_API_VERSION` inalterado em [plugins/semver.py](../plugins/semver.py)
-- [ ] `retornos` publicado e **instalado** em `storages/plugins/` antes do commit do core
-- [ ] Modo escuro: nada de UI nova — verificação dispensada, registrar como N/A
+- [x] `venv/bin/python -m pytest` verde no Postgres de teste — **4 falhas, nenhuma deste plano**: as 3 pré-existentes conhecidas (cadeia do Alembic ×2 + matriz de auditoria, reproduzidas idênticas num worktree limpo do `HEAD` sem este patch) e `test_f4_inbound_save_failure_leaves_a_trace`, que **passa isolada** — flake dependente de ordem
+- [x] `venv/bin/python -m pytest tests/integration/characterization/` verde **sem edição** — nenhum teste `.py` foi tocado pelo plano; a única falha ali é a matriz de auditoria, uma das 3 pré-existentes
+- [x] `venv/bin/python -m pytest tests/contracts/` verde — `test_docs_hygiene.py` e `test_plugin_api_surface.py` rodados também à parte, no estado final
+- [x] `node --test web/static/js/services/messages.test.js` verde — **40/40**
+- [x] Runner do plugin: `python3 scripts/test_plugins.py retornos` — **111 Python + 33 JS**, exit 0
+- [ ] ⏸️ Duas mensagens seguidas do WhatsApp → **duas** bolhas ao vivo **e** após F5 — *manual, exige aparelho real; verificar após o deploy*
+- [ ] ⏸️ Responder (botão direito) à **primeira** das duas → a citação mostra o texto certo, e só o dela — *manual*
+- [ ] ⏸️ A resposta escrita entre as duas renderiza **entre** elas após recarregar — *manual*
+- [x] Nenhuma migration nova; `WHATSBOT_API_VERSION` inalterado em [plugins/semver.py](../plugins/semver.py) — ⚠️ **mas ver a pendência do bump na F7**: a política escrita no changelog classifica esta mudança como MINOR
+- [x] `retornos` publicado e **instalado** em `storages/plugins/` antes do commit do core — 1.21.0, e já ativo em produção
+- [x] Modo escuro: nada de UI nova — **N/A**
 
+---
+
+## 9 — Pendências abertas ao fim da execução
+
+Levantadas pela auditoria adversarial de **2026-09-01** (6 dimensões, cada achado submetido a 3 refutadores independentes). As três primeiras foram confirmadas por leitura direta do código; **nenhuma bloqueou o envio**, e todas seguem abertas.
+
+| # | Pendência | Onde | Gravidade |
+|---|---|---|---|
+| 1 | `suppress_ai_on_ignored` passa a ver só a ÚLTIMA mensagem do batch — a IA responde onde antes calava | `protocolos` `logic.py:6118` | alta |
+| 2 | Dois `message.saved` do mesmo batch correm em paralelo (`asyncio.create_task`) sobre um get-or-create de ciclo sem índice único | `protocolos` + `plugins/events.py:472` | alta |
+| 3 | O bump: a política do changelog (linha 25) classifica "ampliar o conjunto de situações em que um evento existente é emitido" como **MINOR** | `docs/PLUGIN_API_CHANGELOG.md` | média |
+| 4 | Webhook de SAÍDA passa a entregar N vezes por batch, com texto parcial — não documentado em `docs/API_REST.md` | `server/webhook_dispatcher.py:172` | média |
+| 5 | As 7 subqueries do preview da sidebar têm o mesmo empate de `ts` que a F1 corrigiu no histórico do LLM | `db/repositories/conversation_query.py` | média |
+| 6 | `mergeBufferedMessages` pode devolver o batch fora de ordem quando a conversa é aberta no meio dele (some ao recarregar) | `web/static/js/services/messages.js` | baixa |
+| 7 | Guard do `retornos` é unidirecional e a janela de 15 s alcança batches distintos | `retornos` `events.py` | baixa |
+| 8 | Lacunas de teste: mesmo-batch não é provado, `reply_to_msg_id` por linha e `executions.input_text` sem cobertura | `tests/integration/test_batch_message_identity.py` | baixa |

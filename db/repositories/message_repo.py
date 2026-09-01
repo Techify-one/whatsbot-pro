@@ -449,7 +449,12 @@ def get_context(contact_id: int, limit: int, *, exclude=None) -> list[dict]:
                 & (~messages.c.role.in_(excluded))
                 & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
             )
-            .order_by(messages.c.ts.desc())
+            # plano 146: desempate por ``id``. O batch deixou de mesclar, então duas
+            # mensagens do MESMO segundo viram duas linhas com ``ts`` IDÊNTICO — o
+            # ``ts`` do provedor tem resolução de segundo (RFC 3339, ver gowa/inbound
+            # ``_epoch``). Sem desempate o Postgres não garante ordem nenhuma entre
+            # elas e o modelo podia ler os dois turnos ``user`` TROCADOS.
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
             .limit(fetch_limit)
         ).mappings().all()
     return _apply_exclude(rows, limit, exclude)
@@ -481,7 +486,8 @@ def get_context_by_conversation(conversation_id: int, limit: int, *,
                 & (~messages.c.role.in_(excluded))
                 & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
             )
-            .order_by(messages.c.ts.desc())
+            # plano 146: mesmo desempate do ``get_context`` — ver a nota lá.
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
             .limit(fetch_limit)
         ).mappings().all()
     return _apply_exclude(rows, limit, exclude)
@@ -515,7 +521,9 @@ def get_last(contact_id: int) -> dict | None:
         row = conn.execute(
             select(messages)
             .where(messages.c.contact_id == contact_id)
-            .order_by(messages.c.ts.desc())
+            # plano 146: sem o desempate, "a mais recente" é indefinida entre duas
+            # mensagens do mesmo segundo (o batch não mescla mais).
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
             .limit(1)
         ).mappings().first()
     return _row_to_dict(row) if row else None
@@ -574,7 +582,9 @@ def get_last_user_message(contact_id: int,
         row = conn.execute(
             select(messages)
             .where(cond)
-            .order_by(messages.c.ts.desc())
+            # plano 146: idem — a última mensagem DO CONTATO precisa ser determinística
+            # (janela de 24h, regras de plugin), e duas do mesmo segundo empatam no ``ts``.
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
             .limit(1)
         ).mappings().first()
     return _row_to_dict(row) if row else None

@@ -174,7 +174,7 @@ Mensagens recebidas no WhatsApp são entregues em tempo real via webhook do GOWA
 
 1. GOWA inicia com `--webhook http://127.0.0.1:{web_port}/api/webhook`
 2. Mensagem chega → GOWA faz POST em `/api/webhook` com payload contendo `body`, `from`, `id`, `is_from_me`
-3. Webhook acumula mensagens do mesmo contato por `message_batch_delay` segundos (padrão: 3s) — se o contato enviar várias mensagens em sequência, são juntadas em uma só
+3. Webhook acumula mensagens do mesmo contato por `message_batch_delay` segundos (padrão: 3s) — várias mensagens em sequência viram **um só ciclo de IA**, mas cada uma continua sendo **uma linha** em `messages` (⚠️ abaixo)
 4. Após o delay, `_process_batch()` junta os textos com `\n` e chama `agent_handler.process_message()`
 5. O AgentHandler faz a chamada ao LLM com tool calling — se o LLM detectar dados pessoais (nome, email, profissão, empresa), chama `save_contact_info` automaticamente
 6. Resposta é enviada via `gowa_client.send_message()`
