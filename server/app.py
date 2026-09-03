@@ -54,6 +54,23 @@ from server.balance_monitor import set_runtime as _set_balance_runtime
 logger = logging.getLogger(__name__)
 
 
+# ``python:3.x-slim`` (our Docker base) ships no ``/etc/mime.types`` — only
+# ``mimetypes``'s small builtin table, which doesn't know these extensions our
+# own providers write to ``statics/`` (GOWA: ``.jfif`` photos, ``.oga`` voice
+# notes; generic: ``.ogg``/``.m4a``). ``guess_type`` then falls back to
+# ``application/octet-stream``, and the StaticFiles mount below serves that as
+# the response's Content-Type — the browser still *renders* an <img> (decoders
+# sniff the bytes) but a top-level navigation (the panel's "open in new tab" on
+# click) downloads it instead of opening it. Registering here runs once at
+# import time, before ``create_app``/uvicorn ever handle a request, and fixes
+# every file already on disk (the type is computed per-request from the
+# extension, never stored) — no migration, no touching ``statics/``.
+mimetypes.add_type("image/jpeg", ".jfif")
+mimetypes.add_type("audio/ogg", ".ogg")
+mimetypes.add_type("audio/ogg", ".oga")
+mimetypes.add_type("audio/mp4", ".m4a")
+
+
 # A plugin exposes PUBLIC (auth-exempt) endpoints under ``/api/plugins/<id>/
 # public/…`` and authenticates them ITSELF (plano 46 · 01-D — e.g. the website
 # widget validates a per-visitor session token + allowed-domains, never the
