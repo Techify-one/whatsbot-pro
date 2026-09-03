@@ -137,7 +137,9 @@ def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_
     # um agente de IA que nunca vai respondê-la; sem vínculo ela cai na fila "Não
     # atribuídas". Religar a IA da conversa depois re-vincula o padrão
     # (conversation_service.set_ai ON). Um active_agent_key EXPLÍCITO do caller
-    # continua respeitado independentemente do ai_active.
+    # continua respeitado independentemente do ai_active — é por essa porta que
+    # entra o "atendente padrão do canal" que é um agente de IA (plano 152), cujo
+    # caller já manda ai_active=1 no mesmo movimento.
     if active_agent_key is None and ai_active:
         active_agent_key = default_agent_key_for_inbox(inbox_id)
     # Global master gate: with the panel-wide ``auto_reply`` switch OFF, no channel
@@ -186,7 +188,8 @@ def create(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
 def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int,
                         opened_at: float | None, origin: str | None,
                         ai_active_seed: int | None = None,
-                        assignee_user_id_seed: int | None = None) -> tuple[dict, bool]:
+                        assignee_user_id_seed: int | None = None,
+                        active_agent_key_seed: str | None = None) -> tuple[dict, bool]:
     """Race-safe get-or-create of the OPEN conversation for (contact, inbox).
 
     Closes the brand-new-contact double-create: when two inbound messages of a
@@ -214,7 +217,8 @@ def _create_open_atomic(*, inbox_id: int, contact_id: int, contact_inbox_id: int
             row = _insert_conversation(
                 conn, inbox_id=inbox_id, contact_id=contact_id,
                 contact_inbox_id=contact_inbox_id, opened_at=opened_at,
-                ai_active=ai_active_seed, is_archived=0, active_agent_key=None,
+                ai_active=ai_active_seed, is_archived=0,
+                active_agent_key=active_agent_key_seed,
                 origin=origin, assignee_user_id=assignee_user_id_seed)
             return row, True
     except IntegrityError:
@@ -322,7 +326,8 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
                            origin: str | None = None,
                            create_closed: bool = False,
                            ai_active_seed: int | None = None,
-                           assignee_user_id_seed: int | None = None) -> tuple[dict, str | None]:
+                           assignee_user_id_seed: int | None = None,
+                           active_agent_key_seed: str | None = None) -> tuple[dict, str | None]:
     """Like :func:`resolve_for_contact` but also reports the lifecycle transition.
 
     Returns ``(conv, event)`` where ``event`` is ``"created"`` (a brand-new
@@ -365,6 +370,14 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
     uma conversa JÁ ABERTA não é tocado (respeita o estado vivo). ``None`` (default)
     ⇒ nunca carimba (fila "Não atribuídas"), byte-idêntico ao legado. O ramo
     ``create_closed`` da regra "ignorar abertura" não recebe dono.
+
+    ``active_agent_key_seed`` (plano 152) é a OUTRA metade do mesmo campo de tela:
+    quando o "atendente padrão" escolhido é um AGENTE DE IA, é a chave dele. Aplica
+    nos MESMOS dois momentos do humano — nascimento e reabertura órfã —, mas
+    espelhando o ``kind="ai"`` do painel: vincula o agente, deixa
+    ``assignee_user_id`` NULL e a IA LIGADA. O caller garante a exclusão mútua
+    (humano vence); aqui, se os dois vierem, o humano também vence — a conversa
+    nunca nasce com dono humano E agente de IA ao mesmo tempo.
     """
     from db.repositories import contact_inbox_repo
     ci = contact_inbox_repo.get_or_create(
@@ -379,7 +392,9 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
         row, created = _create_open_atomic(
             inbox_id=inbox_id, contact_id=contact_id, contact_inbox_id=ci["id"],
             opened_at=opened_at, origin=origin, ai_active_seed=ai_active_seed,
-            assignee_user_id_seed=assignee_user_id_seed)
+            assignee_user_id_seed=assignee_user_id_seed,
+            active_agent_key_seed=(None if assignee_user_id_seed
+                                   else active_agent_key_seed))
         return row, ("created" if created else None)
     if reopen_if_closed and conv["status"] == "closed":
         reopened = set_status(conv["id"], "open")
@@ -398,6 +413,21 @@ def resolve_for_contact_ex(contact_id: int, jid: str, *, reopen_if_closed: bool 
                 "assignee_user_id": assignee_user_id_seed,
                 "ai_active": 0,
                 "active_agent_key": None,
+            }) or reopened
+        # plano 152: mesma regra para o "atendente padrão" que é um AGENTE DE IA —
+        # a conversa que reabre ÓRFÃ (sem humano E sem agente) volta para o agente
+        # do canal, com a IA ligada. Sem isto, a 2ª conversa do mesmo cliente cairia
+        # no agente padrão GLOBAL, não no que o canal escolheu. Exige os DOIS campos
+        # nulos (um agente sobrevivente ao fechamento é estado vivo, não se sobrescreve)
+        # e nunca roda junto com o ramo humano acima (o caller já os torna exclusivos,
+        # e o `elif` fecha a porta para uma config editada à mão com as duas chaves).
+        elif (active_agent_key_seed and reopened is not None
+                and reopened.get("assignee_user_id") is None
+                and not reopened.get("active_agent_key")):
+            reopened = _update(conv["id"], {
+                "assignee_user_id": None,
+                "ai_active": 1,
+                "active_agent_key": active_agent_key_seed,
             }) or reopened
         return reopened, "reopened"
     return conv, None

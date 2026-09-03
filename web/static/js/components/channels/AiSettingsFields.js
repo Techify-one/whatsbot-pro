@@ -9,17 +9,67 @@ import { SearchableSelect } from '../SearchableSelect.js';
 
 const html = htm.bind(h);
 
-export function AiSettingsFields({ value, onChange, sequentialDefault = true, users = [] }) {
+// Prefixos do valor do seletor de "atendente padrão". O campo guarda DUAS chaves
+// distintas na config (`default_assignee_user_id`, int; `default_assignee_agent_key`,
+// texto) e o <select> precisa de um espaço de valores único — daí `u:` e `ia:`.
+// `ia:` é o MESMO encoding que o plugin fechamento_ia usa para o rótulo do tipo
+// `atendente`; manter os dois iguais evita duas gramáticas para a mesma ideia.
+const ASSIGNEE_USER_PREFIX = 'u:';
+const ASSIGNEE_AI_PREFIX = 'ia:';
+
+export function AiSettingsFields({ value, onChange, sequentialDefault = true, users = [],
+                                  aiAgents = [] }) {
   const ai = value || {};
   const set = (key, v) => onChange({ ...ai, [key]: v });
-  // Default human attendant for NEW conversations (plano 71). Stored as an int
-  // (or null) in ai.default_assignee_user_id; the <select> works in strings.
-  const assigneeVal = ai.default_assignee_user_id != null ? String(ai.default_assignee_user_id) : '';
   const num = (key, v, fallback) => {
     const n = parseFloat(v);
     set(key, isNaN(n) ? fallback : n);
   };
   const aiOn = ai.ai_enabled !== false;
+  // Default attendant for NEW conversations (plano 71, estendido no plano 152):
+  // um HUMANO (`default_assignee_user_id`, int) OU um AGENTE DE IA
+  // (`default_assignee_agent_key`, texto). São MUTUAMENTE EXCLUSIVOS — escolher um
+  // zera o outro no mesmo onChange, para nunca existir config com os dois (que o
+  // backend resolveria a favor do humano, não do que o operador acabou de clicar).
+  const assigneeAgentKey = ai.default_assignee_agent_key || '';
+  const assigneeVal = ai.default_assignee_user_id != null
+    ? ASSIGNEE_USER_PREFIX + String(ai.default_assignee_user_id)
+    : (assigneeAgentKey ? ASSIGNEE_AI_PREFIX + assigneeAgentKey : '');
+  const pickAssignee = (v) => {
+    if (!v) return onChange({ ...ai, default_assignee_user_id: null, default_assignee_agent_key: null });
+    if (v.startsWith(ASSIGNEE_AI_PREFIX)) {
+      return onChange({ ...ai, default_assignee_user_id: null,
+                        default_assignee_agent_key: v.slice(ASSIGNEE_AI_PREFIX.length) });
+    }
+    const uid = parseInt(v.slice(ASSIGNEE_USER_PREFIX.length), 10);
+    return onChange({ ...ai, default_assignee_user_id: isNaN(uid) ? null : uid,
+                      default_assignee_agent_key: null });
+  };
+  // Com o master do canal DESLIGADO os agentes de IA não são oferecidos: uma IA
+  // que o gate do canal cala nunca assumiria a conversa, e anunciá-la no seletor
+  // seria a mesma promessa vazia que o fix atribuição-IA-off (2026-07) tirou do
+  // nascimento. O que já está SALVO continua listado (senão o campo mostraria a
+  // string crua "ia:<chave>" em vez do nome) — com o aviso logo abaixo.
+  const offeredAiAgents = aiOn
+    ? aiAgents
+    : aiAgents.filter((a) => a.agent_key === assigneeAgentKey);
+  const assigneeOptions = [
+    ...users.map((u) => ({ value: ASSIGNEE_USER_PREFIX + String(u.id),
+                           label: u.name || u.email, sublabel: u.name ? u.email : '' })),
+    ...offeredAiAgents.map((a) => ({ value: ASSIGNEE_AI_PREFIX + a.agent_key,
+                                     label: a.display_name || a.agent_key,
+                                     sublabel: 'Agente de IA' })),
+  ];
+  // Agente salvo que sumiu do catálogo (excluído ou desativado em /ai/agents):
+  // entra como opção "órfã" só para o campo mostrar a chave em vez de ficar em
+  // branco. O backend já o ignora (agent_repo.get → enabled), então o aviso abaixo
+  // é o que conta.
+  const assigneeAgentKnown = !assigneeAgentKey
+    || aiAgents.some((a) => a.agent_key === assigneeAgentKey);
+  if (!assigneeAgentKnown) {
+    assigneeOptions.push({ value: ASSIGNEE_AI_PREFIX + assigneeAgentKey,
+                           label: assigneeAgentKey, sublabel: 'Agente de IA indisponível' });
+  }
   // Transcrição de áudio E descrição de imagem são multi-selects de direção
   // (recebidas/enviadas/privadas), resolvidos pela mesma escada do backend.
   const audioModes = mediaModesFrom(ai, 'audio');
@@ -57,20 +107,35 @@ export function AiSettingsFields({ value, onChange, sequentialDefault = true, us
         Ativar a IA neste canal
       </label>
 
-      <!-- Atendente padrão para novas conversas (plano 71). SEMPRE visível — vale
-           mesmo com a IA do canal desligada (o consumidor de integração externa tem a IA off):
-           a conversa nova nasce atribuída a este humano e com a IA desligada. -->
+      <!-- Atendente padrão para novas conversas (plano 71 · plano 152). SEMPRE visível
+           — vale mesmo com a IA do canal desligada (o consumidor de integração externa tem
+           a IA off): a conversa nova nasce atribuída a este humano e com a IA desligada.
+           Desde o plano 152 o mesmo campo aceita um AGENTE DE IA, e aí a conversa nasce
+           do outro jeito: vinculada ao agente e com a IA LIGADA. Os agentes de IA só são
+           oferecidos com o master do canal ligado (ver offeredAiAgents acima).
+           ATENÇÃO: nenhuma CRASE pode aparecer neste comentário — ele está DENTRO do
+           template do htm, e uma crase o fecharia, quebrando o módulo inteiro. -->
       <div>
         <label class="block text-[12px] text-wa-secondary mb-1">Atendente padrão para novas conversas</label>
         <${SearchableSelect}
-          value=${assigneeVal ? String(assigneeVal) : ''}
-          onChange=${(v) => set('default_assignee_user_id', v ? parseInt(v, 10) : null)}
-          options=${users.map((u) => ({ value: String(u.id), label: u.name || u.email }))}
+          value=${assigneeVal}
+          onChange=${pickAssignee}
+          options=${assigneeOptions}
           allowEmpty=${true} emptyLabel='Nenhum (fila "Não atribuídas")'
           placeholder='Nenhum (fila "Não atribuídas")'
-          searchPlaceholder="Pesquisar atendente…" />
-        ${assigneeVal ? html`
+          searchPlaceholder="Pesquisar atendente ou agente de IA…" />
+        ${assigneeAgentKey ? html`
+          <span class="block text-[11px] text-wa-secondary mt-1">A conversa nasce com a IA ligada e atendida por este agente, sem dono humano.</span>
+        ` : (ai.default_assignee_user_id != null ? html`
           <span class="block text-[11px] text-wa-secondary mt-1">A conversa nasce atribuída a esta pessoa, com a IA desligada.</span>
+        ` : html`
+          <span class="block text-[11px] text-wa-secondary mt-1">Pode ser uma pessoa do painel ou um agente de IA. Sem escolha, a conversa nasce na fila "Não atribuídas".</span>
+        `)}
+        ${assigneeAgentKey && !aiOn ? html`
+          <span class="block text-[11px] text-amber-600 dark:text-amber-400 mt-1">Este agente de IA não vai assumir nada enquanto "Ativar a IA neste canal" estiver desligado.</span>
+        ` : null}
+        ${assigneeAgentKey && !assigneeAgentKnown ? html`
+          <span class="block text-[11px] text-amber-600 dark:text-amber-400 mt-1">Agente não encontrado ou desativado — as conversas vão nascer na fila "Não atribuídas". Escolha outro.</span>
         ` : null}
       </div>
 

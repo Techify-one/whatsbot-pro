@@ -346,7 +346,8 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // mostrar derruba a aba para "Todas". UMA regra, dois consumidores (o plano 89 · P1
   // pedia justamente que não virassem duas mitigações parecidas em arquivos diferentes):
   //   • a conversa que o operador acaba de INICIAR — ela nasce sem responsável (o único
-  //     carimbo automático é o `default_assignee_user_id` do INBOUND, por canal), então
+  //     carimbo automático é o "atendente padrão" do canal no INBOUND — humano ou, desde
+  //     o plano 152, um agente de IA), então
   //     em "Minhas" o chat abre mas a sidebar fica sem a linha: o servidor não a devolve
   //     e o insert de WS é gateado de propósito (conversationRows.js `rowMatchesView`);
   //   • o deep-link de uma conversa que é de outro atendente (o 89 fez o link SEMPRE

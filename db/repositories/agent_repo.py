@@ -76,6 +76,20 @@ def get(agent_key: str) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def is_enabled(agent_key: str) -> bool:
+    """O agente existe E está habilitado? UMA coluna, para o caminho quente.
+
+    Espelha ``user_repo.is_active``: o "atendente padrão" de um canal que é um
+    agente de IA (plano 152) é validado a CADA resolução de conversa, e
+    :func:`get` traria a row inteira — prompt inline incluso, que pode ter vários
+    KB. Ausente ⇒ ``False``."""
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(ai_agents.c.enabled).where(ai_agents.c.agent_key == agent_key)
+        ).first()
+    return bool(row[0]) if row else False
+
+
 def get_default() -> dict | None:
     """The system's FALLBACK agent — the one the runtime cascade lands on.
 

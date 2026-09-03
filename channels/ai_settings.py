@@ -49,6 +49,12 @@ PER_CHANNEL_AI_KEYS = (
     # sub-objeto ``ai``; esta entrada documenta a intenção (e habilita o
     # ``ChannelSettingsView`` a expô-la, embora só o nascimento a leia via ``value``).
     "default_assignee_user_id",
+    # plano 152: o MESMO campo aceita um AGENTE DE IA em vez de um humano — a
+    # conversa nasce vinculada a ele (``active_agent_key``) e com a IA LIGADA.
+    # As duas chaves são MUTUAMENTE EXCLUSIVAS (a UI zera a outra ao escolher) e,
+    # se ambas vierem preenchidas por uma edição à mão, o HUMANO vence (é o
+    # comportamento legado — nunca ligar a IA por acidente).
+    "default_assignee_agent_key",
 )
 
 _CACHE: dict[str, tuple[dict, float]] = {}

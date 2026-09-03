@@ -803,8 +803,10 @@ export async function deleteChannel(id, { purge = false } = {}) {
   return request('DELETE', `/api/channels/${encodeURIComponent(id)}${qs}`);
 }
 
-// Usuários do painel atribuíveis como agentes de um canal (criação + edição).
-// → {users:[{id,name,email,is_admin}]}
+// Usuários do painel atribuíveis como agentes de um canal (criação + edição) e —
+// desde o plano 152 — os agentes de IA habilitados, que o campo "atendente padrão
+// para novas conversas" também aceita.
+// → {users:[{id,name,email,is_admin}], ai_agents:[{agent_key,display_name}]}
 export async function listChannelAssignableUsers() {
   return request('GET', '/api/channels/assignable-users');
 }

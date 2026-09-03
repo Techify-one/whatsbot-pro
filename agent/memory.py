@@ -231,6 +231,56 @@ class ContactMemory:
             return None
         return uid
 
+    def _resolve_default_agent_key(self) -> str | None:
+        """O "atendente padrão" do canal quando ele é um AGENTE DE IA (plano 152).
+
+        Mesma escada do :meth:`_resolve_default_assignee` (o campo é UM só na tela;
+        só o tipo do escolhido muda), lendo ``config['ai']['default_assignee_agent_key']``
+        fresh via ``ai_settings`` (cache 30s). O agente resolvido é carimbado em
+        ``active_agent_key`` no NASCIMENTO da conversa, que então nasce com a IA
+        LIGADA e sem dono humano — espelha o ``kind="ai"`` do
+        ``conversation_service.assign_unified`` (o picker unificado do painel).
+
+        ⚠️ **O master do canal manda**: com "Ativar a IA neste canal"
+        (``ai_enabled``) desligado devolve ``None``. Sem essa guarda a conversa
+        nasceria "atribuída a uma IA" que o gate global/por-canal nunca deixaria
+        falar — exatamente o buraco que o fix atribuição-IA-off (2026-07) fechou
+        para o seed de ``ai_active``. A UI já esconde os agentes de IA nesse caso;
+        aqui é o cinto de segurança para config editada à mão.
+
+        Defensivo (fail-open → ``None`` = legado, sem carimbo de agente):
+        - só aceita string não-vazia (a chave de agente é texto);
+        - IGNORA agente inexistente ou desabilitado (espelha a guarda P5 do humano),
+          por ``agent_repo.is_enabled`` (1 coluna) e não ``get`` (row com o prompt);
+        - canal sem o campo sai no early-return SEM tocar o banco (caminho quente
+          de ``add_message``)."""
+        from channels import ai_settings
+        raw = ai_settings.value(self.channel_id, "default_assignee_agent_key", None)
+        if not isinstance(raw, str):
+            return None
+        key = raw.strip()
+        if not key:
+            return None
+        # Master do canal: IA desligada ⇒ nenhum agente assume nada.
+        try:
+            if not bool(ai_settings.value(self.channel_id, "ai_enabled", True)):
+                return None
+        except Exception:
+            logger.exception("Falha ao ler o master de IA do canal %s", self.channel_id)
+            return None
+        try:
+            from db.repositories import agent_repo
+            # is_enabled (1 coluna, indexada pela PK) e não get(): este método roda
+            # no caminho quente de add_message, e a row do agente carrega o prompt
+            # inline. Mesmo motivo do user_repo.is_active no ramo humano.
+            if not agent_repo.is_enabled(key):
+                return None
+        except Exception:
+            logger.exception("Falha ao validar agente padrão %s do canal %s",
+                             key, self.channel_id)
+            return None
+        return key
+
     def _resolve_contact_type(self) -> str:
         """Tipo do contato declarado pelo provider do canal (plano tipos-de-contato).
 
@@ -368,12 +418,24 @@ class ContactMemory:
             # regra do INSERT). O carimbo só vale no CREATE; o reopen NÃO re-carimba
             # (o repo threada isso apenas no ramo `created`). None ⇒ legado (sem dono).
             assignee_seed = self._resolve_default_assignee()
+            # plano 152: o MESMO campo da tela aceita um agente de IA. Um humano
+            # escolhido VENCE (legado — nunca ligar a IA por acidente numa config
+            # com as duas chaves preenchidas à mão); só na ausência dele o agente
+            # de IA é resolvido, e aí a conversa nasce com a IA LIGADA e vinculada
+            # a ele (a escolha explícita vence o "IA ativada por padrão para novos
+            # contatos" — sem isso, escolher um agente não faria nada).
+            agent_seed: str | None = None
             if assignee_seed:
                 seed = 0
+            else:
+                agent_seed = self._resolve_default_agent_key()
+                if agent_seed:
+                    seed = 1
             conv, transition = conversation_repo.resolve_for_contact_ex(
                 self.id, self._source_id(), reopen_if_closed=reopen_closed,
                 inbox_id=self.inbox_id, origin=origin, create_closed=create_closed,
-                ai_active_seed=seed, assignee_user_id_seed=assignee_seed)
+                ai_active_seed=seed, assignee_user_id_seed=assignee_seed,
+                active_agent_key_seed=agent_seed)
             return conv, conv["id"], transition
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)

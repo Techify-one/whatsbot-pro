@@ -172,6 +172,26 @@ def assignable_users() -> list[dict]:
     ]
 
 
+def assignable_ai_agents() -> list[dict]:
+    """Agentes de IA que podem ser o "atendente padrão" de um canal (plano 152).
+
+    Mesmo recorte de ``/api/atendimentos/assignable-agents`` (só os habilitados,
+    ``{agent_key, display_name}``) — o campo do canal é o mesmo conceito do picker
+    unificado do painel, só que aplicado ao NASCIMENTO da conversa em vez de a uma
+    conversa já aberta. Best-effort: qualquer falha devolve ``[]`` e o seletor cai
+    para "só humanos" em vez de derrubar a tela de Canais."""
+    try:
+        from db.repositories import agent_repo
+        return [
+            {"agent_key": a["agent_key"],
+             "display_name": a.get("display_name") or a["agent_key"]}
+            for a in agent_repo.list_all() if a.get("enabled")
+        ]
+    except Exception:
+        logger.exception("[channels] falha ao listar agentes de IA atribuíveis")
+        return []
+
+
 # ── Provider instantiation / live registration (R15 via registry.instantiate) ───
 
 def required_credentials(deps, provider: str) -> list[str]:
@@ -651,7 +671,11 @@ async def get_members(deps, row: dict) -> dict:
         name=row.get("display_name") or channel_id)
     members = await asyncio.to_thread(inbox_member_repo.member_ids, inbox["id"])
     users = await asyncio.to_thread(assignable_users)
-    return {"inbox_id": inbox["id"], "member_ids": members, "users": users}
+    # plano 152: o mesmo payload alimenta o "atendente padrão para novas conversas"
+    # do form de edição, que aceita humano OU agente de IA.
+    ai_agents = await asyncio.to_thread(assignable_ai_agents)
+    return {"inbox_id": inbox["id"], "member_ids": members, "users": users,
+            "ai_agents": ai_agents}
 
 
 async def set_members(deps, row: dict, user_ids: list[int]) -> dict:

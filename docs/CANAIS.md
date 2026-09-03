@@ -89,6 +89,43 @@ Cada contato registra o **tipo herdado do canal que o materializou**, gravado em
 - **Provider novo**: implemente `contact_type()` (ver `/new-channel`); sem override os contatos herdam `"outros"`.
 
 
+## Atendente padrão para novas conversas — humano **ou** agente de IA (plano 71 · plano 152)
+
+O campo *Atendente padrão para novas conversas* ([AiSettingsFields.js](../web/static/js/components/channels/AiSettingsFields.js), bloco *Inteligência Artificial* do formulário de canal) diz **quem assume o atendimento no NASCIMENTO da conversa** daquele canal. Desde o plano 152 ele aceita as duas naturezas de atendente que o painel já conhecia no picker unificado ([AssigneePicker.js](../web/static/js/components/contacts/AssigneePicker.js)): uma **pessoa** do painel ou um **agente de IA** cadastrado em `/ai/agents`.
+
+**São duas chaves em `channels.config["ai"]`, mutuamente exclusivas** (a UI zera uma ao escolher a outra):
+
+| Escolha | Chave | Como a conversa NASCE |
+|---|---|---|
+| Pessoa do painel | `default_assignee_user_id` (int) | `assignee_user_id=<uid>`, `ai_active=0`, `active_agent_key=NULL` |
+| Agente de IA | `default_assignee_agent_key` (texto) | `active_agent_key=<chave>`, `ai_active=1`, `assignee_user_id=NULL` |
+| Nada | — | fila "Não atribuídas"; `ai_active` sai do `default_ai_enabled` e o agente do fallback GLOBAL |
+
+O efeito é exatamente o do `kind="user"`/`kind="ai"` de `conversation_service.assign_unified`, só que aplicado ao INSERT — sem passar por `assign_unified`, e por isso **sem card de atribuição** no nascimento (provado por `test_birth_stamp_emits_no_extra_assignment_card`).
+
+**Onde cada peça mora:**
+
+- **Resolução** ([agent/memory.py](../agent/memory.py)): `_resolve_default_assignee()` (humano, plano 71) e `_resolve_default_agent_key()` (IA, plano 152) leem fresh via `ai_settings.value` (cache 30s) — mudar a config do canal vale em ≤30s. Canal sem o campo sai no **early-return sem tocar o banco**: isto roda no caminho quente de `add_message`.
+- **Carimbo** ([db/repositories/conversation_repo.py](../db/repositories/conversation_repo.py)): `resolve_for_contact_ex(..., assignee_user_id_seed=…, active_agent_key_seed=…)` → `_create_open_atomic` → `_insert_conversation`. O `active_agent_key` explícito atravessa a regra "IA off ⇒ sem agente" porque o caller manda `ai_active=1` no mesmo movimento.
+- **Catálogo do seletor**: `GET /api/channels/assignable-users` (criação) e `GET /api/channels/{id}/members` (edição) devolvem `users` **e** `ai_agents` no mesmo payload. É de propósito: `/api/ai/agents` exige `agent.config.manage`, permissão que um gestor de canais pode não ter — o formulário todo é gated por `channel.manage`.
+
+**⚠️ A escolha de um agente de IA vence o "IA ativada por padrão para novos contatos".** Se respeitasse aquele checkbox, escolher um agente com ele desmarcado não faria absolutamente nada: a conversa nasceria `ai_active=0` e, pela regra do INSERT, **sem agente nenhum**. O checkbox continua mandando quando NENHUM padrão foi escolhido.
+
+**⚠️ O master do canal (`ai_enabled`) manda, e o veredito é dado em dois lugares.** Com "Ativar a IA neste canal" desligado, os agentes de IA **não aparecem** no seletor (só os humanos) e `_resolve_default_agent_key` devolve `None` mesmo que a chave esteja gravada — cinto de segurança para config editada à mão. Sem isso a conversa nasceria "atribuída a uma IA" que o gate do canal cala: a mesma promessa vazia que o *fix atribuição-IA-off* (2026-07) tirou do seed de `ai_active`. Um agente salvo que sobreviva ao desligamento do master continua listado no campo (senão a tela mostraria a string crua `ia:<chave>`), acompanhado do aviso âmbar.
+
+**⚠️ O gate GLOBAL `auto_reply` continua soberano.** Ele zera `ai_active` e `active_agent_key` dentro do `_insert_conversation`, depois de qualquer seed — inclusive o do agente escolhido. O carimbo do **humano**, esse, é independente do gate de IA e sobrevive.
+
+**Reabertura (P2 revisado do plano 71, estendido no 152).** Uma conversa fechada que reabre reaplica o padrão do canal, mas **só quando reabre órfã**:
+
+- humano: reaplica se `assignee_user_id IS NULL`;
+- agente de IA: reaplica se `assignee_user_id IS NULL` **e** `active_agent_key IS NULL`.
+
+Os dois ramos são `if`/`elif` — nunca correm juntos, mesmo numa config à mão com as duas chaves. Estado vivo sempre vence: dono humano ou agente que sobreviveram ao fechamento não são trocados. Sem esta regra, a 2ª conversa do mesmo cliente cairia no agente padrão **global**, não no que o canal escolheu.
+
+**Exclusão mútua e precedência.** A UI garante que só uma chave exista. Se as duas vierem (edição manual do JSON), **o humano vence** — é o comportamento legado, e o erro seguro é não ligar a IA por acidente. Agente inexistente ou desabilitado é ignorado (fail-open), espelhando a guarda P5 do atendente inativo.
+
+**Testes**: [tests/integration/test_channel_default_assignee.py](../tests/integration/test_channel_default_assignee.py) (humano) e [tests/integration/test_channel_default_ai_agent.py](../tests/integration/test_channel_default_ai_agent.py) (agente de IA).
+
 ## O `ts` do inbound: por que ele é coagido em três camadas (plano 141)
 
 **Incidente (2026-08-18 → 2026-08-25, produção).** O operador relatou "tem uma

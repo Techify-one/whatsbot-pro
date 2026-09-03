@@ -60,6 +60,7 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
   });
 
   const [users, setUsers] = useState([]);
+  const [aiAgents, setAiAgents] = useState([]);   // plano 152: agentes de IA atribuíveis
   const [selected, setSelected] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -75,6 +76,9 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
       if (!alive) return;
       if (res && res.ok) {
         setUsers(res.data.users || []);
+        // plano 152: o "atendente padrão" também aceita agente de IA. Vem no mesmo
+        // payload; ausente (core antigo) ⇒ [] e o campo fica só com humanos.
+        setAiAgents(res.data.ai_agents || []);
         setSelected(res.data.member_ids || []);
       } else {
         setError((res && res.error) || 'Falha ao carregar agentes.');
@@ -171,7 +175,7 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
 
           <div class="border-t border-wa-border pt-3">
             <label class="block text-[12px] text-wa-secondary mb-2">Inteligência Artificial</label>
-            <${AiSettingsFields} value=${ai} onChange=${setAi} users=${users} />
+            <${AiSettingsFields} value=${ai} onChange=${setAi} users=${users} aiAgents=${aiAgents} />
           </div>
 
           <div class="border-t border-wa-border pt-3">

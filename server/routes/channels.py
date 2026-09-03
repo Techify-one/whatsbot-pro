@@ -263,13 +263,19 @@ def register_routes(app, deps):
     async def assignable_users(request: Request):
         """Active panel users for the channel agent picker (create + edit).
 
+        Também devolve os AGENTES DE IA habilitados (plano 152): o campo "atendente
+        padrão para novas conversas" aceita humano OU agente de IA, e serví-los na
+        mesma resposta evita um 2º request (e uma 2ª permissão — ``/api/ai/agents``
+        exige ``agent.config.manage``, que um gestor de canais pode não ter).
+
         Gated by ``channel.manage`` (same as the rest of this screen). Registered
         before ``/{channel_id}`` so the literal path wins the match."""
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
         users = await asyncio.to_thread(svc.assignable_users)
-        return _ok({"users": users})
+        ai_agents = await asyncio.to_thread(svc.assignable_ai_agents)
+        return _ok({"users": users, "ai_agents": ai_agents})
 
     @app.get("/api/channels/providers")
     async def list_providers(request: Request):
