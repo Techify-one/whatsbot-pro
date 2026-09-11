@@ -2044,9 +2044,12 @@ with _get_engine().connect() as _conn:
     _role_keys = {r[0] for r in _conn.execute(_sa_select(_roles_t.c.key))}
     _perm_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_perms_t)).scalar()
     _rp_count = _conn.execute(_sa_select(_sa_func.count()).select_from(_rp_t)).scalar()
+# 40 → 42 no plano de API: ``apikey.manage`` e ``webhook.manage``. As DUAS são
+# admin-only (não entram em ROLE_DEFAULTS), então ``_rp_count`` (gestor 35 +
+# atendente 5) segue 40 de propósito — é o que prova que nenhum papel as ganhou.
 check("RBAC seed -> 3 system roles (admin/gestor/atendente)",
       _role_keys == {"admin", "gestor", "atendente"})
-check("RBAC seed -> 40 permissions", _perm_count == 40)
+check("RBAC seed -> 42 permissions", _perm_count == 42)
 check("RBAC seed -> role_permissions populated (gestor 35 + atendente 5)", _rp_count == 40)
 with _get_engine().connect() as _conn:
     _perm_keys = {r[0] for r in _conn.execute(_sa_select(_perms_t.c.key))}
@@ -2086,7 +2089,7 @@ check("POST /auth/login (user wrong pw) -> 401", r.status_code == 401)
 r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/me (user) -> 200", r.status_code == 200)
 _perms = r.json()["data"]["user"]["permissions"]
-check("admin me -> all 40 permissions", len([p for p in _perms if p != "*"]) == 40)
+check("admin me -> all 42 permissions", len([p for p in _perms if p != "*"]) == 42)
 
 r = client.get("/api/auth/check", headers={"Authorization": f"Bearer {_utok}"})
 check("GET /auth/check (user session) -> authenticated",
@@ -2157,8 +2160,8 @@ check("admin resolver -> short-circuit '*'", "*" in _rrepo.user_permissions(_adm
 # ── Users CRUD + permission gating (Fases 4-5) ─────────────────────
 r = client.get("/api/roles")
 check("GET /api/roles -> 200", r.status_code == 200)
-check("GET /api/roles -> 3 roles + 40 perms",
-      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 40)
+check("GET /api/roles -> 3 roles + 42 perms",
+      len(r.json()["data"]["roles"]) == 3 and len(r.json()["data"]["permissions"]) == 42)
 
 r = client.get("/api/users")
 check("GET /api/users (admin session) -> 200", r.status_code == 200)
@@ -2338,8 +2341,8 @@ _roles_payload = r.json()["data"]["roles"]
 _by_key = {ro["key"]: ro for ro in _roles_payload}
 check("GET /api/roles -> permission_keys present",
       "permission_keys" in _by_key["gestor"] and len(_by_key["gestor"]["permission_keys"]) == 35)
-check("GET /api/roles -> admin shows all 40",
-      len(_by_key["admin"]["permission_keys"]) == 40)
+check("GET /api/roles -> admin shows all 42",
+      len(_by_key["admin"]["permission_keys"]) == 42)
 
 # Create a custom role
 r = client.post("/api/roles", json={
@@ -3277,10 +3280,18 @@ if _src_protocolos:
           _alogic.before_reopen(_CtxExtras({"role": "user", "text": "PROT-3"}), True) is True)
 
     # Feature 2 — pular avaliação por atributos (contato + conversa)
-    check("attr match string (case/trim)", _alogic._attr_value_matches("Não Possui", " não possui ") is True)
-    check("attr match lista nativa", _alogic._attr_value_matches(["a", "não possui"], "não possui") is True)
-    check("attr match multi vírgula", _alogic._attr_value_matches("a, não possui, b", "não possui") is True)
-    check("attr no-match diferente", _alogic._attr_value_matches("possui", "não possui") is False)
+    # O casamento valor-armazenado × valor-da-regra é do `_rule_matches` (via
+    # `_stored_parts`/`_condition_matches`). O helper antigo `_attr_value_matches` existia
+    # só para a decisão de continuidade por atributo, removida na 2.0.0 do plugin.
+    def _r1(op, *values):
+        return {"key": "a", "scope": "contact", "conditions": [{"op": op, "values": list(values)}]}
+    check("attr match string (case/trim)", _alogic._rule_matches("Não Possui", _r1("eq", " não possui ")) is True)
+    check("attr match lista nativa", _alogic._rule_matches(["a", "não possui"], _r1("eq", "não possui")) is True)
+    check("attr match multi vírgula", _alogic._rule_matches("a, não possui, b", _r1("eq", "não possui")) is True)
+    check("attr no-match diferente", _alogic._rule_matches("possui", _r1("eq", "não possui")) is False)
+    # Fichas (plugin 2.0.0): positivo casa com QUALQUER uma, negativo exige NENHUMA.
+    check("attr match qualquer ficha", _alogic._rule_matches("possui", _r1("eq", "não possui", "possui")) is True)
+    check("attr negativo exige nenhuma ficha", _alogic._rule_matches("possui", _r1("neq", "não possui", "possui")) is False)
     check("sanitize descarta scope inválido",
           _alogic._sanitize_skip_attrs([{"key": "k", "scope": "x", "value": "v"}]) == [])
 
@@ -3293,10 +3304,12 @@ if _src_protocolos:
     _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
                                  "privado": {"title": "", "link": ""},
                                  "skip_attrs": [{"key": "curso_de_interesse", "scope": "contact", "value": "não possui"}]})
+    # A condição guarda `values` (fichas) + o espelho legado `value` quando é 1 ficha só.
     check("skip_attrs round-trip na protocol-config",
           _alogic.get_protocol_config().get("skip_attrs")
           == [{"key": "curso_de_interesse", "scope": "contact", "join": "any",
-               "conditions": [{"op": "eq", "value": "não possui"}], "value": "não possui"}])
+               "conditions": [{"op": "eq", "values": ["não possui"], "value": "não possui"}],
+               "value": "não possui"}])
     check("skip avaliação por atributo de CONTATO -> True",
           _alogic._should_skip_evaluation({"contact_id": _skcid}, None) is True)
     _ca_repo.set_values(_contacts_tbl, _skcid, {"curso_de_interesse": "engenharia"})
@@ -3317,7 +3330,8 @@ if _src_protocolos:
     check("sanitize aceita scope protocolo",
           _alogic._sanitize_skip_attrs([{"key": "resultado", "scope": "protocolo", "value": "sem contato"}])
           == [{"key": "resultado", "scope": "protocolo", "join": "any",
-               "conditions": [{"op": "eq", "value": "sem contato"}], "value": "sem contato"}])
+               "conditions": [{"op": "eq", "values": ["sem contato"], "value": "sem contato"}],
+               "value": "sem contato"}])
     _alogic.set_protocol_config({"enabled": True, "normal": {"title": "", "link": "https://x"},
                                  "privado": {"title": "", "link": ""},
                                  "skip_attrs": [{"key": "resultado", "scope": "protocolo", "value": "sem contato"}]})
@@ -5690,14 +5704,47 @@ def _fake_async_client(resp):
     return MagicMock(return_value=cm)
 
 
+def _service_number_unreachable():
+    """Patch target: ``GET /service_number`` fora do ar.
+
+    Sem isto o bloco abaixo dependeria de REDE. O core deixou de ter número de
+    provisionamento embutido (era o literal "5513981744038" até 2026-08-20), então
+    numa máquina sem internet o destino passaria a ser vazio e o envio seria
+    recusado — o teste falharia por ambiente, não por regressão. Fixamos os dois
+    lados: endpoint inacessível + env conhecida.
+    """
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=MagicMock(
+        get=AsyncMock(side_effect=RuntimeError("sem rede"))))
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=cm)
+
+
 # request-key: sends the provisioning WhatsApp message and arms polling
 _send_calls_before = mock_gowa_client.send_message.call_count
-r = client.post("/api/setup/request-key")
+with patch("app.services.provisioning_service.httpx.AsyncClient",
+           _service_number_unreachable()), \
+     patch("app.services.provisioning_service.TECHIFY_PROVISION_NUMBER",
+           "5513981744038"):
+    r = client.post("/api/setup/request-key")
 check("POST /api/setup/request-key -> 200", r.status_code == 200)
 check("POST /api/setup/request-key -> returns number",
       r.json()["data"].get("number") == "5511999990001")
 check("POST /api/setup/request-key -> WhatsApp message sent",
       mock_gowa_client.send_message.call_count == _send_calls_before + 1)
+
+# ...e sem destino nenhum (nem env, nem endpoint) NADA é enviado: o core não tem
+# mais número embutido para servir de reserva.
+_send_calls_before = mock_gowa_client.send_message.call_count
+with patch("app.services.provisioning_service.httpx.AsyncClient",
+           _service_number_unreachable()), \
+     patch("app.services.provisioning_service.TECHIFY_PROVISION_NUMBER", ""):
+    r = client.post("/api/setup/request-key")
+check("POST /api/setup/request-key sem destino -> 400", r.status_code == 400)
+check("POST /api/setup/request-key sem destino -> erro acionável",
+      r.json()["ok"] is False and "destino" in r.json()["error"])
+check("POST /api/setup/request-key sem destino -> nada enviado",
+      mock_gowa_client.send_message.call_count == _send_calls_before)
 
 # key-status: account not ready yet
 with patch("server.routes.setup.httpx.AsyncClient",
@@ -5783,6 +5830,7 @@ for path in [
     "/ai/variables/nome_empresa", "/ai/tools", "/ai/tools/save_contact_info",
     "/plugins/lembretes", "/channels/default",
     "/users/1", "/users/roles", "/users/roles/gestor",
+    "/users/teams", "/users/teams/1",
     "/quick-replies/saudacao",
     "/custom-attributes/contact", "/custom-attributes/contact/empresa",
     "/custom-attributes/conversation/prioridade",
@@ -6411,6 +6459,44 @@ with _get_engine().connect() as _conn:
         .where(_msgs_t.c.content.like("%pedido 123%"))
         .limit(1)).first()
 check("send-template -> mensagem persistida no fio", _tpl_saved is not None)
+
+# Plano 119 — o cabeçalho de mídia do template vira BOLHA no histórico. Antes o
+# painel guardava só o texto do corpo: quem abrisse a conversa depois não tinha
+# como saber qual imagem tinha saído.
+_tpl_outbox = app.state.deps.statics_outbox_dir
+_tpl_outbox.mkdir(parents=True, exist_ok=True)
+(_tpl_outbox / "tpl_header.jpg").write_bytes(b"\xff\xd8\xff\xdb")
+
+
+def _tpl_last_msg():
+    with _get_engine().connect() as _c:
+        return _c.execute(
+            _sa_select(_msgs_t.c.content, _msgs_t.c.media_type, _msgs_t.c.media_path)
+            .where(_msgs_t.c.contact_id == _cid)
+            .order_by(_msgs_t.c.id.desc()).limit(1)).first()
+
+
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/send-template", json={
+    "template_name": "boas_vindas", "language": "pt_BR",
+    "preview_text": "Olá Alice, com imagem",
+    "media_type": "image", "media_path": "statics/outbox/tpl_header.jpg"})
+check("send-template com mídia -> 200", r.status_code == 200)
+_m = _tpl_last_msg()
+check("send-template com mídia -> linha vira bolha de imagem",
+      _m is not None and _m[1] == "image" and _m[2] == "statics/outbox/tpl_header.jpg")
+check("send-template com mídia -> texto do corpo continua na linha",
+      _m is not None and "com imagem" in (_m[0] or ""))
+
+# Path traversal NUNCA vira media_path: a mensagem grava como texto e o envio
+# (que já chegou ao cliente) não vira erro na tela.
+r = client.post(f"/api/conversations/{_tpl_conv['id']}/send-template", json={
+    "template_name": "boas_vindas", "language": "pt_BR",
+    "preview_text": "Olá Alice, sem imagem",
+    "media_type": "image", "media_path": "statics/outbox/../../.env"})
+check("send-template com caminho traversal -> 200 (recusa macia)", r.status_code == 200)
+_m = _tpl_last_msg()
+check("send-template com caminho traversal -> gravou texto puro",
+      _m is not None and _m[1] is None and _m[2] is None)
 
 check("send-template canal sem suporte -> 400",
       client.post(f"/api/conversations/{_conv2['id']}/send-template",

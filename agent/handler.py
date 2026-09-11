@@ -385,6 +385,8 @@ class AgentHandler:
                               sent_by_user_id: int | None = None,
                               sent_by_name: str | None = None,
                               channel_id: str = "default",
+                              media_type: str | None = None,
+                              media_path: str | None = None,
                               reopen: bool | None = None) -> dict:
         """Save a manually sent message (from the operator) without LLM processing.
 
@@ -394,11 +396,20 @@ class AgentHandler:
 
         ``sent_by_user_id``/``sent_by_name`` gravam QUEM (operador logado) enviou —
         o nome (snapshot) é exibido no painel no lugar de "Manual". None quando não
-        há usuário logado (instalação legada/aberta) → cai em "Manual"."""
+        há usuário logado (instalação legada/aberta) → cai em "Manual".
+
+        ``media_type``/``media_path`` (plano 119) fazem esta linha renderizar como
+        BOLHA DE MÍDIA em vez de texto puro — mesma forma que ``send_media`` já
+        grava no envio de imagem do operador (``media_path`` relativo, tipo em
+        ``image``/``video``/``document``). Ambos ``None`` ⇒ comportamento anterior
+        byte a byte. ``media_caption`` fica de fora de propósito: o painel cai no
+        ``content`` (é o que o envio de imagem do operador faz hoje), e a coluna
+        do plano 87 significa "o que o CLIENTE digitou junto da mídia"."""
         contact = self._get_contact(phone, channel_id=channel_id)
         contact.add_message("assistant", text, status=status, msg_id=msg_id,
                             reply_to_msg_id=reply_to_msg_id,
                             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                            media_type=media_type, media_path=media_path,
                             reopen=reopen)
         return message_repo.get_last(contact.id) or {"role": "assistant", "content": text, "ts": time.time()}
 
@@ -411,12 +422,27 @@ class AgentHandler:
 
     def update_last_user_message_content(self, phone: str, new_content: str,
                                          channel_id: str = "default") -> None:
-        """Update the content of the last user message (e.g., with transcription).
+        """Update the content of the last user message.
+
+        ⚠️ **NÃO use para colar transcrição/descrição de mídia** (plano 133). O
+        alvo é RESOLVIDO POR REPROCURA — ``get_last_user_message`` ordena por
+        ``ts DESC`` e **não exige ``media_type``**. Enquanto o ``ts`` era o
+        relógio do INSERT a mídia (salva por último) vencia sempre e o alvo saía
+        certo por acidente; desde o **plano 129** o ``ts`` é o REAL do provedor,
+        então um TEXTO entregue no mesmo segundo tem carimbo maior e recebia a
+        descrição — prefixo interno virando bolha pública (linha sem
+        ``media_type`` não é filtrada pelo painel) e texto do cliente destruído
+        pelo ``UPDATE``. Quem insere a linha tem o ``id`` de volta: use
+        ``message_repo.update_content(saved["id"], …)``.
 
         Plano 37 (B5): escopa à conversa do CANAL do turno (o ``ContactMemory`` é
         construído com ``channel_id`` → carrega ``inbox_id``), evitando a corrida
         cross-canal em que a transcrição sobrescreveria a última msg de outro canal.
-        Fail-open: sem conversa aberta naquele inbox, cai no contact-global."""
+        Fail-open: sem conversa aberta naquele inbox, cai no contact-global.
+
+        Sem chamador em ``app/``/``server/`` desde o plano 133 — permanece porque
+        a semântica "última msg do turno" é consumida por plugin (ver
+        ``message_repo.get_last_user_message``)."""
         contact = self._get_contact(phone, channel_id=channel_id)
         from db.repositories import conversation_repo
         conv = conversation_repo.get_open_for_contact_scoped(contact)

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   SYSTEM_CARD_VARIANTS, isSystemCardRole, senderColor, quotedMediaText,
   isCollapsibleRole, collapsedPreview, cardStateKey, mediaCaptionOf,
+  isOperatorMessage, isAiContentLabel,
 } from './messageView.js';
 
 test('isSystemCardRole: all panel-only roles recognized', () => {
@@ -44,6 +45,53 @@ test('senderColor: user blue, operator amber, AI theme-aware var', () => {
   assert.equal(senderColor(false, true), '#b45309');
   // IA usa a variável CSS --wa-ai-label (clara no dark, escura no light).
   assert.equal(senderColor(false, false), 'rgb(var(--wa-ai-label))');
+});
+
+// ── plano 143 F1/F2 — de quem é a mensagem NÃO sai do estado de ENTREGA ────────
+//
+// `status` é o estado de entrega da linha. Quando o provedor recusa por webhook,
+// `mark_failed_by_msg_id` sobrescreve 'operator' → 'failed' (message_repo.py:695)
+// — e o painel, que lia autoria daquele mesmo campo, passava a assinar a bolha
+// como "IA". Eram 409 falhas de operador em 7 dias exibidas como se a IA as
+// tivesse escrito. A marca de autoria (`sent_by_user_id`/`sent_by_name`) é o que
+// sobrevive à sobrescrita, e é ela que o predicado consulta.
+
+test('isOperatorMessage: operador entregue continua operador', () => {
+  assert.equal(isOperatorMessage({ role: 'assistant', status: 'operator' }), true);
+});
+
+test('isOperatorMessage: operador que FALHOU continua operador (plano 143)', () => {
+  assert.equal(isOperatorMessage(
+    { role: 'assistant', status: 'failed', sent_by_name: 'Fulano' }), true);
+  assert.equal(isOperatorMessage(
+    { role: 'assistant', status: 'failed', sent_by_user_id: 7 }), true);
+});
+
+test('isOperatorMessage: falha OTIMISTA do compositor (_status) também conta', () => {
+  assert.equal(isOperatorMessage(
+    { role: 'assistant', _status: 'failed', sent_by_name: 'Fulano' }), true);
+});
+
+test('isOperatorMessage: resposta da IA que falha continua sendo da IA', () => {
+  // Sem esta metade, consertar o rótulo do operador trocaria um erro por outro:
+  // toda resposta da IA que falhasse passaria a assinar "Manual".
+  assert.equal(isOperatorMessage({ role: 'assistant', status: 'failed' }), false);
+  assert.equal(isOperatorMessage(
+    { role: 'assistant', status: 'failed', sent_by_name: '' }), false);
+  assert.equal(isOperatorMessage(
+    { role: 'assistant', status: 'failed', sent_by_user_id: null }), false);
+});
+
+test('isOperatorMessage: mensagem do cliente nunca é do operador', () => {
+  assert.equal(isOperatorMessage({ role: 'user', status: 'operator' }), false);
+  assert.equal(isOperatorMessage(
+    { role: 'user', status: 'failed', sent_by_name: 'Fulano' }), false);
+});
+
+test('isOperatorMessage: entrada ausente/vazia não quebra', () => {
+  assert.equal(isOperatorMessage(null), false);
+  assert.equal(isOperatorMessage(undefined), false);
+  assert.equal(isOperatorMessage({}), false);
 });
 
 test('quotedMediaText: per media type', () => {
@@ -219,4 +267,44 @@ test('cardStateKey: _id=0 is a valid id (not falsy-skipped)', () => {
 
 test('cardStateKey: empty msg_id falls through to role:ts', () => {
   assert.equal(cardStateKey({ msg_id: '', role: 'transcription', ts: 7 }, 2), 'rt:transcription:7');
+});
+
+// ── carimbo de autor de grupo ("[Fulano]: ") ─────────────────────────
+// Não há coluna de remetente: o autor viaja no `content` e o painel o extrai
+// para o cabeçalho da bolha. Ele fica NA FRENTE do bloco da IA, então as
+// superfícies que leem o content cru (preview da sidebar, citação) precisam
+// descontá-lo antes de decidir o que é legenda do cliente.
+
+test('mediaCaptionOf: carimbo de autor sozinho não é legenda', () => {
+  assert.equal(mediaCaptionOf({ content: '[Luísa Maira]: ' }), '');
+  assert.equal(mediaCaptionOf({ content: '[Luísa Maira]:   ' }), '');
+});
+
+test('mediaCaptionOf: descrição da IA atrás do autor não vaza', () => {
+  assert.equal(
+    mediaCaptionOf({ content: '[Luísa Maira]: [Descrição da imagem]: duas janelas' }),
+    '',
+  );
+  assert.equal(
+    mediaCaptionOf({ content: '[Luísa Maira]: [Descrição da imagem]: duas janelas\nolha isso' }),
+    '',
+  );
+});
+
+test('mediaCaptionOf: legenda normal de grupo segue intocada', () => {
+  assert.equal(mediaCaptionOf({ content: '[Luísa Maira]: olha isso' }),
+               '[Luísa Maira]: olha isso');
+  // A bolha desconta o autor antes de chamar (displayContent).
+  assert.equal(mediaCaptionOf({ content: '[Luísa Maira]: olha isso' }, 'olha isso'),
+               'olha isso');
+});
+
+test('isAiContentLabel: só os rótulos da IA, nunca um nome de pessoa', () => {
+  for (const label of ['Descrição da imagem', 'Transcrição do áudio',
+                       'Conteúdo do documento']) {
+    assert.equal(isAiContentLabel(label), true, label);
+  }
+  for (const label of ['Luísa Maira', 'Descrição', '', null, undefined]) {
+    assert.equal(isAiContentLabel(label), false, String(label));
+  }
 });

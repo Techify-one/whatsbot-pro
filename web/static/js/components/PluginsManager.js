@@ -12,6 +12,22 @@ import { useDeepLink } from '../hooks/useDeepLink.js';
 
 const html = htm.bind(h);
 
+// Largura do modal "Configurar". O core é dono do modal, então uma screen de
+// configuração não consegue passar da largura dele por dentro: o plugin DECLARA
+// um tamanho em `screens[].width` e aqui ele é traduzido para uma classe.
+// Valor desconhecido cai no default — nunca interpolar a string do manifest numa
+// classe (um plugin passaria CSS arbitrário para dentro do painel).
+const CONFIG_MODAL_WIDTHS = {
+  normal: 'max-w-2xl',
+  wide: 'max-w-6xl',
+  full: 'max-w-[95vw]',
+};
+
+function configModalWidth(cfgScreen) {
+  if (!cfgScreen) return 'max-w-lg';   // form declarativo (Pydantic), sempre estreito
+  return CONFIG_MODAL_WIDTHS[cfgScreen.width] || CONFIG_MODAL_WIDTHS.normal;
+}
+
 
 function StatusBadge({ plugin }) {
   if (plugin.error) {
@@ -402,13 +418,13 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
 
       ${settingsOpen ? html`
         <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center">
-          <div class="bg-wa-bg rounded-lg shadow-xl ${cfgScreen ? 'max-w-2xl' : 'max-w-lg'} w-full mx-4 max-h-[85vh] overflow-y-auto">
-            <div class="border-b border-wa-border px-4 py-3 flex items-center justify-between">
+          <div class="bg-wa-bg rounded-lg shadow-xl ${configModalWidth(cfgScreen)} w-full mx-4 max-h-[90vh] flex flex-col">
+            <div class="border-b border-wa-border px-4 py-3 flex items-center justify-between shrink-0">
               <div class="font-medium">Configurações — ${(cfgPlugin && cfgPlugin.name) || settingsOpen}</div>
               <button class="text-wa-secondary hover:text-wa-text"
                       onClick=${() => { setSettingsOpen(null); pushUrl(null); }}>×</button>
             </div>
-            <div class="p-4">
+            <div class="p-4 flex-1 overflow-y-auto">
               ${cfgScreen
                 ? html`<${PluginScreen} screen=${{ ...cfgScreen, pluginId: cfgPlugin.id }} />`
                 : html`<${PluginSettingsForm}

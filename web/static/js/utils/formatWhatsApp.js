@@ -87,18 +87,42 @@ export function highlightComposerMarkup(text) {
   let s = escapeHtml(text);
   const dim = (inner) => `<span style="opacity:.4">${inner}</span>`;
 
+  // ⚠️ REGRA DURA deste realce (plano 132 · F2/D3): nada aqui pode mudar a
+  // MÉTRICA da fonte — largura de avanço dos glifos ou família tipográfica.
+  //
+  // O espelho e a <textarea> precisam quebrar a linha exatamente no mesmo ponto;
+  // é só isso que faz o caret cair onde o operador clica. Até aqui o negrito era
+  // <b> e o código era `font-family:monospace`, e ambos ocupam largura diferente
+  // do texto normal. Medido em Chromium e Firefox: com DOIS negritos na mensagem,
+  // 52 de 52 pontos de clique caíam errados (pior: 27 caracteres); com TRÊS, o
+  // campo inteiro perdia uma linha (198px contra 218px). Nenhum ajuste de padding
+  // conserta isso, porque o erro é proporcional ao texto marcado.
+  //
+  // O realce continua existindo — mudou a TÉCNICA. As três propriedades abaixo
+  // são puramente de pintura e não entram no cálculo de layout:
+  //   • negrito  → -webkit-text-stroke engorda o traço SEM mexer no avanço
+  //                (suportado em Chrome, Firefox e Safari; `currentColor` segue
+  //                o tema sozinho);
+  //   • código   → tarja de fundo, mantendo a MESMA família tipográfica;
+  //   • itálico e tachado → medidos como neutros (0 divergência), ficam como estão.
+  //
+  // Cor via token `--wa-text` (regra do CLAUDE.md): 12% do próprio texto vira uma
+  // tarja discreta no claro e no escuro, sem hex cru em nenhum dos dois temas.
+  const CODE_STYLE = 'background:rgb(var(--wa-text) / .12);border-radius:3px';
+  const BOLD_STYLE = '-webkit-text-stroke:.4px currentColor';
+
   // Code block (``` must come before inline `)
   s = s.replace(/```([\s\S]+?)```/g,
-    (m, inner) => dim('&#96;&#96;&#96;') + '<code style="font-family:monospace">' + inner + '</code>' + dim('&#96;&#96;&#96;'));
+    (m, inner) => dim('&#96;&#96;&#96;') + `<span style="${CODE_STYLE}">` + inner + '</span>' + dim('&#96;&#96;&#96;'));
 
   // Inline code
   s = s.replace(/`([^`\n]+?)`/g,
-    (m, inner) => dim('&#96;') + '<code style="font-family:monospace">' + inner + '</code>' + dim('&#96;'));
+    (m, inner) => dim('&#96;') + `<span style="${CODE_STYLE}">` + inner + '</span>' + dim('&#96;'));
 
   // Bold — authored with DOUBLE asterisks (**texto**). Collapsed to WhatsApp's
   // single-asterisk wire format by toWhatsAppMarkup() on send.
   s = s.replace(/\*\*([^\n]+?)\*\*/g,
-    (m, inner) => dim('&#42;&#42;') + '<b>' + inner + '</b>' + dim('&#42;&#42;'));
+    (m, inner) => dim('&#42;&#42;') + `<span style="${BOLD_STYLE}">` + inner + '</span>' + dim('&#42;&#42;'));
 
   // Italic (word boundaries to avoid matching underscores in URLs)
   s = s.replace(/\b_((?!_)[^\n]+?)_\b/g,
@@ -107,6 +131,24 @@ export function highlightComposerMarkup(text) {
   // Strikethrough
   s = s.replace(/~([^~\n]+?)~/g,
     (m, inner) => dim('&#126;') + '<s>' + inner + '</s>' + dim('&#126;'));
+
+  // A LINHA FINAL que o espelho não gera sozinho (plano 132 · F1).
+  //
+  // Uma <textarea> reserva uma última linha vazia para o caret quando o valor
+  // termina em quebra; um bloco `white-space: pre-wrap` NÃO gera essa linha (a
+  // quebra no fim do bloco é descartada pela especificação). O espelho ficava
+  // então exatamente 20px — uma linha — mais curto que o textarea, e como
+  // `syncMirror` copia `textarea.scrollTop` para um elemento cuja rolagem máxima
+  // é menor, o valor era TRUNCADO: o campo inteiro passava a exibir conteúdo uma
+  // linha adiantado. O operador clicava no texto que via e o caret caía ~65
+  // caracteres à frente, no meio da mensagem — o chamado da investigação 131.
+  //
+  // Um <br> só, mesmo com várias quebras no fim: o espelho fica sempre UMA linha
+  // curto, nunca duas (a penúltima quebra já produz linha própria; só a última é
+  // descartada). E <br> em vez de "\n" literal porque é ELEMENTO, não texto:
+  // `textContent` não muda e a paridade de contagem — o invariante de que o
+  // espelho tem o mesmo comprimento do valor da textarea — sobrevive intacta.
+  if (text.endsWith('\n')) s += '<br>';
 
   return s;
 }

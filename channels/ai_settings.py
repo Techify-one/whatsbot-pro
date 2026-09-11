@@ -29,7 +29,10 @@ PER_CHANNEL_AI_KEYS = (
     "ai_enabled",
     "default_ai_enabled",
     "group_reply_mode",
-    "image_transcription_enabled",
+    "image_transcription_enabled",   # legado (bool) — fallback do mode abaixo
+    # plano 118 — direções da DESCRIÇÃO DE IMAGEM (received/sent/private), igual ao
+    # áudio. Sem esta linha o override do canal seria silenciosamente ignorado.
+    "image_transcription_mode",
     "document_transcription_enabled",
     "audio_transcription_mode",
     "audio_transcription_target",
@@ -46,6 +49,12 @@ PER_CHANNEL_AI_KEYS = (
     # sub-objeto ``ai``; esta entrada documenta a intenção (e habilita o
     # ``ChannelSettingsView`` a expô-la, embora só o nascimento a leia via ``value``).
     "default_assignee_user_id",
+    # plano 152: o MESMO campo aceita um AGENTE DE IA em vez de um humano — a
+    # conversa nasce vinculada a ele (``active_agent_key``) e com a IA LIGADA.
+    # As duas chaves são MUTUAMENTE EXCLUSIVAS (a UI zera a outra ao escolher) e,
+    # se ambas vierem preenchidas por uma edição à mão, o HUMANO vence (é o
+    # comportamento legado — nunca ligar a IA por acidente).
+    "default_assignee_agent_key",
 )
 
 _CACHE: dict[str, tuple[dict, float]] = {}
@@ -114,6 +123,20 @@ class ChannelSettingsView:
         if key in ov and ov[key] is not None and key in PER_CHANNEL_AI_KEYS:
             return ov[key]
         return self._settings.get(key, default)
+
+    def overridden_keys(self) -> frozenset:
+        """As chaves que ESTE canal de fato sobrepõe (não as globais herdadas).
+
+        Usado por ``server.transcription.modes_for`` (plano 118) para resolver a
+        escada "mode → bool legado" DENTRO do mesmo escopo: um canal que só tem o
+        booleano antigo não pode ser vencido por um ``*_transcription_mode`` que
+        existe apenas no config global.
+        """
+        ov = self._ov
+        return frozenset(
+            k for k, v in ov.items()
+            if v is not None and k in PER_CHANNEL_AI_KEYS
+        )
 
 
 def view(channel_id: str, settings) -> ChannelSettingsView:

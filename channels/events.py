@@ -72,5 +72,30 @@ class InboundEvent:
     # ``user_changed_number`` that is the old number); the new identity, when the
     # provider knows it, rides in ``media_extras["wa_id"]``.
 
+    def __post_init__(self) -> None:
+        """Coage ``ts`` para float — o contrato, não só o parser (plano 141).
+
+        A anotação ``ts: float`` de uma dataclass **não é enforcement**: o GOWA
+        injetava uma string RFC 3339 aqui e ela viajava intacta até o INSERT em
+        ``messages.ts`` (``double precision``), onde derrubava o save e destruía
+        a mensagem do cliente em silêncio. O parser corrigido resolve ESTE
+        payload; esta camada impede que QUALQUER provider — inclusive plugin de
+        terceiro, que o core não revisa — volte a deixar um não-float escapar.
+
+        ⚠️ O escopo é o TIPO, não o formato: aqui um RFC 3339 é "ininterpretável"
+        e vira ``0.0`` (⇒ ``time.time()`` a jusante), porque reparsear data é
+        trabalho do parser do provider, que é quem conhece a convenção dele.
+        A garantia desta linha é só esta, e é a que importa: **carimbo estranho
+        nunca custa a mensagem**.
+
+        Nunca levanta — um provider mal-comportado não pode derrubar o webhook.
+        """
+        if isinstance(self.ts, float):
+            return
+        try:
+            self.ts = 0.0 if isinstance(self.ts, bool) else float(self.ts)
+        except (TypeError, ValueError):
+            self.ts = 0.0
+
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

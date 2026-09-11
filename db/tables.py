@@ -404,11 +404,85 @@ user_sessions = Table(
 Index("idx_sessions_user", user_sessions.c.user_id)
 Index("idx_sessions_expires", user_sessions.c.expires_at)
 
+# API keys (plano "Sistema de API com chave por usuário"). A chave é apenas um
+# CRACHÁ novo que resolve para o MESMO ``request.state.user`` que uma sessão
+# resolve — RBAC, escopo por inbox e auditoria continuam valendo sem alteração.
+# O segredo NUNCA é persistido: só o Argon2 ``key_hash``. ``prefix`` é o pedaço
+# público (lookup indexado) e ``scopes`` é reservado/NULL (D3 — a chave herda as
+# permissões do dono; o controle é criar um usuário dedicado por integração).
+api_keys = Table(
+    "api_keys",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("label", Text, nullable=False, server_default=""),
+    Column("key_hash", Text, nullable=False),        # Argon2id PHC — nunca em claro
+    Column("prefix", Text, nullable=False),          # pedaço público p/ lookup
+    Column("last4", Text, nullable=False, server_default=""),   # exibição na lista
+    Column("scopes", Text, nullable=True),           # RESERVADO (NULL = herda tudo)
+    Column("created_at", Float, nullable=False),
+    Column("last_used_at", Float, nullable=True),
+    Column("expires_at", Float, nullable=True),
+    Column("revoked_at", Float, nullable=True),
+    Column("created_by", Integer, nullable=True),    # FK lógica -> users.id
+)
+Index("idx_api_keys_user", api_keys.c.user_id)
+Index("idx_api_keys_prefix", api_keys.c.prefix)
+
+
+# Webhooks de SAÍDA (plano "Sistema de API com chave por usuário" · fase 8). Todo
+# o resto da API é *pull*; um CRM que precisa saber "chegou mensagem" ou "conversa
+# resolvida" teria de fazer polling (o único push é o /ws, que exige sessão de
+# painel e não é escopado). O núcleo de entrega é do CORE e viaja pelo MESMO
+# barramento de eventos — então evento de PLUGIN sai de graça, sem transporte
+# próprio. Estado NUNCA em memória: um restart de plugin derruba o processo.
+webhook_endpoints = Table(
+    "webhook_endpoints",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("url", Text, nullable=False),
+    Column("description", Text, nullable=False, server_default=""),
+    Column("secret", Text, nullable=False),          # segredo do HMAC do corpo
+    Column("events", _json_type(), nullable=False),  # lista; ["*"] = tudo permitido
+    Column("enabled", Integer, nullable=False, server_default="1"),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Column("created_by", Integer, nullable=True),     # FK lógica -> users.id
+    Column("last_delivery_at", Float, nullable=True),
+    Column("last_status", Integer, nullable=True),    # último HTTP status observado
+    Column("failure_streak", Integer, nullable=False, server_default="0"),
+    Column("disabled_reason", Text, nullable=True),   # auto-desligado por falha crônica
+)
+Index("idx_webhook_endpoints_enabled", webhook_endpoints.c.enabled)
+
+webhook_deliveries = Table(
+    "webhook_deliveries",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("endpoint_id", Integer,
+           ForeignKey("webhook_endpoints.id", ondelete="CASCADE"), nullable=False),
+    Column("event", Text, nullable=False),
+    Column("payload", _json_type(), nullable=False),
+    # pending | delivered | failed (vai re-tentar) | dead (esgotou as tentativas)
+    Column("status", Text, nullable=False, server_default="pending"),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("next_attempt_at", Float, nullable=False, server_default="0"),
+    Column("response_status", Integer, nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+Index("idx_webhook_deliveries_due",
+      webhook_deliveries.c.status, webhook_deliveries.c.next_attempt_at)
+Index("idx_webhook_deliveries_endpoint", webhook_deliveries.c.endpoint_id)
+
 
 # ── Inbox e Conversas (plano 01 Fase 1) ────────────────────────────────────
 # Modelo 3 níveis: Contact → ContactInbox (identidade da pessoa num canal) →
-# Conversation (thread de atendimento). assignee_user_id/team_id são NULLABLE
-# SEM FK por robustez de ordem de migration (P1). channel_id liga p/ channels.id
+# Conversation (thread de atendimento). assignee_user_id é NULLABLE SEM FK por
+# robustez de ordem de migration (P1); team_id é NULLABLE COM FK para teams.id
+# (ON DELETE SET NULL — plano 153 D4: apagar um time só limpa a etiqueta).
+# channel_id liga p/ channels.id
 # "default" (plano 02 faz ALTER aditivo depois). conversation_id em messages é
 # aditivo. custom_attributes de conversa é JSON/JSONB nativo (NUNCA TEXT — coord
 # plano 05). status só open|closed (P3); is_archived ortogonal (P10).
@@ -459,6 +533,31 @@ inbox_members = Table(
 )
 Index("idx_inbox_members_user", inbox_members.c.user_id)
 
+# Times (plano 153) — agrupam atendentes para filtro/transferência de atendimento,
+# INDEPENDENTE do assignee_user_id individual (D1: os dois convivem, nenhum limpa o
+# outro). Cópia estrutural de inboxes/inbox_members acima — mesmo padrão N:N.
+teams = Table(
+    "teams",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", Text, nullable=False),
+    Column("description", Text, nullable=False, server_default=""),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Column("restrict_visibility", Integer, nullable=False, server_default="0"),  # 1 = esconde da listagem pra quem está na caixa mas não é do time — plano 154
+    Column("visible_to_assignee", Integer, nullable=False, server_default="0"),  # 1 = quem está atribuído à conversa a vê mesmo fora do time (só com restrict_visibility=1) — plano 155
+)
+
+team_members = Table(
+    "team_members",
+    metadata,
+    Column("team_id", Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", Float, nullable=False),
+    PrimaryKeyConstraint("team_id", "user_id"),
+)
+Index("idx_team_members_user", team_members.c.user_id)
+
 atendimentos = Table(
     "atendimentos",                                             # RENOMEADA de "conversations" (nomenclatura Atendimento)
     metadata,
@@ -472,7 +571,7 @@ atendimentos = Table(
     Column("is_archived", Integer, nullable=False, server_default="0"),  # ortogonal (P10)
     Column("is_pinned", Integer, nullable=False, server_default="0"),    # fixar no topo por CONVERSA (plano 54)
     Column("assignee_user_id", Integer),                        # NULLABLE sem FK (P1)
-    Column("team_id", Integer),                                 # NULLABLE sem FK
+    Column("team_id", Integer, ForeignKey("teams.id", ondelete="SET NULL")),  # NULLABLE, FK (plano 153)
     Column("priority", Text),
     Column("ai_active", Integer, nullable=False, server_default="1"),   # gate IA nível 3
     Column("active_agent_key", Text),                          # plano 06: agente da conversa
@@ -492,6 +591,7 @@ atendimentos = Table(
 )
 Index("idx_atend_inbox_status", atendimentos.c.inbox_id, atendimentos.c.status)
 Index("idx_atend_assignee_status", atendimentos.c.assignee_user_id, atendimentos.c.status)
+Index("idx_atend_team_status", atendimentos.c.team_id, atendimentos.c.status)
 Index("idx_atend_contact", atendimentos.c.contact_id)
 Index("idx_atend_contact_inbox", atendimentos.c.contact_inbox_id)
 Index("idx_atend_last_activity", atendimentos.c.last_activity_at)
@@ -747,7 +847,13 @@ ai_tools = Table(
     # 'code' = user-authored, runs ISOLATED in a subprocess (gated by
     # ai_tools_code_enabled). 'builtin' = a seeded core tool, runs IN-PROCESS
     # with the live ToolContext (handler/DB), always available, can't be deleted.
+    # 'plugin' = a tool contributed by a plugin (entry.tools), seeded from the
+    # plugin's on-disk source; also IN-PROCESS, and NOT gated by the kill-switch.
     Column("kind", Text, nullable=False, server_default="code"),
+    # Dono da row quando kind='plugin' (NULL para 'code'/'builtin'). Não é
+    # derivável de tool_overrides.plugin_id: aquela row some quando o plugin é
+    # desabilitado, e é justamente aí que a procedência importa.
+    Column("plugin_id", Text),
     Column("description", Text, nullable=False, server_default=""),
     # Python source materialised to storages/ai_tools/<name>.py and imported.
     Column("code", Text, nullable=False, server_default=""),
@@ -846,8 +952,11 @@ audit_log = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("actor_user_id", Integer, nullable=True),                       # logical FK -> users.id
-    Column("actor_type", Text, nullable=False, server_default="system"),   # system | user | ai
+    Column("actor_type", Text, nullable=False, server_default="system"),   # system | user | ai | apikey
     Column("actor_label", Text, nullable=True),                            # name snapshot at the time
+    # Procedência: quando a ação entrou por uma CHAVE DE API, o ator continua
+    # sendo o usuário dono (actor_user_id) e esta coluna diz por qual chave.
+    Column("api_key_id", Integer, nullable=True),                          # logical FK -> api_keys.id
     Column("action", Text, nullable=False),                                # recurso.verbo (db/audit_actions)
     Column("resource_type", Text, nullable=False),
     Column("resource_id", Text, nullable=True),                            # string: phone/jid/uuid/id

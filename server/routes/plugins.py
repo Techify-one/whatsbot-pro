@@ -16,7 +16,8 @@ from fastapi import Depends, Request
 from fastapi import UploadFile
 from fastapi.responses import StreamingResponse
 
-from db.repositories import config_repo, plugin_repo, rbac_repo, tool_override_repo
+from db.repositories import (config_repo, plugin_repo, rbac_repo, tool_override_repo,
+                             tool_repo)
 from plugins.manifest import (
     WHATSBOT_API_VERSION,
     find_manifest_file,
@@ -34,6 +35,32 @@ logger = logging.getLogger(__name__)
 
 
 _PLUGIN_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+# Version sanitized for use in a filename / HTTP header. The manifest's own
+# ``_is_semver`` is NOT enough: its regex ends in ``(?:[-+].*)?``, so a build
+# tag carrying a quote or a newline would pass and poison Content-Disposition.
+_SAFE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$")
+
+
+def _export_filename(plugin_id: str, plugin_dir: Path) -> str:
+    """Export zip name: ``<id>-<version>-plugin.zip``.
+
+    Degrades to the legacy name (``<id>-plugin.zip``) whenever the version
+    cannot be read safely -- the download must never fail over its own name.
+
+    The broad ``except`` is deliberate: ``load_manifest`` also raises
+    ``ValueError`` when ``whatsbot_api_version`` is incompatible with the
+    running core, which is exactly the plugin an operator wants to export in
+    order to fix it elsewhere.
+    """
+    try:
+        version = (load_manifest(plugin_dir).version or "").strip()
+    except Exception:
+        return f"{plugin_id}-plugin.zip"
+    if not _SAFE_VERSION_RE.match(version):
+        return f"{plugin_id}-plugin.zip"
+    return f"{plugin_id}-{version}-plugin.zip"
+
 
 # Cap on the total UNCOMPRESSED size of an uploaded plugin zip (anti zip-bomb).
 _MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024  # 256 MiB
@@ -261,6 +288,22 @@ def register_routes(app, deps):
             # #2). Key lives OUTSIDE the 'plugin.gowa.' prefix just wiped above.
             if plugin_id == "gowa":
                 config_repo.set("gowa_uninstalled", "1")
+            # Rows editáveis das tools do plugin + as marcas de tombstone DELAS.
+            # A limpeza do tombstone é o que faz reinstalar o ``.zip`` devolver
+            # uma tool excluída; sem ela o plugin voltaria permanentemente
+            # incompleto, sem nenhuma UI para recuperar. Escopo pelos nomes das
+            # rows daquele plugin — nunca um wipe da chave, que ressuscitaria uma
+            # builtin deletada de propósito.
+            from agent import ai_builtin_tools, ai_plugin_tools
+            ai_tools_names = tool_repo.delete_for_plugin(plugin_id)
+            # As tools JÁ excluídas do plugin não têm mais row — os nomes delas
+            # vêm do registro de donos gravado no delete. Sem esta parte, uma
+            # tool excluída ficaria tombada para sempre e o plugin voltaria
+            # permanentemente incompleto.
+            tombadas = ai_plugin_tools.tombstoned_names_for(plugin_id)
+            tombstones_cleared = ai_builtin_tools.untombstone_tools(
+                list(ai_tools_names) + tombadas)
+            ai_plugin_tools.forget_tombstone_owners(tombadas)
             overrides_removed = tool_override_repo.delete_for_plugin(plugin_id)
             # RBAC perms declared by the plugin (plano "RBAC para Plugins"):
             # role_permissions/user_permissions grants cascade via FK.
@@ -269,6 +312,8 @@ def register_routes(app, deps):
                 "folder_removed": had_dir,
                 "tables_dropped": dropped,
                 "tool_overrides_removed": overrides_removed,
+                "ai_tools_removed": len(ai_tools_names),
+                "tombstones_cleared": tombstones_cleared,
                 "permissions_removed": perms_removed,
             }
 
@@ -356,7 +401,7 @@ def register_routes(app, deps):
                 zf.write(path, arc)
         size = buf.getbuffer().nbytes
         buf.seek(0)
-        filename = f"{plugin_id}-plugin.zip"
+        filename = _export_filename(plugin_id, target)
         return StreamingResponse(
             buf,
             media_type="application/zip",

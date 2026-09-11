@@ -29,18 +29,27 @@ from plugins.context import ToolContext
 logger = logging.getLogger(__name__)
 
 
-def _builtin_tombstoned(name: str) -> bool:
-    """Builtin deletada de verdade pelo operador? (plano 30 WS3 — tombstone).
+def _tombstoned(name: str) -> bool:
+    """Tool deletada de verdade pelo operador? (plano 30 WS3 — tombstone).
+
+    Vale para builtin E para tool de plugin. O conjunct ``is_builtin(name)`` que
+    existia aqui deixava uma tool de PLUGIN tombada ressuscitar a todo boot: o
+    loader a recontribui sempre, e este é o único ponto por onde ela passa. A
+    recriação de um builtin deletado como tool code-in-DB — o motivo original do
+    conjunct — já é coberta pelo ``tombstone_exempt=True`` que o installer passa.
 
     Import lazy + defensivo: falha de leitura NUNCA bloqueia um registro
     (fail-open pro comportamento legado — a tool registra).
     """
     try:
         from agent import ai_builtin_tools
-        return (ai_builtin_tools.is_builtin(name)
-                and name in ai_builtin_tools.deleted_builtin_tools())
+        return name in ai_builtin_tools.deleted_tools()
     except Exception:  # noqa: BLE001
         return False
+
+
+# Nome antigo preservado — os testes do plano 30 o importam.
+_builtin_tombstoned = _tombstoned
 
 
 def _default_enabled(name: str) -> bool:
@@ -55,6 +64,22 @@ def _default_enabled(name: str) -> bool:
         return ai_builtin_tools.default_override_enabled(name)
     except Exception:  # noqa: BLE001 — nunca bloqueia um registro de tool
         return True
+
+
+def _deletable(name: str, code_row: dict | None, plugin_id: str | None) -> bool:
+    """A tool pode ser excluída pela interface? Política em ``ai_builtin_tools``."""
+    if code_row is None and plugin_id:
+        # Tool de plugin sem row ai_tools = o seed falhou. Não há o que excluir
+        # (a row É o cabo), e oferecer o botão daria 404 no clique. O builtin sem
+        # row é diferente: a rota de DELETE cobre esse caso pelo tombstone.
+        return False
+    try:
+        from agent import ai_builtin_tools
+        row = dict(code_row) if code_row else {"kind": "builtin"}
+        row.setdefault("name", name)
+        return ai_builtin_tools.is_deletable(row)
+    except Exception:  # noqa: BLE001 — na dúvida, não oferece Excluir
+        return False
 
 
 class ToolRegistry:
@@ -116,11 +141,12 @@ class ToolRegistry:
                 name, existing_pid or "core", plugin_id or "core",
             )
             return
-        if not tombstone_exempt and _builtin_tombstoned(name):
-            # Builtin DELETADA pelo operador (plano 30 WS3): não registra nem
-            # recria a row tool_overrides — o delete_orphans do boot limpa o
-            # resto. Sem este skip a tool ressuscitaria a cada restart.
-            logger.info("Builtin '%s' deletada pelo operador; registro pulado", name)
+        if not tombstone_exempt and _tombstoned(name):
+            # DELETADA pelo operador (plano 30 WS3): não registra nem recria a
+            # row tool_overrides — o delete_orphans do boot limpa o resto. Sem
+            # este skip a tool ressuscitaria a cada restart, e para a tool de
+            # PLUGIN isso valeria sempre: o loader a recontribui a todo boot.
+            logger.info("Tool '%s' deletada pelo operador; registro pulado", name)
             return
         # Pluck WhatsBot-only metadata so the schema we pass to the LLM proxy is
         # a clean tool spec.
@@ -266,6 +292,14 @@ class ToolRegistry:
             overrides = {row["name"]: row for row in tool_override_repo.list_all()}
         except Exception:
             overrides = {}
+        # ``deletable`` também sai aqui, e não só em /api/ai/tools, para cobrir o
+        # caso degenerado de um builtin deletável cujo seed falhou (sem row
+        # ai_tools, a tela não teria de onde tirar a política).
+        try:
+            from db.repositories import tool_repo
+            code_rows = {r["name"]: r for r in tool_repo.list_all()}
+        except Exception:  # noqa: BLE001 — sem banco, ninguém deleta nada
+            code_rows = {}
         items: list[dict] = []
         for name, original in self._tool_originals.items():
             fn = original.get("function", {})
@@ -289,6 +323,7 @@ class ToolRegistry:
                 "has_override": bool(ov.get("description")),
                 "has_label_override": bool(ov.get("display_label")),
                 "parameters_schema": fn.get("parameters", {}),
+                "deletable": _deletable(name, code_rows.get(name), plugin_id),
             })
         return items
 

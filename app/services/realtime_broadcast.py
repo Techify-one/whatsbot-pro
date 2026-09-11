@@ -69,11 +69,15 @@ def build_inbound_saved_message(saved: dict,
     lugar com a cópia otimista do t=0 via ``msg_id``/``_id`` (dedup), então a
     entrega dupla é inofensiva.
 
-    ``supersedes`` = a lista de ``msg_id`` que um batch combinou nesta única linha
-    (o batch junta N mensagens em ``"a\\nb"`` sob o ``msg_id`` da ÚLTIMA). O
-    frontend usa isso para colapsar as bolhas otimistas individuais das mensagens
-    anteriores na linha combinada. O ``msg_id`` da própria linha é excluído (ele
-    reconcilia no lugar, preservando a posição da bolha).
+    ``supersedes`` = a lista de ``msg_id`` que um batch combinou nesta única linha.
+    ⚠️ **Nenhum call site do core o passa desde o plano 146**: o batch de texto
+    deixou de mesclar e grava uma linha por mensagem, cada uma reconciliando com a
+    própria bolha otimista pelo seu ``msg_id``. O parâmetro é MANTIDO de propósito
+    — um rollback do core volta a produzir a linha combinada, e um cliente sem esta
+    maquinaria mostraria bolha duplicada diante dele. Quando presente, o frontend o
+    usa para colapsar as bolhas otimistas das mensagens anteriores na linha
+    combinada; o ``msg_id`` da própria linha é excluído (ele reconcilia no lugar,
+    preservando a posição da bolha).
 
     Quando a linha CITA outra mensagem, o alvo também vai hidratado em
     ``quoted`` (plano 75 — ver :func:`_attach_quoted`); é o único ponto em que

@@ -40,15 +40,21 @@ const PRESENCE_REFRESH_MS = 10000;
  * @param {any} opts.channelId
  * @param {boolean} opts.sandbox
  * @param {boolean} opts.sessionClosed - 24h window closed (WhatsApp Cloud).
+ * @param {boolean} opts.aiWindowClosed - janela da IA do canal fechada: o plugin
+ *   do canal aborta o turno, então a nota privada não pede IA nenhuma.
  * @param {(updater:(prev:any)=>any)=>void} opts.setContactData
  * @param {(localId:string, updater:(m:any)=>any)=>void} opts.updateMsgByLocalId
  * @param {(el:HTMLTextAreaElement, val:string)=>void} opts.updateMenus - autocomplete tick.
  * @param {()=>void} opts.closeMentionMenu - close @mention menu on send.
+ * @param {()=>void} [opts.closeMenus] - close BOTH autocomplete menus (blur).
+ * @param {()=>boolean} [opts.menusOpen] - true quando algum menu está aberto.
  * @param {()=>void} opts.openTemplatePicker
  */
 export function useComposer({
-  api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser = null,
-  setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, openTemplatePicker,
+  api, phone, conversationId, channelId, sandbox, sessionClosed,
+  aiWindowClosed = false, currentUser = null,
+  setContactData, updateMsgByLocalId, updateMenus, closeMentionMenu, closeMenus = null,
+  menusOpen = null, openTemplatePicker,
   collectMentions = null, resetMentions = null,
 }) {
   const [input, setInputState] = useState('');
@@ -91,6 +97,18 @@ export function useComposer({
     const val = typeof next === 'function' ? next(inputValueRef.current) : next;
     applyInput(val);
     setDraft(draftKeyRef.current, val);
+  }, [applyInput]);
+
+  // Consome o texto do compositor: devolve o que estava lá e limpa estado +
+  // rascunho de uma vez (plano 124). Existe porque o envio de MÍDIA passou a
+  // usar o texto como legenda e precisa da mesma limpeza que `handleSend` faz
+  // — sem que o `ContactDetail` mexa no rascunho por fora, o que duplicaria a
+  // regra de qual chave de rascunho vale agora.
+  const consumeInput = useCallback(() => {
+    const val = inputValueRef.current;
+    applyInput('');
+    clearDraft(draftKeyRef.current);
+    return val;
   }, [applyInput]);
 
   // Troca de conversa: hidrata o compositor com o rascunho salvo (ou esvazia).
@@ -174,6 +192,60 @@ export function useComposer({
     }, 0);
   }
 
+  // ── O menu de autocomplete tem de seguir o CARET, não só o texto ───────
+  //
+  // Até o plano 132 · F5, `updateMenus` tinha um único gatilho: o evento
+  // `input`. Mover o cursor não reavaliava nada, então o menu continuava aberto
+  // ancorado num "@" que o operador já tinha deixado para trás — e aplicar a
+  // escolha ali fazia o splice comer todo o trecho entre a âncora velha e o
+  // cursor novo. A guarda de `replaceToken` impede o estrago; estes gatilhos
+  // evitam o menu enganoso que levava até ele.
+  //
+  // ⚠️ MEDIDO em Chromium 151 e Firefox 153: o evento `select` da textarea
+  // dispara APENAS quando há seleção de verdade. Clique simples, seta, Home e
+  // End movem o caret sem disparar `select` nenhum — por isso `onSelect`
+  // sozinho não cobre o caso relatado (o operador CLICA noutro ponto). Daí os
+  // quatro gatilhos abaixo: seleção, clique, tecla de navegação e perda de foco.
+  const CARET_MOVE_KEYS = new Set([
+    'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown',
+  ]);
+
+  // ⚠️ CONSERVADOR de propósito: o caret que se move só pode FECHAR ou reancorar
+  // um menu que já estava aberto — nunca ABRIR um. O menu é uma ajuda de quem
+  // está DIGITANDO; se um clique pudesse abri-lo, um "/agendar" no meio de uma
+  // mensagem já escrita faria o menu saltar quando o operador só queria pôr o
+  // cursor ali — e o Enter seguinte inseriria a resposta rápida em vez de
+  // enviar a mensagem. Com nenhum menu aberto, mexer o cursor não faz nada.
+  function syncMenusToCaret(el) {
+    if (!el) return;
+    if (menusOpen && !menusOpen()) return;
+    updateMenus(el, el.value);
+  }
+
+  // Seleção de verdade (arrastar, duplo clique, Ctrl+A).
+  function handleSelect(e) { syncMenusToCaret(e.target); }
+
+  // Clique simples: o caret anda e nada mais avisa.
+  function handleClick(e) { syncMenusToCaret(e.target); }
+
+  // Teclas que movem o caret sem mudar o texto.
+  //
+  // ⚠️ ArrowUp/ArrowDown ficam DE FORA de propósito: com o menu aberto elas são
+  // a navegação entre candidatos (`handleMenuKeyDown` dá `preventDefault`, o
+  // caret não anda), e recalcular o menu aqui zeraria o `index` a cada seta —
+  // a lista voltaria para o primeiro item a cada tecla.
+  function handleCaretKeyUp(e) {
+    if (CARET_MOVE_KEYS.has(e.key)) syncMenusToCaret(e.target);
+  }
+
+  // Perder o foco fecha os dois menus: eles são um enfeite flutuante ancorado
+  // num caret que não existe mais. Seguro porque os itens do menu aplicam a
+  // escolha no `onMouseDown` com `preventDefault` — clicar num deles não tira o
+  // foco do campo e portanto não chega aqui.
+  function handleBlur() {
+    if (closeMenus) closeMenus();
+  }
+
   // Send typing presence to contact (debounced)
   function handleInputChange(e) {
     const val = e.target.value;
@@ -246,7 +318,12 @@ export function useComposer({
       const mm = collectMentions ? collectMentions(text) : { mentions: [], mention_inbox: false };
       try {
         const res = await sendPrivateMessage(phone, text, {
-          aiRead: aiReadPrivate,
+          // Com a janela da IA fechada os toggles não são nem renderizados, mas o
+          // ESTADO deles sobrevive à troca de conversa (só reseta ao sair da
+          // aba): sem este `&&`, quem deixou "IA lê" ligado noutro atendimento
+          // continuaria agendando um turno que o filtro do plugin descarta em
+          // silêncio. A nota privada em si é salva normalmente.
+          aiRead: aiReadPrivate && !aiWindowClosed,
           aiReply: aiReadPrivate ? aiReplyInChat : true,
           conversationId,
           channelId,  // plano 37 (C1): conversa nova em canal não-default não misfila
@@ -363,18 +440,26 @@ export function useComposer({
     return false;
   }
 
-  // Stop typing presence imperatively (used when sending media before the form).
+  // Stop typing presence imperatively (envio de mídia, que não passa pelo
+  // `handleSend`). Cancelar o debounce sem avisar o provedor deixaria o
+  // "Fulano está digitando…" dos outros atendentes pendurado até expirar por
+  // segurança (15s) — por isso o 'stop' é EMITIDO aqui, não só cancelado.
   function stopPresence() {
+    const wasTyping = !!presenceTimerRef.current;
     clearTimeout(presenceTimerRef.current);
     presenceTimerRef.current = null;
     presenceStartedAtRef.current = 0;
+    if (wasTyping && phone && !sandbox) {
+      sendPresence(phone, 'stop', conversationId, channelId).catch(() => {});
+    }
   }
 
   return {
     input, setInput, mode, setMode,
     aiReadPrivate, setAiReadPrivate, aiReplyInChat, setAiReplyInChat,
     replyingTo, setReplyingTo, emojiOpen, setEmojiOpen,
-    inputRef, emojiRef,
-    insertEmoji, handleInputChange, handleSend, handleRetry, stopPresence,
+    inputRef, emojiRef, consumeInput,
+    insertEmoji, handleInputChange, handleSelect, handleClick, handleCaretKeyUp, handleBlur,
+    handleSend, handleRetry, stopPresence,
   };
 }

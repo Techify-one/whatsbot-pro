@@ -11,7 +11,8 @@ import assert from 'node:assert/strict';
 import {
   providerMeta, credLabel, tintForColor, parseChannelConfig, aiDefaultsFrom,
   missingCredsFor, initialConfigValues, buildCreatePayload, buildEditPayload,
-  buildEmbedSnippet,
+  buildEmbedSnippet, parseMediaModes, serializeMediaModes, mediaModesFrom,
+  withResolvedMediaModes, parseAudioModes, serializeAudioModes,
 } from './constants.js';
 
 // Plano 76 · F0 — CARACTERIZAÇÃO: a string do snippet é copiada pelo operador e
@@ -263,3 +264,81 @@ test('buildEditPayload: all-blank/masked creds omit credentials', () => {
   });
   assert.equal(p.credentials, undefined);
 });
+
+// ── plano 118 — modos de transcrição por direção (imagem ganhou direções) ────
+// Espelho de server/transcription.py (parse_media_modes / modes_for). UI e gate
+// discordarem seria o mesmo bug duas vezes.
+test('parseMediaModes: legados (null/off/both) e lista', () => {
+  assert.deepEqual([...parseMediaModes(null)], ['received']);
+  assert.equal(parseMediaModes('off').size, 0);
+  assert.equal(parseMediaModes('').size, 0);
+  assert.equal(parseMediaModes('none').size, 0);
+  assert.deepEqual([...parseMediaModes('both')].sort(), ['received', 'sent']);
+  assert.deepEqual([...parseMediaModes('received,sent,private')].sort(),
+    ['private', 'received', 'sent']);
+  assert.equal(parseMediaModes('lixo').size, 0);
+});
+
+test('serializeMediaModes: ordem canônica e "off" quando vazio', () => {
+  assert.equal(serializeMediaModes(new Set(['private', 'received'])), 'received,private');
+  assert.equal(serializeMediaModes(new Set()), 'off');
+});
+
+test('os nomes antigos continuam apontando para as mesmas funções', () => {
+  assert.equal(parseAudioModes, parseMediaModes);
+  assert.equal(serializeAudioModes, serializeMediaModes);
+});
+
+test('mediaModesFrom: mode vence, senão o booleano legado, senão received', () => {
+  assert.deepEqual([...mediaModesFrom({ image_transcription_mode: 'sent' }, 'image')], ['sent']);
+  // mode presente vence mesmo com o booleano contradizendo
+  assert.deepEqual([...mediaModesFrom(
+    { image_transcription_mode: 'sent', image_transcription_enabled: false }, 'image')], ['sent']);
+  assert.deepEqual([...mediaModesFrom({ image_transcription_enabled: true }, 'image')], ['received']);
+  assert.equal(mediaModesFrom({ image_transcription_enabled: false }, 'image').size, 0);
+  assert.deepEqual([...mediaModesFrom({}, 'image')], ['received']);
+  assert.deepEqual([...mediaModesFrom({ audio_transcription_mode: 'both' }, 'audio')].sort(),
+    ['received', 'sent']);
+});
+
+test('withResolvedMediaModes: o booleano DO CANAL vira mode antes do merge', () => {
+  // Canal legado com a caixa DESmarcada + um global que já tem o mode: sem esta
+  // resolução o merge {...defaults, ...channelAi} ligaria a descrição sozinha.
+  const channelAi = { image_transcription_enabled: false };
+  const merged = { ...aiDefaultsFrom({ image_transcription_mode: 'received,sent' }),
+                   ...withResolvedMediaModes(channelAi) };
+  assert.equal(merged.image_transcription_mode, 'off');
+  assert.equal(mediaModesFrom(merged, 'image').size, 0);
+});
+
+test('withResolvedMediaModes: canal sem chave nenhuma herda o default global', () => {
+  const merged = { ...aiDefaultsFrom({ image_transcription_mode: 'private' }),
+                   ...withResolvedMediaModes({}) };
+  assert.equal(merged.image_transcription_mode, 'private');
+});
+
+test('withResolvedMediaModes: mode explícito do canal não é reescrito', () => {
+  const out = withResolvedMediaModes(
+    { image_transcription_mode: 'sent', image_transcription_enabled: false });
+  assert.equal(out.image_transcription_mode, 'sent');
+});
+
+test('aiDefaultsFrom: semeia image_transcription_mode pela escada do backend', () => {
+  assert.equal(aiDefaultsFrom({}).image_transcription_mode, 'received');
+  assert.equal(aiDefaultsFrom({ image_transcription_enabled: false }).image_transcription_mode, 'off');
+  assert.equal(
+    aiDefaultsFrom({ image_transcription_mode: 'received,private' }).image_transcription_mode,
+    'received,private');
+  // o booleano legado continua no objeto (fallback para um core anterior)
+  assert.equal(aiDefaultsFrom({}).image_transcription_enabled, true);
+});
+
+test('buildEditPayload: carrega a chave nova no config.ai', () => {
+  const p = buildEditPayload({
+    displayName: 'X', descriptor: { credential_fields: [] }, channelConfig: '{}',
+    ai: { ...aiDefaultsFrom({}), image_transcription_mode: 'received,sent' },
+    credValues: {}, configValues: {},
+  });
+  assert.equal(p.config.ai.image_transcription_mode, 'received,sent');
+});
+

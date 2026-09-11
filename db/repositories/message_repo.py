@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from sqlalchemy import (and_, case as sa_case, delete as sa_delete, insert as sa_insert,
@@ -11,6 +12,8 @@ from sqlalchemy import (and_, case as sa_case, delete as sa_delete, insert as sa
 from db.engine import get_engine
 from db.repositories._mapping import coerce_json
 from db.tables import messages
+
+logger = logging.getLogger(__name__)
 
 
 def add(contact_id: int, role: str, content: str, *,
@@ -37,7 +40,22 @@ def add(contact_id: int, role: str, content: str, *,
     depois pela descrição/transcrição da IA e deixa de ser separável. NULL =
     mídia sem legenda (ou mensagem que não é mídia).
     """
-    ts = ts or time.time()
+    # ⚠️ Última linha de defesa (plano 141): ``ts = ts or time.time()`` PARECE um
+    # guard de tipo e não é — qualquer string não-vazia é truthy e atravessava
+    # até o INSERT, onde ``messages.ts`` (Float) levantava
+    # ``InvalidTextRepresentation`` e a mensagem do cliente era destruída.
+    # Carimbo ruim NUNCA pode custar a mensagem: aqui ele vira ``time.time()``
+    # (nunca ``0.0``, que jogaria a linha para 1970 no topo do fio) + warning.
+    if ts is None or isinstance(ts, bool):
+        ts = time.time()
+    else:
+        try:
+            ts = float(ts) or time.time()
+        except (TypeError, ValueError):
+            logger.warning(
+                "[message_repo] ts inválido (%r) para contact_id=%s role=%s — "
+                "carimbando com o horário atual", ts, contact_id, role)
+            ts = time.time()
     with get_engine().begin() as conn:
         result = conn.execute(sa_insert(messages).values(
             contact_id=contact_id,
@@ -431,7 +449,12 @@ def get_context(contact_id: int, limit: int, *, exclude=None) -> list[dict]:
                 & (~messages.c.role.in_(excluded))
                 & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
             )
-            .order_by(messages.c.ts.desc())
+            # plano 146: desempate por ``id``. O batch deixou de mesclar, então duas
+            # mensagens do MESMO segundo viram duas linhas com ``ts`` IDÊNTICO — o
+            # ``ts`` do provedor tem resolução de segundo (RFC 3339, ver gowa/inbound
+            # ``_epoch``). Sem desempate o Postgres não garante ordem nenhuma entre
+            # elas e o modelo podia ler os dois turnos ``user`` TROCADOS.
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
             .limit(fetch_limit)
         ).mappings().all()
     return _apply_exclude(rows, limit, exclude)
@@ -463,7 +486,8 @@ def get_context_by_conversation(conversation_id: int, limit: int, *,
                 & (~messages.c.role.in_(excluded))
                 & ((messages.c.status.is_(None)) | (messages.c.status != "failed"))
             )
-            .order_by(messages.c.ts.desc())
+            # plano 146: mesmo desempate do ``get_context`` — ver a nota lá.
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
             .limit(fetch_limit)
         ).mappings().all()
     return _apply_exclude(rows, limit, exclude)
@@ -497,7 +521,9 @@ def get_last(contact_id: int) -> dict | None:
         row = conn.execute(
             select(messages)
             .where(messages.c.contact_id == contact_id)
-            .order_by(messages.c.ts.desc())
+            # plano 146: sem o desempate, "a mais recente" é indefinida entre duas
+            # mensagens do mesmo segundo (o batch não mescla mais).
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
             .limit(1)
         ).mappings().first()
     return _row_to_dict(row) if row else None
@@ -533,7 +559,17 @@ def last_inbound_ts(*, conversation_id: int | None = None,
 
 def get_last_user_message(contact_id: int,
                           conversation_id: int | None = None) -> dict | None:
-    """Return the most recent user message (for updating with transcription etc).
+    """Return the most recent user message.
+
+    ⚠️ **Não filtra ``media_type``** — devolve a última linha ``role='user'``
+    qualquer que seja, por ``ts DESC``. Desde o plano 129 esse ``ts`` é o do
+    PROVEDOR, não o do INSERT: usar esta função para escolher onde colar a
+    transcrição de uma mídia erra o alvo sempre que outra mensagem do cliente
+    tiver carimbo maior (plano 133). Quem inseriu a linha deve mirar pelo ``id``.
+
+    Assinatura e query **congeladas** (plano 133 · D5): há consumidor externo vivo
+    — o plugin ``vendas_ia`` (``filters.py``) lê por aqui o texto do turno, e
+    endurecer com ``media_type IS NOT NULL`` o quebraria.
 
     Plano 37 (B5): ``conversation_id`` escopa a busca àquela conversa/canal — num
     contato com áudio no Telegram e texto no GOWA na mesma janela, a transcrição
@@ -546,14 +582,22 @@ def get_last_user_message(contact_id: int,
         row = conn.execute(
             select(messages)
             .where(cond)
-            .order_by(messages.c.ts.desc())
+            # plano 146: idem — a última mensagem DO CONTATO precisa ser determinística
+            # (janela de 24h, regras de plugin), e duas do mesmo segundo empatam no ``ts``.
+            .order_by(messages.c.ts.desc(), messages.c.id.desc())
             .limit(1)
         ).mappings().first()
     return _row_to_dict(row) if row else None
 
 
 def update_content(message_id: int, content: str) -> None:
-    """Update the content of a specific message."""
+    """Update the content of a specific message.
+
+    ⚠️ Troca o ``content`` INTEIRO e **não toca em ``media_type``/``media_caption``**.
+    Colar um ``content`` composto (``[Descrição da imagem]: …``) numa linha que
+    não é mídia produz vazamento no painel: sem ``media_type``, ``mediaCaptionOf``
+    não é consultada e o prefixo interno é desenhado como texto do cliente
+    (plano 133). Passe o ``id`` da linha que você mesmo inseriu."""
     with get_engine().begin() as conn:
         conn.execute(sa_update(messages).where(messages.c.id == message_id).values(content=content))
 

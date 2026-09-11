@@ -33,6 +33,7 @@ def _row_to_dict(row) -> dict:
     d["installed_deps"] = _decode_list(d.get("installed_deps"))
     d["enabled"] = bool(d.get("enabled", 1))
     d["kind"] = d.get("kind") or "code"
+    d["plugin_id"] = d.get("plugin_id") or None
     return d
 
 
@@ -66,22 +67,29 @@ def save(
     dependencies: list[str] | None,
     enabled: bool,
     kind: str | None = None,
+    plugin_id: str | None = None,
 ) -> dict:
     """Upsert a tool (CRUD path). Resets install_status to ``pending`` so the
     next boot re-validates, bumps version and snapshots to history.
 
     ``kind`` defaults to the existing row's kind (or ``'code'`` for a new tool),
-    so editing a builtin tool keeps it a builtin.
+    so editing a builtin tool keeps it a builtin. ``plugin_id`` segue a MESMA
+    regra, e por um motivo bem concreto: ``rollback()`` chama ``save()`` sem
+    nenhum dos dois, e o UPSERT escreve um ``values`` completo — sem esta linha,
+    reverter (ou salvar) uma tool de plugin apagaria o dono dela em silêncio, e
+    a row viraria uma tool code-in-DB órfã.
     """
     now = time.time()
     existing = get(name)
     row_kind = kind or (existing or {}).get("kind") or "code"
+    row_plugin_id = plugin_id or (existing or {}).get("plugin_id") or None
     deps = dependencies or []
     if existing is not None and (
         (description or "") == (existing.get("description") or "")
         and (code or "") == (existing.get("code") or "")
         and deps == (existing.get("dependencies") or [])
         and row_kind == (existing.get("kind") or "code")
+        and row_plugin_id == (existing.get("plugin_id") or None)
     ):
         # Toggle de `enabled` (ou save idêntico) NÃO é edição: sem bump de
         # versão, sem history (plano 30 · review F3). Sem isso, ligar um
@@ -101,6 +109,7 @@ def save(
     values = {
         "name": name,
         "kind": row_kind,
+        "plugin_id": row_plugin_id,
         "description": description,
         "code": code,
         "dependencies": json.dumps(deps, ensure_ascii=False),
@@ -117,8 +126,9 @@ def save(
     with get_engine().begin() as conn:
         conn.execute(upsert(
             ai_tools, values, conflict_cols=["name"],
-            update_cols=["kind", "description", "code", "dependencies", "enabled",
-                         "install_status", "install_error", "version", "updated_at"],
+            update_cols=["kind", "plugin_id", "description", "code", "dependencies",
+                         "enabled", "install_status", "install_error", "version",
+                         "updated_at"],
         ))
         conn.execute(ai_tools_history.insert().values(
             name=name,
@@ -127,6 +137,74 @@ def save(
             created_at=now,
         ))
     return _row_to_dict(values)
+
+
+def sync_source(
+    name: str,
+    *,
+    description: str,
+    code: str,
+    kind: str,
+    plugin_id: str | None = None,
+) -> bool:
+    """Refresca uma row NÃO EDITADA a partir da fonte confiável do disco.
+
+    Existe fora de :func:`save` de propósito: ``save`` bumpa versão e grava
+    history, e nenhuma das duas coisas deve acontecer aqui. Espelhar o disco não
+    é uma edição — uma linha sintética em ``ai_tools_history`` ofereceria um
+    "reverter" para uma versão idêntica à atual e quebraria a relação
+    versão ↔ histórico de que o modal de Histórico depende.
+
+    Só escreve quando a row existe, está em ``version <= 1`` (ou seja, ninguém a
+    editou) e o código de fato mudou. NUNCA toca ``enabled`` (desligar uma tool é
+    decisão do operador e tem de sobreviver ao upgrade do plugin), ``version``,
+    nem ``installed_deps``. Devolve ``True`` quando escreveu.
+    """
+    existing = get(name)
+    if existing is None or int(existing.get("version", 1)) > 1:
+        return False
+    if ((existing.get("code") or "") == (code or "")
+            and (existing.get("description") or "") == (description or "")
+            and (existing.get("plugin_id") or None) == (plugin_id or None)):
+        return False
+    with get_engine().begin() as conn:
+        conn.execute(sa_update(ai_tools).where(ai_tools.c.name == name).values(
+            kind=kind,
+            plugin_id=plugin_id,
+            description=description,
+            code=code,
+            install_status="ok",
+            install_error=None,
+            updated_at=time.time(),
+        ))
+    return True
+
+
+def list_for_plugin(plugin_id: str) -> list[dict]:
+    """As rows de um plugin (kind='plugin'), pela coluna ``plugin_id``."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(ai_tools).where(ai_tools.c.plugin_id == plugin_id)
+            .order_by(ai_tools.c.name)
+        ).mappings().all()
+    return [_row_to_dict(r) for r in rows]
+
+
+def delete_for_plugin(plugin_id: str) -> list[str]:
+    """Apaga as rows de um plugin (e o history delas). Devolve os nomes.
+
+    Os nomes voltam porque quem chama — a desinstalação do plugin — precisa
+    deles para limpar o tombstone daquele plugin, e depois de apagar as rows não
+    há mais como descobrir quais eram.
+    """
+    names = [r["name"] for r in list_for_plugin(plugin_id)]
+    if not names:
+        return []
+    with get_engine().begin() as conn:
+        conn.execute(sa_delete(ai_tools_history).where(
+            ai_tools_history.c.name.in_(names)))
+        conn.execute(sa_delete(ai_tools).where(ai_tools.c.plugin_id == plugin_id))
+    return names
 
 
 def list_history(name: str) -> list[dict]:

@@ -87,6 +87,7 @@ async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
         "contact_id": conv.get("contact_id"),
         "status": conv.get("status"),
         "assignee_user_id": conv.get("assignee_user_id"),
+        "team_id": conv.get("team_id"),
         "active_agent_key": conv.get("active_agent_key"),
         "ai_active": conv.get("ai_active"),
         "is_archived": conv.get("is_archived"),
@@ -151,6 +152,45 @@ async def _emit_notice(conv: dict, event_type: str, *, actor_name: str | None = 
         )
     except Exception as e:
         logger.debug("conversation notice %s failed: %s", event_type, e)
+
+
+async def apply_labels(deps, conv: dict, names: list[str], *,
+                       actor_name: str | None = None) -> list[str]:
+    """Substitui as etiquetas DA CONVERSA e dispara os três efeitos, uma vez cada.
+
+    Mora aqui (e não na rota) porque a fachada ``/api/v1`` precisa das mesmas
+    consequências: sem isto, a v1 gravaria a etiqueta e o painel aberto não se
+    atualizaria (``conversation_labels_changed``), plugin nenhum saberia
+    (``conversation.labeled``) e o fio não ganharia o card de "etiqueta
+    adicionada/removida" — três divergências silenciosas de uma vez.
+
+    Devolve os nomes efetivamente aplicados (o repo resolve nome → linha, então
+    um nome inexistente simplesmente não aparece no resultado).
+    """
+    from db.repositories import conversation_label_repo as label_repo
+
+    conv_id = conv["id"]
+    previous = await asyncio.to_thread(label_repo.get_names_for_conversation, conv_id)
+    result = await asyncio.to_thread(
+        label_repo.set_for_conversation, conv_id, [str(x) for x in names])
+    result_names = [r["name"] for r in result]
+
+    try:
+        await deps.ws_manager.broadcast("conversation_labels_changed", {
+            "conversation_id": conv_id, "contact_id": conv.get("contact_id"),
+            "labels": result_names, "ts": time.time()})
+    except Exception as e:  # noqa: BLE001 — broadcast nunca falha a ação
+        logger.debug("conversation_labels_changed broadcast failed: %s", e)
+    await emit_with_filter("conversation.labeled", {
+        "conversation_id": conv_id, "contact_id": conv.get("contact_id"),
+        "labels": result_names, "ts": time.time()})
+
+    prev_set, now_set = set(previous), set(result_names)
+    for name in (now_set - prev_set):
+        await _emit_notice(conv, "conv_label_added", actor_name=actor_name, label=name)
+    for name in (prev_set - now_set):
+        await _emit_notice(conv, "conv_label_removed", actor_name=actor_name, label=name)
+    return result_names
 
 
 # ── Lifecycle ──────────────────────────────────────────────────────────────────
@@ -563,6 +603,29 @@ async def set_agent(deps, conv: dict, agent_key: str | None, *,
         ag = await asyncio.to_thread(agent_repo.get, updated["active_agent_key"])
         agent_name = (ag or {}).get("display_name") or updated["active_agent_key"]
     await _emit_notice(updated, "agent_changed", actor_name=actor_name, agent=agent_name)
+    return updated
+
+
+async def assign_team(deps, conv: dict, team_id: int | None, *,
+                      actor_name: str | None = None) -> dict | None:
+    """Set/clear the TEAM of a conversation (plano 153). Emits
+    ``conversation.team_assigned`` (team set) OR ``conversation.team_unassigned``
+    (team cleared) — the WS event stays ``conversation_assigned`` (D7, reused).
+
+    Plano 153 D1 — time e atendente individual são INDEPENDENTES: esta função
+    NUNCA passa por :func:`_transfer` (o cotovelo que unifica assignee/agente/IA
+    porque os três SÃO mutuamente exclusivos). Time não exclui nada — pura
+    escrita de campo, no molde de :func:`set_agent`."""
+    updated = await asyncio.to_thread(conversation_repo.set_team, conv["id"], team_id)
+    if not updated:
+        return None
+    previous_team_id = conv.get("team_id")
+    if team_id:
+        await _broadcast(deps, "conversation_assigned", "conversation.team_assigned", updated,
+                         previous_team_id=previous_team_id)
+    else:
+        await _broadcast(deps, "conversation_assigned", "conversation.team_unassigned", updated,
+                         previous_team_id=previous_team_id)
     return updated
 
 

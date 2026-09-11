@@ -18,10 +18,18 @@ from db.tables import audit_log
 
 # Keys whose values are replaced by "***" before persisting (recursive). Names
 # confirmed as real secrets in the project (config/settings.py, plano 03).
+#
+# The match is on the EXACT key name (lowercased), never a substring — so a
+# secret under a name nobody listed here goes into the trail in the clear. That
+# is how a connection string carrying a production database password sat next to
+# a properly redacted ``openrouter_api_key`` for weeks (plano 149·F8): the key
+# was ``nexus_dsn``, which no entry matched. Anything holding a DSN belongs in
+# this set, and adding a name here fixes the trail for EVERY plugin at once.
 _SECRET_KEYS = frozenset({
     "openrouter_api_key", "access_token", "api_key", "apikey", "password",
     "password_hash", "token", "secret", "credentials", "authorization",
     "verify_token", "client_secret", "private_key",
+    "nexus_dsn", "dsn", "database_url", "connection_string",
 })
 _REDACTED = "***"
 
@@ -48,17 +56,20 @@ def _dump(data) -> str | None:
 def add(*, actor_user_id: int | None = None, actor_type: str = "system",
         actor_label: str | None = None, action: str, resource_type: str,
         resource_id=None, before=None, after=None, ip_address: str | None = None,
-        request_id: str | None = None, created_at: float | None = None) -> int:
+        request_id: str | None = None, created_at: float | None = None,
+        api_key_id: int | None = None) -> int:
     """Insert an audit row (the only write). Returns the inserted id.
 
     ``before``/``after`` are sanitised + JSON-encoded here. ``resource_id`` is
-    coerced to str (covers phone/jid/uuid/int).
+    coerced to str (covers phone/jid/uuid/int). ``api_key_id`` é a PROCEDÊNCIA
+    (a request entrou por uma chave de API); o ator segue sendo o usuário dono.
     """
     with get_engine().begin() as conn:
         result = conn.execute(sa_insert(audit_log).values(
             actor_user_id=actor_user_id,
             actor_type=actor_type or "system",
             actor_label=actor_label,
+            api_key_id=api_key_id,
             action=action,
             resource_type=resource_type,
             resource_id=str(resource_id) if resource_id is not None else None,
@@ -72,10 +83,13 @@ def add(*, actor_user_id: int | None = None, actor_type: str = "system",
 
 
 def _filters(*, actor_user_id=None, actor_type=None, resource_type=None,
-             resource_id=None, action=None, ts_from=None, ts_to=None):
+             resource_id=None, action=None, ts_from=None, ts_to=None,
+             api_key_id=None):
     conds = []
     if actor_user_id is not None:
         conds.append(audit_log.c.actor_user_id == actor_user_id)
+    if api_key_id is not None:
+        conds.append(audit_log.c.api_key_id == api_key_id)
     if actor_type:
         conds.append(audit_log.c.actor_type == actor_type)
     if resource_type:
@@ -93,11 +107,12 @@ def _filters(*, actor_user_id=None, actor_type=None, resource_type=None,
 
 def query(*, actor_user_id=None, actor_type=None, resource_type=None,
           resource_id=None, action=None, ts_from=None, ts_to=None,
-          limit: int = 50, offset: int = 0) -> list[dict]:
+          limit: int = 50, offset: int = 0, api_key_id=None) -> list[dict]:
     """Filtered, newest-first page of audit rows."""
     conds = _filters(actor_user_id=actor_user_id, actor_type=actor_type,
                      resource_type=resource_type, resource_id=resource_id,
-                     action=action, ts_from=ts_from, ts_to=ts_to)
+                     action=action, ts_from=ts_from, ts_to=ts_to,
+                     api_key_id=api_key_id)
     stmt = select(audit_log)
     if conds:
         stmt = stmt.where(and_(*conds))
@@ -107,10 +122,12 @@ def query(*, actor_user_id=None, actor_type=None, resource_type=None,
 
 
 def count(*, actor_user_id=None, actor_type=None, resource_type=None,
-          resource_id=None, action=None, ts_from=None, ts_to=None) -> int:
+          resource_id=None, action=None, ts_from=None, ts_to=None,
+          api_key_id=None) -> int:
     conds = _filters(actor_user_id=actor_user_id, actor_type=actor_type,
                      resource_type=resource_type, resource_id=resource_id,
-                     action=action, ts_from=ts_from, ts_to=ts_to)
+                     action=action, ts_from=ts_from, ts_to=ts_to,
+                     api_key_id=api_key_id)
     stmt = select(func.count()).select_from(audit_log)
     if conds:
         stmt = stmt.where(and_(*conds))

@@ -120,7 +120,9 @@ def register_routes(app, deps):
         no conversation yet (plano 21). Channel-scoped twin of
         ``POST /api/conversations/{id}/send-template``.
 
-        body: ``{phone, template_name, language?, components?, preview_text?}``.
+        body: ``{phone, template_name, language?, components?, preview_text?,
+        media_type?, media_path?}`` — os dois últimos gravam o cabeçalho de mídia
+        do template no histórico (plano 119); ver ``tpl_svc.sanitize_media``.
         """
         denied = permission_denied(request, "conversation.reply")
         if denied:
@@ -147,7 +149,9 @@ def register_routes(app, deps):
             language=language, components=components,
             preview_text=body.get("preview_text") or "",
             sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None))
+            sent_by_name=(_u.get("name") if _u else None),
+            media_type=body.get("media_type"),
+            media_path=body.get("media_path"))
         if kind == "send_failed":
             return _err(f"Falha ao enviar template: {data}", status=502)
         if kind == "save_failed":
@@ -259,13 +263,19 @@ def register_routes(app, deps):
     async def assignable_users(request: Request):
         """Active panel users for the channel agent picker (create + edit).
 
+        Também devolve os AGENTES DE IA habilitados (plano 152): o campo "atendente
+        padrão para novas conversas" aceita humano OU agente de IA, e serví-los na
+        mesma resposta evita um 2º request (e uma 2ª permissão — ``/api/ai/agents``
+        exige ``agent.config.manage``, que um gestor de canais pode não ter).
+
         Gated by ``channel.manage`` (same as the rest of this screen). Registered
         before ``/{channel_id}`` so the literal path wins the match."""
         denied = permission_denied(request, "channel.manage")
         if denied:
             return denied
         users = await asyncio.to_thread(svc.assignable_users)
-        return _ok({"users": users})
+        ai_agents = await asyncio.to_thread(svc.assignable_ai_agents)
+        return _ok({"users": users, "ai_agents": ai_agents})
 
     @app.get("/api/channels/providers")
     async def list_providers(request: Request):

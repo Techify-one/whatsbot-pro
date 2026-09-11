@@ -64,6 +64,15 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     ("execution.read",           "Ver trilha de execuções"),
     ("execution.delete",         "Expurgar execuções"),
     ("database.manage",          "Migração e manutenção do banco"),
+    # Chaves de API — a ÚNICA permissão nova do plano de API. Governa
+    # *emitir/revogar* chave, NUNCA *usar* a API (quem pode fazer algo no painel
+    # pode fazer via chave, com as permissões do próprio dono). Admin-only de
+    # propósito: NÃO entra em ``ROLE_DEFAULTS`` — senão um gestor cunharia uma
+    # chave com os próprios poderes.
+    ("apikey.manage",            "Emitir/revogar chaves de API"),
+    # Webhooks de SAÍDA (fase 8): quem cadastra o endpoint para onde os eventos
+    # da instalação são empurrados. Admin-only pelo mesmo motivo da chave.
+    ("webhook.manage",           "Cadastrar/remover webhooks de saída"),
 ]
 
 
@@ -136,6 +145,8 @@ PERMISSION_GROUPS: dict[str, tuple[str, str]] = {
     "users.manage": ("core", _G_USERS),
     "audit.read": ("core", _G_USERS),
     "audit.manage": ("core", _G_USERS),
+    "apikey.manage": ("core", _G_USERS),
+    "webhook.manage": ("core", _G_USERS),
     "usage.read": ("core", _G_USERS),
     "execution.read": ("core", _G_USERS),
     "execution.delete": ("core", _G_USERS),

@@ -10,6 +10,7 @@ import htm from 'htm';
 import { updateChannel, getChannelMembers, setChannelMembers } from '../../services/api.js';
 import {
   parseChannelConfig, aiDefaultsFrom, buildEditPayload, validateCredentials,
+  withResolvedMediaModes,
 } from './constants.js';
 import { ConfigFields, CredentialFields, FormComponentLoader } from './DescriptorFields.js';
 import { EmbedSnippetBlock } from './notices.js';
@@ -24,7 +25,10 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
   // global-derived defaults (so unset keys show the inherited value).
   const [ai, setAi] = useState(() => {
     const cfg = parseChannelConfig(channel.config);
-    return { ...(aiDefaults || aiDefaultsFrom({})), ...(cfg.ai || {}) };
+    // ``withResolvedMediaModes``: o booleano legado DESTE canal vira mode explícito
+    // antes do merge, senão o default derivado do global venceria (plano 118).
+    return { ...(aiDefaults || aiDefaultsFrom({})),
+             ...withResolvedMediaModes(cfg.ai || {}) };
   });
   // Editable config-field values (generated fields are immutable → skipped).
   const [configValues, setConfigValues] = useState(() => {
@@ -56,6 +60,7 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
   });
 
   const [users, setUsers] = useState([]);
+  const [aiAgents, setAiAgents] = useState([]);   // plano 152: agentes de IA atribuíveis
   const [selected, setSelected] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -71,6 +76,9 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
       if (!alive) return;
       if (res && res.ok) {
         setUsers(res.data.users || []);
+        // plano 152: o "atendente padrão" também aceita agente de IA. Vem no mesmo
+        // payload; ausente (core antigo) ⇒ [] e o campo fica só com humanos.
+        setAiAgents(res.data.ai_agents || []);
         setSelected(res.data.member_ids || []);
       } else {
         setError((res && res.error) || 'Falha ao carregar agentes.');
@@ -167,7 +175,7 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
 
           <div class="border-t border-wa-border pt-3">
             <label class="block text-[12px] text-wa-secondary mb-2">Inteligência Artificial</label>
-            <${AiSettingsFields} value=${ai} onChange=${setAi} users=${users} />
+            <${AiSettingsFields} value=${ai} onChange=${setAi} users=${users} aiAgents=${aiAgents} />
           </div>
 
           <div class="border-t border-wa-border pt-3">

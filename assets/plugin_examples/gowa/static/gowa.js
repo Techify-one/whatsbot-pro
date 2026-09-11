@@ -52,7 +52,8 @@ function DisconnectAlerts({ apiBase }) {
 
   async function load() {
     try {
-      // Envia o fuso do navegador para o backend persistir (detecção automática).
+      // Manda o fuso do navegador só como SUGESTÃO: desde o plano 148 o GET não
+      // persiste nada — ele volta em `timezone_auto` e só vira config no Salvar.
       const q = browserTz ? `?tz=${encodeURIComponent(browserTz)}` : '';
       const r = await apiFetch(`${apiBase}/alert-settings${q}`);
       const data = await r.json();
@@ -170,6 +171,10 @@ function DisconnectAlerts({ apiBase }) {
             options=${(cfg.timezones || []).map((t) => ({ value: t.value, label: t.label }))}
             inputClass=${FIELD + ' w-full'} searchPlaceholder="Pesquisar fuso…" />
           <div class=${HINT}>Fuso usado na hora exibida nos alertas. A lista traz todos os fusos do mundo.</div>
+          ${cfg.timezone_effective && cfg.timezone !== cfg.timezone_effective ? html`
+            <div class="text-xs text-amber-600 mt-1">
+              Ainda não salvo — os alertas usam ${cfg.timezone_effective} até você clicar em Salvar.
+            </div>` : null}
         </div>
 
         <div class="flex gap-2 pt-1">

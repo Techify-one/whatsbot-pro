@@ -4,7 +4,7 @@
 Locks the CURRENT behavior (bugs included) of ``agent.agno_engine._extract_reply``
 and its interaction with the handler-side reply splitter
 (``server.helpers.parse_split_reply``), BEFORE the Wave-2 refactor touches the
-engine. CLAUDE.md flags this extraction step as "crítico": with ``split_messages``
+engine. CLAUDE.md (and docs/IA.md) flag this extraction step as "crítico": with ``split_messages``
 ON the model emits a JSON array and AGNO can otherwise concatenate a pre-tool
 "chatter" turn with the post-tool final turn — which would corrupt the array.
 ``_extract_reply`` defends against that by returning the LAST assistant message
@@ -15,7 +15,7 @@ This is a focused UNIT golden: it feeds synthetic ``run_output`` objects straigh
 into ``_extract_reply`` (no ``build_test_app``, no DB, no network). Each case
 ``golden_assert``s the NORMALIZED extracted reply. The split cases additionally
 capture how extraction composes with ``parse_split_reply`` (the route/handler
-splitter), since CLAUDE.md describes the two as one critical chain.
+splitter), since CLAUDE.md / docs/IA.md describe the two as one critical chain.
 
 Mandatory cells (see each test docstring):
 

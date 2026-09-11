@@ -197,6 +197,11 @@ class AppState:
         self.webhook_payloads: deque[dict] = deque(maxlen=50)
         # Login attempts per IP for brute-force protection
         self.login_attempts: dict[str, deque[float]] = {}
+        # Rate-limit das CHAVES DE API — bucket PRÓPRIO, por chave (plano
+        # "Sistema de API com chave por usuário" §4.3). Nunca reaproveitar o do
+        # login (uma integração legítima esgotaria o limite de um IP inteiro) e
+        # nunca chavear por ``audit_ip`` (autodeclarado ⇒ forjável).
+        self.api_key_calls: dict[int, deque[float]] = {}
 
     # ── MessagingState delegation (Plano 23 · Fase B3) ──────────────────────
     #

@@ -6,9 +6,17 @@ from db.repositories import conversation_repo
 
 logger = logging.getLogger(__name__)
 
-# Tag applied to the contact on a human handoff. Plano 29 A5: it is ALSO read as
-# a belt-and-suspenders AI gate (``messaging_service._conversation_ai_active``)
-# and cleared when the AI retakes the conversation (``conversation_service``).
+# Legacy handoff tag. It is NO LONGER APPLIED by this tool: the handoff signal is
+# the conversation itself (``ai_active=0`` + assignee), written below. It stopped
+# being read as an AI gate in plano 37 (it was contact-global, so transferring on
+# one channel silenced the sibling channel) and was left only as a visual label —
+# now dropped, since a label the operator never asked for is noise.
+#
+# The NAME stays exported because it is still CONSUMED elsewhere: the core clears
+# it when the AI retakes a conversation (``conversation_service._clear_transfer_tag``,
+# so rows tagged before this change age out on their own) and plugins import it
+# (``retornos``, ``vendas_ia``, and the Meta channels' HUMAN_AGENT fallback).
+# Removing the constant would break those imports; nothing writes it anymore.
 TRANSFER_TAG = "transferido_atendente"
 
 
@@ -49,15 +57,16 @@ _TRANSFER_FEEDBACK = (
 
 
 def execute(ctx, args: dict) -> str | None:
-    """Disable AI for the contact and tag the conversation as transferred.
+    """Disable AI for the contact and hand the conversation over to a human.
+
+    No tag is applied: the handoff lives in the conversation row (``ai_active=0``
+    + assignee) — see ``TRANSFER_TAG`` above.
 
     Returns a feedback string that the handler will inject as the tool reply
     when the model issues only the tool call (no inline text).
     """
     try:
         ctx.contact.set_ai_enabled(False)
-        ctx.tag_registry.create(TRANSFER_TAG, "#ef4444")
-        ctx.contact.add_tag(TRANSFER_TAG)
         ctx.contact.save()
         # Unassign the conversation so it lands in the "Não atribuídas" inbox:
         # clear both the human assignee and the bound AI agent, and pause the

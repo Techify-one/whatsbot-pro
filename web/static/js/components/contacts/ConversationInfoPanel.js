@@ -11,6 +11,7 @@ import { getFilters } from '../../plugins/registry.js';
 import { CloseIcon } from './icons.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
 import { AssigneePicker } from './AssigneePicker.js';
+import { TeamPicker } from './TeamPicker.js';
 import { ConversationLabelEditor } from './ConversationLabelEditor.js';
 import { RequiredAttributesModal } from './RequiredAttributesModal.js';
 import { hasPermission } from '../../utils/permissions.js';
@@ -268,6 +269,13 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
             ${canAssign ? html`
             <div class="bg-wa-bg px-6 py-4 border-b border-wa-border">
               <${AssigneePicker} conv=${conv} onChange=${mergeConv} />
+            </div>
+            ` : null}
+
+            <!-- Time atribuído (plano 153) — campo independente do assignee (D1) -->
+            ${canAssign ? html`
+            <div class="bg-wa-bg px-6 py-4 border-b border-wa-border">
+              <${TeamPicker} conv=${conv} onChange=${mergeConv} />
             </div>
             ` : null}
 

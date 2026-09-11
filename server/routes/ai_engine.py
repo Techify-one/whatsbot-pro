@@ -439,11 +439,42 @@ def register_routes(app, deps):
         return _ok(row)
 
     # ── Tools (code-in-DB) ──────────────────────────────────────────────
+    def _with_policy(row: dict) -> dict:
+        """Acrescenta ``deletable`` à row. A política vive num lugar só
+        (``ai_builtin_tools.is_deletable``) e é PUBLICADA — em vez de uma
+        allowlist duplicada à mão no cliente, que sai de sincronia calada."""
+        from agent import ai_builtin_tools
+        out = dict(row)
+        out["deletable"] = ai_builtin_tools.is_deletable(row)
+        return out
+
+    def _fanout_module_edit(names: list[str], code: str) -> list[str]:
+        """Propaga o código salvo para as tools irmãs do mesmo módulo.
+
+        Cada irmã ganha a própria linha em ``ai_tools_history`` (o Histórico
+        delas passa a mostrar a versão criada por esta edição, que é a verdade)
+        e mantém a própria ``description`` — só o código é compartilhado.
+        """
+        escritas: list[str] = []
+        for irma in names or []:
+            row = tool_repo.get(irma)
+            if row is None:
+                continue
+            tool_repo.save(
+                irma,
+                description=row.get("description", ""),
+                code=code,
+                dependencies=row.get("dependencies") or [],
+                enabled=bool(row.get("enabled", True)),
+            )
+            escritas.append(irma)
+        return escritas
+
     @app.get("/api/ai/tools",
              dependencies=[Depends(require_permission("agent.tools.manage"))])
     async def list_ai_tools():
         rows = await asyncio.to_thread(tool_repo.list_all)
-        return _ok(rows)
+        return _ok([_with_policy(r) for r in rows])
 
     @app.get("/api/ai/tools/{name}",
              dependencies=[Depends(require_permission("agent.tools.manage"))])
@@ -451,6 +482,11 @@ def register_routes(app, deps):
         row = await asyncio.to_thread(tool_repo.get, name)
         if not row:
             return _err("Tool não encontrada.", status=404)
+        row = _with_policy(row)
+        if row["kind"] == "plugin":
+            from agent import ai_plugin_tools
+            row["siblings"] = await asyncio.to_thread(
+                ai_plugin_tools.sibling_names, name)
         return _ok(row)
 
     @app.put("/api/ai/tools/{name}",
@@ -460,12 +496,19 @@ def register_routes(app, deps):
         if dependencies is not None and not isinstance(dependencies, list):
             return _err("dependencies deve ser uma lista.")
         existing = await asyncio.to_thread(tool_repo.get, name)
-        is_builtin = bool(existing and existing.get("kind") == "builtin")
+        kind = (existing or {}).get("kind") or "code"
+        # Resolvidas ANTES do save: o vínculo entre irmãs é o código idêntico, e
+        # depois de gravar o novo código o match já não existiria.
+        irmas = []
+        if kind == "plugin":
+            from agent import ai_plugin_tools
+            irmas = await asyncio.to_thread(ai_plugin_tools.sibling_names, name)
         # Gate P63: code-in-DB tools are born DISABLED. A human must explicitly
         # flip ``enabled`` (and the operator must set ai_tools_code_enabled) before
         # arbitrary Python from the DB ever executes. Default False, not True.
-        # Built-in (core) tools are core functionality → default enabled True.
-        enabled = bool(body.get("enabled", True if is_builtin else False))
+        # Tool core ou de plugin é funcionalidade que JÁ está registrada e
+        # rodando: salvar uma edição não pode desligá-la por omissão.
+        enabled = bool(body.get("enabled", kind in ("builtin", "plugin")))
         row = await asyncio.to_thread(
             tool_repo.save, name,
             description=body.get("description", ""),
@@ -473,6 +516,13 @@ def register_routes(app, deps):
             dependencies=dependencies or [],
             enabled=enabled,
         )
+        # O módulo é a unidade de edição: um ``tools.py`` de plugin declara
+        # várias tools, e salvar só uma deixaria o boot seguinte com esta row
+        # executando o módulo do BANCO e as irmãs o do DISCO — dois objetos de
+        # módulo e uma constante editada valendo pela metade.
+        for irma in await asyncio.to_thread(
+                _fanout_module_edit, irmas, body.get("code", "")):
+            _emit_changed("tool", irma)
         _emit_changed("tool", name)
         # Code-in-DB needs a process restart so the installer re-materialises,
         # re-imports and re-registers the tool. Opt out with restart=false.
@@ -494,17 +544,32 @@ def register_routes(app, deps):
             (existing or {}).get("kind") == "builtin"
             or (existing is None and name in ai_builtin_tools.DELETABLE_BUILTINS)
         )
-        if is_builtin_delete:
+        is_plugin_delete = (existing or {}).get("kind") == "plugin"
+        if is_builtin_delete or is_plugin_delete:
             # Plano 30 WS3 (D2/D8): delete REAL de builtin, restrito à allowlist
             # DELETABLE_BUILTINS. Grava o tombstone (config.deleted_builtin_tools)
             # pra tool não voltar no boot (os dois caminhos de re-seed pulam
             # nomes tombados), apaga as rows ai_tools + tool_overrides e
             # desregistra do processo vivo. Sem rota de reinstalar — recriação
             # é manual (tool code-in-DB ou editar a config no banco).
+            #
+            # Tool de PLUGIN usa o MESMO mecanismo, sem allowlist: o loader a
+            # recontribui a todo boot, então só o tombstone a mantém fora. A
+            # diferença é a via de volta — reinstalar o ``.zip`` do plugin, que
+            # limpa as marcas daquele plugin (ver routes/plugins.py). O escopo é
+            # por NOME: apagar uma das tools de um módulo deixa as irmãs vivas.
             from db.repositories import tool_override_repo
-            if name not in ai_builtin_tools.DELETABLE_BUILTINS:
+            if is_builtin_delete and not ai_builtin_tools.is_deletable(
+                    existing or {"kind": "builtin", "name": name}):
                 return _err("Tools core não podem ser excluídas (apenas editadas ou desativadas).", status=400)
-            await asyncio.to_thread(ai_builtin_tools.tombstone_builtin, name)
+            await asyncio.to_thread(ai_builtin_tools.tombstone_tool, name)
+            if is_plugin_delete:
+                # Anotado ANTES de apagar a row: depois dela o dono é
+                # irrecuperável, e reinstalar o plugin não traria a tool de volta.
+                from agent import ai_plugin_tools
+                await asyncio.to_thread(
+                    ai_plugin_tools.remember_tombstone_owner,
+                    name, (existing or {}).get("plugin_id") or "")
             await asyncio.to_thread(tool_repo.delete, name)
             await asyncio.to_thread(tool_override_repo.delete, name)
             try:
@@ -513,8 +578,10 @@ def register_routes(app, deps):
             except Exception as e:
                 logger.warning("delete builtin '%s': unregister falhou (%s)", name, e)
             _emit_changed("tool", name)
-            schedule_restart(f"builtin tool deleted: {name}")
-            logger.info("Builtin tool '%s' deletada (tombstone gravado)", name)
+            rotulo = "plugin" if is_plugin_delete else "builtin"
+            schedule_restart(f"{rotulo} tool deleted: {name}")
+            logger.info("%s tool '%s' deletada (tombstone gravado)",
+                        rotulo.capitalize(), name)
             return _ok({"deleted": True, "tombstoned": True})
         deleted = await asyncio.to_thread(tool_repo.delete, name)
         if not deleted:

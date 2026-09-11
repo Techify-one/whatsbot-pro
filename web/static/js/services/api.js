@@ -803,8 +803,10 @@ export async function deleteChannel(id, { purge = false } = {}) {
   return request('DELETE', `/api/channels/${encodeURIComponent(id)}${qs}`);
 }
 
-// Usuários do painel atribuíveis como agentes de um canal (criação + edição).
-// → {users:[{id,name,email,is_admin}]}
+// Usuários do painel atribuíveis como agentes de um canal (criação + edição) e —
+// desde o plano 152 — os agentes de IA habilitados, que o campo "atendente padrão
+// para novas conversas" também aceita.
+// → {users:[{id,name,email,is_admin}], ai_agents:[{agent_key,display_name}]}
 export async function listChannelAssignableUsers() {
   return request('GET', '/api/channels/assignable-users');
 }
@@ -1170,6 +1172,61 @@ export async function checkAuth() {
 // `opts.silent` suprime o toast "Permissão negada." quando o chamador é um read
 // best-effort de fundo (ex.: tela de Conversas popular a lista de "Transferir"
 // para quem não tem `users.manage`). A tela de Usuários chama sem `silent`.
+// ── Chaves de API (plano "Sistema de API com chave por usuário") ───────────
+// O SEGREDO só existe na resposta de createApiKey — não há endpoint que o leia
+// de volta (o banco guarda apenas o hash Argon2).
+
+export async function getApiKeys(opts) {
+  return request('GET', '/api/api-keys', undefined, opts);
+}
+
+// Donos que o ATOR pode escolher ao emitir. Rota própria porque /api/users é
+// gateado por users.manage: quem tem só apikey.manage tomava 403 e ficava sem
+// conseguir emitir nem para si mesmo. O recorte é do servidor.
+export async function getApiKeyOwners(opts) {
+  return request('GET', '/api/api-keys/owners', undefined, opts);
+}
+
+export async function createApiKey(data) {
+  return request('POST', '/api/api-keys', data, { silent: true });
+}
+
+export async function revokeApiKey(id) {
+  return request('DELETE', `/api/api-keys/${id}`);
+}
+
+// ── Webhooks de SAÍDA (fase 8) ────────────────────────────────────────────
+// ⚠️ Não confundir com o webhook de ENTRADA (`/api/webhook/...`), que é o
+// provedor nos chamando. Aqui é o contrário: nós chamando o integrador.
+
+export async function getWebhooks(opts) {
+  return request('GET', '/api/webhooks', undefined, opts);
+}
+
+export async function createWebhook(data) {
+  return request('POST', '/api/webhooks', data, { silent: true });
+}
+
+export async function updateWebhook(id, data) {
+  return request('PUT', `/api/webhooks/${id}`, data, { silent: true });
+}
+
+export async function testWebhook(id) {
+  return request('POST', `/api/webhooks/${id}/test`, undefined, { silent: true });
+}
+
+export async function rotateWebhookSecret(id) {
+  return request('POST', `/api/webhooks/${id}/rotate-secret`);
+}
+
+export async function deleteWebhook(id) {
+  return request('DELETE', `/api/webhooks/${id}`);
+}
+
+export async function getWebhookDeliveries(id, opts) {
+  return request('GET', `/api/webhooks/${id}/deliveries`, undefined, opts);
+}
+
 export async function getUsers(opts) {
   return request('GET', '/api/users', undefined, opts);
 }
@@ -1219,4 +1276,29 @@ export async function deleteRole(id) {
 
 export async function resetRole(id) {
   return request('POST', `/api/roles/${id}/reset`);
+}
+
+// Times (plano 153) — CRUD gated por users.manage (D5, mesma permissão de
+// "Usuários"/"Grupos de permissão"). Independente de assignee_user_id (D1).
+export async function getTeams() {
+  return request('GET', '/api/teams');
+}
+
+export async function createTeam(data) {
+  return request('POST', '/api/teams', data);
+}
+
+export async function updateTeam(id, data) {
+  return request('PUT', `/api/teams/${id}`, data);
+}
+
+export async function deleteTeam(id) {
+  return request('DELETE', `/api/teams/${id}`);
+}
+
+// Atribuir/desatribuir o TIME de uma conversa — reusa conversation.assign (D6).
+export async function assignTeam(convId, teamId) {
+  return request('POST', `/api/atendimentos/${convId}/assign-team`, {
+    team_id: teamId == null ? null : teamId,
+  });
 }

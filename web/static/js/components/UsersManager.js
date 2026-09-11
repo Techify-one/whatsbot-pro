@@ -9,6 +9,7 @@ import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import PermissionPicker from './PermissionPicker.js';
 import RolesManager from './RolesManager.js';
+import TeamsManager from './TeamsManager.js';
 import { useDeepLink, entityPath, basePath } from '../hooks/useDeepLink.js';
 import {
   getUsers,
@@ -225,11 +226,22 @@ function PasswordModal({ user, onSubmit, onCancel, busy }) {
 const SUBTABS = [
   { id: 'users', label: 'Usuários' },
   { id: 'roles', label: 'Grupos de permissão' },
+  { id: 'teams', label: 'Times' },
 ];
 
+function _subtabPath(id) {
+  if (id === 'roles') return entityPath('users', { sub: 'roles' });
+  if (id === 'teams') return entityPath('users', { sub: 'teams' });
+  return basePath('users');
+}
+
 export default function UsersManager({ initialEntity }) {
-  // Sub-view (Usuários | Papéis) espelha a URL: /users[/{id}] vs /users/roles[/{key}].
-  const [view, setView] = useState(() => (initialEntity && initialEntity.sub === 'roles' ? 'roles' : 'users'));
+  // Sub-view (Usuários | Papéis | Times) espelha a URL: /users[/{id}] vs
+  // /users/roles[/{key}] vs /users/teams[/{id}].
+  const [view, setView] = useState(() => (
+    initialEntity && initialEntity.sub === 'roles' ? 'roles'
+    : initialEntity && initialEntity.sub === 'teams' ? 'teams'
+    : 'users'));
   const [users, setUsers] = useState([]);
   const [roleDefs, setRoleDefs] = useState([]);
   const [permCatalog, setPermCatalog] = useState([]);
@@ -266,10 +278,13 @@ export default function UsersManager({ initialEntity }) {
 
   // Sub-view segue a URL (deep-link / back-forward).
   useEffect(() => {
-    setView(initialEntity && initialEntity.sub === 'roles' ? 'roles' : 'users');
+    setView(initialEntity && initialEntity.sub === 'roles' ? 'roles'
+      : initialEntity && initialEntity.sub === 'teams' ? 'teams'
+      : 'users');
   }, [initialEntity]);
 
-  // Deep-link /users/<id> (sub-view Usuários). RolesManager cuida de /users/roles/<key>.
+  // Deep-link /users/<id> (sub-view Usuários). RolesManager/TeamsManager cuidam de
+  // /users/roles/<key> e /users/teams/<id>.
   const pushUrl = useDeepLink({
     tab: 'users',
     resolve: initialEntity && !initialEntity.sub ? { id: initialEntity.id } : null,
@@ -325,13 +340,13 @@ export default function UsersManager({ initialEntity }) {
         ${SUBTABS.map(t => html`
           <!-- Plano 106 · F4 (B6): sub-aba é navegação → <a href>. onClick inalterado. -->
           <a key=${t.id}
-            href=${t.id === 'roles' ? entityPath('users', { sub: 'roles' }) : basePath('users')}
+            href=${_subtabPath(t.id)}
             class="px-4 py-2 text-[14px] -mb-px border-b-2 transition-colors whitespace-nowrap no-underline ${view === t.id
               ? 'border-wa-teal text-wa-teal font-medium'
               : 'border-transparent text-wa-secondary hover:text-wa-text'}"
             onClick=${() => {
               setView(t.id); setEditing(null); setCreating(false); setError('');
-              const p = t.id === 'roles' ? entityPath('users', { sub: 'roles' }) : basePath('users');
+              const p = _subtabPath(t.id);
               if (window.location.pathname !== p) {
                 history.pushState(null, '', p);
                 window.dispatchEvent(new PopStateEvent('popstate'));
@@ -340,7 +355,8 @@ export default function UsersManager({ initialEntity }) {
         `)}
       </div>
 
-      ${view === 'roles' ? html`<${RolesManager} initialEntity=${initialEntity} />` : html`
+      ${view === 'roles' ? html`<${RolesManager} initialEntity=${initialEntity} />`
+      : view === 'teams' ? html`<${TeamsManager} initialEntity=${initialEntity} />` : html`
       <div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">

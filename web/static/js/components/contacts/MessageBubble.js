@@ -4,7 +4,7 @@ import { formatBubbleTime } from './utils.js';
 import { SingleCheckIcon, DoubleCheckIcon, ClockIcon, FailedIcon, RetryIcon } from './icons.js';
 import { MediaContent } from './MediaContent.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
-import { senderColor } from '../../services/messageView.js';
+import { senderColor, isOperatorMessage, isAiContentLabel } from '../../services/messageView.js';
 
 const html = htm.bind(h);
 
@@ -34,7 +34,10 @@ export function MessageBubble({
   const isUser = m.role === 'user';
   const isFailed = m._status === 'failed' || m.status === 'failed';
   const isSending = m._status === 'sending';
-  const isOperator = !isUser && m.status === 'operator';
+  // plano 143: NÃO derive a autoria do estado de entrega. A recusa do provedor
+  // sobrescreve 'operator' → 'failed' e fazia toda mensagem manual falhada
+  // assinar "IA"; o predicado consulta a marca de autoria, que sobrevive.
+  const isOperator = isOperatorMessage(m);
 
   // In groups, the backend prefixes user content with "[Sender Name]: text"
   // for LLM context. Strip the prefix here and use the sender name as label.
@@ -42,7 +45,14 @@ export function MessageBubble({
   let groupSender = null;
   if (isUser && isGroup && typeof m.content === 'string') {
     const { sender, text } = stripGroupPrefix(m.content);
-    if (sender != null) { groupSender = sender; displayContent = text; }
+    // `isAiContentLabel`: numa linha LEGADA de imagem descrita, o bloco da IA
+    // ficava na frente e engolia o autor — o "remetente" extraído seria
+    // "Descrição da imagem". Nesse caso não há autor a mostrar: mantemos o
+    // content intacto (assim `mediaCaptionOf` ainda reconhece o bloco da IA e
+    // não o desenha como legenda) e o rótulo cai no nome do grupo, como antes.
+    if (sender != null && !isAiContentLabel(sender)) {
+      groupSender = sender; displayContent = text;
+    }
   }
 
   // Which side the bubble sits on. In sandbox you ARE the customer,
@@ -110,7 +120,7 @@ export function MessageBubble({
             </div>
           `;
         })() : ''}
-        ${m.revoked ? '' : html`<${MediaContent} message=${m} displayContent=${displayContent} fmt=${fmt} />`}
+        ${m.revoked ? '' : html`<${MediaContent} message=${m} displayContent=${displayContent} fmt=${fmt} selectionMode=${selectionMode} />`}
         ${m.revoked ? html`
           <span class="italic text-wa-secondary flex items-center gap-[5px] text-[12px] mt-[2px]">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8 0-1.85.63-3.55 1.69-4.9L16.9 18.31C15.55 19.37 13.85 20 12 20zm6.31-3.1L7.1 5.69C8.45 4.63 10.15 4 12 4c4.41 0 8 3.59 8 8 0 1.85-.63 3.55-1.69 4.9z"/></svg>

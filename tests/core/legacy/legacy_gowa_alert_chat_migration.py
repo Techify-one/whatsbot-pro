@@ -105,6 +105,21 @@ def _fake_set(key, value):
 alerts.config_repo.set = _fake_set
 _orig_client = alerts.httpx.AsyncClient
 
+
+# ── Capture o seam de auditoria (plano 148) sem tocar no banco ──────────────
+# A migração muda PARA ONDE todo alerta vai; desde o plano 148 ela deixa rastro
+# também aqui, no loop de fundo — o caminho comum, ao contrário do botão
+# "Testar alerta". Sem este patch o seam real tentaria escrever em ``audit_log``
+# e este script deixaria de ser livre de banco.
+_auditadas: list[dict] = []
+
+
+def _fake_audit(plugin_id, action, **kw):
+    _auditadas.append({"p": plugin_id, "a": action, **kw})
+
+
+alerts._core_audit = _fake_audit
+
 MIG = {"ok": False, "error_code": 400,
        "description": "Bad Request: group chat was upgraded to a supergroup chat",
        "parameters": {"migrate_to_chat_id": -1009990001112}}
@@ -117,6 +132,7 @@ try:
     # ── 1. Migração detectada → persiste novo id + reexecuta com sucesso ──
     section("chat_id migra para supergrupo → auto-atualiza e reenvia")
     _persisted.clear()
+    _auditadas.clear()
     shared = {"responses": [MIG, OK42], "calls": []}
     _install_httpx(shared)
     mid = loop.run_until_complete(alerts._tg_send("TKN", "-100307", "oi"))
@@ -130,6 +146,15 @@ try:
     check("novo chat_id persistido em config uma vez",
           _persisted == [("plugin.gowa.disconnect_alert_chat_id", "-1009990001112")],
           str(_persisted))
+    check("a troca de destino deixa UMA linha na trilha",
+          len(_auditadas) == 1, str(_auditadas))
+    check("ação, valores e ator (system, não o humano da request)",
+          _auditadas[:1] == [{"p": "gowa", "a": "alerta.chat_id_migrado",
+                              "before": {"chat_id": "-100307"},
+                              "after": {"chat_id": "-1009990001112"},
+                              "actor_type": "system",
+                              "actor_label": "Loop de alerta de desconexão (gowa)"}],
+          str(_auditadas))
 
     # ── 2. Anti-loop: se o retry TAMBÉM migrar, não recorre de novo ──
     section("guarda anti-loop: retry que também migra não recorre")
@@ -147,12 +172,15 @@ try:
     # ── 3. Erro comum (sem migrate_to_chat_id) não dispara persist/retry ──
     section("erro comum não migra")
     _persisted.clear()
+    _auditadas.clear()
     shared3 = {"responses": [{"ok": False, "description": "chat not found"}], "calls": []}
     _install_httpx(shared3)
     data = loop.run_until_complete(
         alerts._tg_call("TKN", "sendMessage", {"chat_id": "-100307", "text": "x"}))
     check("erro sem migrate_to_chat_id: uma só chamada", len(shared3["calls"]) == 1)
     check("erro sem migrate_to_chat_id: nada persistido", _persisted == [])
+    check("erro sem migrate_to_chat_id: nada na trilha", _auditadas == [],
+          str(_auditadas))
 
     # ── 4. Chamada sem chat_id (não é envio de chat) nunca migra ──
     section("chamada sem chat_id não migra")

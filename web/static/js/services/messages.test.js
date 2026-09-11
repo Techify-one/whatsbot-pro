@@ -282,6 +282,65 @@ test('mergeBufferedMessages: combined DB row already present → authoritative d
   assert.equal(out[0].msg_id, 'B');
 });
 
+// ── plano 146: sem mescla, o autoritativo vem SEM supersedes ──────────────
+// A F1 fez o batch salvar uma linha por mensagem do cliente, então cada bolha
+// otimista de t=0 reconcilia com a SUA linha pelo msg_id — não há mais o que
+// colapsar. Estes casos provam que o caminho "sem supersedes" já fazia o certo:
+// o frontend não precisou mudar. Os testes acima do plano 57 CONTINUAM valendo —
+// as linhas mescladas legadas seguem no banco e um rollback do core tem de
+// encontrar o cliente preparado (M7/R6 do plano 146).
+test('plano 146: N autoritativos SEM supersedes viram N bolhas (conversa aberta no meio do batch)', () => {
+  // O caso real: o loader rodou ANTES do save (thread vazia) e os dois
+  // autoritativos pós-save chegam pelo buffer, cada um com o SEU msg_id.
+  const pending = [
+    { role: 'user', ts: 1, content: 'Vou tentar abrir o computador', msg_id: 'A',
+      _id: 10, authoritative: true },
+    { role: 'user', ts: 2, content: 'Eu vou ver ainda se a vm está lá', msg_id: 'B',
+      _id: 11, authoritative: true },
+  ];
+  const out = mergeBufferedMessages([], pending);
+  assert.equal(out.length, 2, 'nenhuma mensagem do cliente pode sumir');
+  assert.deepEqual(out.map(m => m.msg_id), ['A', 'B']);
+  assert.deepEqual(out.map(m => m._id), [10, 11]);
+  assert.ok(out.every(m => !('supersedes' in m)));
+});
+
+test('plano 146: as N linhas já vieram do REST e os autoritativos repetem → sem duplicata', () => {
+  // O outro caso real: o fetch terminou DEPOIS do save, então as duas linhas já
+  // vêm do banco (com _id) e os autoritativos bufferizados são as mesmas.
+  const existing = [
+    { role: 'user', ts: 1, content: 'Vou tentar abrir o computador', msg_id: 'A', _id: 10 },
+    { role: 'user', ts: 2, content: 'Eu vou ver ainda se a vm está lá', msg_id: 'B', _id: 11 },
+  ];
+  const pending = [
+    { role: 'user', ts: 1, content: 'Vou tentar abrir o computador', msg_id: 'A',
+      _id: 10, authoritative: true },
+    { role: 'user', ts: 2, content: 'Eu vou ver ainda se a vm está lá', msg_id: 'B',
+      _id: 11, authoritative: true },
+  ];
+  const out = mergeBufferedMessages(existing, pending);
+  assert.equal(out.length, 2, 'o autoritativo repetido não pode virar uma 3ª bolha');
+  assert.deepEqual(out.map(m => m.msg_id), ['A', 'B']);
+});
+
+test('plano 146: autoritativo sem supersedes NÃO apaga a bolha irmã do mesmo batch', () => {
+  // A regressão que este teste barra: se alguém "limpasse" o caminho fazendo o
+  // autoritativo colapsar tudo que veio antes, a 1ª mensagem sumiria de novo.
+  const existing = [{ role: 'user', ts: 1, content: 'primeira', msg_id: 'A' }];
+  const pending = [{ role: 'user', ts: 2, content: 'segunda', msg_id: 'B', _id: 7,
+                     authoritative: true }];
+  const out = mergeBufferedMessages(existing, pending);
+  assert.deepEqual(out.map(m => m.msg_id), ['A', 'B']);
+});
+
+test('plano 146: dropSuperseded com autoritativo sem supersedes é no-op (mesma ref)', () => {
+  const msgs = [
+    { role: 'user', ts: 1, content: 'primeira', msg_id: 'A' },
+    { role: 'user', ts: 2, content: 'segunda', msg_id: 'B' },
+  ];
+  assert.equal(dropSuperseded(msgs, undefined), msgs);
+});
+
 test('mergeBufferedMessages: no pending → same existing ref', () => {
   const existing = [{ role: 'user', ts: 1, content: 'x', msg_id: 'A' }];
   assert.equal(mergeBufferedMessages(existing, []), existing);

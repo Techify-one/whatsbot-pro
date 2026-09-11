@@ -15,14 +15,11 @@ from gowa.client import GOWASendError
 
 from db.repositories import contact_repo, message_repo, config_repo, conversation_repo, tag_repo
 from db.repositories import custom_attribute_repo as ca_repo
-from db.repositories import inbox_repo
 from db.repositories import mention_repo, inbox_member_repo
-from db.repositories import contact_inbox_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
 from channels.contact_type import resolve_contact_type
-from channels import (audio_transcode, audio_validate, media_limits,
-                      video_validate, video_transcode)
+from channels import audio_transcode, media_limits, video_transcode
 from agent import group_mentions
 from server import system_notices
 from server.authz import (current_user, permission_denied, can_access_inbox,
@@ -160,11 +157,14 @@ def register_routes(app, deps):
     # (R14 — image/audio/document unified) lives in ``MessagingService.send_media``.
     # The AI gate isn't exercised by ``send_media`` but the context requires it;
     # mirror the webhook's master gate so the service is wired identically.
-    from app.services.messaging_service import MessagingContext, MessagingService
+    from app.services.messaging_service import (MessagingContext, MessagingService,
+                                                _turn_handed_off)
     # Conversation lifecycle/ownership service (plano 23 Fase B4): the per-contact
     # AI toggle emits its events + system notice + P17 conversation mirror through
     # ``conversation_service.toggle_contact_ai``. Deferred import (cycle avoidance).
     from app.services import conversation_service as conv_svc
+    # Escrita de contato (plano de API): compartilhada com a fachada /api/v1.
+    from app.services import contact_service as contact_svc
 
     def _channel_ai_enabled(channel_id: str) -> bool:
         if not settings.get("auto_reply", True):
@@ -179,74 +179,39 @@ def register_routes(app, deps):
     ))
 
     def _channel_for(phone: str, conversation_id=None, channel_id=None) -> str:
-        """Channel a conversation belongs to (plano 11 D1). The conversa-cêntrica UI
-        passes ``conversation_id``; an explicit ``channel_id`` is used when starting a
-        BRAND-NEW conversation (no conversation row yet — the inbox picker chooses it).
-        Legacy callers (neither) fall back to 'default' (GOWA), preserving the previous
-        behavior exactly. Routing is by CHANNEL, never name."""
-        if conversation_id:
-            from db.repositories import conversation_repo as _cr
-            try:
-                conv = _cr.get_with_channel(int(conversation_id))
-            except (TypeError, ValueError):
-                conv = None
-            if conv and conv.get("channel_id"):
-                return conv["channel_id"]
-        if channel_id:
-            return str(channel_id)
-        return "default"
+        """Canal a que a conversa pertence — delega a ``messaging_service`` (R-txt).
+
+        A regra subiu para o serviço porque a fachada ``/api/v1`` precisa dela;
+        manter uma cópia aqui produziria roteamento divergente entre as duas
+        superfícies. O nome local fica como atalho dos ~12 call sites deste módulo.
+        """
+        from app.services.messaging_service import resolve_channel_id
+        return resolve_channel_id(phone, conversation_id, channel_id)
 
     def _wire_target(phone: str, conversation_id=None) -> str:
-        """Real send address (the JID the conversation RECEIVES from), not the saved
-        ``contacts.phone``.
-
-        ``contacts.phone`` can drift from the WhatsApp account's JID — the classic
-        Brazilian 9th-digit case: a number saved with 13 digits whose WhatsApp is
-        registered on 12 (or vice-versa). Inbound and the AI auto-reply always use the
-        exact JID that came in the received message, so they deliver; a manual/operator
-        send that used the raw ``phone`` went to a GHOST JID (GOWA still returns a
-        msg_id, but WhatsApp silently drops it → the client never sees it, no delivery
-        ack). This resolves the conversation's ``contact_inbox.source_jid`` (the address
-        the conversation actually receives from) and returns its bare digits for a
-        person (``@s.whatsapp.net``) or the full JID for a group (``@g.us``); anything
-        else (lid / Telegram / Cloud / unknown) keeps ``phone`` unchanged, so only the
-        exact bug is corrected and other providers are untouched. Falls back to
-        ``phone`` on any lookup failure — never raises."""
-        if not conversation_id:
-            return phone
-        try:
-            conv = conversation_repo.get(int(conversation_id))
-            ci_id = (conv or {}).get("contact_inbox_id")
-            if not ci_id:
-                return phone
-            ci = contact_inbox_repo.get(int(ci_id))
-            cand = ((ci or {}).get("source_jid")
-                    or (ci or {}).get("source_id") or "").strip()
-        except Exception:  # noqa: BLE001 — a resolution glitch must never block a send
-            return phone
-        if cand.endswith("@g.us"):
-            return cand
-        if cand.endswith("@s.whatsapp.net"):
-            digits = cand.split("@", 1)[0]
-            return digits if digits.isdigit() else phone
-        return phone
+        """Endereço real de envio — delega a ``messaging_service.wire_target`` (R-txt)."""
+        from app.services.messaging_service import wire_target
+        return wire_target(phone, conversation_id)
 
     def _resolve_inbox_id(conversation_id=None, channel_id=None) -> int | None:
-        """Inbox id targeted by an operator write (plano inboxes/canais §4.7).
+        """Inbox alvo de uma escrita do operador — delega a ``messaging_service`` (R-txt)."""
+        from app.services.messaging_service import resolve_inbox_id
+        return resolve_inbox_id(conversation_id, channel_id)
 
-        Prefers the conversation's inbox; falls back to the channel's inbox when
-        starting a brand-new conversation. ``None`` quando indeterminável — o
-        chamador (``can_access_inbox``) nega para usuários escopados."""
-        if conversation_id:
-            try:
-                conv = conversation_repo.get(int(conversation_id))
-            except (TypeError, ValueError):
-                conv = None
-            if conv:
-                return conv.get("inbox_id")
-        cid = str(channel_id) if channel_id else "default"
-        inbox = inbox_repo.get_by_channel(cid)
-        return inbox["id"] if inbox else None
+    async def _inbox_guard_veredict(request: Request, conversation_id=None,
+                                    channel_id=None):
+        """Veredito de DOMÍNIO do gate de inbox (para o ``inbox_guard`` do serviço).
+
+        Mesma decisão de :func:`_inbox_send_denied`, mas devolve o dict que
+        ``MessagingService.send_text`` entende (ou ``None`` quando liberado) —
+        um ``JSONResponse`` não teria como ser mapeado pela fachada ``/api/v1``.
+        """
+        inbox_id = await asyncio.to_thread(
+            _resolve_inbox_id, conversation_id, channel_id)
+        if not can_access_inbox(request, inbox_id):
+            return {"ok": False, "reason": "inbox_forbidden",
+                    "message": "Sem acesso a esta caixa de entrada.", "status": 403}
+        return None
 
     async def _inbox_send_denied(request: Request, *, conversation_id=None,
                                  channel_id=None):
@@ -269,69 +234,18 @@ def register_routes(app, deps):
         return res.external_msg_id or ""
 
     def _session_window_block(channel_id, conversation_id, phone=None):
-        """Guard for the WhatsApp Cloud 24h free-text window (plano 02 P17).
+        """Guard da janela de 24h — delega o VEREDITO a ``messaging_service`` (R-txt)
+        e o embrulha no ``_err(409)`` que as rotas do painel já devolviam.
 
-        Returns a 409 ``_err`` when free text/media is NOT allowed right now —
-        i.e. a windowed channel (Cloud, ``session_window_hours>0``) whose last
-        inbound is older than the window (or has none). Returns ``None`` when the
-        send is allowed, which is ALWAYS the case for always-open channels
-        (GOWA/Telegram, ``session_window_hours==0``). Capability-driven — never by
-        provider name. Outside the window only an approved template may be sent.
-        The agentic auto-reply (webhook) does not pass through here and is
-        inherently in-window, so it is never affected.
-
-        When ``conversation_id`` is absent (a BRAND-NEW conversation from the "Nova
-        conversa" modal — plano 21) but ``phone`` is given, resolves the contact's
-        latest conversation in this channel's inbox so an already-open 24h window is
-        honored (otherwise a fresh send would be wrongly blocked even mid-window).
+        A regra em si (capability ``session_window_hours``, último inbound,
+        ``by_human=True``, texto por capability de template) mora no serviço, que
+        é onde a fachada ``/api/v1`` também a consome.
         """
-        caps = outbound.capabilities(channel_id)
-        if not getattr(caps, "session_window_hours", 0):
+        from app.services.messaging_service import session_window_block
+        verdict = session_window_block(outbound, channel_id, conversation_id, phone)
+        if verdict is None:
             return None
-        last_ts = None
-        if conversation_id:
-            try:
-                last_ts = message_repo.last_inbound_ts(conversation_id=int(conversation_id))
-            except (TypeError, ValueError):
-                last_ts = None
-        elif phone:
-            contact = contact_repo.get_by_phone(phone)
-            if contact:
-                from db.repositories import inbox_repo
-                inbox = inbox_repo.get_by_channel(channel_id)
-                conv = (conversation_repo.get_latest_for_contact_inbox(
-                    contact["id"], inbox["id"]) if inbox else None)
-                if conv:
-                    last_ts = message_repo.last_inbound_ts(conversation_id=conv["id"])
-        # ``by_human=True``: every caller of this guard is an OPERATOR action from
-        # the panel, so a provider that grants humans an extended window
-        # (Messenger/Instagram, ``human_window_hours``) is honoured here — while the
-        # agentic reply, which never passes through this guard, can't reach it.
-        if outbound.session_open(channel_id, last_ts, by_human=True):
-            return None
-        return _err(
-            "Fora da janela de 24h: só é possível enviar um template aprovado.",
-            status=409, data={"reason": "session_window_closed"})
-
-    def _media_limits_block(channel_id: str, kind: str, filename: str, size: int):
-        """Guard for the media limits the CHANNEL declares (tamanho/formato).
-
-        Returns a 413/415 ``_err`` when the upload cannot be delivered by this
-        channel (WhatsApp Cloud: 5 MB JPEG/PNG, 16 MB áudio, 100 MB PDF/DOC/…),
-        or ``None`` when it is fine — which is always the case for a channel that
-        declares no limits for the kind (GOWA/Telegram). Capability-driven, never
-        by provider name; the numbers live in the provider plugin.
-
-        Runs BEFORE the upload is written to disk, so a blocked send leaves no
-        orphan file. Video has its own path (validate → transcode → block) because
-        it also inspects codecs and may re-encode instead of blocking.
-        """
-        verdict = media_limits.validate_upload(
-            filename, size, outbound.capabilities(channel_id), kind)
-        if verdict.ok:
-            return None
-        status = 413 if verdict.reason == media_limits.TOO_BIG else 415
-        return _err(verdict.message, status=status, data={"reason": verdict.reason})
+        return _err(verdict["message"], status=409, data={"reason": verdict["reason"]})
 
     def _private_ai_conversation_open(channel_id: str, phone: str) -> bool:
         """A conversa aceita que a IA fale com o cliente? (plano 96 I9)
@@ -835,7 +749,15 @@ def register_routes(app, deps):
                 last_ts = (message_repo.last_inbound_ts(
                     conversation_id=scoped_conv["id"]) if scoped_conv else None)
                 data["templates_supported"] = outbound.supports(channel, "templates")
-                data["session_open"] = outbound.session_open(channel, last_ts)
+                # ``by_human=True``: ver a nota em routes/conversations.py — este
+                # payload alimenta o compositor do OPERADOR, então tem de enxergar
+                # a mesma janela que a rota de envio dele enxerga.
+                data["session_open"] = outbound.session_open(channel, last_ts,
+                                                             by_human=True)
+                # Janela da IA — ver a nota em routes/conversations.py. Ela fecha
+                # antes da do operador nos canais Meta, e é ela que decide se os
+                # toggles de instrução para a IA aparecem no compositor.
+                data["ai_window_open"] = outbound.ai_window_open(channel, last_ts)
                 # Capability hints p/ o menu de contexto da mensagem: esconder
                 # "Apagar" onde o canal não revoga (Cloud), mostrar "Editar" só onde
                 # o canal edita. Dirigido por CAPABILITY, nunca por nome de provider.
@@ -897,19 +819,8 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.delete")
         if denied:
             return denied
-        def _delete():
-            data = contact_repo.get_by_phone(phone)
-            if data is None:
-                return False
-            contact_repo.delete(data["id"])
-            # Clear in-memory cache (all channel-variants)
-            agent_handler.drop_cached_contact(phone)
-            return True
-        found = await asyncio.to_thread(_delete)
-        if not found:
+        if not await contact_svc.delete_contact(agent_handler, ws_manager, phone):
             return _err("Contato não encontrado.", status=404)
-        logger.info("[Contact] Deleted contact %s", phone)
-        await ws_manager.broadcast("contact_deleted", {"phone": phone})
         return _ok({"message": "Contato apagado."})
 
     @app.post("/api/contacts/{phone}/archive")
@@ -962,150 +873,37 @@ def register_routes(app, deps):
 
     @app.post("/api/contacts/{phone}/send")
     async def send_to_contact(phone: str, body: dict, request: Request):
-        """Send a manual message to a contact (operator-initiated, no LLM)."""
+        """Send a manual message to a contact (operator-initiated, no LLM).
+
+        O corpo do envio (janela de 24h, filtros, JID real, @menções, dedupe de
+        eco, aborto do ciclo da IA, desvio de sandbox) vive em
+        ``MessagingService.send_text`` desde o refactor R-txt, para que a fachada
+        ``/api/v1`` chame EXATAMENTE a mesma função — duas implementações
+        divergiriam em silêncio. A rota mantém só o que é dela: a permissão, o
+        gate de inbox e o envelope legado ``{ok, data|error}``.
+        """
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
-        message = (body.get("message") or "").strip()
-        if not message:
-            return _err("Campo 'message' é obrigatório.")
-        # Optional: quote/reply to an existing message (GOWA msg_id).
-        reply_to = (body.get("reply_to") or "").strip() or None
-        # Operador logado (para exibir o nome no balão em vez de "Manual"). None em
-        # instalação legada/aberta → cai em "Manual".
         _u = current_user(request)
-        _uid = _u.get("id") if _u else None
-        _uname = _u.get("name") if _u else None
-
-        # Plugin filter: allow plugins to add signature/formatting/redact to operator sends
-        filtered = await apply_filter(
-            "filter.reply.part", message,
-            {"phone": phone, "index": 0, "total": 1, "source": "operator", "sent_by_name": _uname},
+        result = await messaging.send_text(
+            phone=phone,
+            message=body.get("message") or "",
+            conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"),
+            reply_to=body.get("reply_to"),
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None),
+            inbox_guard=lambda: _inbox_guard_veredict(
+                request, body.get("conversation_id"), body.get("channel_id")),
         )
-        if filtered is None:
-            return _err("Mensagem bloqueada por plugin.", status=400)
-        message = filtered
-
-        # Regra "ignorar abertura" (plugin): um filtro pode impedir que este envio do
-        # operador REABRA uma conversa fechada (mantém fechada quando o texto casa a
-        # regex). Sem plugin registrado, apply_filter devolve True → reopen=None (default).
-        _allow_reopen = await apply_filter(
-            "filter.conversation.before_reopen", True,
-            {"phone": phone, "role": "assistant", "text": message})
-        _reopen = False if not _allow_reopen else None
-
-        # Sandbox/test contact — never goes over GOWA (the number isn't real).
-        # Persist the operator message locally and broadcast it, no error.
-        if await asyncio.to_thread(_is_sandbox_contact, phone):
-            msg_data = await asyncio.to_thread(
-                agent_handler.save_operator_message, phone, message, status="operator",
-                reply_to_msg_id=reply_to,
-                sent_by_user_id=_uid, sent_by_name=_uname, reopen=_reopen,
-            )
-            await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
-            await emit_with_filter("message.sent", {
-                "phone": phone, "text": message, "msg_id": None,
-                "media_type": None, "media_path": None,
-                "source": "operator", "status": "operator",
-                "reply_to_msg_id": reply_to,
-                "ts": time.time(),
-            })
-            logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
-            return _ok({"message": "Mensagem enviada.", "msg_id": None})
-
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=body.get("conversation_id"),
-            channel_id=body.get("channel_id"))
-        if denied_inbox:
-            return denied_inbox
-
-        channel_id = _channel_for(phone, body.get("conversation_id"), body.get("channel_id"))
-        _operator_took_over(channel_id, phone)
-        # Wire target = the JID the conversation actually receives from (fixes the BR
-        # 9th-digit ghost-send). `phone` stays the contact key for save/broadcast.
-        wire_phone = await asyncio.to_thread(
-            _wire_target, phone, body.get("conversation_id"))
-        block = await asyncio.to_thread(
-            _session_window_block, channel_id, body.get("conversation_id"), phone)
-        if block:
-            return block
-        # Resolve @Name / @todos -> real mentions for group targets, only on channels
-        # that support groups (Cloud is 1:1). `message` (friendly @Name) is saved/shown;
-        # `send_text` (inline @<number>) + mentions go on the wire.
-        send_text, mentions = message, None
-        if "@g.us" in phone and outbound.supports(channel_id, "groups"):
-            send_text, mentions = await asyncio.to_thread(
-                group_mentions.resolve_outgoing, phone, message)
-
-        # Plugin filter: WIRE-ONLY transform (e.g. signature) — reaches the contact
-        # but NOT the saved/broadcast copy (which keeps using `message`).
-        _wired = await apply_filter(
-            "filter.outbound.text", send_text,
-            {"phone": phone, "channel_id": channel_id, "source": "operator",
-             "sent_by_name": _uname, "index": 0, "total": 1},
-        )
-        if _wired is not None:
-            send_text = _wired
-
-        # Track sent message to filter echo-backs — key on the WIRE target (the echo
-        # comes back stamped with the real JID, not the saved phone).
-        state.recently_sent[f"{channel_id}:{wire_phone}:{send_text[:120]}"] = time.time()
-
-        # Send via the conversation's channel — always save message (status on failure)
-        send_failed = False
-        error_msg = ""
-        msg_id = None
-        try:
-            msg_id = await asyncio.to_thread(
-                _route_send_text, channel_id, wire_phone, send_text, mentions, reply_to)
-        except GOWASendError as e:
-            logger.error("[Send] Failed to send message to %s: %s", phone, e)
-            send_failed = True
-            error_msg = str(e)
-        except Exception as e:
-            logger.error("[Send] Failed to send message to %s: %s", phone, e)
-            send_failed = True
-            error_msg = str(e)
-
-        if send_failed:
-            msg_id = None
-
-        # Always save to contact memory (with status="failed" if send failed)
-        try:
-            msg_data = await asyncio.to_thread(
-                agent_handler.save_operator_message, phone, message,
-                status="failed" if send_failed else "operator",
-                msg_id=msg_id, reply_to_msg_id=reply_to, channel_id=channel_id,
-                sent_by_user_id=_uid, sent_by_name=_uname, reopen=_reopen,
-            )
-        except Exception as e:
-            logger.error("[Send] Failed to save message for %s: %s", phone, e)
-            return _err(f"Erro ao salvar mensagem: {e}", status=500)
-
-        if send_failed:
-            # Broadcast error event for frontend toast/error bubble
-            await _emit_send_error(ws_manager, phone, f"Falha ao enviar mensagem: {error_msg}")
-            return _err(f"Falha ao enviar mensagem: {error_msg}", status=500)
-
-        logger.info("[Send] Manual message to %s: %s", phone, message[:80])
-
-        # Broadcast to all WS clients
-        await ws_manager.broadcast("new_message", {
-            "phone": phone,
-            "channel_id": channel_id,
-            "message": msg_data,
-        })
-
-        # Plugin event: manual operator send
-        await emit_with_filter("message.sent", {
-            "phone": phone, "text": message, "msg_id": msg_id,
-            "media_type": None, "media_path": None,
-            "source": "operator", "status": "operator",
-            "reply_to_msg_id": reply_to,
-            "ts": time.time(),
-        })
-
-        return _ok({"message": "Mensagem enviada.", "msg_id": msg_id})
+        if not result.get("ok"):
+            # ``data`` chega preenchido só onde o envelope legado o tinha (o
+            # ``reason`` do bloqueio de 24h, que o compositor lê); ``_err``
+            # ignora ``None``, então os demais erros mantêm a forma antiga.
+            return _err(result["message"], status=result.get("status", 400),
+                        data=result.get("data"))
+        return _ok({"message": result["message"], "msg_id": result.get("msg_id")})
 
     @app.post("/api/contacts/{phone}/messages/delete")
     async def delete_message(phone: str, body: dict, request: Request):
@@ -1297,9 +1095,15 @@ def register_routes(app, deps):
                                if abort_epoch is None else abort_epoch)
         run_wire = await asyncio.to_thread(_wire_target, phone, conversation_id)
 
-        async def _may_reply_in_chat_now() -> bool:
+        async def _may_reply_in_chat_now(allow_self_handoff: bool = False) -> bool:
+            """Espelha ``MessagingService._cycle_may_continue`` (plano 122).
+
+            Época PRIMEIRO — o perdão jamais a alcança. Ele só existe para o turno
+            que chamou ``transfer_to_human`` e portanto fechou o próprio gate."""
             if messaging._abort_epoch(run_channel, phone) != private_abort_epoch:
                 return False
+            if allow_self_handoff:
+                return True
             return await asyncio.to_thread(
                 _private_ai_conversation_open, run_channel, phone)
 
@@ -1364,7 +1168,12 @@ def register_routes(app, deps):
         # interruptor de automação apagaria o recurso inteiro em instalação com a
         # automação desligada, que não é o problema que o plano 96 ataca (D1: o que
         # cala é o HUMANO no comando daquela conversa).
-        if reply_in_chat and not await _may_reply_in_chat_now():
+        #
+        # Plano 122 — o perdão do turno que transferiu. Sem ele, uma IA privada com
+        # "responder no chat" que chame ``transfer_to_human`` cai aqui e grava um
+        # card FALSO ("um atendente assumiu a conversa" — ninguém assumiu).
+        handed_off = _turn_handed_off(result.tool_calls)
+        if reply_in_chat and not await _may_reply_in_chat_now(handed_off):
             logger.info("[PrivateAI] resposta não enviada a %s — a conversa está "
                         "com um atendente humano", phone)
             await _blocked_notice()
@@ -1432,7 +1241,7 @@ def register_routes(app, deps):
             # Same last-moment rule as the normal AI pipeline. The initial check
             # above is not enough: plugins and a multi-part response create another
             # window in which the operator can take over.
-            if not await _may_reply_in_chat_now():
+            if not await _may_reply_in_chat_now(handed_off):
                 logger.info("[PrivateAI] split de %s/%s interrompido na parte %d/%d",
                             run_channel, phone, i + 1, len(parts))
                 await _blocked_notice()
@@ -1456,7 +1265,9 @@ def register_routes(app, deps):
             if send_failed:
                 msg_id = None
             if msg_id:
-                state.processed_messages.add(msg_id)
+                # Prefixed — same format ``_ingest_echo`` looks up (o id cru nunca
+                # casava). Ver o gotcha "Echo do próprio envio" em docs/OPERACAO.md.
+                state.processed_messages.add(f"{channel_id}:{msg_id}")
 
             try:
                 msg_data = await asyncio.to_thread(
@@ -1480,7 +1291,8 @@ def register_routes(app, deps):
                 "phone": phone, "channel_id": channel_id, "message": msg_data,
             })
             await emit_with_filter("message.sent", {
-                "phone": phone, "text": part, "msg_id": msg_id,
+                "phone": phone, "channel_id": channel_id, "text": part, "msg_id": msg_id,
+                "conversation_id": (msg_data or {}).get("conversation_id"),
                 "media_type": None, "media_path": None,
                 "source": "private_ai", "status": "sent",
                 "ts": time.time(),
@@ -1850,6 +1662,38 @@ def register_routes(app, deps):
             actor=_u, raw_mentions=_parse_mentions_field(mentions_raw),
             mention_inbox=str(mention_inbox_raw).lower() in ("1", "true", "yes", "on"),
             preview=db_content)
+
+        # plano 118 — descrição da IMAGEM colada como nota privada, gateada pela
+        # direção "Privadas" do canal (``image_transcription_mode``); molde do
+        # ``/private-audio``. Só o card visível: fazer a IA LER a imagem privada
+        # exigiria o toggle "IA lê", que este endpoint não tem (P4). A nota em si
+        # nunca vai ao contato — invariante deste helper.
+        if kind == "image":
+            card_text = ""
+            try:
+                card_text = await messaging.maybe_transcribe(
+                    "image", str(dest),
+                    phone=phone, source="private",
+                    channel_id=resolved_channel)
+            except Exception as e:
+                logger.error("[Private] Image description failed for %s: %s", phone, e)
+            if card_text:
+                try:
+                    await asyncio.to_thread(
+                        lambda: agent_handler._get_contact(
+                            phone, channel_id=resolved_channel).add_message(
+                            "transcription", card_text))
+                except Exception as e:
+                    logger.error("[Private] Failed to save description for %s: %s", phone, e)
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone,
+                    "channel_id": resolved_channel,
+                    "message": {
+                        "role": "transcription",
+                        "content": card_text,
+                        "ts": time.time(),
+                    },
+                })
         return note_msg
 
     @app.post("/api/contacts/{phone}/private-image")
@@ -1961,13 +1805,55 @@ def register_routes(app, deps):
 
         state.msg_count += 1
         await emit_with_filter("message.sent", {
-            "phone": phone, "text": message, "msg_id": msg_id,
+            "phone": phone, "channel_id": channel_id, "text": message, "msg_id": msg_id,
+            # `conversation_id` fica de fora: o retry só faz UPDATE de status numa row
+            # que já existe, então não há id de conversa resolvido no escopo — e o do
+            # body é do cliente. Campo ausente é melhor que valor errado (plano 123 F2·2).
             "media_type": None, "media_path": None,
             "source": "retry", "status": "sent",
             "ts": time.time(),
         })
         logger.info("[Retry] Resent to %s: %s", phone, message[:80])
         return _ok({"message": "Mensagem reenviada."})
+
+    async def _send_media_upload(request: Request, phone: str, kind: str,
+                                 upload: UploadFile, *, caption: str,
+                                 conversation_id, channel_id):
+        """Cauda comum das quatro rotas de mídia — delega o preparo ao serviço.
+
+        Plano 151 · R-media. Até aqui cada rota repetia nove passos (sandbox →
+        canal → tomada humana → wire → janela de 24h → limites → gravar →
+        validar/transcodificar → a tabela de seis parâmetros por ``kind``); a
+        fachada ``/api/v1`` seria a quinta cópia. O que sobra na ROTA é o que é
+        genuinamente HTTP: o gate de permissão, ler o ``UploadFile`` e traduzir
+        o veredito para o envelope ``{ok, data|error}`` do painel.
+        """
+        _u = current_user(request)
+
+        async def _guard():
+            return await _inbox_guard_veredict(
+                request, conversation_id=conversation_id, channel_id=channel_id)
+
+        return await messaging.send_media_upload(
+            phone=phone, kind=kind,
+            data=await upload.read(),
+            filename=upload.filename,
+            content_type=upload.content_type,
+            caption=caption,
+            conversation_id=conversation_id, channel_id=channel_id,
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None),
+            inbox_guard=_guard)
+
+    def _media_error(result: dict):
+        """Veredito de erro do serviço → o MESMO ``_err`` que a rota devolvia."""
+        return _err(result["message"], status=result.get("status", 500),
+                    data=result.get("data"))
+
+    def _media_ok(result: dict, message: str):
+        return _ok({"message": message,
+                    "msg_id": result.get("msg_id"),
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/send-image")
     async def send_image_to_contact(
@@ -1982,48 +1868,13 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=conversation_id, channel_id=channel_id)
-        if denied_inbox:
-            return denied_inbox
-        # Sandbox/test contact — keep the image local, never hit GOWA.
-        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id, channel_id)
-        _operator_took_over(channel_id, phone)
-        wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
-        # 24h window gate BEFORE writing the file (no orphan on a blocked send);
-        # sandbox stays local so it is never gated (mirrors /send text).
-        if not is_sandbox:
-            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
-            if block:
-                return block
-        suffix = Path(image.filename or "img.png").suffix or ".png"
-        content = await image.read()
-        # Bloqueio de tamanho/formato ANTES de gravar (sem órfão no disco).
-        if not is_sandbox:
-            block = _media_limits_block(
-                channel_id, "image", image.filename or f"img{suffix}", len(content))
-            if block:
-                return block
-        dest = statics_outbox_dir / unique_media_name(
-            image.content_type, image.filename, default_ext=".png")
-        dest.write_bytes(content)
-        # R14: shared operator media-send tail (send → persist → broadcast → emit).
-        _u = current_user(request)
-        result = await messaging.send_media(
-            channel_id=channel_id, phone=phone, kind="image", dest=dest,
-            is_sandbox=is_sandbox, content=caption, emit_text=caption,
-            caption=caption, error_label="imagem",
-            sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None),
-            wire_phone=wire_phone)
+        result = await _send_media_upload(
+            request, phone, "image", image, caption=caption,
+            conversation_id=conversation_id, channel_id=channel_id)
         if not result["ok"]:
-            verb = "Falha" if result["kind"] == "send" else "Erro"
-            return _err(f"{verb} ao enviar imagem: {result['error']}", status=500)
+            return _media_error(result)
         logger.info("[Send] Image sent to %s", phone)
-        return _ok({"message": "Imagem enviada.",
-                    "msg_id": result.get("msg_id"),
-                    "media_path": result.get("media_path")})
+        return _media_ok(result, "Imagem enviada.")
 
     @app.post("/api/contacts/{phone}/send-audio")
     async def send_audio_to_contact(
@@ -2033,89 +1884,21 @@ def register_routes(app, deps):
         conversation_id: str = Form(""),
         channel_id: str = Form(""),
     ):
-        """Send an audio file to a contact (operator-initiated)."""
+        """Send an audio file to a contact (operator-initiated).
+
+        Sem campo de legenda: ``/send/audio`` é nota de voz (PTT) e o protocolo
+        não carrega caption — ver ``_MEDIA_KIND_SPEC`` em ``messaging_service``.
+        """
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=conversation_id, channel_id=channel_id)
-        if denied_inbox:
-            return denied_inbox
-        # Sandbox/test contact — keep the audio local, never hit GOWA.
-        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id, channel_id)
-        _operator_took_over(channel_id, phone)
-        wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
-        # 24h window gate BEFORE writing the file (no orphan on a blocked send);
-        # sandbox stays local so it is never gated (mirrors /send text).
-        if not is_sandbox:
-            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
-            if block:
-                return block
-        suffix = Path(audio.filename or "voice.ogg").suffix or ".ogg"
-        content = await audio.read()
-        # Canal que declara AudioLimits (codec-aware) segue o caminho do vídeo:
-        # grava → valida (ffprobe) → recodifica com ffmpeg → só bloqueia se não
-        # der. Canal com MediaLimits simples (ou nenhum) mantém o bloqueio
-        # barato ANTES de gravar (sem órfão no disco). Dirigido pelo que o
-        # PROVIDER declara, nunca por nome de provider.
-        caps = outbound.capabilities(channel_id) if not is_sandbox else None
-        alimits = audio_validate.audio_limits(caps) if caps is not None else None
-        if not is_sandbox and alimits is None:
-            block = _media_limits_block(
-                channel_id, "audio", audio.filename or f"voice{suffix}", len(content))
-            if block:
-                return block
-        dest = statics_outbox_dir / unique_media_name(
-            audio.content_type, audio.filename, default_ext=".ogg")
-        dest.write_bytes(content)
-
-        if alimits is not None:
-            verdict = await asyncio.to_thread(audio_validate.validate_audio, str(dest), caps)
-            if not verdict.ok:
-                # Recodifica para o container/codec que ESTE canal declarou
-                # (ex.: Ogg/Vorbis → Ogg/Opus, o único ogg que a Meta aceita).
-                transcoded = await asyncio.to_thread(
-                    audio_transcode.transcode_to_limits, str(dest), alimits)
-                if transcoded:
-                    new_dest = (statics_outbox_dir
-                                / f"{int(time.time() * 1000)}{Path(transcoded).suffix}")
-                    try:
-                        os.replace(transcoded, new_dest)
-                    except OSError:
-                        import shutil as _shutil
-                        _shutil.move(transcoded, str(new_dest))
-                    try:
-                        dest.unlink()
-                    except OSError:
-                        pass
-                    dest = new_dest
-                else:
-                    try:
-                        dest.unlink()
-                    except OSError:
-                        pass
-                    status = 413 if verdict.reason == audio_validate.TOO_BIG else 415
-                    return _err(verdict.message, status=status,
-                                data={"reason": verdict.reason})
-        # R14: shared media-send tail. Audio sends with no caption, persists
-        # "[Áudio]" / emits empty text, and runs the operator-audio transcription
-        # tail (audio_transcription_mode in sent/both) inside the service.
-        _u = current_user(request)
-        result = await messaging.send_media(
-            channel_id=channel_id, phone=phone, kind="audio", dest=dest,
-            is_sandbox=is_sandbox, content="[Áudio]", emit_text="",
-            error_label="áudio", transcribe_audio=True,
-            sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None),
-            wire_phone=wire_phone)
+        result = await _send_media_upload(
+            request, phone, "audio", audio, caption="",
+            conversation_id=conversation_id, channel_id=channel_id)
         if not result["ok"]:
-            verb = "Falha" if result["kind"] == "send" else "Erro"
-            return _err(f"{verb} ao enviar áudio: {result['error']}", status=500)
+            return _media_error(result)
         logger.info("[Send] Audio sent to %s", phone)
-        return _ok({"message": "Áudio enviado.",
-                    "msg_id": result.get("msg_id"),
-                    "media_path": result.get("media_path")})
+        return _media_ok(result, "Áudio enviado.")
 
     @app.post("/api/contacts/{phone}/send-document")
     async def send_document_to_contact(
@@ -2126,58 +1909,24 @@ def register_routes(app, deps):
         conversation_id: str = Form(""),
         channel_id: str = Form(""),
     ):
-        """Send an arbitrary file (document) to a contact (operator-initiated)."""
+        """Send an arbitrary file (document) to a contact (operator-initiated).
+
+        ⚠️ É por aqui que uma IMAGEM é enviada COM A QUALIDADE ORIGINAL: o
+        despacho é por ``kind`` puro, sem olhar o MIME, e ``kind="document"`` cai
+        em ``/send/file`` (``documentMessage``), que não recomprime. A zona
+        "Arquivo" do compositor manda exatamente isto.
+        """
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=conversation_id, channel_id=channel_id)
-        if denied_inbox:
-            return denied_inbox
-        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id, channel_id)
-        _operator_took_over(channel_id, phone)
-        wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
-        # 24h window gate BEFORE writing the file (no orphan on a blocked send);
-        # sandbox stays local so it is never gated (mirrors /send text).
-        if not is_sandbox:
-            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
-            if block:
-                return block
-        filename = document.filename or "arquivo"
-        safe_name = Path(filename).name
-        suffix = Path(safe_name).suffix
-        stem = Path(safe_name).stem or "arquivo"
-        content = await document.read()
-        # Bloqueio de tamanho/formato ANTES de gravar (sem órfão no disco).
-        if not is_sandbox:
-            block = _media_limits_block(channel_id, "document", safe_name, len(content))
-            if block:
-                return block
-        dest = statics_outbox_dir / unique_media_name(
-            document.content_type, safe_name, default_ext=".bin")
-        dest.write_bytes(content)
-        text_content = f"[Documento enviado: {safe_name}]"
-        if caption.strip():
-            text_content = f"{text_content}\n{caption.strip()}"
-        # R14: shared media-send tail. Document persists/broadcasts the label
-        # (+caption) body, emits the caption as the message.sent text, and sends
-        # with the caption + the safe original filename.
-        _u = current_user(request)
-        result = await messaging.send_media(
-            channel_id=channel_id, phone=phone, kind="document", dest=dest,
-            is_sandbox=is_sandbox, content=text_content, emit_text=caption,
-            caption=caption, filename=safe_name, error_label="documento",
-            sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None),
-            wire_phone=wire_phone)
+        result = await _send_media_upload(
+            request, phone, "document", document, caption=caption,
+            conversation_id=conversation_id, channel_id=channel_id)
         if not result["ok"]:
-            verb = "Falha" if result["kind"] == "send" else "Erro"
-            return _err(f"{verb} ao enviar documento: {result['error']}", status=500)
-        logger.info("[Send] Document sent to %s: %s", phone, safe_name)
-        return _ok({"message": "Documento enviado.",
-                    "msg_id": result.get("msg_id"),
-                    "media_path": result.get("media_path")})
+            return _media_error(result)
+        logger.info("[Send] Document sent to %s: %s",
+                    phone, Path(document.filename or "arquivo").name)
+        return _media_ok(result, "Documento enviado.")
 
     @app.post("/api/contacts/{phone}/send-video")
     async def send_video_to_contact(
@@ -2201,84 +1950,25 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=conversation_id, channel_id=channel_id)
-        if denied_inbox:
-            return denied_inbox
-        is_sandbox = await asyncio.to_thread(_is_sandbox_contact, phone)
-        channel_id = _channel_for(phone, conversation_id, channel_id)
-        _operator_took_over(channel_id, phone)
-        wire_phone = await asyncio.to_thread(_wire_target, phone, conversation_id)
-        # 24h window gate BEFORE writing the file (no orphan on a blocked send);
-        # sandbox stays local so it is never gated (mirrors /send text).
-        if not is_sandbox:
-            block = await asyncio.to_thread(_session_window_block, channel_id, conversation_id, phone)
-            if block:
-                return block
-        suffix = Path(video.filename or "video.mp4").suffix or ".mp4"
-        dest = statics_outbox_dir / unique_media_name(
-            video.content_type, video.filename, default_ext=".mp4")
-        content = await video.read()
-        dest.write_bytes(content)
-
-        # Validate against the Cloud limits (no-op for always-open channels). On a
-        # windowed channel a non-conforming file is transcoded (if ffmpeg) or
-        # blocked. Runs off-thread (ffprobe/ffmpeg are blocking).
-        if not is_sandbox:
-            caps = outbound.capabilities(channel_id)
-            verdict = await asyncio.to_thread(video_validate.validate_video, str(dest), caps)
-            if not verdict.ok:
-                # Re-encode toward the limits THIS channel declared (plano 65).
-                limits = video_validate.video_limits(caps)
-                transcoded = await asyncio.to_thread(
-                    video_transcode.transcode_to_limits, str(dest), limits)
-                if transcoded:
-                    # Move the transcoded mp4 into the outbox so its media_path
-                    # resolves for the panel render; drop the original upload.
-                    new_dest = statics_outbox_dir / unique_media_name(
-                        "video/mp4", "video.mp4", default_ext=".mp4")
-                    try:
-                        os.replace(transcoded, new_dest)
-                    except OSError:
-                        import shutil as _shutil
-                        _shutil.move(transcoded, str(new_dest))
-                    try:
-                        dest.unlink()
-                    except OSError:
-                        pass
-                    dest = new_dest
-                else:
-                    # Block (F5A): remove the orphan upload and return a clear error.
-                    try:
-                        dest.unlink()
-                    except OSError:
-                        pass
-                    status = 413 if verdict.reason == video_validate.TOO_BIG else 415
-                    return _err(verdict.message, status=status,
-                                data={"reason": verdict.reason})
-
-        # R14: shared operator media-send tail (send → persist → broadcast → emit).
-        _u = current_user(request)
-        result = await messaging.send_media(
-            channel_id=channel_id, phone=phone, kind="video", dest=dest,
-            is_sandbox=is_sandbox, content=caption or "[Vídeo]", emit_text=caption,
-            caption=caption, error_label="vídeo",
-            sent_by_user_id=(_u.get("id") if _u else None),
-            sent_by_name=(_u.get("name") if _u else None),
-            wire_phone=wire_phone)
+        result = await _send_media_upload(
+            request, phone, "video", video, caption=caption,
+            conversation_id=conversation_id, channel_id=channel_id)
         if not result["ok"]:
-            verb = "Falha" if result["kind"] == "send" else "Erro"
             # Meta rejects a codec ffprobe could not inspect (131053) — surface it
-            # as a friendly hint instead of the raw provider string (F5A).
-            err = result["error"] or ""
-            if "131053" in err:
+            # as a friendly hint instead of the raw provider string (F5A). Isto é
+            # FORMATAÇÃO DE MENSAGEM, não regra: fica na rota de propósito.
+            if "131053" in (result.get("provider_error") or ""):
                 return _err(
                     "O WhatsApp recusou o vídeo (codec/formato). "
                     "Reexporte em MP4 H.264/AAC e tente novamente.",
                     status=422, data={"reason": "bad_codec"})
-            return _err(f"{verb} ao enviar vídeo: {err}", status=500)
+            return _media_error(result)
         logger.info("[Send] Video sent to %s", phone)
-        return _ok({"message": "Vídeo enviado."})
+        # `msg_id` como nas irmãs (imagem/áudio/documento): o painel adota o id na
+        # bolha otimista para o broadcast `new_message` reconciliar por identidade
+        # em vez da heurística conteúdo+30s — sem ele o vídeo aparecia duas vezes
+        # (a bolha diz "[Vídeo]", a cópia do servidor vem com a legenda vazia).
+        return _media_ok(result, "Vídeo enviado.")
 
     @app.post("/api/contacts/{phone}/presence")
     async def send_presence_to_contact(phone: str, body: dict, request: Request):
@@ -2466,78 +2156,17 @@ def register_routes(app, deps):
 
         Scalar fields use replace semantics (an empty string clears the field);
         a custom_attribute sent as null is removed. This is an explicit human
-        edit, distinct from the LLM auto-fill path (ContactMemory.update_info)."""
+        edit, distinct from the LLM auto-fill path (ContactMemory.update_info).
+
+        O corpo da edição (validação dos atributos, REPLACE dos escalares,
+        observações, emit ``contact.updated``) vive em
+        ``app.services.contact_service`` desde o plano de API, para que a fachada
+        ``/api/v1`` grave pelas MESMAS regras.
+        """
         denied = permission_denied(request, "contact.write")
         if denied:
             return denied
-        # Validate custom attributes up front so we can return a clean 400 (P50:
-        # unknown key → error; invalid value → error) before touching the row.
-        custom_attrs = body.get("custom_attributes")
-        valid_partial: dict = {}
-        if custom_attrs is not None:
-            if not isinstance(custom_attrs, dict):
-                return _err("custom_attributes deve ser um objeto.")
-            all_defs = await asyncio.to_thread(
-                ca_repo.list_definitions, "contact", True)  # include soft-deleted
-            defs = {d["attribute_key"]: d for d in all_defs if d.get("deleted_at") is None}
-            known_keys = {d["attribute_key"] for d in all_defs}
-            # Keys already stored on this contact but without any definition — e.g.
-            # `cw_id`/`cw_identifier` left behind by the Chatwoot migration. The panel
-            # re-sends the whole JSON on save; tolerating these avoids a 400 that would
-            # abort the entire save (name, email, tags). Still preserves P50 for a
-            # genuinely new + undefined key (typo from code) → 400.
-            stored = await asyncio.to_thread(contact_repo.get_by_phone, phone)
-            stored_keys = set((stored or {}).get("custom_attributes") or {})
-            for key, value in custom_attrs.items():
-                definition = defs.get(key)
-                if definition is None:
-                    # A value left behind by a DELETED attribute (soft-delete keeps
-                    # stored values, P49) or by the Chatwoot migration (never defined,
-                    # but already in the stored JSON) is tolerated — the frontend
-                    # re-sends it. Leave it untouched instead of blocking the save.
-                    # Only a key that is BOTH undefined AND not stored is a genuine
-                    # typo → 400 (P50).
-                    if key in known_keys or key in stored_keys:
-                        continue
-                    return _err(f"Atributo '{key}' não existe.", 400)  # P50
-                if value is None:
-                    valid_partial[key] = None  # explicit clear → set_values pops it
-                    continue
-                norm, err = validate_value(definition, value)
-                if err:
-                    return _err(err)
-                valid_partial[key] = norm
-
-        result_attrs: dict = {}
-
-        def _update():
-            nonlocal result_attrs
-            contact = agent_handler._get_contact(phone)
-            # Scalar fields: explicit human edit → replace semantics (an empty
-            # string clears the field). Only keys actually present in the body
-            # are written, so an absent field is left untouched while "" is an
-            # intentional clear. Distinct from update_info (LLM merge).
-            scalar_keys = ("name", "email", "profession", "company", "address")
-            scalar_fields = {k: body[k] for k in scalar_keys if k in body}
-            if scalar_fields:
-                contact.set_info_fields(scalar_fields)
-            # Observations: replace entire list (update_info only appends)
-            if "observations" in body:
-                new_obs = [
-                    o for o in body["observations"] if isinstance(o, str) and o.strip()
-                ]
-                contact.info["observations"] = new_obs
-                contact_repo.set_observations(contact.id, new_obs)
-            if custom_attrs is not None:
-                result_attrs = ca_repo.set_values(contacts_table, contact.id, valid_partial)
-            else:
-                result_attrs = ca_repo.get_values(contacts_table, contact.id)
-            return contact.info
-        info = await asyncio.to_thread(_update)
-        # Surface the persisted custom_attributes under `info` so the panel and the
-        # resolve guard read a single, reliable source (matches get_full_contact).
-        info = {**info, "custom_attributes": result_attrs}
-        await emit_with_filter("contact.updated", {
-            "phone": phone, "info": info, "custom_attributes": result_attrs, "ts": time.time(),
-        })
+        info, err = await contact_svc.update_info(agent_handler, phone, body)
+        if err:
+            return _err(err)
         return _ok(info)

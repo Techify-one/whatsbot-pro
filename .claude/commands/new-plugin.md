@@ -15,8 +15,8 @@ Use `AskUserQuestion` para coletar (ou inferir do `$ARGUMENTS`):
 5. **Precisa injetar conteúdo no system prompt?** (ex: cardápio). Se sim, descreva o que injetar.
 6. **Tabelas no banco**: lista de `{name, columns}` (sem o prefixo, vou adicionar). Pode ser vazia.
 7. **Settings declaráveis** (Pydantic Valves) — campos configuráveis pelo usuário. **Toda configuração do plugin vive na aba de configuração DO PRÓPRIO plugin** (botão "Configurar" em `/plugins`), NUNCA numa aba nova do painel de Configurações do core. Escolha: (a) `settings.py` com `class Settings(BaseModel)` → form auto-gerado; e/ou (b) uma screen `config: true` com UI custom. Pode ser vazio se o plugin não tem o que configurar.
-8. **Events que o plugin observa** (fire-and-forget, paralelo): lista de nomes a assinar — ex: `message.received`, `message.sent`, `llm.after`, `tool.after`, `*` (catch-all). Pode ser vazia. Use `plugins/events.py::KNOWN_EVENTS` como fonte executável; a tabela do `CLAUDE.md` é guia de payloads, não catálogo exaustivo.
-9. **Filters que o plugin intercepta** (síncronos, podem modificar ou abortar): lista de nomes a interceptar — ex: `filter.message.before_save`, `filter.reply.part`, `filter.system_prompt`, `filter.tool.args`. Retornar `None` aborta a ação. Pode ser vazia. Use `plugins/events.py::KNOWN_FILTERS` como catálogo executável e `CLAUDE.md` para tipos/contexto.
+8. **Events que o plugin observa** (fire-and-forget, paralelo): lista de nomes a assinar — ex: `message.received`, `message.sent`, `llm.after`, `tool.after`, `*` (catch-all). Pode ser vazia. Use `plugins/events.py::KNOWN_EVENTS` como fonte executável; a tabela de `docs/PLUGIN_BUS.md` é guia de payloads, não catálogo exaustivo.
+9. **Filters que o plugin intercepta** (síncronos, podem modificar ou abortar): lista de nomes a interceptar — ex: `filter.message.before_save`, `filter.reply.part`, `filter.system_prompt`, `filter.tool.args`. Retornar `None` aborta a ação. Pode ser vazia. Use `plugins/events.py::KNOWN_FILTERS` como catálogo executável e `docs/PLUGIN_BUS.md` para tipos/contexto.
 10. **Controle de acesso (RBAC)**: "Quais funcionalidades têm controle de acesso? Para cada uma, quais ações (ver/editar/excluir)?" → gera o bloco `rbac:` no manifest. Convenção forte de chaves: `view`/`edit`/`delete`. Pode ser vazia (plugin acessível a todos, como hoje).
 
 Se o usuário escreveu tudo no `$ARGUMENTS`, deduza e confirme com **uma** pergunta de validação.
@@ -84,7 +84,13 @@ entry:
   settings: settings    # omitir se não houver
   events: events        # omitir se não houver
   filters: filters      # omitir se não houver
+  services: services    # omitir se não houver — API INTERNA plugin→plugin
 migrations: migrations  # omitir se não houver
+# APIs internas de OUTROS plugins que este consome (omitir se não houver).
+# Fornece o range default de services.call(..., _as="<id>").
+# uses_services:
+#   - plugin: <outro_id>
+#     version: ">=1.0,<2.0"
 screens:
   - id: <screen-id>
     title: <Título>
@@ -110,12 +116,54 @@ dependencies: []
 # frontend_extends: /plugins/<id>/static/extends.js
 # frontend_api_version: "1.0"
 # plugin_services_version: ">=2.0,<3.0"
+#
+# ⚠️ As DUAS sintaxes NÃO são a mesma. `whatsbot_api_version` é lido pelo parser
+# do backend (plugins/semver.py), que aceita SÓ comparadores — "1.1", "^1.1" e
+# "~1.1" são rejeitados e o plugin não carrega. Já `frontend_api_version` /
+# `plugin_services_version` são lidos pelo parser do JS, que aceita essas formas
+# e trata versão pura como compatibilidade por MAJOR. Não copie de um para o
+# outro. Mantenha ">=1.0,<2.0" (o plugin precisa instalar em produção rodando
+# core antigo) e só suba o piso se depender de um seam novo — veja
+# docs/PLUGIN_API_CHANGELOG.md.
 ```
 
 `plugin_services_version` negocia separadamente a allowlist `api.services`.
 Manifest legado sem o campo recebe a superfície de compatibilidade 1.x; plugin
 novo deve declarar 2.x e ainda feature-detectar funções opcionais. Range inválido
 ou incompatível faz o core pular o `frontend_extends` (fail-closed).
+
+⚠️ **`plugin_services_version` (frontend) ≠ `uses_services` (backend)** — nomes
+parecidos, superfícies sem relação nenhuma.
+
+**`entry.services` — API interna plugin→plugin** (ver `docs/PLUGINS.md` e o CLAUDE.md §"API interna
+plugin→plugin"). O módulo exporta `SERVICES = {"op": callable, ...}` e,
+opcionalmente, `SERVICES_VERSION` (semver da SUA superfície, mora no código) e
+`SERVICES_ALLOW` (tupla de ids autorizados; vazio = qualquer plugin carregado).
+Três regras duras:
+
+1. **Nunca exponha isso por HTTP** — sem rota `/rpc`, sem `/service/{op}`. A
+   fronteira é "nada sai do processo".
+2. **`services.py` é FOLHA**: nenhum outro módulo do plugin o importa. É o que
+   mantém o plugin carregando num core anterior, que não conhece
+   `entry.services`. Helper compartilhado vai para um módulo vizinho.
+3. **Nenhuma op pode depender de estado criado no `setup()`** — o registro roda
+   em `create_app`, antes do lifespan. Uma op não pronta devolve
+   `ServiceDisabled` (→ envelope `DISABLED`), nunca levanta.
+
+Do lado CONSUMIDOR, o import é sempre defensivo (import duro no topo de um módulo
+que o loader importa = o plugin não carrega, falha muda no boot):
+
+```python
+try:
+    from plugins import services as _services   # core >= 1.1
+except Exception:
+    _services = None
+...
+if _services is not None:
+    res = _services.call("<provedor>", "<op>", _as="<meu_id>", **kwargs)
+    # res.ok / res.status ∈ ok|unavailable|unknown_op|incompatible|disabled|
+    #                       wrong_context|error — NUNCA levanta
+```
 
 **Onde fica a configuração (REGRA):** se o plugin tem opções configuráveis, elas
 vivem na aba de configuração DO PRÓPRIO plugin — `settings.py` (form auto-gerado)
@@ -129,6 +177,8 @@ declarativo. Veja as screens `config: true` em
 ### tools.py (se houver tools)
 
 Cada tool é um par `(schema, executor)`. O executor recebe `ToolContext` (ver [plugins/context.py](../../plugins/context.py)) e retorna `str | None` (string vira `tool` reply no follow-up; `None` usa o default).
+
+⚠️ **Só definições no topo do arquivo — nada de efeito colateral no import** (thread, task, escrita em banco, mutação de estado global). Este módulo é re-executado in-process quando o operador edita a tool pela tela `/ai/tools`. Inicialização vai em `entry.lifecycle`. Ver "Contrato de tools" no fim deste documento.
 
 ```python
 import logging
@@ -290,7 +340,7 @@ logger = logging.getLogger(__name__)
 def on_message_received(ctx, payload: dict) -> None:
     # ctx: EventContext — ctx.handler, ctx.plugin_id, ctx.plugin_db,
     #                     ctx.event_name (importante p/ catch-all "*"), ctx.emitted_at
-    # payload: dict tipado conforme o evento (ver tabela em CLAUDE.md)
+    # payload: dict tipado conforme o evento (ver tabela em docs/PLUGIN_BUS.md)
     if payload.get("is_group"):
         return  # filtra cedo
     logger.info("[<id>] %s disse: %s", payload["phone"], payload["text"])
@@ -306,7 +356,7 @@ EVENT_HANDLERS = {
 }
 ```
 
-**Eventos comuns** (catálogo executável completo em `plugins/events.py::KNOWN_EVENTS`):
+**Eventos comuns** (catálogo executável completo em `plugins/events.py::KNOWN_EVENTS`; payloads em `docs/PLUGIN_BUS.md`):
 
 - Mensagem: `message.received` (pre-DB), `message.saved` (post-DB, **use este pra ler do DB**), `message.sent`, `message.any`, `message.reaction`, `message.edited`, `message.revoked`, `message.deleted`
 - Conexão/grupo: `presence.changed`, `receipt.changed`, `group.participants_changed`, `group.joined`, `call.received`, `connection.changed`, `chat.archived`
@@ -344,13 +394,14 @@ FILTERS = {
 }
 ```
 
-**Filters disponíveis** (tabela completa com tipo do `value` e `ctx.extras` em `CLAUDE.md`):
+**Filters disponíveis** (tabela completa com tipo do `value` e `ctx.extras` em `docs/PLUGIN_BUS.md`):
 
 | Filter | `value` | `None` faz |
 |---|---|---|
 | `filter.webhook.payload` | `dict` (body bruto de qualquer provider; `ctx.extras` traz provider/canal/assinatura) | webhook responde 200 sem processar |
 | `filter.message.before_save` | `dict` (mensagem tipada com `media_extras`) | mensagem ignorada |
 | `filter.message.outgoing` | `dict` (echo do celular do usuário) | echo ignorado |
+| `filter.message.notify` | `bool` (default `True`) | mensagem silenciosa (salva e exibida, sem badge/som) |
 | `filter.transcription.should_run` | `bool` (default `True`) | pula transcribe/describe (mesmo que `False`) |
 | `filter.transcription.result` | `str` (transcrição/descrição já gerada) | trata como vazia |
 | `filter.contact.tags` | `list[str]` (tags pretendidas) | mantém tags atuais |
@@ -367,6 +418,7 @@ FILTERS = {
 | `filter.conversation.before_status` | `dict` da mudança de status | aborta fechamento |
 | `filter.conversation.before_assign` | `dict` da atribuição | aborta atribuição |
 | `filter.conversation.clear_assignee_on_close` | `bool` | default seguro limpa assignee |
+| `filter.conversation.before_reopen` | `bool` (default `True`) | a mensagem não reabre a conversa fechada |
 | `filter.agent.resolve` | `AgentSpec` | mantém agente default |
 | `filter.conversation.assignment` | `dict` de destino | mantém atribuição default |
 
@@ -402,7 +454,7 @@ CREATE INDEX IF NOT EXISTS plugin_<id>_items_created_at
 
 Componente Preact + HTM com `default export`. Usar imports do importmap (`preact`, `preact/hooks`, `htm`). Receber `apiBase` como prop.
 
-**Cores / modo escuro (obrigatório):** a tela tem que ser legível nos temas claro E escuro. Use as classes semânticas `wa-*` para superfícies/textos/bordas — `bg-wa-bg`, `bg-wa-panel` (cards), `text-wa-text`, `text-wa-secondary`, `border-wa-border`, `bg-wa-hover`, `bg-wa-teal` (botão), `text-white` (texto sobre botão colorido). Em `<input>`/`<textarea>`/`<select>` use a classe `.wa-field` (fundo cinza + texto preto). NÃO use cores cruas de fundo/texto (`bg-white`, `text-gray-*`, hex inline) confiando no padrão claro — no escuro vira texto claro sobre fundo claro = ilegível. Sempre ligue o modo escuro (engrenagem → "Modo escuro") e confira o contraste. Detalhes em CLAUDE.md → "Tema e modo escuro (legibilidade)".
+**Cores / modo escuro (obrigatório):** a tela tem que ser legível nos temas claro E escuro. Use as classes semânticas `wa-*` para superfícies/textos/bordas — `bg-wa-bg`, `bg-wa-panel` (cards), `text-wa-text`, `text-wa-secondary`, `border-wa-border`, `bg-wa-hover`, `bg-wa-teal` (botão), `text-white` (texto sobre botão colorido). Em `<input>`/`<textarea>`/`<select>` use a classe `.wa-field` (fundo cinza + texto preto). NÃO use cores cruas de fundo/texto (`bg-white`, `text-gray-*`, hex inline) confiando no padrão claro — no escuro vira texto claro sobre fundo claro = ilegível. Sempre ligue o modo escuro (engrenagem → "Modo escuro") e confira o contraste. Detalhes em `docs/FRONTEND.md`.
 
 **Importante (auth):** quando o usuário configura uma senha no app, a API exige `Authorization: Bearer <token>` em **todas** as chamadas `/api/*`. O token fica em `localStorage` sob a chave `whatsbot_token`. Plugin precisa anexar esse header — senão a tela mostra `Não autenticado.` quando o app está protegido por senha. O helper abaixo cobre isso e também captura 401 pra disparar o evento de logout do core (`whatsbot:unauthorized`):
 
@@ -497,3 +549,21 @@ Por isso:
 - **`display_label`** (opcional, no nível do dict raiz, fora de `function`) é o rótulo legível mostrado em `/tools`. O handler retira esse campo antes de mandar pro LLM (não vai pra OpenAI). Use português, curto. Ex: `"display_label": "Salva Dados do Contato"`.
 - Quando o plugin é deletado pela UI, todas as overrides daquele plugin somem junto (`delete_for_plugin` no DELETE do plugin).
 - Convenção de naming: `<plugin_id>_<verbo>` (ex: `lembretes_create`, `orders_search`) — evita colisão e ajuda o usuário a saber de que plugin a tool veio.
+
+### A tool também é EDITÁVEL pela tela (e isso impõe uma regra ao seu módulo)
+
+Além da row em `tool_overrides`, toda tool de `entry.tools` ganha uma row em **`ai_tools`** (`kind='plugin'`, `plugin_id=<id>`), **semeada sozinha no boot a partir do seu `tools.py` em disco** — você não insere nada no banco, não escreve migration e não declara nada a mais no manifest. É isso que faz a tool aparecer em **Configurações de IA → Tools** (`/ai/tools`) com as MESMAS opções das tools do core: liga/desliga, **Editar código**, **Histórico** e **Excluir**.
+
+⚠️ **Por isso o módulo de `entry.tools` tem de ser LIVRE DE EFEITO COLATERAL NO IMPORT.** Quando o operador salva uma edição pela tela, o código do banco é compilado e **re-executado in-process**, sobrepondo o que está em disco. Um módulo que sobe thread, abre conexão, agenda task ou muta estado global **no import** faria isso duas vezes. Mantenha o topo do arquivo só com definições:
+
+- ✅ imports, constantes, os dicts de schema, as funções `execute_*`, o `CORE_TOOLS`;
+- 🚫 `threading.Thread(...).start()`, `asyncio.create_task(...)`, escrita em banco, registro em singleton do core, mutação de variável de outro módulo.
+
+Trabalho de inicialização vai para `entry.lifecycle` (`setup(ctx)` + `ctx.spawn_task`), nunca para o `tools.py`.
+
+Mais duas consequências que valem lembrar:
+
+- **A unidade de edição é o MÓDULO, não a tool.** Um `tools.py` com 3 tools vira 3 rows com o MESMO código; salvar uma propaga para as irmãs. Não escreva o arquivo supondo que cada tool possa divergir sozinha.
+- **Enquanto ninguém editar (`version <= 1`), o disco é que manda** — o código do banco é só o que a tela exibe. Depois da 1ª edição humana, o banco vence. Excluir pela tela grava um tombstone; a via de volta é **reinstalar o `.zip`** do plugin.
+
+Detalhes do mecanismo (as três procedências `builtin`/`plugin`/`code`, o compilador único, o tombstone) estão em **"Tool editável pela tela (core E plugin)"** no [CLAUDE.md](../../CLAUDE.md).

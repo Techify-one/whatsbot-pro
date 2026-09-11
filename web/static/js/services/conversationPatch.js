@@ -18,8 +18,10 @@
  * @property {number} [id] - contact id (legacy contact-only rows match by this).
  * @property {string} [conv_status]
  * @property {number|null} [assignee_user_id]
+ * @property {number|null} [team_id]
  * @property {string|null} [active_agent_key]
  * @property {boolean} [conv_ai_active]
+ * @property {string[]} [conv_labels] - etiquetas da CONVERSA (não as tags do contato).
  */
 
 /**
@@ -28,8 +30,10 @@
  * @property {number} [conversation_id]
  * @property {string} [status]
  * @property {number|null} [assignee_user_id]
+ * @property {number|null} [team_id]
  * @property {string|null} [active_agent_key]
  * @property {boolean} [ai_active]
+ * @property {string[]} [labels] - snapshot de `conversation_labels_changed`.
  * @property {{ custom_attributes?: any }} [fields] - e.g. `{ custom_attributes: {...} }`.
  */
 
@@ -68,8 +72,12 @@ export function conversationPatch(row, ev) {
   if (!ev) return patch;
   if (ev.status !== undefined) patch.conv_status = ev.status;
   if (ev.assignee_user_id !== undefined) patch.assignee_user_id = ev.assignee_user_id;
+  if (ev.team_id !== undefined) patch.team_id = ev.team_id;
   if (ev.active_agent_key !== undefined) patch.active_agent_key = ev.active_agent_key;
   if (ev.ai_active !== undefined) patch.conv_ai_active = ev.ai_active;
+  // `conversation_labels_changed` carries the conversation's label snapshot as
+  // `labels`; the sidebar row calls it `conv_labels` (o campo que os chips leem).
+  if (ev.labels !== undefined) patch.conv_labels = ev.labels;
   // A legacy contact-only row adopts the conversation id from the event.
   if (ev.conversation_id != null && row && row.conversation_id == null) {
     patch.conversation_id = ev.conversation_id;
@@ -78,9 +86,12 @@ export function conversationPatch(row, ev) {
 }
 
 /**
- * Apply a conversation event across a list of rows, returning a NEW array with
- * the targeted row(s) patched (others returned unchanged by reference). This is
- * the single-source mapping used by the sidebar's `setContacts(prev => …)`.
+ * Apply a conversation event across a list of rows. The targeted row(s) are patched
+ * (others returned unchanged by reference); quando NENHUMA linha muda, devolve o
+ * MESMO array (plano 130 · F2) — o `rows.map` cru trocava a identidade da lista em
+ * todo evento, re-renderizando a sidebar inteira e re-disparando o efeito da
+ * contagem das abas. This is the single-source mapping used by the sidebar's
+ * `setContacts(prev => …)`.
  *
  * @param {ConversationRow[]} rows
  * @param {ConversationEvent} ev
@@ -88,11 +99,18 @@ export function conversationPatch(row, ev) {
  */
 export function applyConversationEvent(rows, ev) {
   if (!Array.isArray(rows)) return rows;
-  return rows.map(row => {
+  let changed = false;
+  const next = rows.map(row => {
     if (!eventTargetsRow(row, ev)) return row;
     const patch = conversationPatch(row, ev);
-    return Object.keys(patch).length ? { ...row, ...patch } : row;
+    // Só conta como mudança se algum VALOR difere: um evento que reafirma o estado
+    // atual (o mesmo assignee, o mesmo status) não pode trocar a identidade da linha.
+    // `conv_labels` é array, então compara por referência — o lado seguro do erro.
+    if (!Object.keys(patch).some(k => row[k] !== patch[k])) return row;
+    changed = true;
+    return { ...row, ...patch };
   });
+  return changed ? next : rows;
 }
 
 /**

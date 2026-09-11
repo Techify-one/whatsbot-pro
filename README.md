@@ -170,7 +170,7 @@ Plugins ficam isolados na pasta `storages/plugins/` e podem ser instalados, ativ
 
 Para criar um plugin do zero, abra o projeto no Claude Code e rode `/new-plugin` — a IA pergunta o que você quer fazer e gera tudo (código, banco, tela, configurações) automaticamente.
 
-Documentação técnica completa em [CLAUDE.md](CLAUDE.md) (Sistema de plugins, Events e Filters).
+Documentação técnica em [CLAUDE.md](CLAUDE.md) (regras e convenções) e nos guias de [docs/](docs/) — sistema de plugins, barramento de eventos/filtros, canais, IA, deploy.
 
 ---
 

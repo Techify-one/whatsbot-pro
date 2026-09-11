@@ -7,6 +7,7 @@ import { highlightComposerMarkup, toWhatsAppMarkup } from '../../utils/formatWha
 import { syncMirror } from '../../utils/composerMirror.js';
 import { TemplatePickerHost, templatePickerAvailable } from './TemplatePickerHost.js';
 import { useQuickReplies } from '../../hooks/useQuickReplies.js';
+import { replaceToken } from '../../services/composerTokens.js';
 import { avatarUrl } from './utils.js';
 import { DefaultAvatar } from './icons.js';
 import { channelPickerMeta } from '../../services/providerCatalog.js';
@@ -89,8 +90,22 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   // quebras de linha divergem e o cursor descola do fim do texto).
   const mirrorRef = useRef(null);
   useEffect(() => {
-    syncMirror(inputRef.current, mirrorRef.current);
+    const sync = () => syncMirror(inputRef.current, mirrorRef.current);
+    sync();
+    // Remede na frame seguinte, já com o layout final do modal (plano 132 · F4).
+    const raf = requestAnimationFrame(sync);
+    return () => cancelAnimationFrame(raf);
   }, [message]);
+
+  // Re-sincroniza quando a LARGURA muda sem o texto mudar — o modal anima ao
+  // abrir e acompanha o redimensionamento da janela. Ver Composer.js (F4).
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => syncMirror(inputRef.current, mirrorRef.current));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   // Autocomplete do campo "Para": busca contatos por NOME ou número (server-side,
   // cobre todos os contatos independente do filtro da sidebar). Escolher um item
   // preenche o número e dispara a verificação de WhatsApp já existente.
@@ -259,9 +274,14 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
   // Texto livre só é permitido dentro da janela de 24h (ou em canais sempre-abertos
   // como o GOWA, onde windowOpen é sempre true). O template é SEMPRE opcional num
   // canal com suporte — mesmo dentro das 24h.
-  const freeTextAllowed = !templatesChannel || windowOpen;
-  // Fora da janela num canal com templates → texto livre indisponível, só template.
-  const windowClosed = templatesChannel && !windowOpen;
+  // ⚠️ NÃO volte a condicionar isto a `templatesChannel`: num canal SEM template
+  // (Instagram/Messenger) a janela fechada não tem plano B, e amarrar o bloqueio
+  // ao template deixava o operador escrever e mandar para receber 409 do backend.
+  // `!sessionState` = a consulta ainda não voltou/falhou → fail-open, quem decide
+  // é o servidor.
+  const freeTextAllowed = !sessionState || windowOpen;
+  // Fora da janela → texto livre indisponível (só template, onde houver).
+  const windowClosed = !!sessionState && !windowOpen;
 
   const canSendNormal = !!checkResult && !!channelId && message.trim().length > 0
     && !sending && freeTextAllowed && !sessionLoading;
@@ -306,22 +326,45 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
     }
   }
 
+  // ⚠️ O splice é o MESMO do compositor do chat e erra do mesmo jeito quando o
+  // cursor se move depois de o menu abrir: `start` é congelado na abertura e o
+  // caret é lido vivo do DOM, então um clique noutro ponto fazia
+  // `slice(0,start) + insert + slice(pos)` duplicar ou APAGAR o trecho entre os
+  // dois. Por isso aqui usa a mesma `replaceToken` guardada do compositor
+  // (plano 132 · F5) — e lê valor e índice da MESMA fonte, o DOM vivo.
   function applyQuickReply(cand) {
     if (!cand || !quickReplyMenu) return;
     const el = inputRef.current;
-    const pos = (el && el.selectionStart != null) ? el.selectionStart : message.length;
-    const before = message.slice(0, quickReplyMenu.start);
-    const after = message.slice(pos);
-    const insert = cand.content;
-    setMessage(before + insert + after);
+    const cur = el ? el.value : message;
+    const pos = (el && el.selectionStart != null) ? el.selectionStart : cur.length;
+    const { value: newVal, caret } = replaceToken(cur, quickReplyMenu.start, pos, cand.content);
+    setMessage(newVal);
     setQuickReplyMenu(null);
     setTimeout(() => {
       if (el) {
         el.focus();
-        const caret = (before + insert).length;
         el.setSelectionRange(caret, caret);
       }
     }, 0);
+  }
+
+  // O menu segue o CARET, não só o texto — ver useComposer.js (plano 132 · F5).
+  // `select` só dispara em seleção de verdade, daí o clique e as teclas de
+  // navegação entrarem separados; ArrowUp/ArrowDown ficam de fora porque são a
+  // navegação do próprio menu.
+  const CARET_MOVE_KEYS = new Set([
+    'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown',
+  ]);
+  // Conservador como no chat: o caret que se move só FECHA ou reancora um menu
+  // já aberto — nunca abre um. Um "/algo" no meio de uma mensagem pronta não
+  // pode fazer o menu saltar só porque o operador clicou ali.
+  function syncMenuToCaret(el) {
+    if (!el || !quickReplyMenu) return;
+    updateQuickReplyMenu(el, el.value);
+  }
+  function onCaretMove(e) { syncMenuToCaret(e.target); }
+  function onCaretKeyUp(e) {
+    if (CARET_MOVE_KEYS.has(e.key)) syncMenuToCaret(e.target);
   }
 
   function onMessageInput(e) {
@@ -479,9 +522,13 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
           ${checkResult && windowClosed ? html`
             <div class="flex items-start gap-1.5 rounded-lg border border-amber-200 bg-amber-100 text-amber-700 px-3 py-2.5 text-[13px]">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 mt-0.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-              <span>${sessionState && sessionState.has_conversation
-                ? 'Passaram-se mais de 24 horas desde a última mensagem do cliente. Só é possível enviar um template aprovado.'
-                : 'Ainda não há conversa com este número neste canal. O primeiro contato precisa ser um template aprovado.'}</span>
+              <span>${templatesChannel
+                ? (sessionState && sessionState.has_conversation
+                  ? 'Passaram-se mais de 24 horas desde a última mensagem do cliente. Só é possível enviar um template aprovado.'
+                  : 'Ainda não há conversa com este número neste canal. O primeiro contato precisa ser um template aprovado.')
+                : (sessionState && sessionState.has_conversation
+                  ? 'Fora da janela de mensagens deste canal. Aguarde o cliente responder para voltar a enviar mensagens.'
+                  : 'Este canal não permite iniciar a conversa: o primeiro contato precisa partir do cliente.')}</span>
             </div>
           ` : ''}
 
@@ -495,12 +542,18 @@ export function NewConversationModal({ contacts = [], onClose, onSent }) {
                 class="wa-field pointer-events-none absolute inset-0 z-0 overflow-hidden box-border rounded-lg px-3 py-2 text-[14px] whitespace-pre-wrap break-words border border-transparent ${(!freeTextAllowed && !sessionLoading) ? 'opacity-60' : ''}"
                 dangerouslySetInnerHTML=${{ __html: highlightComposerMarkup(message) }}
               ></div>
+              <!-- autocorrect OFF — ver Composer.js (plano 132 · F6). -->
               <textarea
                 ref=${inputRef}
                 value=${message}
                 onInput=${onMessageInput}
+                onSelect=${onCaretMove}
+                onClick=${onCaretMove}
+                onKeyUp=${onCaretKeyUp}
+                onBlur=${() => setQuickReplyMenu(null)}
                 onKeyDown=${onTextKeyDown}
                 onScroll=${(e) => syncMirror(e.target, mirrorRef.current)}
+                autocorrect="off"
                 disabled=${!freeTextAllowed && !sessionLoading}
                 placeholder=${freeTextAllowed ? 'Escreva sua mensagem aqui...  (use / para respostas rápidas)' : 'Texto livre indisponível fora da janela de 24h — envie um template.'}
                 rows="4"

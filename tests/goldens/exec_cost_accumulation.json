@@ -26,7 +26,8 @@
               "media_type": null,
               "msg_id": "<MSGID>",
               "reply_to_msg_id": null,
-              "text": "quanto custa?"
+              "text": "quanto custa?",
+              "ts": "<TS>"
             }
           ],
           "phone": "5511975500004"

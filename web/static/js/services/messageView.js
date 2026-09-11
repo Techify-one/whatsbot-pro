@@ -198,6 +198,35 @@ export function cardStateKey(m, index) {
  * @param {boolean} isOperator
  * @returns {string}
  */
+/**
+ * A mensagem é de um ATENDENTE HUMANO (envio manual pelo painel ou por automação
+ * que assina), e não da IA?
+ *
+ * ⚠️ Não basta olhar `status === 'operator'`. `status` é o estado de ENTREGA da
+ * linha: quando o provedor recusa por webhook, `mark_failed_by_msg_id`
+ * (db/repositories/message_repo.py) sobrescreve 'operator' por 'failed' — a
+ * função irmã `update_status_by_msg_id` recusa fazer isso de propósito, mas o
+ * caminho de falha não. Lendo autoria daquele campo, o painel assinava como "IA"
+ * toda mensagem manual que falhou (plano 143: 409 casos em 7 dias).
+ *
+ * O que sobrevive à sobrescrita é a marca de autoria — e é ela que decide aqui.
+ *
+ * ⚠️ A segunda metade da condição é obrigatória: sem exigir a marca de autoria,
+ * uma resposta da IA que falha passaria a assinar "Manual" — um rótulo errado
+ * trocado por outro.
+ *
+ * @param {{role?: string, status?: string, _status?: string,
+ *          sent_by_user_id?: any, sent_by_name?: string|null}} m
+ * @returns {boolean}
+ */
+export function isOperatorMessage(m) {
+  if (!m || m.role === 'user') return false;
+  if (m.status === 'operator') return true;
+  const failed = m.status === 'failed' || m._status === 'failed';
+  if (!failed) return false;
+  return m.sent_by_user_id != null || !!m.sent_by_name;
+}
+
 export function senderColor(isUser, isOperator) {
   // IA usa uma variável CSS (--wa-ai-label) que fica CLARA no modo escuro e escura
   // no claro — a cor inline não responderia ao tema sozinha. user→azul, operator→âmbar.
@@ -214,6 +243,28 @@ const AI_CONTENT_PREFIXES = [
   '[Transcrição do áudio]',
   '[Conteúdo do documento]',
 ];
+
+// O carimbo de autor que o inbound de GRUPO põe no `content` ("[Fulano]: ") —
+// não há coluna de remetente, o nome da bolha sai daqui. Gêmeo do
+// `_SENDER_PREFIX_RE` de server/transcription.py.
+const SENDER_PREFIX_RE = /^\[[^\]\n]+\]: /;
+
+/**
+ * `true` quando o rótulo extraído de um `[X]: ` é da IA, não uma pessoa.
+ *
+ * Linha LEGADA de imagem em grupo: a descrição era colada ANTES do "[Fulano]: "
+ * e engolia o autor, então `stripGroupPrefix` devolvia "Descrição da imagem"
+ * como se fosse o remetente — e a bolha assinava com isso. O produtor foi
+ * corrigido (o autor volta a vir primeiro), mas as linhas já gravadas
+ * continuam no banco.
+ *
+ * @param {string|null} label
+ * @returns {boolean}
+ */
+export function isAiContentLabel(label) {
+  if (typeof label !== 'string') return false;
+  return AI_CONTENT_PREFIXES.some((p) => p === `[${label}]`);
+}
 
 // Placeholders que o backend grava quando a mídia não tem legenda nenhuma. Não
 // são texto do cliente — o balão já desenha a própria mídia.
@@ -253,6 +304,19 @@ export function mediaCaptionOf(message, displayContent) {
     ? displayContent
     : (message.content || '');
   if (typeof body !== 'string' || !body) return '';
+  // Grupo: o autor ("[Fulano]: ") vem NA FRENTE do bloco da IA. Superfícies que
+  // não descontam o prefixo antes de chamar (preview da sidebar, citação) veem
+  // o content cru — sem esta linha o guard abaixo não casaria e a descrição
+  // vazaria como se fosse legenda do cliente. Só desconta quando o que sobra É
+  // bloco da IA; legenda normal de grupo continua intocada.
+  const senderMatch = body.match(SENDER_PREFIX_RE);
+  if (senderMatch) {
+    const rest = body.slice(senderMatch[0].length);
+    // Mídia sem legenda em grupo: o content é SÓ o carimbo de autor, que é
+    // rótulo de bolha e não legenda.
+    if (!rest.trim()) return '';
+    if (AI_CONTENT_PREFIXES.some((p) => rest.startsWith(p))) return '';
+  }
   if (AI_CONTENT_PREFIXES.some((p) => body.startsWith(p))) return '';
   for (const p of AI_CONTENT_PREFIXES) {
     const at = body.indexOf('\n' + p);

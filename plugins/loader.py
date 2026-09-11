@@ -48,6 +48,10 @@ class LoadedPlugin:
     plugin_dir: Path
     package_name: str
     tools: list[tuple[dict, callable]] = dataclasses.field(default_factory=list)
+    # Procedência do módulo de ``entry.tools`` — de onde ``agent.ai_plugin_tools``
+    # lê a fonte confiável para semear/reconciliar as rows editáveis em ai_tools.
+    # ``(nome_do_submódulo, caminho_no_disco)``; None quando o plugin não tem tools.
+    tools_module: tuple[str, str] | None = None
     prompt_fragments: list[callable] = dataclasses.field(default_factory=list)
     event_handlers: dict[str, callable] = dataclasses.field(default_factory=dict)
     # Each entry is either ``fn`` or ``(fn, priority:int)``.
@@ -60,6 +64,10 @@ class LoadedPlugin:
     teardown_fn: callable | None = None
     # Channel provider classes (plano 02 Fase 0): registered in the ChannelRegistry.
     channel_providers: list = dataclasses.field(default_factory=list)
+    # Plugin→plugin service surface (in-process, never HTTP — plugins.services).
+    services: dict[str, callable] = dataclasses.field(default_factory=dict)
+    services_version: str = "1.0"
+    services_allow: tuple = ()  # empty = any loaded plugin may call
 
     @property
     def id(self) -> str:
@@ -192,12 +200,14 @@ def _process_one(plugin_dir: Path, registry: PluginRegistry) -> None:
         registry.loaded[manifest.id] = loaded
         plugin_repo.set_load_error(manifest.id, None)
         logger.info(
-            "Plugin %s loaded (tools=%d prompts=%d events=%d filters=%d router=%s screens=%d)",
+            "Plugin %s loaded (tools=%d prompts=%d events=%d filters=%d "
+            "services=%d router=%s screens=%d)",
             manifest.id,
             len(loaded.tools),
             len(loaded.prompt_fragments),
             len(loaded.event_handlers),
             len(loaded.filters),
+            len(loaded.services),
             "yes" if loaded.router else "no",
             len(manifest.screens),
         )
@@ -243,6 +253,9 @@ def _entry_tools(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType
     tools_attr = getattr(mod, "CORE_TOOLS", None) or getattr(mod, "TOOLS", None)
     if not tools_attr:
         return
+    mod_file = getattr(mod, "__file__", None)
+    if mod_file:
+        loaded.tools_module = ((manifest.entry or {}).get("tools") or "tools", mod_file)
     for entry in tools_attr:
         if not isinstance(entry, tuple) or len(entry) != 2:
             logger.warning(
@@ -272,6 +285,18 @@ def _entry_filters(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleTy
     from plugins.events import validate_filters
     loaded.filters.update(
         validate_filters(manifest.id, getattr(mod, "FILTERS", None)))
+
+
+def _entry_services(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
+    # Validation lives in plugins.services — single source, same pattern as
+    # events/filters above. NEVER touches ``loaded.router``: the service surface
+    # is in-process only and must stay invisible to HTTP.
+    from plugins.services import validate_services
+    loaded.services.update(
+        validate_services(manifest.id, getattr(mod, "SERVICES", None)))
+    loaded.services_version = str(getattr(mod, "SERVICES_VERSION", "1.0"))
+    allow = getattr(mod, "SERVICES_ALLOW", None)
+    loaded.services_allow = tuple(allow) if allow else ()
 
 
 def _entry_routes(loaded: LoadedPlugin, manifest: PluginManifest, mod: ModuleType) -> None:
@@ -313,6 +338,10 @@ _ENTRY_SPECS: list[tuple[str, callable]] = [
     ("settings", _entry_settings),    # Settings (Pydantic BaseModel) — phase 6
     ("channels", _entry_channels),    # CHANNEL_PROVIDERS=[ChannelClass, ...] — plano 02
     ("lifecycle", _entry_lifecycle),  # setup(ctx)/teardown(ctx) — plano 09 Fase 1
+    # APPENDED at the end on purpose: the order above is the legacy load order and
+    # every position must stay put. A core without this row simply never consults
+    # ``entry.services`` — which is what keeps a provider loadable on an older core.
+    ("services", _entry_services),    # SERVICES={"op": callable, ...}
 ]
 
 

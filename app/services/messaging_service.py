@@ -35,8 +35,10 @@ import random
 import time
 from dataclasses import dataclass
 
+from pathlib import Path
+
 from channels import ai_settings
-from db.repositories import agent_repo, contact_repo, conversation_repo
+from db.repositories import agent_repo, contact_repo, conversation_repo, message_repo
 from agent import group_mentions
 from server import sound_catalog, system_notices
 from server.execution import (
@@ -44,9 +46,11 @@ from server.execution import (
     astamp_execution_channel, aset_execution_texts, set_current_contact_id,
 )
 from server.helpers import parse_split_reply
+from server.upload_names import unique_media_name
 from server.transcription import (
     maybe_transcribe,
     format_media_content,
+    split_sender_prefix,
     placeholder_for_unrenderable,
 )
 from plugins.events import apply_filter, emit_with_filter
@@ -68,6 +72,240 @@ async def error_bubble(ws_manager, phone: str, content: str) -> None:
         "phone": phone,
         "message": {"role": "error", "content": content, "ts": time.time()},
     })
+
+
+# ── Resolução de rota do envio do operador (R-txt) ────────────────────────────
+#
+# Estas cinco funções eram closures dentro de ``contacts.register_routes`` e por
+# isso NÃO existiam para nenhum outro chamador. Subiram para o módulo porque a
+# fachada ``/api/v1`` precisa das MESMAS regras — duplicá-las produziria a
+# divergência silenciosa que o plano descreve (mandar para o JID errado, fora da
+# janela de 24h, sem calar a IA). O comportamento é o mesmo byte a byte; só o
+# ``session_window_block`` mudou de FORMA (devolve um veredito de domínio em vez
+# de um ``JSONResponse``), e a rota volta a montar o ``_err`` a partir dele.
+
+
+def is_sandbox_contact(phone: str) -> bool:
+    """True para contato de teste/sandbox — o envio nunca vai ao provedor."""
+    from db.repositories import config_repo
+    from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
+    return bool(config_repo.get(f"{SANDBOX_CONTACT_PREFIX}{phone}"))
+
+
+def resolve_channel_id(phone: str, conversation_id=None, channel_id=None) -> str:
+    """Canal a que a conversa pertence (plano 11 D1).
+
+    A UI conversa-cêntrica passa ``conversation_id``; um ``channel_id`` explícito
+    é usado ao iniciar uma conversa NOVA em folha (ainda não existe linha de
+    conversa — quem escolhe é o seletor de caixa). Chamador legado (nenhum dos
+    dois) cai em ``"default"`` (GOWA), preservando o comportamento anterior.
+    Roteamento por CANAL, nunca por nome.
+    """
+    if conversation_id:
+        try:
+            conv = conversation_repo.get_with_channel(int(conversation_id))
+        except (TypeError, ValueError):
+            conv = None
+        if conv and conv.get("channel_id"):
+            return conv["channel_id"]
+    if channel_id:
+        return str(channel_id)
+    return "default"
+
+
+def wire_target(phone: str, conversation_id=None) -> str:
+    """Endereço REAL de envio (o JID de que a conversa recebe), não ``contacts.phone``.
+
+    ``contacts.phone`` pode divergir do JID da conta — o clássico 9º dígito
+    brasileiro. Um envio manual pelo ``phone`` cru ia para um JID FANTASMA (o
+    provedor devolve msg_id, o WhatsApp descarta em silêncio). Fallback para
+    ``phone`` em qualquer falha — nunca levanta.
+    """
+    if not conversation_id:
+        return phone
+    from db.repositories import contact_inbox_repo
+    try:
+        conv = conversation_repo.get(int(conversation_id))
+        ci_id = (conv or {}).get("contact_inbox_id")
+        if not ci_id:
+            return phone
+        ci = contact_inbox_repo.get(int(ci_id))
+        cand = ((ci or {}).get("source_jid") or (ci or {}).get("source_id") or "").strip()
+    except Exception:  # noqa: BLE001 — um tropeço de resolução nunca bloqueia o envio
+        return phone
+    if cand.endswith("@g.us"):
+        return cand
+    if cand.endswith("@s.whatsapp.net"):
+        digits = cand.split("@", 1)[0]
+        return digits if digits.isdigit() else phone
+    return phone
+
+
+def resolve_inbox_id(conversation_id=None, channel_id=None) -> int | None:
+    """Inbox alvo de uma escrita do operador (plano inboxes/canais §4.7).
+
+    Prefere a inbox da conversa; cai na inbox do canal quando a conversa está
+    nascendo. ``None`` quando indeterminável — e o chamador
+    (``can_access_inbox``) NEGA nesse caso para usuário escopado.
+    """
+    from db.repositories import inbox_repo
+    if conversation_id:
+        try:
+            conv = conversation_repo.get(int(conversation_id))
+        except (TypeError, ValueError):
+            conv = None
+        if conv:
+            return conv.get("inbox_id")
+    cid = str(channel_id) if channel_id else "default"
+    inbox = inbox_repo.get_by_channel(cid)
+    return inbox["id"] if inbox else None
+
+
+def session_window_block(outbound, channel_id, conversation_id, phone=None) -> dict | None:
+    """Veredito da janela de 24h da WhatsApp Cloud (plano 02 P17).
+
+    ``None`` = pode enviar — o que é SEMPRE o caso em canal sempre-aberto
+    (GOWA/Telegram, ``session_window_hours == 0``). Bloqueado ⇒
+    ``{"message": <PT-BR>, "reason": "session_window_closed"}``: a rota do painel
+    embrulha no ``_err(409)`` de sempre e a ``/api/v1`` devolve o seu próprio DTO.
+    Dirigido por CAPABILITY, nunca por nome de provider. Fora da janela só um
+    template aprovado passa — e canal SEM template ganha outro texto, porque
+    mandar o operador procurar um template que não existe é pior que não dizer
+    nada. A resposta agêntica (webhook) não passa por aqui e é inerentemente
+    dentro da janela, então nunca é afetada.
+
+    Sem ``conversation_id`` (conversa NOVA pelo modal "Nova conversa" — plano 21)
+    mas com ``phone``, resolve a conversa mais recente do contato NAQUELA inbox,
+    para honrar uma janela de 24h já aberta — senão um envio novo seria bloqueado
+    por engano no meio da janela.
+    """
+    from db.repositories import message_repo
+    caps = outbound.capabilities(channel_id)
+    if not getattr(caps, "session_window_hours", 0):
+        return None
+    last_ts = None
+    if conversation_id:
+        try:
+            last_ts = message_repo.last_inbound_ts(conversation_id=int(conversation_id))
+        except (TypeError, ValueError):
+            last_ts = None
+    elif phone:
+        from db.repositories import inbox_repo
+        contact = contact_repo.get_by_phone(phone)
+        if contact:
+            inbox = inbox_repo.get_by_channel(channel_id)
+            conv = (conversation_repo.get_latest_for_contact_inbox(
+                contact["id"], inbox["id"]) if inbox else None)
+            if conv:
+                last_ts = message_repo.last_inbound_ts(conversation_id=conv["id"])
+    # ``by_human=True``: todo chamador deste guard é ação de OPERADOR.
+    if outbound.session_open(channel_id, last_ts, by_human=True):
+        return None
+    if outbound.supports(channel_id, "templates"):
+        msg = "Fora da janela de 24h: só é possível enviar um template aprovado."
+    else:
+        msg = ("Fora da janela de mensagens deste canal: aguarde o cliente "
+               "responder para voltar a enviar mensagens.")
+    return {"message": msg, "reason": "session_window_closed"}
+
+
+def media_limits_block(outbound, channel_id: str, kind: str, filename: str,
+                       size: int) -> dict | None:
+    """Veredito dos limites que o CANAL declara para ``kind`` (plano 151 · I3).
+
+    Irmão exato de :func:`session_window_block`: ``None`` = pode enviar, e o
+    bloqueio devolve ``{"message", "reason", "status"}`` — um veredito de
+    DOMÍNIO, não um ``JSONResponse``. Era uma closure em ``contacts.py`` que já
+    embrulhava no ``_err``, forma que a fachada ``/api/v1`` não tem como mapear
+    (ela tem DTO próprio).
+
+    Dirigido por capability, nunca por nome de provider: canal que não declara
+    limite para o kind (GOWA/Telegram) nunca é bloqueado. Roda ANTES de o upload
+    ir para o disco, então um envio bloqueado não deixa órfão em
+    ``statics/outbox/``.
+    """
+    from channels import media_limits as _media_limits
+    verdict = _media_limits.validate_upload(
+        filename, size, outbound.capabilities(channel_id), kind)
+    if verdict.ok:
+        return None
+    return {"message": verdict.message, "reason": verdict.reason,
+            "status": 413 if verdict.reason == _media_limits.TOO_BIG else 415}
+
+
+# ── A tabela por-``kind`` do envio de mídia (plano 151 · §2.2) ───────────────
+#
+# Isto É a regra, e por isso mora num lugar só. Cada rota de mídia do painel
+# montava seis parâmetros diferentes para a MESMA chamada de :meth:`send_media`;
+# a fachada ``/api/v1`` seria a quinta cópia. Duas cópias de uma tabela como esta
+# divergem em silêncio — o precedente no repo são as duas de ``send_template``,
+# que só foram reunidas no plano 119.
+#
+# ``body(caption, safe_name) -> (content, emit_text)``:
+#   * ``content``   — o que é PERSISTIDO e vira a bolha do painel;
+#   * ``emit_text`` — o texto do evento ``message.sent`` (plugin lê daqui).
+# Os dois divergem de propósito no áudio e no documento.
+_MEDIA_KIND_SPEC: dict[str, dict] = {
+    "image": {
+        "default_ext": ".png", "fallback_name": "img.png",
+        "error_label": "imagem", "transcribe": True,
+        "send_caption": True, "send_filename": False,
+        "body": lambda caption, name: (caption, caption),
+    },
+    "audio": {
+        # Nota de voz (PTT): ``/send/audio`` não aceita legenda, então a legenda
+        # NÃO é repassada — e o texto emitido é vazio, não "[Áudio]" (um plugin
+        # que leia ``text`` não deve receber um rótulo de UI).
+        "default_ext": ".ogg", "fallback_name": "voice.ogg",
+        "error_label": "áudio", "transcribe": True,
+        "send_caption": False, "send_filename": False,
+        "body": lambda caption, name: ("[Áudio]", ""),
+    },
+    "document": {
+        # A legenda NÃO substitui o rótulo: ela é anexada, para a bolha do painel
+        # continuar dizendo QUAL arquivo foi enviado.
+        "default_ext": ".bin", "fallback_name": "arquivo",
+        "error_label": "documento", "transcribe": False,
+        "send_caption": True, "send_filename": True,
+        "body": lambda caption, name: (
+            f"[Documento enviado: {name}]"
+            + (f"\n{caption.strip()}" if caption.strip() else ""),
+            caption),
+    },
+    "video": {
+        "default_ext": ".mp4", "fallback_name": "video.mp4",
+        "error_label": "vídeo", "transcribe": False,
+        "send_caption": True, "send_filename": False,
+        "body": lambda caption, name: (caption or "[Vídeo]", caption),
+    },
+}
+
+MEDIA_KINDS = tuple(_MEDIA_KIND_SPEC)
+
+
+def _unlink(path: Path) -> None:
+    """Remove um upload que acabou de ser recusado (sem órfão em ``statics/outbox``)."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _replace_outbox_file(new_dest: Path, transcoded: str, original: Path) -> Path:
+    """Move o arquivo recodificado para a outbox e descarta o upload original.
+
+    ``os.replace`` falha entre sistemas de arquivos diferentes (o ``ffmpeg``
+    escreve no ``tempdir`` do SO, que pode estar em outro device) — daí o
+    fallback para ``shutil.move``.
+    """
+    import os
+    import shutil
+    try:
+        os.replace(transcoded, new_dest)
+    except OSError:
+        shutil.move(transcoded, str(new_dest))
+    _unlink(original)
+    return new_dest
 
 
 # ── broadcast_and_emit (R-bc — generalized lift of conversations._broadcast) ──
@@ -121,6 +359,24 @@ async def broadcast_and_emit(deps, ws_event: str, bus_event: str, payload: dict,
     finally:
         if restore:
             set_current_execution(prev)
+
+
+def _turn_handed_off(tool_calls) -> bool:
+    """Este turno terminou transferindo o atendimento para um humano?
+
+    Plano 122 — o discriminador do perdão de ``_cycle_may_continue``: só um turno
+    que de fato chamou ``transfer_to_human`` pode falar depois de o gate ter sido
+    fechado, porque foi ele próprio quem o fechou
+    ([transfer_to_human.py:96-98] grava ``ai_active=0``).
+
+    ``not skipped`` é obrigatório e não é detalhe: um ``filter.tool.args`` que
+    aborte a tool ([agno_engine.py:239/287]) deixa a entrada em ``tool_calls`` com
+    ``skipped=True`` — e nesse caso o gate NÃO foi fechado por este turno, então
+    não há nada a perdoar.  Mesma forma dos predicados irmãos
+    ([:648] e agent_run_service.py:105/402).
+    """
+    return any(tc.get("tool") == "transfer_to_human" and not tc.get("skipped")
+               for tc in (tool_calls or []))
 
 
 # ── service context ───────────────────────────────────────────────────────────
@@ -222,16 +478,45 @@ class MessagingService:
         return int(epochs.get((channel_id, phone), 0) or 0)
 
     def _cycle_may_continue(self, channel_id: str, phone: str,
-                            abort_epoch: int | None) -> bool:
+                            abort_epoch: int | None, *,
+                            allow_self_handoff: bool = False) -> bool:
         """Whether this specific AI cycle may still put text on the wire.
 
         The database gate covers assignment/IA-OFF.  The generation closes the
         other takeover path: an operator SEND does not permanently disable the AI,
         but it must invalidate the reply that was already being prepared.
+
+        ``allow_self_handoff`` (plano 122) perdoa **apenas** o gate de banco, e só
+        quando o turno chamou ``transfer_to_human`` — que grava ``ai_active=0``
+        ([transfer_to_human.py:96-98]) no MEIO do turno e assim descartava a
+        despedida que ele mesmo acabou de escrever (226 transferências mudas em
+        produção entre 31/07 e 14/08).
+
+        ⚠️ A ordem das duas checagens É o contrato: a época vem PRIMEIRO e o perdão
+        nunca a alcança. É o que preserva o plano 96 inteiro — toda tomada humana
+        (``assign``/``assign_me``/``assign_unified``/``set_ai(0)`` e o envio do
+        operador) passa por ``abort_ai_cycle``, que incrementa a época antes de
+        qualquer outra coisa, inclusive quando se recusa a cancelar a task por
+        estar em ``sending``/``processing``.  ``transfer_to_human`` não toca na
+        época.  Inverter as duas linhas devolveria o bug do plano 96 em silêncio.
         """
         if abort_epoch is not None and self._abort_epoch(channel_id, phone) != abort_epoch:
             return False
+        if allow_self_handoff:
+            return True
         return self._ai_may_speak_now(channel_id, phone)
+
+    def _guard_reason(self, channel_id: str, phone: str,
+                      abort_epoch: int | None) -> str:
+        """Por que o guard cortou — só para log (leitura em memória, sem DB).
+
+        O texto único de antes ("gate fechado ou ciclo invalidado") fundia os dois
+        motivos, que agora têm consequências diferentes: época = humano assumiu;
+        gate = a conversa está desligada.  Diagnosticar a próxima ocorrência exige
+        saber qual dos dois foi."""
+        if abort_epoch is not None and self._abort_epoch(channel_id, phone) != abort_epoch:
+            return "ciclo invalidado pelo operador (época)"
+        return "gate da conversa fechado"
 
     # ── error bubble ──────────────────────────────────────────────────────────
 
@@ -245,7 +530,7 @@ class MessagingService:
                          emit_text: str, caption: str = "",
                          filename: str | None = None,
                          error_label: str,
-                         transcribe_audio: bool = False,
+                         transcribe: bool = False,
                          sent_by_user_id: int | None = None,
                          sent_by_name: str | None = None,
                          wire_phone: str | None = None) -> dict:
@@ -267,8 +552,10 @@ class MessagingService:
         The per-kind variation is parameterised: ``content`` (the persisted/broadcast
         body), ``emit_text`` (the ``message.sent`` text — caption for image/document,
         ``""`` for audio), ``caption`` + ``filename`` (forwarded to the channel's
-        media send), ``error_label`` (PT-BR wording), and ``transcribe_audio`` (the
-        audio-only tail). ``dest`` is the already-written ``Path``.
+        media send), ``error_label`` (PT-BR wording), and ``transcribe`` (the
+        transcription tail — plano 118: vale para ``audio`` E ``image``, gateado
+        por direção ``sent`` no ``<kind>_transcription_mode`` DO CANAL).
+        ``dest`` is the already-written ``Path``.
 
         Returns ``{"ok": True, "msg_id": ..., "media_path": ...}`` on success or
         ``{"ok": False, "error": ..., "kind": "send"|"unexpected"}`` when the send
@@ -307,9 +594,11 @@ class MessagingService:
             return {"ok": False, "error": str(e), "kind": "unexpected"}
 
         # msg_id is the channel external id (None for sandbox). Mark it processed so
-        # the webhook ignores the WhatsApp echo of our own message.
+        # the webhook ignores the echo of our own message. The key MUST carry the
+        # channel prefix: it is the format ``_ingest_echo`` looks up, and the raw id
+        # registered here before never matched anything (dead guard).
         if msg_id:
-            state.processed_messages.add(msg_id)
+            state.processed_messages.add(f"{channel_id}:{msg_id}")
 
         rel_path = f"statics/outbox/{dest.name}"
         msg_data = {
@@ -328,7 +617,7 @@ class MessagingService:
         _allow_reopen = await apply_filter(
             "filter.conversation.before_reopen", True,
             {"phone": phone, "role": "assistant", "text": emit_text})
-        contact.add_message("assistant", content, media_type=kind,
+        _saved = contact.add_message("assistant", content, media_type=kind,
                             media_path=rel_path, status="operator", msg_id=msg_id,
                             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
                             reopen=(False if not _allow_reopen else None))
@@ -336,23 +625,30 @@ class MessagingService:
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": channel_id, "message": msg_data})
         await emit_with_filter("message.sent", {
-            "phone": phone, "text": emit_text, "msg_id": msg_id,
+            "phone": phone, "channel_id": channel_id, "text": emit_text, "msg_id": msg_id,
+            "conversation_id": (_saved or {}).get("conversation_id"),
             "media_type": kind, "media_path": rel_path,
             "source": "operator", "status": "operator",
             "ts": time.time(),
         })
 
-        if transcribe_audio:
-            # Transcribe the operator-sent audio when enabled (audio_transcription_mode
-            # in sent/both) so the panel/AI can read what was said — same private card
-            # used for inbound media. Defensive: a transcription failure never breaks
-            # the send (the audio was already delivered above).
-            transcription = await maybe_transcribe(
-                "audio", str(dest),
-                settings=self.settings, agent_handler=agent_handler,
+        if transcribe:
+            # Transcreve/descreve a mídia que o OPERADOR acabou de enviar quando o
+            # canal marcou a direção "Enviadas" (``<kind>_transcription_mode``), para
+            # que painel/IA leiam o conteúdo — mesmo card privado da mídia de entrada.
+            # Defensivo: uma falha de transcrição nunca quebra o envio (a mídia já foi
+            # entregue acima).
+            #
+            # ⚠️ plano 118 B1 — usa o WRAPPER (``self.maybe_transcribe``), que resolve
+            # o gate PELO CANAL (``ai_settings.view``). Antes chamava o helper com
+            # ``settings=self.settings`` (o config GLOBAL), então marcar/desmarcar
+            # "Enviadas" no canal não tinha efeito nenhum neste caminho.
+            transcription = await self.maybe_transcribe(
+                kind, str(dest),
                 phone=phone, source="operator",
                 is_group=contact.is_group,
                 group_jid=phone if contact.is_group else None,
+                channel_id=channel_id,
             )
             if transcription:
                 contact.add_message("transcription", transcription)
@@ -366,18 +662,420 @@ class MessagingService:
                     },
                 })
 
-        return {"ok": True, "msg_id": msg_id, "media_path": rel_path}
+        # ``conversation_id`` é ADITIVO (plano 151 · I2): já estava em mãos
+        # (``_saved``, usado no emit acima) e a fachada ``/api/v1`` precisa dele
+        # no DTO de resposta. O painel ignora a chave.
+        return {"ok": True, "msg_id": msg_id, "media_path": rel_path,
+                "conversation_id": (_saved or {}).get("conversation_id")}
+
+    # ── Operator media UPLOAD (R-media — o preparo, plano 151 · F2) ─────────
+
+    async def send_media_upload(self, *, phone: str, kind: str, data: bytes,
+                                filename: str | None = None,
+                                content_type: str | None = None,
+                                caption: str = "",
+                                conversation_id=None, channel_id=None,
+                                sent_by_user_id: int | None = None,
+                                sent_by_name: str | None = None,
+                                inbox_guard=None) -> dict:
+        """Prepara e envia UMA mídia do operador — o irmão de :meth:`send_text`.
+
+        :meth:`send_media` (R14) já unificava a CAUDA (send → persist →
+        broadcast → emit). O que continuava copiado quatro vezes em
+        ``contacts.py`` era o **preparo**: desvio de sandbox, resolução de canal,
+        tomada humana, alvo de wire, janela de 24h, limites do canal, gravação em
+        disco, transcode de áudio/vídeo e — o pior — a tabela de SEIS parâmetros
+        que variam por ``kind``. Uma segunda cópia dessa tabela divergiria em
+        silêncio; foi o que aconteceu com ``send_template`` até o plano 119.
+
+        ⚠️ **``kind`` é do CHAMADOR e nunca é inferido do MIME.** É o que permite
+        mandar uma imagem como ``document`` — ``/send/file`` é ``documentMessage``
+        e não recomprime, então a foto chega com a qualidade original. O painel já
+        funciona assim (a zona "Arquivo" do compositor manda ``sendMode:'file'``);
+        inferir do ``content_type`` faria o oposto do que o operador pediu.
+
+        ⚠️ **A ordem é contrato** e é a das rotas de mídia do painel, que difere
+        da de :meth:`send_text`: aqui o ``inbox_guard`` vem ANTES do desvio de
+        sandbox (no texto vem depois). Inverter muda o status de um contato de
+        sandbox numa caixa alheia de 403 para 200.
+
+        Devolve ``{"ok": True, "msg_id", "media_path", "conversation_id",
+        "channel_id", "kind", "sandbox"}`` ou ``{"ok": False, "reason",
+        "message", "status"[, "data"][, "provider_error"]}``. ``provider_error``
+        é o texto CRU do provedor, que a rota de vídeo inspeciona para traduzir o
+        código 131053 numa dica acionável.
+        """
+        spec = _MEDIA_KIND_SPEC.get(kind)
+        if spec is None:
+            return {"ok": False, "reason": "invalid_kind", "status": 400,
+                    "message": ("Tipo de mídia inválido. Use um de: "
+                                + ", ".join(sorted(_MEDIA_KIND_SPEC)) + ".")}
+
+        outbound = self.outbound
+        caption = caption or ""
+
+        # 1) gate de caixa — PRIMEIRO, como nas rotas do painel (ver o ⚠️ acima).
+        if inbox_guard is not None:
+            denied = await inbox_guard()
+            if denied:
+                return denied
+
+        # 2) sandbox: fica local, nunca vai ao provedor (o número não é real).
+        is_sandbox = await asyncio.to_thread(is_sandbox_contact, phone)
+
+        # 3) canal → tomada humana → alvo de wire (o JID REAL da conversa).
+        resolved_channel = await asyncio.to_thread(
+            resolve_channel_id, phone, conversation_id, channel_id)
+        abort_ai_cycle(self._deps, resolved_channel, phone)
+        wire_phone = await asyncio.to_thread(wire_target, phone, conversation_id)
+
+        # 4) janela de 24h ANTES de gravar (envio bloqueado não deixa órfão).
+        if not is_sandbox:
+            block = await asyncio.to_thread(
+                session_window_block, outbound, resolved_channel,
+                conversation_id, phone)
+            if block:
+                return {"ok": False, "reason": block["reason"], "status": 409,
+                        "message": block["message"],
+                        "data": {"reason": block["reason"]}}
+
+        # 5) preparo por kind: limites → grava → valida/transcodifica.
+        safe_name = Path(filename or "arquivo").name
+        prepared = await self._prepare_media_file(
+            spec, kind, data, filename=filename, safe_name=safe_name,
+            content_type=content_type, channel_id=resolved_channel,
+            is_sandbox=is_sandbox)
+        if not prepared["ok"]:
+            return prepared
+        dest = prepared["dest"]
+
+        # 6) a tabela por-kind — UM lugar só (§2.2 do plano 151).
+        content, emit_text = spec["body"](caption, safe_name)
+        result = await self.send_media(
+            channel_id=resolved_channel, phone=phone, kind=kind, dest=dest,
+            is_sandbox=is_sandbox, content=content, emit_text=emit_text,
+            caption=(caption if spec["send_caption"] else ""),
+            filename=(safe_name if spec["send_filename"] else None),
+            error_label=spec["error_label"], transcribe=spec["transcribe"],
+            sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+            wire_phone=wire_phone)
+
+        if not result["ok"]:
+            verb = "Falha" if result.get("kind") == "send" else "Erro"
+            return {"ok": False, "reason": "send_failed", "status": 500,
+                    "message": f"{verb} ao enviar {spec['error_label']}: "
+                               f"{result.get('error')}",
+                    "provider_error": result.get("error") or ""}
+
+        return {"ok": True, "msg_id": result.get("msg_id"),
+                "media_path": result.get("media_path"),
+                "conversation_id": result.get("conversation_id"),
+                "channel_id": resolved_channel, "kind": kind,
+                "sandbox": is_sandbox}
+
+    async def _prepare_media_file(self, spec, kind: str, data: bytes, *,
+                                  filename: str | None, safe_name: str,
+                                  content_type: str | None, channel_id: str,
+                                  is_sandbox: bool) -> dict:
+        """Grava o upload e o valida contra o que o CANAL declara.
+
+        ⚠️ **As ordens de áudio e vídeo são diferentes de propósito — não
+        "harmonize".** Áudio: um canal que declara ``AudioLimits`` (codec-aware)
+        precisa do arquivo em disco para o ``ffprobe``, então grava→valida→
+        recodifica; um canal com ``MediaLimits`` simples (ou nenhum) faz o
+        bloqueio BARATO antes de gravar. Vídeo sempre grava antes, porque a
+        validação dele é sempre por ``ffprobe``. Unificar as duas quebra o
+        transcode de uma delas.
+
+        Devolve ``{"ok": True, "dest": Path}`` ou o mesmo dict de erro de
+        :meth:`send_media_upload`.
+        """
+        from channels import (audio_transcode, audio_validate,
+                              video_transcode, video_validate)
+
+        outbound = self.outbound
+        outbox = Path(self._deps.statics_outbox_dir)
+        size = len(data)
+
+        # Nome usado no CHEQUE DE LIMITE (extensão + tamanho). Para documento é o
+        # nome saneado — que é também o que o destinatário vê e o que define o
+        # MIME no fio.
+        limit_name = safe_name if kind == "document" else (
+            filename or spec["fallback_name"])
+
+        caps = outbound.capabilities(channel_id) if not is_sandbox else None
+        alimits = (audio_validate.audio_limits(caps)
+                   if kind == "audio" and caps is not None else None)
+
+        # Bloqueio barato ANTES de gravar. Vídeo nunca passa por aqui (a política
+        # dele é ``video_validate``, que inspeciona codec); áudio só quando o
+        # canal NÃO declarou ``AudioLimits``.
+        if not is_sandbox and kind != "video" and alimits is None:
+            block = media_limits_block(outbound, channel_id, kind, limit_name, size)
+            if block:
+                return {"ok": False, "reason": block["reason"],
+                        "status": block["status"], "message": block["message"],
+                        "data": {"reason": block["reason"]}}
+
+        # O nome EM DISCO vem do MIME validado, nunca do nome do cliente
+        # (``.html``/``.svg`` servidos same-origin = XSS armazenado — plano 64).
+        dest = outbox / unique_media_name(
+            content_type, (safe_name if kind == "document" else filename),
+            default_ext=spec["default_ext"])
+        await asyncio.to_thread(dest.write_bytes, data)
+
+        if kind == "audio" and alimits is not None:
+            verdict = await asyncio.to_thread(
+                audio_validate.validate_audio, str(dest), caps)
+            if not verdict.ok:
+                # Recodifica para o container/codec que ESTE canal declarou
+                # (ex.: Ogg/Vorbis → Ogg/Opus, o único ogg que a Meta aceita).
+                transcoded = await asyncio.to_thread(
+                    audio_transcode.transcode_to_limits, str(dest), alimits)
+                if transcoded:
+                    dest = _replace_outbox_file(
+                        outbox / f"{int(time.time() * 1000)}{Path(transcoded).suffix}",
+                        transcoded, dest)
+                else:
+                    _unlink(dest)
+                    status = 413 if verdict.reason == audio_validate.TOO_BIG else 415
+                    return {"ok": False, "reason": verdict.reason, "status": status,
+                            "message": verdict.message,
+                            "data": {"reason": verdict.reason}}
+
+        if kind == "video" and not is_sandbox:
+            verdict = await asyncio.to_thread(
+                video_validate.validate_video, str(dest), caps)
+            if not verdict.ok:
+                limits = video_validate.video_limits(caps)
+                transcoded = await asyncio.to_thread(
+                    video_transcode.transcode_to_limits, str(dest), limits)
+                if transcoded:
+                    dest = _replace_outbox_file(
+                        outbox / unique_media_name("video/mp4", "video.mp4",
+                                                   default_ext=".mp4"),
+                        transcoded, dest)
+                else:
+                    _unlink(dest)
+                    status = 413 if verdict.reason == video_validate.TOO_BIG else 415
+                    return {"ok": False, "reason": verdict.reason, "status": status,
+                            "message": verdict.message,
+                            "data": {"reason": verdict.reason}}
+
+        return {"ok": True, "dest": dest}
+
+    # ── Operator text send (R-txt — o irmão de send_media para TEXTO) ────────
+
+    async def send_text(self, *, phone: str, message: str,
+                        conversation_id=None, channel_id=None,
+                        reply_to: str | None = None,
+                        sent_by_user_id: int | None = None,
+                        sent_by_name: str | None = None,
+                        inbox_guard=None) -> dict:
+        """Envia UMA mensagem de texto do operador e persiste/transmite/emite.
+
+        Era ~150 linhas dentro do handler ``POST /api/contacts/{phone}/send`` e
+        NÃO existia como função de serviço — então qualquer segunda superfície
+        (a fachada ``/api/v1``) teria de reimplementar regras que não podem
+        divergir: janela de 24h, ``filter.reply.part`` (cópia exibida) E
+        ``filter.outbound.text`` (wire-only), ``filter.conversation.before_reopen``,
+        o JID real via :func:`wire_target` (o ghost-send do 9º dígito), @menções
+        de grupo, o dedupe de eco ``state.recently_sent`` chaveado no alvo de
+        wire, ``abort_ai_cycle`` (calar o ciclo da IA em andamento — plano 96) e
+        o desvio de sandbox.
+
+        Mesmo precedente do refactor R14, que já unificou a cauda das três rotas
+        de mídia em :meth:`send_media`: as DUAS superfícies (painel e v1) chamam
+        esta função, e o comportamento do painel não muda.
+
+        ``inbox_guard`` é um callable ``async () -> dict | None`` chamado no
+        MESMO ponto em que o handler original checava o acesso à caixa — depois
+        do desvio de sandbox e antes de resolver o canal. A ordem é contrato: um
+        contato de sandbox nunca passou pelo gate de inbox.
+
+        Devolve ``{"ok": True, "msg_id", "conversation_id", "channel_id",
+        "message", "sandbox"}`` ou ``{"ok": False, "reason", "message",
+        "status"[, "data"]}`` — a rota mapeia para o envelope que ela já
+        devolvia. ``data`` só existe quando o envelope legado carregava um extra
+        (hoje: o ``{"reason": "session_window_closed"}`` do bloqueio de 24h).
+        """
+        from gowa.client import GOWASendError
+
+        outbound = self.outbound
+        ws_manager = self.ws_manager
+        state = self.state
+        agent_handler = self.agent_handler
+
+        message = (message or "").strip()
+        if not message:
+            return {"ok": False, "reason": "empty",
+                    "message": "Campo 'message' é obrigatório.", "status": 400}
+        reply_to = (reply_to or "").strip() or None
+
+        # Filtro de plugin: assinatura/formatação/redação no envio do operador.
+        filtered = await apply_filter(
+            "filter.reply.part", message,
+            {"phone": phone, "index": 0, "total": 1, "source": "operator",
+             "sent_by_name": sent_by_name},
+        )
+        if filtered is None:
+            return {"ok": False, "reason": "blocked_by_plugin",
+                    "message": "Mensagem bloqueada por plugin.", "status": 400}
+        message = filtered
+
+        # Regra "ignorar abertura": um filtro pode impedir que este envio REABRA
+        # uma conversa fechada. Sem plugin registrado ⇒ True ⇒ reopen=None (default).
+        _allow_reopen = await apply_filter(
+            "filter.conversation.before_reopen", True,
+            {"phone": phone, "role": "assistant", "text": message})
+        _reopen = False if not _allow_reopen else None
+
+        # Sandbox/contato de teste — nunca vai ao provedor (o número não é real).
+        if await asyncio.to_thread(is_sandbox_contact, phone):
+            msg_data = await asyncio.to_thread(
+                agent_handler.save_operator_message, phone, message, status="operator",
+                reply_to_msg_id=reply_to,
+                sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                reopen=_reopen,
+            )
+            await ws_manager.broadcast("new_message", {"phone": phone, "message": msg_data})
+            await emit_with_filter("message.sent", {
+                "phone": phone, "text": message, "msg_id": None,
+                "channel_id": channel_id or "default",
+                "conversation_id": (msg_data or {}).get("conversation_id"),
+                "media_type": None, "media_path": None,
+                "source": "operator", "status": "operator",
+                "reply_to_msg_id": reply_to,
+                "ts": time.time(),
+            })
+            logger.info("[Send] Sandbox contact %s — message saved locally (no GOWA)", phone)
+            return {"ok": True, "sandbox": True, "msg_id": None,
+                    "conversation_id": (msg_data or {}).get("conversation_id"),
+                    "channel_id": channel_id or "default",
+                    "message": "Mensagem enviada."}
+
+        if inbox_guard is not None:
+            denied = await inbox_guard()
+            if denied:
+                return denied
+
+        resolved_channel = await asyncio.to_thread(
+            resolve_channel_id, phone, conversation_id, channel_id)
+        abort_ai_cycle(self._deps, resolved_channel, phone)
+        # Alvo de wire = o JID de que a conversa realmente recebe (corrige o
+        # ghost-send do 9º dígito). ``phone`` segue sendo a chave de save/broadcast.
+        wire_phone = await asyncio.to_thread(wire_target, phone, conversation_id)
+        block = await asyncio.to_thread(
+            session_window_block, outbound, resolved_channel, conversation_id, phone)
+        if block:
+            # ``data`` é o EXTRA que o envelope do painel carregava neste caso
+            # específico (``{"reason": "session_window_closed"}``) — o compositor
+            # do frontend lê essa chave para decidir se oferece o fluxo de
+            # template. Só o bloqueio de janela a tinha; os demais erros deste
+            # handler nunca mandaram ``data``, e mandar agora mudaria a forma da
+            # resposta para clientes antigos.
+            return {"ok": False, "reason": block["reason"],
+                    "message": block["message"], "status": 409,
+                    "data": {"reason": block["reason"]}}
+
+        # @Nome / @todos → menção real, só em canal que suporta grupos. ``message``
+        # (com @Nome amigável) é o que se salva/exibe; ``send_text`` (com @<número>)
+        # + ``mentions`` vão no fio.
+        wire_text, mentions = message, None
+        if "@g.us" in phone and outbound.supports(resolved_channel, "groups"):
+            wire_text, mentions = await asyncio.to_thread(
+                group_mentions.resolve_outgoing, phone, message)
+
+        # Filtro WIRE-ONLY (ex.: assinatura): chega ao contato mas NÃO à cópia
+        # salva/transmitida (que continua usando ``message``).
+        _wired = await apply_filter(
+            "filter.outbound.text", wire_text,
+            {"phone": phone, "channel_id": resolved_channel, "source": "operator",
+             "sent_by_name": sent_by_name, "index": 0, "total": 1},
+        )
+        if _wired is not None:
+            wire_text = _wired
+
+        # Dedupe de eco — chaveado no alvo de WIRE (o eco volta carimbado com o
+        # JID real, não com o phone salvo).
+        state.recently_sent[f"{resolved_channel}:{wire_phone}:{wire_text[:120]}"] = time.time()
+
+        send_failed = False
+        error_msg = ""
+        msg_id = None
+        try:
+            res = await asyncio.to_thread(
+                outbound.send_text, resolved_channel, wire_phone, wire_text,
+                reply_to=reply_to, mentions=mentions)
+            if not res.ok:
+                raise GOWASendError(res.error or "Falha no envio")
+            msg_id = res.external_msg_id or ""
+        except GOWASendError as e:
+            logger.error("[Send] Failed to send message to %s: %s", phone, e)
+            send_failed = True
+            error_msg = str(e)
+        except Exception as e:  # noqa: BLE001 — preserva o handler original
+            logger.error("[Send] Failed to send message to %s: %s", phone, e)
+            send_failed = True
+            error_msg = str(e)
+
+        if send_failed:
+            msg_id = None
+
+        # Salva SEMPRE (com status="failed" quando o envio falhou).
+        try:
+            msg_data = await asyncio.to_thread(
+                agent_handler.save_operator_message, phone, message,
+                status="failed" if send_failed else "operator",
+                msg_id=msg_id, reply_to_msg_id=reply_to, channel_id=resolved_channel,
+                sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
+                reopen=_reopen,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("[Send] Failed to save message for %s: %s", phone, e)
+            return {"ok": False, "reason": "save_failed",
+                    "message": f"Erro ao salvar mensagem: {e}", "status": 500}
+
+        if send_failed:
+            await self.error_bubble(phone, f"Falha ao enviar mensagem: {error_msg}")
+            return {"ok": False, "reason": "send_failed",
+                    "message": f"Falha ao enviar mensagem: {error_msg}", "status": 500}
+
+        logger.info("[Send] Manual message to %s: %s", phone, message[:80])
+
+        await ws_manager.broadcast("new_message", {
+            "phone": phone,
+            "channel_id": resolved_channel,
+            "message": msg_data,
+        })
+        await emit_with_filter("message.sent", {
+            "phone": phone, "channel_id": resolved_channel, "text": message,
+            "msg_id": msg_id,
+            "conversation_id": (msg_data or {}).get("conversation_id"),
+            "media_type": None, "media_path": None,
+            "source": "operator", "status": "operator",
+            "reply_to_msg_id": reply_to,
+            "ts": time.time(),
+        })
+        return {"ok": True, "msg_id": msg_id, "sandbox": False,
+                "conversation_id": (msg_data or {}).get("conversation_id"),
+                "channel_id": resolved_channel,
+                "message": "Mensagem enviada."}
 
     # ── Reply Splitting & Sending ─────────────────────────────────────────────
 
     async def send_reply(self, channel_id: str, phone: str, reply: str, *,
                          agent_key: str | None = None,
-                         abort_epoch: int | None = None) -> bool:
+                         abort_epoch: int | None = None,
+                         allow_self_handoff: bool = False) -> bool:
         """Send reply (possibly split into multiple parts) and broadcast.
 
         Channel-aware (plano 11): every leg goes through ``OutboundRouter`` so the
         reply lands on the conversation's own channel. Presence / @mentions are
         gated by ``ChannelCapabilities`` — a Cloud channel skips them silently.
+
+        ``allow_self_handoff`` (plano 122): ver ``_cycle_may_continue``. Perdoa só o
+        gate de banco; a época continua cortando o split a qualquer momento.
         """
         outbound = self.outbound
         ws_manager = self.ws_manager
@@ -469,10 +1167,11 @@ class MessagingService:
             # também invalida o ciclo quando a ação foi um envio manual (que não
             # muda o gate persistido da conversa).
             if not await asyncio.to_thread(
-                    self._cycle_may_continue, channel_id, phone, abort_epoch):
-                logger.info("[Guard] resposta de %s/%s interrompida na parte %d/%d — "
-                            "gate fechado ou ciclo invalidado pelo operador",
-                            channel_id, phone, i + 1, len(parts))
+                    self._cycle_may_continue, channel_id, phone, abort_epoch,
+                    allow_self_handoff=allow_self_handoff):
+                logger.info("[Guard] resposta de %s/%s interrompida na parte %d/%d — %s",
+                            channel_id, phone, i + 1, len(parts),
+                            self._guard_reason(channel_id, phone, abort_epoch))
                 break
 
             # Track for echo-back filtering (key on the wire text we actually send)
@@ -855,7 +1554,8 @@ class MessagingService:
 
     async def _send_with_typing_guard(self, channel_id: str, phone: str, reply: str, *,
                                       agent_key: str | None = None,
-                                      abort_epoch: int | None = None) -> bool:
+                                      abort_epoch: int | None = None,
+                                      allow_self_handoff: bool = False) -> bool:
         """Wait for typing to stop and send, returning whether any part was delivered.
 
         Plano 96 I3 — ÚLTIMO ponto reversível: entre o gate (lido antes do LLM) e
@@ -863,6 +1563,9 @@ class MessagingService:
         humanizado. O veredito é reconsultado DEPOIS da espera e ANTES de ligar
         ``state.sending``. A task deixa de ser cancelável a partir daí, mas a geração
         de aborto e o gate são rechecados antes de cada parte, inclusive a primeira.
+
+        ``allow_self_handoff`` (plano 122) atravessa até o guard por-parte: sem isso
+        a despedida da transferência morreria aqui **ou** na parte 1/N.
         """
         state = self.state
         key = (channel_id, phone)
@@ -870,16 +1573,18 @@ class MessagingService:
             abort_epoch = self._abort_epoch(channel_id, phone)
         await self._wait_typing_paused(channel_id, phone)
         if not await asyncio.to_thread(
-                self._cycle_may_continue, channel_id, phone, abort_epoch):
-            logger.info("[Guard] resposta da IA descartada para %s/%s — "
-                        "gate fechado ou ciclo invalidado pelo operador",
-                        channel_id, phone)
+                self._cycle_may_continue, channel_id, phone, abort_epoch,
+                allow_self_handoff=allow_self_handoff):
+            logger.info("[Guard] resposta da IA descartada para %s/%s — %s",
+                        channel_id, phone,
+                        self._guard_reason(channel_id, phone, abort_epoch))
             return False
         state.sending[key] = True
         try:
             return await self.send_reply(
                 channel_id, phone, reply, agent_key=agent_key,
-                abort_epoch=abort_epoch)
+                abort_epoch=abort_epoch,
+                allow_self_handoff=allow_self_handoff)
         finally:
             state.sending[key] = False
 
@@ -978,9 +1683,22 @@ class MessagingService:
             except Exception:
                 pass
 
+            # plano 146: ``text_items`` guarda o ITEM INTEIRO de cada mensagem de
+            # texto — é dele que sai a identidade de cada linha (msg_id, reply_to,
+            # ts do provedor). ``text_parts``/``text_msg_ids`` continuam existindo
+            # só como material do ``combined``, que é o texto do CICLO (log +
+            # ``executions.input_text``), nunca mais o conteúdo de uma linha.
+            #
+            # ⚠️ Até o plano 146 havia aqui um ``text_reply_to``/``text_ts_last``
+            # que guardavam o valor do ÚLTIMO item: as N mensagens viravam UMA
+            # linha carimbada com a identidade da última, e o ``msg_id`` das
+            # anteriores era DESCARTADO. Toda citação que apontasse para uma
+            # mensagem engolida ficava órfã para sempre ("Mensagem original
+            # indisponível") — 33 casos em produção, ~1/dia. Não volte a derivar
+            # escalares do último item aqui.
             text_parts: list[str] = []
             text_msg_ids: list[str] = []
-            text_reply_to: str | None = None
+            text_items: list[dict] = []
             media_items: list[dict] = []
             for item in items:
                 if (item.get("image_path") or item.get("audio_path")
@@ -990,9 +1708,7 @@ class MessagingService:
                     text_parts.append(item.get("text", ""))
                     if item.get("msg_id"):
                         text_msg_ids.append(item["msg_id"])
-                    # Best-effort: the combined batch quotes the last quoted item.
-                    if item.get("reply_to_msg_id"):
-                        text_reply_to = item["reply_to_msg_id"]
+                    text_items.append(item)
 
             combined_preview = "\n".join(t for t in text_parts if t)
             await atrack_step("batch_accumulated", {
@@ -1027,36 +1743,60 @@ class MessagingService:
                 if combined:
                     logger.info("[Batch] Processing %d text messages from %s: %s",
                                 len(text_parts), phone, combined[:80])
-                    last_msg_id = text_msg_ids[-1] if text_msg_ids else None
-                    # Regra "ignorar abertura" (plugin): mantém a conversa fechada se a
-                    # mensagem recebida casar a regex (ela ainda foi salva/exibida). Sem
-                    # plugin registrado → apply_filter devolve True → reopen=None (default).
-                    _allow_reopen = await apply_filter(
-                        "filter.conversation.before_reopen", True,
-                        {"phone": phone, "role": "user", "text": combined})
-                    saved = contact.add_message("user", combined, msg_id=last_msg_id,
-                                        reply_to_msg_id=text_reply_to,
-                                        reopen=(False if not _allow_reopen else None))
-                    # plano 57: re-emite um new_message AUTORITATIVO pós-save (com o _id/ts
-                    # reais da linha) — fecha a janela "broadcast-antes-do-save" em que a 1ª
-                    # mensagem de uma conversa nova (ou quem abre na janela t=0↔save) nunca
-                    # renderiza ao vivo. `supersedes` = os msg_ids que o batch combinou nesta
-                    # única linha, p/ o front colapsar as bolhas otimistas das anteriores.
-                    # Defensivo: nunca quebra o save/IA.
-                    try:
-                        await ws_manager.broadcast("new_message", {
+                    # plano 146 — UMA LINHA POR MENSAGEM QUE O CLIENTE MANDOU.
+                    #
+                    # A mescla continua existindo, mas onde ela serve: o ``combined``
+                    # acima é a entrada do CICLO (um turno, uma chamada de LLM, uma
+                    # resposta). O histórico registra o que o cliente de fato fez.
+                    # Este laço é o espelho do ramo de mídia logo abaixo, que sempre
+                    # gravou uma linha por item — **copie a forma dali, não invente
+                    # outra**. Sem isto, o ``msg_id`` de toda mensagem menos a última
+                    # era descartado e a citação a ela ficava órfã (conversa 10886).
+                    saved = None
+                    for _item in text_items:
+                        _item_text = _item.get("text", "")
+                        if not _item_text:
+                            # Espelha o ``"\n".join(t for t in text_parts if t)``:
+                            # item vazio nunca virou conteúdo e continua não virando.
+                            continue
+                        # Regra "ignorar abertura" (plugin): mantém a conversa fechada se a
+                        # mensagem recebida casar a regex (ela ainda foi salva/exibida). Sem
+                        # plugin registrado → apply_filter devolve True → reopen=None (default).
+                        # plano 146: avaliada POR MENSAGEM — antes o regex via o bloco
+                        # inteiro, e uma frase que casasse suprimia a reabertura do batch todo.
+                        _allow_reopen = await apply_filter(
+                            "filter.conversation.before_reopen", True,
+                            {"phone": phone, "role": "user", "text": _item_text})
+                        saved = contact.add_message(
+                            "user", _item_text,
+                            msg_id=_item.get("msg_id"),
+                            reply_to_msg_id=_item.get("reply_to_msg_id"),
+                            reopen=(False if not _allow_reopen else None),
+                            ts=(_item.get("ts") or None))  # plano 129 M4 / 146
+                        # plano 57: re-emite um new_message AUTORITATIVO pós-save (com o _id/ts
+                        # reais da linha) — fecha a janela "broadcast-antes-do-save" em que a 1ª
+                        # mensagem de uma conversa nova (ou quem abre na janela t=0↔save) nunca
+                        # renderiza ao vivo. Defensivo: nunca quebra o save/IA.
+                        # plano 146: SEM ``supersedes`` — cada mensagem tem o seu próprio
+                        # msg_id e reconcilia com a própria bolha otimista, como a mídia.
+                        # (``build_inbound_saved_message`` mantém o parâmetro: linhas
+                        # mescladas legadas e um rollback do core ainda dependem dele.)
+                        try:
+                            await ws_manager.broadcast("new_message", {
+                                "phone": phone, "channel_id": channel_id,
+                                "message": build_inbound_saved_message(saved),
+                            })
+                        except Exception:
+                            logger.exception("[Batch] falha ao re-emitir new_message pós-save para %s", phone)
+                        await emit_with_filter("message.saved", {
                             "phone": phone, "channel_id": channel_id,
-                            "message": build_inbound_saved_message(saved, supersedes=text_msg_ids),
+                            "text": _item_text, "msg_id": _item.get("msg_id"),
+                            "conversation_id": (saved or {}).get("conversation_id"),
+                            "media_type": None, "media_path": None,
+                            "is_group": contact.is_group,
+                            "source": "batch_text",
+                            "ts": time.time(),
                         })
-                    except Exception:
-                        logger.exception("[Batch] falha ao re-emitir new_message pós-save para %s", phone)
-                    await emit_with_filter("message.saved", {
-                        "phone": phone, "text": combined, "msg_id": last_msg_id,
-                        "media_type": None, "media_path": None,
-                        "is_group": contact.is_group,
-                        "source": "batch_text",
-                        "ts": time.time(),
-                    })
                     if (self.ai_may_speak(contact, channel_id)
                             and self._abort_epoch(channel_id, phone) == abort_epoch):
                         if not agent_handler.api_key:
@@ -1089,7 +1829,14 @@ class MessagingService:
                                         sent = await self._send_with_typing_guard(
                                             channel_id, phone, result.reply,
                                             agent_key=result.agent_key,
-                                            abort_epoch=abort_epoch)
+                                            abort_epoch=abort_epoch,
+                                            allow_self_handoff=_turn_handed_off(
+                                                result.tool_calls))
+                                        # ⚠️ O takeover fica no predicado ESTRITO (plano
+                                        # 122 D4): um turno que terminou em transferência
+                                        # não é um "a IA assumiu" — o fio ficaria absurdo
+                                        # ("SISTEMA pausou a IA" seguido de "A IA assumiu
+                                        # a conversa"). Não propague o perdão para cá.
                                         if (sent and await asyncio.to_thread(
                                                 self._cycle_may_continue,
                                                 channel_id, phone, abort_epoch)):
@@ -1125,6 +1872,13 @@ class MessagingService:
             # ── Media items (each handled individually) ─────
             for item in media_items:
                 text = item.get("text", "")
+                # Em grupo o ``text`` começa com o ``"[Fulano]: "`` que o painel
+                # usa como rótulo da bolha (não há coluna de remetente). A
+                # descrição da IMAGEM é colada prefix-first, então sem separar o
+                # nome aqui ele ia parar na 2ª linha e a bolha passava a assinar
+                # "Descrição da imagem" — ou o nome do grupo.
+                sender_prefix, caption_text = (
+                    split_sender_prefix(text) if contact.is_group else ("", text))
                 image_path = item.get("image_path")
                 audio_path = item.get("audio_path")
                 document_path = (item.get("media_path")
@@ -1160,6 +1914,7 @@ class MessagingService:
                     media_caption=_saved_caption,
                     msg_id=item.get("msg_id"),
                     reply_to_msg_id=item.get("reply_to_msg_id"),
+                    ts=(item.get("ts") or None),  # plano 129 M5 — ts real do provedor
                 )
                 # plano 57: new_message autoritativo pós-save (cada mídia é 1 linha própria,
                 # com seu próprio msg_id → reconcilia no lugar; sem supersedes).
@@ -1171,8 +1926,9 @@ class MessagingService:
                 except Exception:
                     logger.exception("[Batch] falha ao re-emitir new_message (mídia) pós-save para %s", phone)
                 await emit_with_filter("message.saved", {
-                    "phone": phone, "text": _saved_text,
+                    "phone": phone, "channel_id": channel_id, "text": _saved_text,
                     "msg_id": item.get("msg_id"),
+                    "conversation_id": (saved or {}).get("conversation_id"),
                     "media_type": _saved_media_type,
                     "media_path": _saved_media_path,
                     "media_extras": item.get("media_extras"),
@@ -1213,16 +1969,40 @@ class MessagingService:
                     if audio_path:
                         new_content = format_media_content("audio", transcription)
                     elif image_path:
-                        new_content = format_media_content("image", transcription, text)
+                        new_content = format_media_content(
+                            "image", transcription, caption_text,
+                            sender_prefix=sender_prefix)
                     elif document_path:
                         new_content = format_media_content("document", transcription, text)
                     else:
                         new_content = None
                     if new_content:
-                        await asyncio.to_thread(
-                            agent_handler.update_last_user_message_content, phone,
-                            new_content, channel_id
-                        )
+                        # plano 133 — cola na linha que ESTE laço acabou de inserir,
+                        # mirada pelo ``id`` que o ``INSERT`` devolveu (⚠️ a chave é
+                        # ``"id"``; ``"_id"`` só existe no caminho de LEITURA,
+                        # ``message_repo._row_to_dict``).
+                        #
+                        # Aqui se chamava ``update_last_user_message_content``, que
+                        # REPROCURA "a última msg ``role='user'`` da conversa" por
+                        # ``ORDER BY ts DESC`` — sem exigir ``media_type``. Enquanto
+                        # o ``ts`` era o relógio do INSERT a mídia (salva por último)
+                        # vencia sempre e o alvo saía certo por acidente; desde o
+                        # plano 129 o ``ts`` é o REAL do provedor, e um TEXTO do
+                        # mesmo segundo tem carimbo maior. A descrição ia para a
+                        # linha de texto: prefixo interno virava bolha pública (sem
+                        # ``media_type`` o painel não o esconde), o texto do cliente
+                        # era destruído pelo UPDATE e a imagem ficava sem descrição.
+                        #
+                        # ⚠️ ``saved`` é rebindado a cada iteração do laço — a
+                        # colagem tem de ficar DENTRO da iteração.
+                        saved_id = (saved or {}).get("id")
+                        if saved_id:
+                            await asyncio.to_thread(
+                                message_repo.update_content, saved_id, new_content)
+                        else:
+                            logger.warning(
+                                "[Batch] mídia sem id no retorno do INSERT (%s): "
+                                "descrição/transcrição NÃO colada (plano 133)", phone)
                     if audio_path:
                         await self.deliver_audio_transcription(phone, contact, transcription,
                                                                channel_id=channel_id)
@@ -1258,7 +2038,9 @@ class MessagingService:
                     else:
                         llm_text = llm_text or "[Áudio recebido]"
                 elif image_path and transcription:
-                    llm_text = format_media_content("image", transcription, text)
+                    llm_text = format_media_content(
+                        "image", transcription, caption_text,
+                        sender_prefix=sender_prefix)
                 elif document_path and transcription:
                     llm_text = format_media_content("document", transcription, text)
 
@@ -1285,7 +2067,9 @@ class MessagingService:
                             sent = await self._send_with_typing_guard(
                                 channel_id, phone, result.reply,
                                 agent_key=result.agent_key,
-                                abort_epoch=abort_epoch)
+                                abort_epoch=abort_epoch,
+                                allow_self_handoff=_turn_handed_off(result.tool_calls))
+                            # Takeover no predicado ESTRITO — ver o call site de texto.
                             if (sent and await asyncio.to_thread(
                                     self._cycle_may_continue,
                                     channel_id, phone, abort_epoch)):
@@ -1322,6 +2106,32 @@ class MessagingService:
             await aend_execution(exec_id, error="cancelled")
             raise
         except Exception as exc:
+            # ⚠️ Este ``except`` cobre o ciclo INTEIRO do inbound — o save da
+            # mensagem do cliente incluído — e até o plano 141 ele era MUDO: o
+            # erro só existia dentro de ``executions.error``, tabela que ninguém
+            # abre sem já desconfiar de alguma coisa. Foi exatamente por isso que
+            # a destruição de TODO o inbound 1:1 dos canais GOWA durou 6 dias em
+            # produção em vez de minutos. Agora tem duas saídas visíveis: ``ERROR``
+            # no log e um card no painel.
+            logger.exception("[Batch] Falha no ciclo de inbound de %s (canal %s)",
+                             phone, channel_id)
+            # ⚠️ ORDEM PROPOSITAL: o aviso sai ANTES de ``aend_execution``.
+            # A bolha é só broadcast; ``aend_execution`` é ESCRITA NO BANCO — e
+            # quando a causa da falha é justamente o banco (o caso do plano 141),
+            # ela levanta também e levaria junto o único sinal que o atendente
+            # teria. O aviso não persiste por esse mesmo motivo: num ciclo que
+            # falhou ao escrever, gravar o aviso seria repetir a causa.
+            # Avisar também não pode mascarar o erro original: try/except próprio.
+            try:
+                await self.error_bubble(
+                    phone,
+                    "⚠️ Não foi possível registrar a mensagem recebida deste "
+                    "contato. Ela pode não aparecer no histórico — confira o "
+                    "WhatsApp antes de responder.")
+            except Exception:
+                logger.exception(
+                    "[Batch] Falha ao emitir a bolha de erro de inbound para %s",
+                    phone)
             await aend_execution(exec_id, error=str(exc))
         finally:
             # Always clear the "IA respondendo" hint (success, cancel, or error),

@@ -35,6 +35,15 @@ test('conversationPatch: only present keys are written', () => {
   assert.deepEqual(conversationPatch(row, { assignee_user_id: null }), { assignee_user_id: null });
 });
 
+test('conversationPatch: team_id (plano 153) is patched independently of assignee_user_id', () => {
+  const row = { conversation_id: 7 };
+  assert.deepEqual(conversationPatch(row, { team_id: 3 }), { team_id: 3 });
+  // team_id can be explicitly null (unassign the team) and must be written
+  assert.deepEqual(conversationPatch(row, { team_id: null }), { team_id: null });
+  // an event that only carries assignee_user_id must NOT touch team_id, and vice-versa (D1)
+  assert.deepEqual(conversationPatch(row, { assignee_user_id: 5 }), { assignee_user_id: 5 });
+});
+
 test('conversationPatch: empty event → empty patch', () => {
   assert.deepEqual(conversationPatch({ conversation_id: 7 }, {}), {});
 });
@@ -94,4 +103,26 @@ test('isConversationAttributeWrite', () => {
   assert.equal(isConversationAttributeWrite({ conversation_id: 1 }), false);
   assert.equal(isConversationAttributeWrite({ fields: { custom_attributes: {} } }), false);
   assert.equal(isConversationAttributeWrite(null), false);
+});
+
+// ── plano 130 · F2 — identidade do array preservada no no-op ─────────────────
+
+test('applyConversationEvent: evento que não atinge ninguém devolve a MESMA lista', () => {
+  const rows = [{ conversation_id: 1, conv_status: 'open' }, { conversation_id: 2 }];
+  assert.equal(applyConversationEvent(rows, { conversation_id: 99, status: 'resolved' }), rows);
+});
+
+test('applyConversationEvent: evento que reafirma o estado atual é no-op de identidade', () => {
+  const rows = [{ conversation_id: 1, conv_status: 'open', assignee_user_id: 7 }];
+  const out = applyConversationEvent(rows, { conversation_id: 1, status: 'open', assignee_user_id: 7 });
+  assert.equal(out, rows, 'nada mudou de valor ⇒ nada pode mudar de identidade');
+});
+
+test('applyConversationEvent: mudança real ⇒ array novo, linhas alheias intactas', () => {
+  const rows = [{ conversation_id: 1, conv_status: 'open' }, { conversation_id: 2, conv_status: 'open' }];
+  const out = applyConversationEvent(rows, { conversation_id: 2, status: 'resolved' });
+  assert.notEqual(out, rows);
+  assert.equal(out[0], rows[0]);
+  assert.equal(out[1].conv_status, 'resolved');
+  assert.equal(rows[1].conv_status, 'open', 'entrada não é mutada');
 });

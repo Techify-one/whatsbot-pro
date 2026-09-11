@@ -77,6 +77,10 @@ KNOWN_EVENTS: set[str] = {
     "channel.created", "channel.deleted", "channel.restored",
     "channel.members_changed", "channel.session_action",
     "channel.duplicate_refused",
+    # Inbound de SISTEMA de um canal (plano 82) — o ÚNICO gancho de bus para o
+    # que não é mensagem (``channels/events.py``). Produtor:
+    # ``server/routes/channel_webhook.py``.
+    "channel.system_event",
     # Connection / lifecycle
     "connection.changed",
     "app.startup", "app.shutdown",
@@ -100,6 +104,27 @@ KNOWN_EVENTS: set[str] = {
     "conversation.reopened", "conversation.unassigned",
     "conversation.transferred_to_human", "conversation.agent_changed",
     "conversation.attribute_set", "conversation.ai_takeover",
+    # Fixar/desafixar a conversa (``conversation_service.pin``).
+    "conversation.pinned",
+    # Atribuir/desatribuir TIME (plano 153 — ``conversation_service.assign_team``).
+    # Simétrico a .assigned/.unassigned mas para ``team_id``, INDEPENDENTE do
+    # assignee_user_id (D1 — os dois convivem). Payload: conversation_id, team_id,
+    # previous_team_id, ts. WS event continua ``conversation_assigned`` (reuso, D7).
+    "conversation.team_assigned", "conversation.team_unassigned",
+    # Etiquetas de CONVERSA (``server/routes/conversation_labels.py``):
+    # ``conversation.labeled`` é a atribuição de UMA conversa; os três
+    # ``conversation_label.*`` são o CRUD do registro GLOBAL de etiquetas.
+    "conversation.labeled",
+    "conversation_label.created", "conversation_label.updated",
+    "conversation_label.deleted",
+    # CRUD da definição de atributo customizado
+    # (``server/routes/custom_attributes.py``).
+    "custom_attribute.created", "custom_attribute.updated",
+    "custom_attribute.deleted",
+    # Motor de IA config-in-DB — save/rollback de agente, tool, variável ou
+    # prompt (``server/routes/ai_engine.py``). O cache do ``dynamic_registry``
+    # já foi invalidado quando o evento sai.
+    "ai.config.changed",
     "config.changed",
     "tool_override.changed",
     "execution.started", "execution.ended",
@@ -137,6 +162,10 @@ KNOWN_FILTERS: set[str] = {
     # Inbound webhook / message ingest
     "filter.webhook.payload",
     "filter.message.before_save", "filter.message.outgoing",
+    # ``filter.message.notify`` — bool (default True). False/None ⇒ mensagem
+    # SILENCIOSA: salva e exibida normalmente, mas sem incrementar não-lidas
+    # (nem badge, nem som). Produtor: ``app/services/message_ingest_service.py``.
+    "filter.message.notify",
     # Transcription / media. There is deliberately no generic "unknown media"
     # seam: providers must normalize inbound payloads to a supported InboundEvent
     # kind in ``Channel.parse_inbound``.  The old ``filter.media.unknown`` name
@@ -160,6 +189,29 @@ KNOWN_FILTERS: set[str] = {
     "filter.outbound.text",
     # AuthZ ABAC seam
     "filter.authz.decision",
+    # Onboarding / provisionamento — PAR SIMÉTRICO, ambos ``str``. O core resolve
+    # o destino da mensagem de provisionamento CAMPO A CAMPO (``/service_number``,
+    # que devolve ``{phone, message}`` e é a fonte da verdade → env
+    # ``TECHIFY_PROVISION_NUMBER``/``TECHIFY_PROVISION_MESSAGE`` → literal do
+    # código, a rede para o endpoint fora do ar) e oferece cada resultado ao seu
+    # filtro, que tem a última palavra.
+    #
+    # ``None``/``""`` em QUALQUER um dos dois ABORTA: o core RECUSA o envio e o
+    # wizard responde com erro acionável, em vez de mandar a frase para um número
+    # que ninguém escolheu — ou uma mensagem vazia para ele. O core não valida
+    # formato — normalizar o telefone é de quem responde.
+    #
+    # Os dois existem porque quem troca o número precisa poder trocar a frase
+    # junto: a mensagem É o gatilho que o destino reconhece, e um override só do
+    # número entrega uma frase que o outro lado ignora em silêncio. O ``message``
+    # é resolvido ANTES, então ``filter.provisioning.number`` já vê a frase final
+    # em ``ctx.extras``; o de mensagem só roda se houver destino, e recebe o
+    # número já decidido.
+    #
+    # ``ctx.extras``: ``{source ∈ {service_number, fallback}, message}`` no de
+    # número; ``{source, number}`` no de mensagem. Produtor dos dois:
+    # ``app/services/provisioning_service.fetch_provision_target``.
+    "filter.provisioning.number", "filter.provisioning.message",
     # Plano 23 Fase B4 — conversation lifecycle/ownership pre-action filters.
     # ``filter.conversation.before_status`` was RELOCATED from the route into
     # ``conversation_service``; ``filter.conversation.before_assign`` is new.
@@ -168,6 +220,11 @@ KNOWN_FILTERS: set[str] = {
     # in ``conversation_service.set_status`` on a close (default True = clear the
     # human assignee; a plugin returns False to KEEP the attendant assigned).
     "filter.conversation.clear_assignee_on_close",
+    # ``filter.conversation.before_reopen`` — bool (default True). False/None ⇒ a
+    # mensagem NÃO reabre uma conversa fechada: ela é salva e aparece normalmente,
+    # a conversa segue resolvida. 4 call sites (inbound + envio do operador,
+    # texto e mídia).
+    "filter.conversation.before_reopen",
     # Plano 23 Fase B5 — agent-turn seams (§4.2, experimental — may change while
     # the attendance plugin firms up):
     # ``filter.agent.resolve``: swap the resolved AgentSpec for a turn

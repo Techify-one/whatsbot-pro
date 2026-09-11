@@ -67,3 +67,30 @@ test('nenhuma crase dentro de comentário em template htm', () => {
     + 'CRASE dentro do comentário, que fecha o template e faz o componente sumir '
     + 'da tela sem erro visível. Reescreva o comentário sem crase.');
 });
+
+// ⚠️ SEGUNDA rede (2026-08-18): a heurística acima tem um furo estrutural — ela
+// fatia de cada `html\`` até a PRÓXIMA crase, então um comentário defeituoso que
+// caia ENTRE dois templates aninhados nunca chega a ser inspecionado. Foi assim
+// que um comentário com um número PAR de crases (``foo``) entrou no
+// AiSettingsFields.js, passou por esta suíte e por `node --input-type=module
+// --check`, e derrubou a tela de Canais: o modal de configuração nunca abria,
+// com `html(...) is not a function` no console.
+//
+// Esta checagem é textual e não depende de achar as fronteiras do template:
+// comentário HTML NUNCA leva crase, ponto. Se precisar citar código, tire o
+// comentário de dentro do template.
+test('nenhum comentário HTML contém crase (vale em qualquer lugar do arquivo)', () => {
+  const culpados = [];
+  for (const file of allJsFiles(JS_ROOT)) {
+    const src = readFileSync(file, 'utf8');
+    for (const m of src.matchAll(/<!--[\s\S]*?-->/g)) {
+      if (m[0].includes('`')) {
+        culpados.push(`${file.slice(JS_ROOT.length + 1)}:${src.slice(0, m.index).split('\n').length}`);
+      }
+    }
+  }
+  assert.deepEqual(culpados, [],
+    'comentário HTML com CRASE. Dentro de um template htm ela fecha o template e '
+    + 'o componente lança em runtime (a peça some da tela / o modal não abre). '
+    + 'Reescreva o comentário sem crase.');
+});

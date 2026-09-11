@@ -33,6 +33,8 @@ class ResourceType:
     BILLING = "billing"
     DATA = "data"
     CHANNEL = "channel"
+    API_KEY = "api_key"
+    WEBHOOK = "webhook"
 
 
 class AuditAction:
@@ -45,6 +47,14 @@ class AuditAction:
     USER_DISABLE = "user.disable"
     USER_DELETE = "user.delete"
     USER_PASSWORD_RESET = "user.password_reset"
+    # Chaves de API (plano "Sistema de API com chave por usuário"). O SEGREDO
+    # nunca entra no payload — só rótulo, dono e validade.
+    API_KEY_CREATE = "api_key.create"
+    API_KEY_REVOKE = "api_key.revoke"
+    # Webhooks de saída (fase 8). O SEGREDO do HMAC nunca entra no payload.
+    WEBHOOK_CREATE = "webhook.create"
+    WEBHOOK_UPDATE = "webhook.update"
+    WEBHOOK_DELETE = "webhook.delete"
     ROLE_ASSIGN = "role.assign"
     # Config / IA engine (plano 06)
     CONFIG_UPDATE = "config.update"

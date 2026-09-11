@@ -22,6 +22,7 @@ import {
 import {
   buildCountParams, buildListParams, isServerExpressible, isListServerExpressible,
 } from '../../../services/conversationFilterSpec.js';
+import { countSpecKey, resolveTabCounts, planCountFetch } from '../../../services/tabCounts.js';
 import { draftKeyFor, getDraftAt } from '../../../services/drafts.js';
 import { useDrafts } from '../../../hooks/useDrafts.js';
 
@@ -135,24 +136,66 @@ export function useConversationFilters({ contacts, search = '', selected, select
     unassigned: statusTagFiltered.filter(isUnassigned).length,
     mentions: statusTagFiltered.filter(c => c.has_user_mention).length,
   }), [statusTagFiltered, currentUserId]);
-  const tabCounts = serverCounts || clientTabCounts;
+  // plano 130 — `serverCounts` (total do servidor) e `clientTabCounts` (o que está
+  // CARREGADO na sidebar) são grandezas diferentes; em serverMode a segunda é o
+  // tamanho da página, nunca um total. Ver services/tabCounts.js.
+  const tabCounts = resolveTabCounts({ serverCounts, clientCounts: clientTabCounts, serverMode });
+
+  // plano 69 F3/D4: a contagem só é server-side quando a LISTA também é (serverMode).
+  // Caso contrário cai no cliente junto com a lista — nunca uma metade server e outra
+  // client (senão o badge da aba não bateria com a lista client-filtrada).
+  const countSpec = useMemo(() => ({
+    search, searching, statusFilter, tagFilter, advFilters, archived: showArchived,
+  }), [search, searching, statusFilter, tagFilter, advFilters, showArchived]);
+  // Chave estável do spec: `null` fora de serverMode. Por ser uma STRING, recriar
+  // `tagFilter`/`advFilters` com o mesmo conteúdo deixa de invalidar a contagem.
+  const countKey = useMemo(
+    () => (serverMode ? countSpecKey(countSpec) : null), [countSpec, serverMode]);
+
+  const countSpecRef = useRef(null);       // spec da contagem em vigor (guard das respostas)
+  const countPendingRef = useRef(null);    // início da rajada atual — ÂNCORA do prazo
+  const countFetchedAtRef = useRef(null);  // quando a última requisição PARTIU
+  const countMountedRef = useRef(true);
+  useEffect(() => () => { countMountedRef.current = false; }, []);
 
   useEffect(() => {
-    const spec = {
-      search, searching, statusFilter, tagFilter, advFilters, archived: showArchived,
-    };
-    // plano 69 F3/D4: a contagem só é server-side quando a LISTA também é (serverMode).
-    // Caso contrário cai no cliente junto com a lista — nunca uma metade server e outra
-    // client (senão o badge da aba não bateria com a lista client-filtrada).
-    if (!serverMode) {
+    const plan = planCountFetch({
+      specKey: countKey,
+      lastSpecKey: countSpecRef.current,
+      lastFetchAt: countFetchedAtRef.current,
+      pendingSince: countPendingRef.current,
+      now: Date.now(),
+    });
+    if (plan.action === 'idle') {
+      countSpecRef.current = null;
+      countPendingRef.current = null;
       setServerCounts(null);
       return () => {};
     }
-    setServerCounts(null);
-    let alive = true;
+    if (plan.action === 'reset_and_fetch') {
+      // ⚠️ Este é o ÚNICO ponto que limpa o total (plano 130 · D1): ele pertence ao
+      // filtro ANTERIOR. Enquanto o filtro não muda, o número na tela continua sendo o
+      // último total válido — e NÃO o tamanho da página carregada, que é outra
+      // grandeza. Limpar antes de todo refetch era o que fazia o badge piscar entre
+      // 252 e 50 a cada evento de WS (o gatilho é ~1×/s em produção).
+      countSpecRef.current = countKey;
+      countPendingRef.current = Date.now();
+      setServerCounts(null);
+    } else if (countPendingRef.current == null) {
+      countPendingRef.current = Date.now();
+    }
+    const requested = countKey;
+    // O prazo é ancorado em `countPendingRef` (o 1º gatilho da rajada), então recriar
+    // o timer a cada evento NÃO empurra o vencimento — antes disso, uma rajada
+    // contínua reiniciava o debounce para sempre e a contagem nunca era buscada.
     const timer = setTimeout(() => {
-      countConversations(buildCountParams(spec)).then((res) => {
-        if (!alive) return;
+      countPendingRef.current = null;
+      countFetchedAtRef.current = Date.now();
+      countConversations(buildCountParams(countSpec)).then((res) => {
+        // Guard por CHAVE DE SPEC, não por execução do efeito: como o efeito deixou de
+        // re-rodar a cada evento, um `alive` de closure deixaria a resposta de um filtro
+        // antigo sobrescrever o total do filtro novo.
+        if (!countMountedRef.current || countSpecRef.current !== requested) return;
         if (res && res.ok && res.data) {
           setServerCounts({
             all: Number(res.data.all || 0),
@@ -160,15 +203,13 @@ export function useConversationFilters({ contacts, search = '', selected, select
             unassigned: Number(res.data.unassigned || 0),
             mentions: Number(res.data.mentions || 0),
           });
-        } else {
-          setServerCounts(null);
         }
-      }).catch(() => {
-        if (alive) setServerCounts(null);
-      });
-    }, 300);
-    return () => { alive = false; clearTimeout(timer); };
-  }, [search, searching, statusFilter, tagFilter, advFilters, showArchived, serverMode, contacts]);
+        // Falha (rede/5xx) NÃO limpa o total: uma piscada de rede não pode derrubar o
+        // badge para o número da página. A próxima mudança da lista tenta de novo.
+      }).catch(() => {});
+    }, plan.delayMs);
+    return () => clearTimeout(timer);
+  }, [countKey, countSpec, contacts]);
 
   // plano 69 F2 — refaz a 1ª página da sidebar quando um FILTRO muda (status/aba/
   // tags/avançado). `serverFilterRef` já foi sincronizado no render acima, então o

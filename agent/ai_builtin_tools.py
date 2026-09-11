@@ -34,6 +34,7 @@ import inspect
 import logging
 import types
 
+from agent.ai_tool_compile import compile_tool_module, schema_for
 from agent.tools import save_contact_info as _m_save
 from agent.tools import set_custom_attribute as _m_attr
 from agent.tools import transfer_to_human as _m_transfer
@@ -62,33 +63,80 @@ OFF_BY_DEFAULT_TOOLS: set[str] = {"transferir_agente"}
 # deliberadamente mínimo; a infra de tombstone generaliza depois se precisar).
 DELETABLE_BUILTINS: set[str] = {"transferir_agente"}
 
-# Tombstone (plano 30 WS3): nomes de builtins DELETADOS pelo operador, em
-# ``config`` como JSON array. Sem ele o boot re-seedaria a tool pelos dois
-# caminhos (seed_builtin_tools re-insere a row ai_tools; register_tool/ensure
-# recria a row tool_overrides). Sem rota de "reinstalar" (D8) — pra voltar,
-# recriar como tool code-in-DB ou remover o nome desta chave direto no banco.
+# Tombstone (plano 30 WS3): nomes de tools DELETADAS pelo operador, em ``config``
+# como JSON array. Sem ele o boot re-seedaria a tool pelos dois caminhos
+# (seed_builtin_tools re-insere a row ai_tools; register_tool/ensure recria a row
+# tool_overrides). Sem rota de "reinstalar" (D8) — pra voltar, recriar como tool
+# code-in-DB ou remover o nome desta chave direto no banco.
+#
+# A chave é COMPARTILHADA com as tools de plugin (``agent.ai_plugin_tools``): o
+# mecanismo é o mesmo e uma chave nova exigiria leitura dupla sem ganho nenhum.
+# Só a via de recuperação difere — tool de plugin volta reinstalando o plugin,
+# que limpa as próprias marcas (ver ``untombstone_tools``).
 TOMBSTONE_CONFIG_KEY = "deleted_builtin_tools"
 
 
-def deleted_builtin_tools() -> set[str]:
-    """Nomes de builtins tombados (deletados de verdade pela UI)."""
+def deleted_tools() -> set[str]:
+    """Nomes de tools tombadas (deletadas de verdade pela UI) — core E plugin."""
     try:
         from db.repositories import config_repo
         raw = config_repo.get(TOMBSTONE_CONFIG_KEY, None)
         if isinstance(raw, list):
             return {str(n) for n in raw}
     except Exception as e:  # noqa: BLE001 — leitura best-effort
-        logger.warning("deleted_builtin_tools: leitura falhou (%s)", e)
+        logger.warning("deleted_tools: leitura falhou (%s)", e)
     return set()
 
 
-def tombstone_builtin(name: str) -> None:
-    """Marca um builtin como deletado (idempotente)."""
+def tombstone_tool(name: str) -> None:
+    """Marca uma tool como deletada (idempotente)."""
     from db.repositories import config_repo
-    current = deleted_builtin_tools()
+    current = deleted_tools()
     if name in current:
         return
     config_repo.set(TOMBSTONE_CONFIG_KEY, sorted(current | {name}))
+
+
+def untombstone_tools(names) -> int:
+    """Tira ``names`` do tombstone. Devolve quantos saíram.
+
+    ⚠️ SEMPRE com uma lista explícita de nomes — nunca limpar a chave inteira.
+    Quem chama é a desinstalação de plugin, passando só as tools daquele plugin;
+    um wipe geral ressuscitaria uma builtin que o operador deletou de propósito.
+    """
+    wanted = {str(n) for n in (names or ())}
+    if not wanted:
+        return 0
+    from db.repositories import config_repo
+    current = deleted_tools()
+    remaining = current - wanted
+    if remaining == current:
+        return 0
+    config_repo.set(TOMBSTONE_CONFIG_KEY, sorted(remaining))
+    return len(current) - len(remaining)
+
+
+# Nomes antigos, preservados: são API de fato (testes e call sites os importam).
+deleted_builtin_tools = deleted_tools
+tombstone_builtin = tombstone_tool
+
+
+def is_deletable(row: dict | None) -> bool:
+    """A tool desta row pode ser excluída pela interface?
+
+    Política num lugar só, consultada pela rota de DELETE e publicada nos
+    payloads de listagem — em vez de uma allowlist duplicada no cliente.
+
+    * ``code``   — sim (é autoral do operador);
+    * ``plugin`` — sim: a via de volta é reinstalar o ``.zip`` do plugin;
+    * ``builtin``— só as de :data:`DELETABLE_BUILTINS`; a única cópia de uma tool
+      core é o ``agent/tools/`` do repositório.
+    """
+    row = row or {}
+    kind = row.get("kind") or "code"
+    if kind == "builtin":
+        return str(row.get("name") or "") in DELETABLE_BUILTINS
+    return kind in ("code", "plugin")
 
 
 def default_override_enabled(name: str) -> bool:
@@ -111,50 +159,15 @@ def default_override_enabled(name: str) -> bool:
         return False
 
 
-def _schema_in(namespace: dict, name: str) -> dict | None:
-    """Find the OpenAI tool-schema dict for ``name`` in a module namespace.
-
-    Core tool modules name their schema ``<NAME>_TOOL`` (not ``SCHEMA``), so we
-    accept the canonical aliases first and then scan for any dict that matches
-    the ``{type:function, function:{name}}`` shape with the right name.
-    """
-    schema = namespace.get("SCHEMA") or namespace.get("TOOL")
-    if isinstance(schema, dict):
-        return schema
-    for value in namespace.values():
-        if (
-            isinstance(value, dict)
-            and value.get("type") == "function"
-            and isinstance(value.get("function"), dict)
-            and value["function"].get("name") == name
-        ):
-            return value
-    return None
-
-
 def _compile_extract(name: str, code: str) -> tuple[dict, callable]:
     """Compile + exec edited built-in code IN-PROCESS; return (schema, execute).
 
-    Raises ``ValueError`` if the code doesn't compile or doesn't expose the
-    ``schema dict + execute(ctx, args)`` contract.
+    Delegado a :func:`agent.ai_tool_compile.compile_tool_module` — o mesmo
+    compilador usado pelas tools de plugin. Built-in é autocontida, então vai
+    sem ``package``. Levanta ``ValueError`` quando o código não compila ou não
+    expõe o contrato ``schema dict + execute(ctx, args)``.
     """
-    if not isinstance(code, str) or not code.strip():
-        raise ValueError("código vazio")
-    namespace: dict = {}
-    compiled = compile(code, f"<builtin_tool:{name}>", "exec")
-    exec(compiled, namespace)  # noqa: S102 — in-process by design for builtin tools
-    execute = namespace.get("execute")
-    if not callable(execute):
-        raise ValueError("o código deve definir execute(ctx, args)")
-    schema = _schema_in(namespace, name)
-    if schema is None:
-        raise ValueError(f"o código deve definir o schema da tool '{name}'")
-    fn = schema.get("function") or {}
-    if fn.get("name") != name:
-        raise ValueError(
-            f"o nome no schema ('{fn.get('name')}') deve ser igual a '{name}'"
-        )
-    return schema, execute
+    return compile_tool_module(name, code)
 
 
 def seed_builtin_tools() -> None:
@@ -166,7 +179,7 @@ def seed_builtin_tools() -> None:
     EXCETO as de :data:`OFF_BY_DEFAULT_TOOLS`, que nascem desligadas (plano 30
     D3) — vale só para instalações novas, já que rows existentes são puladas.
     """
-    tombstoned = deleted_builtin_tools()
+    tombstoned = deleted_tools()
     for name, module in BUILTIN_MODULES.items():
         try:
             if name in tombstoned:
@@ -174,7 +187,7 @@ def seed_builtin_tools() -> None:
             if tool_repo.get(name) is not None:
                 continue
             source = inspect.getsource(module)
-            schema = _schema_in(module.__dict__, name) or {}
+            schema = schema_for(module.__dict__, name) or {}
             description = (schema.get("function") or {}).get("description", "")
             tool_repo.save(
                 name,
@@ -197,7 +210,7 @@ def register_builtin_overrides(handler) -> None:
     ``refresh_tool_overrides``. Disabled rows are unregistered; edited rows
     (version > 1) override the baseline with their DB code (fail-closed).
     """
-    tombstoned = deleted_builtin_tools()
+    tombstoned = deleted_tools()
     for name in BUILTIN_MODULES:
         if name in tombstoned:
             # Deletada pelo operador (plano 30 WS3): o registro nem aconteceu

@@ -2,7 +2,7 @@ import { h } from 'preact';
 import { useRef, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { SendIcon, EmojiIcon, AttachIcon, MicIcon, StopIcon, TemplateIcon } from './icons.js';
-import { MediaQueuePreview } from './MediaQueuePreview.js';
+import { MediaTray } from './MediaTray.js';
 import { EmojiPicker } from './EmojiPicker.js';
 import { MediaRejectedModal } from './MediaRejectedModal.js';
 import { hasPermission } from '../../utils/permissions.js';
@@ -28,8 +28,16 @@ function formatRecordTime(secs) {
 //
 // Receives the hook return objects so each piece of state stays where it lives;
 // this component is presentational + event wiring only.
+//
+// ⚠️ Plano 124 — a barra de entrada NÃO some quando há anexo pendente. Ela sumia
+// (a fila renderizava no lugar dela), e era essa troca que fazia o texto já
+// digitado desaparecer da tela e matava o `onPaste` — que vive na `<textarea>` e
+// portanto ia junto, impedindo colar um SEGUNDO arquivo. Hoje a bandeja
+// (`MediaTray`) é uma faixa acima do `<form>` e o texto do compositor é a
+// legenda do lote. O único estado que ainda substitui a barra é a GRAVAÇÃO de
+// áudio, que é modal de verdade.
 export function Composer({
-  sandbox, canSend, templatesSupported, sessionClosed,
+  sandbox, canSend, templatesSupported, sessionClosed, aiWindowClosed = false,
   composer, autocomplete, media, audio, quotedInfo, openTemplatePicker, handleKeyDown,
   currentUser = null,
 }) {
@@ -38,21 +46,25 @@ export function Composer({
   const {
     input, mode, setMode, aiReadPrivate, setAiReadPrivate, aiReplyInChat, setAiReplyInChat,
     replyingTo, setReplyingTo, emojiOpen, setEmojiOpen, inputRef, emojiRef,
-    insertEmoji, handleInputChange,
+    insertEmoji, handleInputChange, handleSelect, handleClick, handleCaretKeyUp, handleBlur,
   } = composer;
   const {
     mentionMenu, quickReplyMenu, getMentionCandidates, getQuickReplyCandidates,
     mentionLabel, applyMention, applyQuickReply,
   } = autocomplete;
   const {
-    attachMenuOpen, attachMenuRef, pendingQueue, mediaCaption, setMediaCaption,
+    attachMenuOpen, attachMenuRef, pendingQueue,
     fileInputRef, docInputRef, videoInputRef, sending, sendProgressLabel, removePendingItem,
     handleAttachClick, pickImage, pickDocument, pickVideo,
     handleFileSelected, handleDocSelected, handleVideoSelected,
-    handlePaste, cancelPendingMedia, confirmPendingMedia,
+    handlePaste, cancelPendingMedia,
     rejection, dismissRejection,
   } = media;
   const hasPending = pendingQueue.length > 0;
+  // Áudio é o único anexo que não aceita legenda (`/send-audio` é nota de voz),
+  // então o placeholder promete o que o envio de fato faz: mandar o texto como
+  // mensagem separada, antes do clipe.
+  const audioOnlyPending = hasPending && pendingQueue.every(i => i.kind === 'audio');
   const { recording, recordDuration, handleMicClick } = audio;
 
   // Highlight overlay (WYSIWYG-in-place): a mirror <div> renders the typed text
@@ -71,6 +83,26 @@ export function Composer({
     const raf = requestAnimationFrame(sync);
     return () => cancelAnimationFrame(raf);
   }, [input]);
+
+  // O espelho também precisa re-sincronizar quando a LARGURA muda sem o texto
+  // mudar (plano 132 · F4): redimensionar a janela, abrir/fechar o painel de
+  // informações do contato, a bandeja de anexos empurrando o layout. O efeito
+  // acima só roda em `[input]`, então até aqui o espelho ficava dessincronizado
+  // até o operador digitar mais uma tecla — e nesse meio-tempo o caret cai fora
+  // do texto que ele está vendo.
+  //
+  // Efeito PRÓPRIO com deps `[]`: pendurado no `[input]` ele criaria e destruiria
+  // um observador por tecla. Sem laço de realimentação — observa o TEXTAREA e
+  // `syncMirror` só escreve no ESPELHO.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => syncMirror(inputRef.current, mirrorRef.current));
+    ro.observe(el);
+    // ⚠️ Desobservar SEMPRE: há precedente no repo de ResizeObserver que nunca
+    // desconecta (useChatDayHeader.js) — não repetir.
+    return () => ro.disconnect();
+  }, []);
 
   const hasText = input.trim().length > 0;
 
@@ -102,22 +134,15 @@ export function Composer({
     <!-- Anexo recusado pelas regras do canal (tamanho/formato) -->
     <${MediaRejectedModal} rejection=${rejection} onClose=${dismissRejection} />
 
-    <!-- Prévia da fila de mídia (plano 64 · F7) -->
+    <!-- Bandeja de anexos (plano 64 · F7; virou faixa no plano 124) -->
     ${hasPending && canSend ? html`
-      <${MediaQueuePreview}
+      <${MediaTray}
         queue=${pendingQueue}
-        caption=${mediaCaption}
-        setCaption=${setMediaCaption}
         onRemove=${removePendingItem}
         onCancel=${cancelPendingMedia}
-        onConfirm=${confirmPendingMedia}
         sending=${sending}
-        progressLabel=${sendProgressLabel}
-        mode=${mode}
-        aiReadPrivate=${aiReadPrivate}
-        setAiReadPrivate=${setAiReadPrivate}
-        aiReplyInChat=${aiReplyInChat}
-        setAiReplyInChat=${setAiReplyInChat}
+        escClears=${!hasText}
+        hasText=${hasText}
       />
     ` : ''}
 
@@ -140,7 +165,7 @@ export function Composer({
           Você não pode enviar mensagens neste grupo
         </span>
       </div>
-    ` : hasPending ? '' : recording ? html`
+    ` : recording ? html`
       <div class="flex items-center px-[10px] py-[5px] bg-wa-panel min-h-[62px] shrink-0">
         <div class="flex-1 flex items-center gap-3 mx-[5px]">
           <span class="w-[10px] h-[10px] rounded-full bg-red-500 animate-pulse shrink-0"></span>
@@ -175,7 +200,18 @@ export function Composer({
             Mensagem Privada
           </button>
         </div>
-        ${mode === 'private' ? html`
+        ${mode === 'private' && aiWindowClosed ? html`
+          <!-- Janela da IA fechada (capability ai_window_hours): o filtro do canal
+               aborta o turno inteiro, então oferecer "IA lê" seria prometer o que o
+               plugin vai descartar em silêncio — era esse o bug. A linha existe
+               porque com a tag HUMAN_AGENT ligada o compositor CONTINUA aberto e
+               nem a faixa de janela fechada aparece: sem ela os toggles sumiriam
+               sem motivo visível. -->
+          <span class="text-[12px] text-wa-secondary">
+            Fora da janela de 24h a IA não pode responder neste canal.
+          </span>
+        ` : ''}
+        ${mode === 'private' && !aiWindowClosed ? html`
           <label class="inline-flex items-center gap-[6px] cursor-pointer select-none" title="Quando ligado, a IA processa a mensagem privada como instrução.">
             <input
               type="checkbox"
@@ -225,10 +261,17 @@ export function Composer({
       ${sessionClosed ? html`
         <div class="px-[14px] py-[6px] bg-wa-panel shrink-0">
           <div class="text-[12px] text-wa-secondary bg-wa-bg border border-wa-border rounded-[6px] px-3 py-1.5">
-            Fora da janela de 24h: só é possível enviar um ${' '}
-            ${templatePickerAvailable() ? html`
-              <button type="button" onClick=${openTemplatePicker} class="text-wa-teal underline font-medium">template aprovado</button>.
-            ` : html`<span class="font-medium">template aprovado</span>.`}
+            ${templatesSupported ? html`
+              Fora da janela de 24h: só é possível enviar um ${' '}
+              ${templatePickerAvailable() ? html`
+                <button type="button" onClick=${openTemplatePicker} class="text-wa-teal underline font-medium">template aprovado</button>.
+              ` : html`<span class="font-medium">template aprovado</span>.`}
+            ` : html`
+              <!-- Canal sem template (Instagram/Messenger): não há saída — o
+                   provedor só reabre a conversa quando o CLIENTE escreve. -->
+              Fora da janela de mensagens deste canal. Aguarde o cliente
+              responder para voltar a enviar mensagens.
+            `}
           </div>
         </div>
       ` : ''}
@@ -346,22 +389,39 @@ export function Composer({
             class="pointer-events-none absolute inset-0 z-0 overflow-hidden box-border rounded-[8px] px-[12px] py-[9px] border border-transparent text-[15px] leading-[20px] whitespace-pre-wrap break-words bg-wa-inputBg text-wa-text"
             dangerouslySetInnerHTML=${{ __html: highlightComposerMarkup(input) }}
           ></div>
+          <!-- autocorrect OFF (plano 132 · F6): a página declara lang="pt-BR",
+               então a autocorreção do navegador nasce LIGADA, e em português
+               quase toda substituição dela PRODUZ um acento. Um Backspace logo
+               depois significa "desfazer a autocorreção", não "apagar um
+               caractere" — que é o sintoma relatado. O spellcheck fica como
+               está: ele só sublinha; quem troca a palavra é o autocorrect. -->
           <textarea
             ref=${inputRef}
             rows="1"
             value=${input}
             onInput=${handleInputChange}
+            onSelect=${handleSelect}
+            onClick=${handleClick}
+            onKeyUp=${handleCaretKeyUp}
+            onBlur=${handleBlur}
             onKeyDown=${handleKeyDown}
             onPaste=${handlePaste}
             onScroll=${(e) => syncMirror(e.target, mirrorRef.current)}
-            placeholder=${mode === 'private' ? 'Mensagem privada' : 'Digite uma mensagem'}
+            autocorrect="off"
+            placeholder=${hasPending
+              ? (audioOnlyPending ? 'Mensagem (enviada antes do áudio)' : 'Adicionar uma legenda (opcional)')
+              : mode === 'private' ? 'Mensagem privada' : 'Digite uma mensagem'}
             style="caret-color: rgb(var(--wa-text));"
             class="relative z-[1] box-border w-full block bg-transparent text-transparent text-[15px] rounded-[8px] px-[12px] py-[9px] border border-wa-border outline-none placeholder-wa-secondary resize-none max-h-[120px] wa-scrollbar leading-[20px]"
           ></textarea>
         </div>
-        ${hasText ? html`
+        ${(hasText || hasPending) ? html`
+          <!-- Sem "disabled" durante o lote: mandar uma mensagem de texto
+               enquanto os anexos sobem sempre foi possível e continua sendo.
+               Quem impede um segundo disparo da FILA é o submitPlan. -->
           <button
             type="submit"
+            title=${hasPending ? (hasText ? 'Enviar anexo com a legenda' : 'Enviar anexo') : 'Enviar'}
             class="p-[8px] shrink-0 transition-colors"
             style="color: ${mode === 'private' ? '#a78bfa' : '#00a884'};"
           >

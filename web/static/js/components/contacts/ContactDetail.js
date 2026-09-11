@@ -4,7 +4,7 @@ import htm from 'htm';
 import { sendMessage, sendImage, sendAudio, sendDocument, sendVideo } from '../../services/api.js';
 import { BackArrowIcon, DefaultAvatar, GroupAvatar } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
-import { formatWhatsApp } from '../../utils/formatWhatsApp.js';
+import { formatWhatsApp, toWhatsAppMarkup } from '../../utils/formatWhatsApp.js';
 import { MessageContextMenu, CopyIcon, TrashIcon, ReplyIcon, LinkIcon, EditIcon,
          MailIcon, PhoneIcon, OpenExternalIcon, copyToClipboard } from './MessageContextMenu.js';
 import { entityFromElement, entityActions } from '../../services/messageEntities.js';
@@ -34,9 +34,10 @@ import { useChatDayHeader } from './hooks/useChatDayHeader.js';
 import { PILL_TRAVEL } from '../../services/chatDayHeader.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
 import { stripGroupPrefix } from '../../services/composerTokens.js';
-import { senderColor, quotedMediaText, cardStateKey, isCollapsibleCard } from '../../services/messageView.js';
+import { senderColor, quotedMediaText, cardStateKey, isCollapsibleCard, isOperatorMessage, isAiContentLabel } from '../../services/messageView.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { transitionAfterOutput } from '../../services/outputTransition.js';
+import { submitPlan, isAudioOnly } from '../../services/composerSubmit.js';
 
 const html = htm.bind(h);
 
@@ -235,10 +236,26 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // ao iniciar um atendimento Novo pela caixa de entrada escolhida (plano 21), do
   // payload channel-scoped do getContact (ainda sem conversationId). O TemplatePicker
   // opera em "channel mode" (channelId + phone) quando não há atendimento.
-  // sessionClosed → a janela de texto livre de 24h expirou (ou nunca abriu, no caso de
-  // um número novo no Cloud), então só um template pode sair.
+  // sessionClosed → a janela de texto livre expirou (ou nunca abriu, no caso de
+  // um número novo no Cloud). No Cloud ainda resta o template; num canal SEM
+  // template (Instagram/Messenger) não sobra nada e o compositor fica bloqueado
+  // até o cliente escrever de novo.
+  //
+  // ⚠️ NÃO reintroduza o `templatesSupported &&` que existia aqui: ele amarrava o
+  // bloqueio a "o canal tem template", então Instagram e Messenger — os únicos em
+  // que a janela fecha SEM saída — nunca bloqueavam nada. O operador digitava,
+  // mandava, e só a Meta recusava, virando bolha "falhou" sem explicação.
   const templatesSupported = !sandbox && !!(contact && contact.templates_supported);
-  const sessionClosed = templatesSupported && contact && contact.session_open === false;
+  const sessionClosed = !sandbox && !!contact && contact.session_open === false;
+  // aiWindowClosed → a janela da IA deste canal (capability `ai_window_hours`)
+  // fechou: o plugin do canal cala o turno da IA e qualquer instrução escrita na
+  // nota privada seria descartada em silêncio. É uma janela DIFERENTE de
+  // `sessionClosed`: no Messenger/Instagram com a tag HUMAN_AGENT ligada o
+  // compositor do atendente segue aberto por 7 dias enquanto esta já fechou às
+  // 24h — foi exatamente esse intervalo que fazia o operador instruir a IA e
+  // nada acontecer. Ausente no payload (canal sem restrição, core antigo) ⇒
+  // aberta, e o compositor fica como sempre foi.
+  const aiWindowClosed = !sandbox && !!contact && contact.ai_window_open === false;
   // Message context-menu capability gates (plano — editar/apagar mensagem):
   //  • revokeSupported: default TRUE — só esconde "Apagar" quando o canal declara
   //    explicitamente que NÃO revoga (WhatsApp Cloud). GOWA e a visão legada
@@ -262,10 +279,21 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   const autocompleteRef = useRef(null);
 
   const composer = useComposer({
-    api: _api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser,
+    api: _api, phone, conversationId, channelId, sandbox, sessionClosed,
+    aiWindowClosed, currentUser,
     setContactData, updateMsgByLocalId,
     updateMenus: (el, val) => autocompleteRef.current && autocompleteRef.current.updateMenus(el, val),
     closeMentionMenu: () => autocompleteRef.current && autocompleteRef.current.setMentionMenu(null),
+    closeMenus: () => {
+      const a = autocompleteRef.current;
+      if (!a) return;
+      a.setMentionMenu(null);
+      a.setQuickReplyMenu(null);
+    },
+    menusOpen: () => {
+      const a = autocompleteRef.current;
+      return !!(a && (a.mentionMenu || a.quickReplyMenu));
+    },
     collectMentions: (text) => autocompleteRef.current
       ? autocompleteRef.current.collectMentions(text) : { mentions: [], mention_inbox: false },
     resetMentions: () => autocompleteRef.current && autocompleteRef.current.resetMentions(),
@@ -286,28 +314,120 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
 
   const composerSend = composer.handleSend;
   const composerRetry = composer.handleRetry;
-  const handleSendGuarded = useCallback(async (e) =>
-    finishSuccessfulOutput(await composerSend(e)),
-  [composerSend, finishSuccessfulOutput]);
   const handleRetryGuarded = useCallback(async (localId, text) =>
     finishSuccessfulOutput(await composerRetry(localId, text)),
   [composerRetry, finishSuccessfulOutput]);
-  const composerUi = { ...composer, handleSend: handleSendGuarded,
-                       handleRetry: handleRetryGuarded };
 
-  const autocomplete = useTokenAutocomplete({
-    phone, sandbox, contact, groupParticipantsChanged, mode: composer.mode,
-    input: composer.input, setInput: composer.setInput, inputRef: composer.inputRef,
-  });
-  autocompleteRef.current = autocomplete;
+  // Plano 124 · F8 — depois de colar/arrastar/escolher um arquivo, o foco volta
+  // ao compositor para o `Enter` enviar sem clique intermediário. Dos 5 caminhos
+  // que enchem a bandeja, só o Ctrl+V com o cursor JÁ no campo deixava o foco em
+  // lugar útil; os outros quatro (colar com foco fora, arrastar na conversa,
+  // soltar numa linha da sidebar, menu de anexo) largavam o foco no `body`.
+  //
+  // Duas guardas: (1) nunca sequestrar foco de OUTRO campo de texto — arrastar um
+  // arquivo enquanto se digita na busca da conversa não pode mover o cursor do
+  // operador (mesma regra do listener de colar, logo abaixo); (2) `preventScroll`
+  // + `setTimeout(0)` porque focar a textarea arrasta o scrollport e a bandeja
+  // ainda vai mudar de altura — pior com a janela ancorada do plano 99.
+  const composerInputRef = composer.inputRef;
+  const focusComposer = useCallback(() => {
+    setTimeout(() => {
+      const el = document.activeElement;
+      const tag = el && el.tagName;
+      // ⚠️ `type="file"` fica de FORA da guarda: os seletores de arquivo do menu
+      // de anexo são `<input type="file">` escondidos, e vários navegadores
+      // devolvem o foco a eles quando o diálogo fecha. Tratá-los como "campo de
+      // texto do operador" desligaria o foco justamente no caminho que a F8
+      // existe para consertar.
+      const typing = (tag === 'TEXTAREA'
+        || (tag === 'INPUT' && el.type !== 'file')
+        || (el && el.isContentEditable));
+      if (typing && el !== composerInputRef.current) return;
+      composerInputRef.current?.focus({ preventScroll: true });
+    }, 0);
+  }, [composerInputRef]);
 
   const media = useMediaUpload({
     api: _api, phone, conversationId, channelId, sandbox, sessionClosed, currentUser,
-    mode: composer.mode, aiReadPrivate: composer.aiReadPrivate,
+    // O `&& !aiWindowClosed` espelha o gate do useComposer: o estado do toggle
+    // sobrevive à troca de conversa, então sem ele um áudio privado gravado numa
+    // conversa com a janela da IA fechada ainda pediria um turno que o filtro do
+    // plugin descarta calado.
+    mode: composer.mode, aiReadPrivate: composer.aiReadPrivate && !aiWindowClosed,
     aiReplyInChat: composer.aiReadPrivate ? composer.aiReplyInChat : true,
     setContactData, updateMsgByLocalId, openTemplatePicker, mediaLimits,
     onSent: () => finishSuccessfulOutput(true),
+    onQueued: focusComposer,
+    // Menções internas escritas na legenda de uma NOTA PRIVADA (@atendente /
+    // @time). Só a nota privada as aceita — ver `useMediaUpload`.
+    collectMentions: (text) => autocompleteRef.current
+      ? autocompleteRef.current.collectMentions(text) : { mentions: [], mention_inbox: false },
+    resetMentions: () => autocompleteRef.current && autocompleteRef.current.resetMentions(),
   });
+
+  // Depois do `media` de propósito: o menu de @menção precisa saber se há anexo
+  // na bandeja (o texto vira legenda, e legenda para o CLIENTE não leva menção).
+  // Os dois hooks continuam desacoplados — quem os liga é o `autocompleteRef`,
+  // lido só na hora da chamada.
+  const autocomplete = useTokenAutocomplete({
+    phone, sandbox, contact, groupParticipantsChanged, mode: composer.mode,
+    input: composer.input, setInput: composer.setInput, inputRef: composer.inputRef,
+    mentionsUnsupported: media.pendingQueue.length > 0 && composer.mode !== 'private',
+  });
+  autocompleteRef.current = autocomplete;
+
+  // ── O gesto de ENVIAR (plano 124) ────────────────────────────────
+  // Um só ponto de decisão para o botão e para a tecla Enter: a regra pura mora
+  // em `services/composerSubmit.js`, aqui fica só a execução. Com anexo na
+  // bandeja, o texto do compositor é a LEGENDA do lote — por isso ele é
+  // consumido (estado + rascunho) ANTES de disparar o envio, do mesmo jeito que
+  // `handleSend` faz com uma mensagem de texto.
+  const handleSendGuarded = useCallback(async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const plan = submitPlan({
+      text: composer.input,
+      queueLength: media.pendingQueue.length,
+      queueIsAudioOnly: isAudioOnly(media.pendingQueue),
+      mode: composer.mode,
+      sessionClosed,
+      sending: media.sending,
+    });
+
+    if (plan.action === 'noop') return false;
+
+    // Fora da janela de 24h nada é consumido: o operador ainda vai precisar do
+    // texto e dos anexos depois de escolher (ou desistir do) template.
+    if (plan.action === 'template') { openTemplatePicker(); return false; }
+
+    if (plan.action === 'text') return finishSuccessfulOutput(await composerSend(e));
+
+    // A partir daqui há anexo na bandeja. `text_then_media` é o caso do áudio,
+    // que não aceita legenda: o texto vai como mensagem PRÓPRIA, antes do clipe.
+    if (plan.action === 'text_then_media') {
+      const sentText = await composerSend(e);
+      if (!sentText) return finishSuccessfulOutput(false);  // texto falhou: o áudio fica na bandeja
+      const okAudio = await media.confirmQueue('');
+      focusComposer();
+      return okAudio;
+    }
+
+    composer.consumeInput();
+    composer.stopPresence();
+    // Mesma colapsagem de marcação do envio de texto: o compositor mostra
+    // **negrito** com realce, então a legenda tem de chegar no formato de fio do
+    // WhatsApp (*negrito*) — senão o mesmo texto sairia diferente só por ter
+    // anexo junto.
+    // `confirmQueue` já chama `onSent` → `finishSuccessfulOutput(true)`.
+    const okMedia = await media.confirmQueue(toWhatsAppMarkup(plan.caption));
+    // F8 item 4: quem manda uma imagem também continua digitando em seguida —
+    // só o caminho de TEXTO devolvia o foco (`useComposer`).
+    focusComposer();
+    return okMedia;
+  }, [composer, media, sessionClosed, composerSend, finishSuccessfulOutput,
+      openTemplatePicker, focusComposer]);
+
+  const composerUi = { ...composer, handleSend: handleSendGuarded,
+                       handleRetry: handleRetryGuarded };
 
   const audio = useAudioRecorder({
     onRecorded: (item) => media.setPendingAudio(item),
@@ -321,6 +441,37 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     disabled: !canReply || media.sending || (sessionClosed && composer.mode !== 'private'),
     onFiles: (files, sendMode) => media.requestFilesDrop(files, sendMode),
   });
+
+  // Colar com o foco FORA do compositor (plano 124 · F6). A `<textarea>` já
+  // escuta `onPaste`; isto cobre o resto da conversa — Ctrl+V depois de rolar o
+  // histórico, sem ter clicado no campo, exatamente como o arrastar já funciona.
+  // Mesmas condições de desligamento do `useDropZone`, mais uma: nunca sequestrar
+  // um colar destinado a OUTRO campo de texto (busca na conversa, editar
+  // mensagem, filtros, tela de plugin) — lá o colar é do usuário, não nosso.
+  const pasteDisabled = !canReply || media.sending
+    || (sessionClosed && composer.mode !== 'private');
+  useEffect(() => {
+    if (pasteDisabled) return;
+    function onDocPaste(e) {
+      const el = e.target;
+      const tag = el && el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return;
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      const files = [];
+      for (const item of items) {
+        if (item.kind !== 'file') continue;
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+      if (!files.length) return;
+      e.preventDefault();
+      media.requestFilesDrop(files, 'media');
+    }
+    document.addEventListener('paste', onDocPaste);
+    return () => document.removeEventListener('paste', onDocPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pasteDisabled, phone, media.requestFilesDrop]);
 
   // Arquivos soltos numa linha da sidebar (plano 64 · F11): o `Contacts` já
   // trocou para esta conversa e nos entrega o lote. Só consome quando o telefone
@@ -575,17 +726,24 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     let qSender = null;
     if (qIsUser && isGroupChat && typeof text === 'string') {
       const { sender, text: stripped } = stripGroupPrefix(text);
-      if (sender != null) { qSender = sender; text = stripped; }
+      // Mesmo guard da bolha: numa linha LEGADA de imagem descrita, o bloco da
+      // IA vinha na frente e engolia o autor — "Descrição da imagem" não é
+      // remetente, e manter o content intacto deixa `quotedMediaText` (via
+      // `mediaCaptionOf`) reconhecê-lo e mostrar o rótulo da mídia.
+      if (sender != null && !isAiContentLabel(sender)) { qSender = sender; text = stripped; }
     }
     text = quotedMediaText(qmsg, text);
     const fromMe = sandbox ? qIsUser : !qIsUser;
     const dn = isGroupChat
       ? (contact.group_name || phone)
       : (info && info.name ? info.name.replace(/^~/, '') : phone);
+    // plano 143: a autoria vem de `isOperatorMessage`, não de `status === 'operator'`
+    // — a falha de envio sobrescreve o status e apagava a autoria (ver messageView.js).
+    const qIsOperator = isOperatorMessage(qmsg);
     const senderLabel = sandbox
       ? (qIsUser ? 'Você' : 'IA')
-      : (qIsUser ? (qSender || dn) : (qmsg.status === 'operator' ? (qmsg.sent_by_name || 'Manual') : 'IA'));
-    const sColor = senderColor(qIsUser, qmsg.status === 'operator');
+      : (qIsUser ? (qSender || dn) : (qIsOperator ? (qmsg.sent_by_name || 'Manual') : 'IA'));
+    const sColor = senderColor(qIsUser, qIsOperator);
     return { senderLabel, senderColor: sColor, fromMe, snippet: (text || '').replace(/\s+/g, ' ').slice(0, 140) };
   }
 
@@ -958,6 +1116,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       ${canReply ? html`
       <${Composer}
         sandbox=${sandbox} canSend=${canSend} templatesSupported=${templatesSupported} sessionClosed=${sessionClosed}
+        aiWindowClosed=${aiWindowClosed}
         composer=${composerUi} autocomplete=${autocomplete} media=${media} audio=${audio}
         quotedInfo=${quotedInfo} openTemplatePicker=${openTemplatePicker} handleKeyDown=${handleKeyDown} currentUser=${currentUser} />
       ` : html`

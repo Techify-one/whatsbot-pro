@@ -20,10 +20,81 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# The running WhatsBot plugin API version. ``manifest.WHATSBOT_API_VERSION`` is
-# the canonical public name; it is kept in sync with this default so the two
-# modules never disagree.
-WHATSBOT_API_VERSION = "1.0.0"
+# The running WhatsBot plugin API version — FONTE ÚNICA.
+# ``manifest.WHATSBOT_API_VERSION`` é re-export por valor, então os dois módulos
+# nunca discordam (travado por ``test_manifest_reexport_stays_in_sync``).
+#
+# Toda mudança na superfície declarada da API de plugins bumpa este número, e o
+# número nunca viaja sem a prosa: a entrada correspondente vai em
+# ``docs/PLUGIN_API_CHANGELOG.md``. O que conta como MAJOR/MINOR/PATCH está lá e
+# no CLAUDE.md ("Versionamento da API de plugins", resumo); quem faz valer é
+# ``tests/contracts/test_plugin_api_surface.py``, que compara a superfície viva
+# com ``tests/goldens/plugin_api_surface.json`` e SE RECUSA a regenerar o
+# snapshot enquanto esta constante não tiver andado.
+#
+# ⚠️ MAJOR é tranche, não decisão de commit: os 36 manifests do parque declaram
+# ``">=1.0,<2.0"``, então um ``2.0.0`` faria TODOS deixarem de carregar de uma
+# vez (o loader retorna antes de registrar o plugin) — inclusive o ``gowa``
+# bundled, que é o único canal auto-instalado.
+#
+# 1.2.0: ADITIVA — a costura de serviço plugin→plugin (``entry.services`` +
+# ``uses_services``, ver plugins/services.py) e ``plugins.context.get_loop()``.
+# Todo manifest do parque declara ``">=1.0,<2.0"`` e segue compatível. ⚠️ Um
+# plugin que declare ``">=1.2"`` FALHA DURO num core anterior (o manifest levanta
+# ⇒ load_error), então só declare quando o plugin for inútil sem os serviços.
+#
+# 1.3.0: ADITIVA — ``message.saved`` e ``message.sent`` passam a carregar
+# ``channel_id`` e ``conversation_id`` (plano 123 F2). Antes disso o plugin só
+# recebia ``phone`` e tinha de adivinhar a thread por telefone — o que, num
+# contato atendido em dois canais (ou num par duplicado 12↔13 dígitos), escolhia
+# a conversa errada. Campo ACRESCENTADO a payload existente: quem não lê não vê
+# diferença. ``conversation_id`` pode vir ausente/``None`` onde o id não está no
+# escopo do call site (retry, resposta da IA) — o consumidor tem de tolerar.
+# 1.4.0: ADITIVA — ``screens[].width`` no manifest (``normal``/``wide``/``full``,
+# só para screen ``config: true``). Campo OPCIONAL: screen que não o declara
+# continua byte-idêntica, e o parser de um core anterior descarta a chave (o dict
+# de screen é whitelist) ⇒ modal no tamanho de sempre. Não declare ``">=1.4"`` só
+# por causa dele.
+#
+# 1.5.0: ADITIVA — ``ChannelCapabilities.ai_window_hours`` (default 0 = sem
+# restrição, comportamento idêntico ao de antes) e o avaliador
+# ``OutboundRouter.ai_window_open``. Declara a janela dentro da qual a IA do canal
+# pode falar, que NÃO é derivável das outras duas: nos canais Meta o operador
+# escreve por 7 dias com a tag HUMAN_AGENT enquanto o ``filters.py`` do plugin já
+# calou a IA às 24h. Provider que não a declara não muda em nada. ⚠️ O plugin que
+# a declarar deve fazê-lo condicionalmente (``dataclasses.fields``) se quiser
+# continuar carregando num core anterior — passar o kwarg a um
+# ``ChannelCapabilities`` sem o campo levanta ``TypeError`` no import.
+# 1.7.0: ADITIVA no catálogo — seam ``filter.provisioning.number`` (str),
+# aplicado em ``provisioning_service.fetch_provision_number`` depois de o core
+# resolver o destino da mensagem de provisionamento. ``None``/``""``
+# ABORTA (semântica padrão de filtro): sem destino o core recusa o envio, em vez
+# de escolher um número por conta própria — na mesma release o literal embutido
+# em ``TECHIFY_PROVISION_NUMBER`` foi removido, então "nenhum destino" passou a
+# ser um desfecho normal. Instalação sem filtro registrado só muda se também não
+# tiver env nem ``/service_number``. Plugin que precise do seam declara
+# ``">=1.7,<2.0"``; quem só quer degradar (o registro de um nome desconhecido é
+# WARNING, não erro) continua em ``">=1.0,<2.0"``.
+# 1.8.0: ADITIVA no catálogo — seam ``filter.provisioning.message`` (str), irmão
+# simétrico do ``filter.provisioning.number`` da 1.7.0 e aplicado no mesmo
+# produtor, agora chamado ``fetch_provision_target``. Existe porque a frase É o
+# gatilho que o destino reconhece: um plugin que aponte o envio para outro número
+# sem poder trocar a mensagem entrega um texto que o outro lado ignora em
+# silêncio. Mesma semântica de aborto (``None``/``""`` ⇒ o core recusa o envio).
+# Na mesma release, e FORA do catálogo: ``/service_number`` passou a ditar também
+# a frase (campo ``message``, resolvido independentemente do ``phone``), e os
+# literais de número e mensagem voltaram a existir em ``config/settings.py`` como
+# última rede para o endpoint fora do ar — "nenhum destino" deixou de ser o
+# desfecho padrão de quem não tem env. Plugin que precise do seam declara
+# ``">=1.8,<2.0"``; quem só quer degradar continua em ``">=1.0,<2.0"``.
+# 1.9.0: ADITIVA no catálogo — ``conversation.team_assigned``/``.team_unassigned``
+# (plano 153: Times, agrupamento de atendentes independente do assignee_user_id
+# individual). Produtor: ``conversation_service.assign_team``. Simétrico a
+# ``.assigned``/``.unassigned`` mas para ``team_id``; o WS event continua
+# ``conversation_assigned`` (reuso, sem nome novo no transporte). Plugin que
+# precise do seam declara ``">=1.9,<2.0"``; quem só quer degradar continua em
+# ``">=1.0,<2.0"``.
+WHATSBOT_API_VERSION = "1.9.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

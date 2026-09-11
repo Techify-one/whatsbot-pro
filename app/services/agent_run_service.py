@@ -108,6 +108,22 @@ def _last_transfer_reason(executed_tools: list[dict] | None) -> str | None:
     return None
 
 
+def _hop_called_transfer_to_human(executed_tools: list[dict] | None) -> bool:
+    """Did this hop call ``transfer_to_human`` (for real, not skipped)?
+
+    More than one agent's ``tool_names`` may include it (e.g. a router AND the
+    global default agent, each transferring on their own) — whichever agent
+    calls it hands the conversation to a HUMAN, zeroing ``active_agent_key``
+    instead of pointing to a spoke. Routing must stop right there instead of
+    re-resolving: an ambient ``ai_active`` check would also trip on
+    conversations that started the turn already gated off for unrelated
+    reasons, so the signal has to be "this hop just transferred to a human",
+    not "the gate happens to be closed now".
+    """
+    return any(e.get("tool") == "transfer_to_human" and not e.get("skipped")
+               for e in (executed_tools or []))
+
+
 async def _run_routing_hop(handler, contact, sender, context_messages, spec, *,
                            disable_tools, handoff: dict | None = None):
     """Build prompt/messages/tools for ``spec`` and run one AGNO hop.
@@ -170,6 +186,13 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
 
     def _resolve_next():
         # transferir_agente persisted the handoff on the conversation; re-resolve.
+        # transfer_to_human zeroes active_agent_key instead of pointing to a
+        # spoke, and build_for_contact's cascade would otherwise fall through
+        # to the global default agent — mistaking "handed off to a human" for
+        # "handed off to the default agent" and running an unrelated agent's
+        # turn right after the human handoff.
+        if _hop_called_transfer_to_human(last_hop["executed"]):
+            return None
         try:
             return agent_factory.build_for_contact(handler, contact).agent_key
         except agent_factory.AgentResolutionError:

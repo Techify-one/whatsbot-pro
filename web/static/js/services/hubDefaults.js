@@ -114,7 +114,8 @@ export function hubUrlHasParams(search, schema = buildHubUrlSchema()) {
  * A evidência preferida é a conversa CARREGADA (`conversation`, fresca e autoritativa);
  * a linha da sidebar (`row`) serve de reserva. SEM evidência nenhuma só 'mine' cede:
  * uma thread sem linha e sem conversa carregada é uma conversa NOVA, que nasce sem
- * responsável (o único carimbo automático é o `default_assignee_user_id` do inbound —
+ * responsável (o único carimbo automático é o "atendente padrão" do canal no inbound —
+ * `default_assignee_user_id` ou, desde o plano 152, `default_assignee_agent_key`;
  * channels/ai_settings.py) ⇒ nunca é "minha", mas é legitimamente "não atribuída".
  *
  * @param {Object} input

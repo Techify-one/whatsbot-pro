@@ -62,6 +62,60 @@ test('replaceToken: preserves text after the caret', () => {
   assert.equal(r.caret, 'a @Bob '.length);
 });
 
+// ── replaceToken: âncora obsoleta (plano 132 · F5) ───────────────────
+//
+// `start` é congelado quando o menu ABRE; `caret` é lido VIVO do DOM na hora de
+// aplicar. Entre um e outro o operador pode ter clicado noutro ponto do texto, e
+// aí os dois índices deixam de descrever um token. Sem guarda, o splice
+// `slice(0,start) + insert + slice(caret)` duplica ou apaga um trecho inteiro —
+// silenciosamente, porque nada valida que `start <= caret`.
+//
+// A guarda devolve o valor INTACTO: perder a menção é irritante, comer 300
+// caracteres do texto do operador é o bug relatado.
+
+test('replaceToken: caret ANTES do start (operador clicou atrás) não duplica', () => {
+  // Menu abriu com o "@" no índice 20; o operador clicou no índice 5 e escolheu.
+  // Sem guarda: slice(0,20) + insert + slice(5) repetia os caracteres 5..20.
+  const v = 'zero um dois tres @qu';
+  const r = replaceToken(v, 18, 5, '@Quatro ');
+  assert.equal(r.value, v, 'valor tem de sair intacto');
+  assert.equal(r.caret, 5, 'caret fica onde o operador o deixou');
+});
+
+test('replaceToken: caret ALÉM do token não engole o texto do meio', () => {
+  // Menu abriu no "@" (índice 3); o operador clicou lá no fim e escolheu.
+  // Sem guarda: tudo entre o "@" e o clique desaparecia.
+  const v = 'oi @ma, tudo bem? preciso confirmar o pedido';
+  const r = replaceToken(v, 3, v.length, '@Maria ');
+  assert.equal(r.value, v);
+  assert.equal(r.caret, v.length);
+});
+
+test('replaceToken: índices fora dos limites devolvem o valor intacto', () => {
+  const v = 'oi @ma';
+  assert.equal(replaceToken(v, -1, 6, '@Maria ').value, v);
+  assert.equal(replaceToken(v, 3, 99, '@Maria ').value, v);
+  assert.equal(replaceToken(v, 3, 6, '@Maria ').value, 'oi @Maria ');  // controle
+});
+
+test('replaceToken: região substituída tem de começar pelo gatilho', () => {
+  // O texto mudou embaixo da âncora (rascunho re-hidratado, colagem, undo) e o
+  // que está em [start, caret) não é mais um token — não é seguro trocar.
+  const r = replaceToken('oi Xma', 3, 6, '@Maria ');
+  assert.equal(r.value, 'oi Xma');
+});
+
+test('replaceToken: aceita "/" além de "@" como gatilho (resposta rápida)', () => {
+  const r = replaceToken('oi /ola', 3, 7, 'Olá, tudo bem?');
+  assert.equal(r.value, 'oi Olá, tudo bem?');
+});
+
+test('replaceToken: seleção vazia no ponto do gatilho ainda insere', () => {
+  // Token de query vazia: "@" acabou de ser digitado, start aponta para ele.
+  const r = replaceToken('oi @', 3, 4, '@Ana ');
+  assert.equal(r.value, 'oi @Ana ');
+});
+
 // ── mentionLabel ────────────────────────────────────────────────────
 test('mentionLabel: name preferred, falls back to phone then lid', () => {
   assert.equal(mentionLabel({ name: 'Ana', phone: '55', lid: 'x' }), 'Ana');

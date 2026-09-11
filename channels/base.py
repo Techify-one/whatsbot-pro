@@ -164,6 +164,26 @@ class ChannelCapabilities:
     # which only the operator-initiated send routes pass; the agentic auto-reply
     # never does. Capability-driven, never by provider name.
     human_window_hours: int = 0
+    # Janela, em horas, dentro da qual a IA deste canal pode falar. 0 = sem
+    # restrição (GOWA, Telegram, WhatsApp Cloud: o turno da IA sempre roda; o que
+    # falha fora da janela é só o ENVIO, e o provedor é quem recusa). >0 = o
+    # provider CALA a IA depois de N horas do último inbound — Messenger e
+    # Instagram, cujo ``filters.py`` devolve ``None`` em ``filter.llm.messages`` e
+    # aborta o turno inteiro, porque a única saída da Meta fora das 24h é a tag
+    # ``HUMAN_AGENT``, reservada a atendente humano.
+    #
+    # ⚠️ É uma JANELA DIFERENTE das outras duas e não dá para derivá-la delas: a
+    # ``session_window_hours`` também vale para o operador, e a
+    # ``human_window_hours`` só para ele. Esta existe para o painel PARAR DE
+    # OFERECER o que o plugin vai calar: sem ela, o compositor de um canal com a
+    # tag ``HUMAN_AGENT`` ligada fica aberto por 7 dias (correto para o atendente)
+    # exibindo os toggles "IA lê"/"IA responde no chat" que, do 2º dia em diante,
+    # não fazem nada — a instrução do atendente sumia em silêncio.
+    #
+    # O core só COMPARA carimbos (``OutboundRouter.ai_window_open``); a decisão de
+    # calar continua inteira no plugin, no filtro. Capability-driven, nunca por
+    # nome de provider.
+    ai_window_hours: int = 0
     # Credential keys a channel of this provider MUST have to ever become
     # operational (plano 02 — anti zombie-channel). Empty for QR/linked-device
     # providers (GOWA): they legitimately bootstrap from an empty channel via the

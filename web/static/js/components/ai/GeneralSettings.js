@@ -28,8 +28,11 @@ export default function GeneralSettings() {
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState(0.5);
   // Exibir o nome do agente de IA nas mensagens ("IA - <NOME>") e nos cards de tool.
   const [showAgentName, setShowAgentName] = useState(true);
-  // A "sugestão de melhoria" (modelo/prompt + análises geradas) migrou para o
-  // plugin "melhorias", renderizado no slot `ai.settings.sections` abaixo.
+  // A "sugestão de melhoria" saiu daqui de vez: primeiro o comportamento migrou para o
+  // plugin "melhorias" (que a injetava de volta pelo slot `ai.settings.sections`), e na
+  // 1.8.0 do plugin a configuração dele foi para a própria aba Configurar do card, em
+  // Gerenciar Plugins. O slot abaixo continua como ponto de extensão genérico — hoje
+  // sem nenhum produtor, então não renderiza nada.
   // plano 43 — lista-negra por regex do histórico da IA (uma regex por linha).
   const [historyExcludePatterns, setHistoryExcludePatterns] = useState('');
   // plano 47 (D9) — tamanho máx. (chars) do resultado de tool reaproveitado.
@@ -270,9 +273,9 @@ export default function GeneralSettings() {
         <span class="text-[12px] text-wa-secondary">Exibe "IA - &lt;nome do agente&gt;" nas respostas e "Ferramenta IA - &lt;nome do agente&gt;" nos cards de tool. Desligado, mostra apenas "IA".</span>
       </div>
 
-      <!-- Seção "Sugestão de melhoria" (config de modelo/prompt + análises geradas):
-           preenchida pelo plugin "melhorias" via o slot. Some quando o plugin está
-           desativado. -->
+      <!-- Ponto de extensão para seções de plugin no fim desta aba. Sem produtor hoje
+           (o "melhorias" o usava até a 1.7.1 e passou a ter aba Configurar própria),
+           então não renderiza nada. -->
       <${Slot} name="ai.settings.sections" ctx=${{}} />
 
       <!-- Filtro de histórico por regex (lista-negra) -->

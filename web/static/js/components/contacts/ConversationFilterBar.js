@@ -48,7 +48,7 @@ const TIME_SORT_CHOICES = [
 // Each active filter dimension renders as its own chip with an individual ✕, so the
 // operator can drop one filter without reopening a dropdown/modal. Labels reuse the
 // same friendly names the advanced dialog shows (status/channel/agent/tag/activity).
-const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', tag: 'Etiqueta do contato', conv_label: 'Etiqueta da conversa', activity: 'Atividade' };
+const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', team: 'Time', tag: 'Etiqueta do contato', conv_label: 'Etiqueta da conversa', activity: 'Atividade' };
 
 function _channelLabel(channels, value) {
   const ch = (channels || []).find(c => String(c.id) === String(value));
@@ -66,6 +66,10 @@ function _agentLabel(agentsUsers, agentsAi, value) {
   }
   return value;
 }
+function _teamLabel(teams, value) {
+  const t = (teams || []).find(x => String(x.id) === String(value));
+  return t ? t.name : value;
+}
 // Rótulo amigável do chip para uma dimensão de atributo personalizado
 // (cattr:<scope>:<key>): "Contato · Plano" / "Atendimento · Plano" pra desambiguar
 // quando o mesmo key existe nos dois escopos. Usa as defs carregadas para o nome.
@@ -78,7 +82,7 @@ function _cattrLabel(cl, attrDefs) {
   const prefix = scope === 'contact' ? 'Contato · ' : 'Conversa · ';
   return prefix + name;
 }
-function advClauseLabel(cl, channels, agentsUsers, agentsAi, attrDefs) {
+function advClauseLabel(cl, channels, agentsUsers, agentsAi, teams, attrDefs) {
   const cattrLabel = _cattrLabel(cl, attrDefs);
   const dimLabel = cattrLabel || DIM_LABELS[cl.dim] || cl.dim;
   if (cl.dim === 'activity') {
@@ -87,11 +91,12 @@ function advClauseLabel(cl, channels, agentsUsers, agentsAi, attrDefs) {
     if (cl.op === 'lt') return `Atividade: há menos de ${days}`;
     return `Atividade: há ${days}`;
   }
-  // channel/agent/tag e atributos `list` são multi-select (lista). Rotula cada valor.
+  // channel/agent/team/tag e atributos `list` são multi-select (lista). Rotula cada valor.
   const labelOne = (v) => {
     if (cl.dim === 'status') return STATUS_LABELS[v] || v;
     if (cl.dim === 'channel') return _channelLabel(channels, v);
     if (cl.dim === 'agent') return _agentLabel(agentsUsers, agentsAi, v);
+    if (cl.dim === 'team') return _teamLabel(teams, v);
     return v;   // tag / atributo personalizado
   };
   const list = Array.isArray(cl.value) ? cl.value : [cl.value];
@@ -234,7 +239,7 @@ export function ConversationFilterBar({
   sortBy, onSortChange,
   tagFilter, onTagFilterChange,
   advFilters, onAdvFiltersChange,
-  channels, agentsUsers, agentsAi,
+  channels, agentsUsers, agentsAi, teams,
   globalTags,
   hasIdentity,
   // Saved presets
@@ -293,9 +298,13 @@ export function ConversationFilterBar({
       onRemove: () => onStatusChange('open'),
     });
   }
+  // "do contato" é explícito de propósito: a linha da sidebar mostra as etiquetas da
+  // CONVERSA, e este funil (hoje só restaurável por filtro salvo antigo) casa contra
+  // as tags do CONTATO. Sem o qualificador, o operador filtraria por uma coisa e veria
+  // outra. O filtro avançado já nomeia as duas dimensões separadamente.
   (tagFilter || []).forEach(t => filterChips.push({
     key: `tag:${t}`,
-    label: `Etiqueta: ${t}`,
+    label: `Etiqueta do contato: ${t}`,
     onRemove: () => onTagFilterChange((tagFilter || []).filter(x => x !== t)),
   }));
   (advFilters || []).forEach(cl => {
@@ -303,7 +312,7 @@ export function ConversationFilterBar({
     if (cl.value === '' || cl.value == null || (Array.isArray(cl.value) && cl.value.length === 0)) return;
     filterChips.push({
       key: `adv:${cl.id}`,
-      label: advClauseLabel(cl, channels, agentsUsers, agentsAi, allAttrDefs),
+      label: advClauseLabel(cl, channels, agentsUsers, agentsAi, teams, allAttrDefs),
       onRemove: () => onAdvFiltersChange((advFilters || []).filter(c => c.id !== cl.id)),
     });
   });
@@ -540,6 +549,7 @@ export function ConversationFilterBar({
               channels=${channels || []}
               agentsUsers=${agentsUsers || []}
               agentsAi=${agentsAi || []}
+              teams=${teams || []}
               tagNames=${tagNames}
               convLabelNames=${convLabelNames}
               contactAttrDefs=${contactAttrDefs}

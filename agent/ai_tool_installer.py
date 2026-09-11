@@ -130,10 +130,14 @@ def install_and_register(handler, data_dir) -> None:
     except Exception as e:
         logger.warning("AI tools: cannot list enabled rows (%s)", e)
         return
-    # Built-in (core) tools are NOT isolated — they run in-process with the live
-    # ToolContext and are registered by ``agent.ai_builtin_tools`` instead. Only
-    # user code-in-DB tools (kind='code') go through the isolated installer.
-    rows = [r for r in rows if r.get("kind", "code") != "builtin"]
+    # ALLOWLIST, não denylist: só ``kind='code'`` (autoral do operador) passa
+    # pelo installer isolado. Built-in e tool de PLUGIN rodam in-process com o
+    # ToolContext vivo e são registradas por ``agent.ai_builtin_tools`` /
+    # ``agent.ai_plugin_tools``. Deixar 'plugin' entrar aqui materializaria o
+    # ``tools.py`` do plugin em storages/ai_tools/ e o subprocesso de describe
+    # explodiria no ``from . import ...`` — marcando install_status='failed' numa
+    # tool que está funcionando perfeitamente.
+    rows = [r for r in rows if (r.get("kind") or "code") == "code"]
     if not rows:
         return
 

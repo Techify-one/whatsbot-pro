@@ -48,6 +48,28 @@ from plugins.context import make_plugin_db
 
 logger = logging.getLogger(__name__)
 
+PLUGIN_ID = "gowa"
+
+# ── Trilha de auditoria (docs/PLUGINS_AUDITAVEIS.md) ─────────────────────────
+# Import defensivo, e DUPLICADO de propósito: ``routes.py`` tem o gêmeo deste
+# helper, mas importá-lo daqui acoplaria o motor de fundo às rotas por nada.
+# Sem o seam (core anterior) o alerta continua funcionando, só não registra.
+try:
+    from plugins.context import audit as _core_audit
+except ImportError:  # pragma: no cover — core antigo
+    _core_audit = None
+
+
+def _audit(action: str, **kw) -> None:
+    """Registra uma ação deste plugin na Auditoria. Nunca quebra o alerta."""
+    if _core_audit is None:
+        return
+    try:
+        _core_audit(PLUGIN_ID, action, **kw)
+    except Exception:  # noqa: BLE001 — auditoria nunca derruba a ação auditada
+        pass
+
+
 # Cadência do loop de verificação (a detecção da queda tem no máximo este atraso).
 CHECK_INTERVAL = 30  # segundos
 # Cadência default do RE-aviso enquanto continua caído (editando a mensagem).
@@ -228,6 +250,18 @@ async def _tg_call(token: str, method: str, payload: dict, _migrated: bool = Fal
                 new_id = str(new_id)
                 await asyncio.to_thread(
                     config_repo.set, _CFG + "disconnect_alert_chat_id", new_id)
+                # ⚠️ MESMA ação do botão "Testar alerta" (routes.py), de propósito.
+                # Este é o caminho COMUM — o loop reenvia a cada ``interval_min``
+                # enquanto o número está fora do ar, e é aqui que a migração de
+                # supergrupo costuma acontecer. Auditar só o painel deixaria a
+                # trilha jurando que o destino dos alertas nunca mudou. Não há
+                # humano na request, então o ator é forçado a ``system`` — o
+                # default herdaria quem quer que estivesse no ContextVar.
+                _audit("alerta.chat_id_migrado",
+                       before={"chat_id": str(payload["chat_id"])},
+                       after={"chat_id": new_id},
+                       actor_type="system",
+                       actor_label="Loop de alerta de desconexão (gowa)")
                 logger.info(
                     "gowa alert: grupo virou supergrupo — chat_id %s → %s (auto-atualizado)",
                     payload["chat_id"], new_id)
@@ -236,8 +270,11 @@ async def _tg_call(token: str, method: str, payload: dict, _migrated: bool = Fal
             logger.warning("gowa alert: Telegram %s falhou: %s", method, data.get("description"))
         return data
     except Exception as e:  # noqa: BLE001
-        logger.warning("gowa alert: erro ao chamar Telegram %s: %s", method, e)
-        return {"ok": False, "description": str(e)}
+        # A URL da Bot API carrega o token e o texto da exceção httpx costuma
+        # trazê-la junto: loga só o TIPO e devolve uma descrição fixa.
+        logger.warning("gowa alert: erro de transporte ao chamar Telegram %s (%s)",
+                       method, type(e).__name__)
+        return {"ok": False, "description": "Falha de transporte no Telegram."}
 
 
 async def _tg_send(token: str, chat_id: str, text_html: str) -> int | None:
@@ -290,8 +327,14 @@ def _reconnect_url(panel_url: str) -> str:
 def _resolve_tz_name() -> str:
     """Nome IANA do fuso para exibir a hora, sem o usuário precisar preencher.
 
-    Ordem: override manual (se preenchido) → fuso auto-detectado do navegador (salvo
-    pela rota /alert-settings ao abrir a tela) → default Brasília.
+    Ordem: override manual (se preenchido) → fuso auto-detectado do navegador →
+    default Brasília.
+
+    ⚠️ NÃO REMOVA o ramo do ``_auto``: desde o plano 148 nenhuma rota GRAVA essa
+    chave (a escrita saía do GET de /alert-settings, o que mudava a hora de todo
+    alerta só de alguém abrir a aba, sem dono na trilha). Ele é PISO LEGADO — a
+    instalação que já tem o valor gravado continua honrando-o, e daqui pra frente
+    o fuso entra em ``disconnect_alert_timezone`` pelo PUT, que é auditado.
     """
     manual = (_cfg("disconnect_alert_timezone", "") or "").strip()
     if manual:

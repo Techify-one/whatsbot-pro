@@ -84,6 +84,27 @@ def _audit(action: str, **kw) -> None:
         pass
 ```
 
+⚠️ **Se o plugin audita em mais de um arquivo, o `try/except` tem de ser ÚNICO —
+num módulo folha.** Proteger só o `routes.py` é cinto sem calça: ele importa os
+irmãos (`from . import consent, …`) e, se um deles fizer
+`from plugins.context import audit` **duro**, o `ImportError` estoura lá e o
+plugin inteiro deixa de carregar — a proteção do `routes.py` nunca chega a rodar.
+Foi o caso do `trackify` (plano 148): `consent.py`, `services.py` e
+`lifecycle.py` auditavam com import duro. O conserto é um `src/_audit.py` que não
+importa nada do próprio plugin, com a **mesma assinatura** de
+`plugins.context.audit` (`audit(plugin_id, action, **kw)`) — assim os call sites
+trocam só a linha do `import`, sem risco de erro de aridade — e o `routes.py`
+mantém o `_audit(action, **kw)` acima como atalho. `plugin_permission` continua
+no import duro: é avaliado pelo decorator em tempo de import e não tem degradação
+sensata.
+
+A faixa de risco é real, não teórica: `plugins.context.audit` nasceu em
+2026-07-27, um mês DEPOIS do `plugin_permission` — e um manifesto que declare
+`whatsbot_api_version: ">=1.0,<2.0"` aceita cores dessa faixa. Um teste que
+prove isso está em `plugins/trackify/tests/` (`..._carrega_num_core_anterior...`):
+apaga o atributo de `plugins.context` e importa os módulos de `entry:` num
+pacote novo.
+
 E em cada rota que muda algo:
 
 ```python
@@ -114,10 +135,25 @@ Três regras de ouro:
 | Criar/editar/excluir objeto compartilhado (visualização de equipe, campo) | Mensagem de chat / evento de alto volume |
 | Ação que dispara efeito externo (semear agentes, re-login de executor) | Cache, invalidação, retry técnico |
 | **Entregar um segredo em claro** ao operador (ver §6) | Tráfego de cliente final (widget, visitante) |
+| **Exportar dado sensível em massa** (baixar um dump) | Abrir a tela que mostra esse mesmo dado |
 
-A última linha é a exceção deliberada ao "GET não audita": uma rota que REVELA um
-segredo (ex.: `GET /reveal-hmac` do plugin `website`) registra **quem viu** — o
-valor, obviamente, nunca entra na linha.
+As duas últimas linhas são a exceção deliberada ao "GET não audita", e são a
+mesma exceção: quando a resposta **revela** em vez de listar, a trilha registra
+**quem viu**.
+
+- Um segredo: `GET /reveal-hmac` do plugin `website`. O valor, obviamente, nunca
+  entra na linha.
+- Um dump: `GET /download` do plugin `debug_bus`, que despeja em JSONL tudo o que
+  a captura persistiu — telefones, texto de conversa, payloads crus do provedor e
+  o system prompt mandado ao LLM. Registre **quem baixou e quantas linhas**; o
+  conteúdo, jamais. É por isso que ligar a captura também audita: quem a ligou e
+  quem levou o resultado embora são duas perguntas diferentes, e as duas serão
+  feitas.
+
+O que separa esta exceção de um log de navegação é o verbo. *Abrir a tela* que
+pagina o mesmo dado continua fora — ela é uma listagem, e auditá-la afogaria a
+trilha. *Baixar o arquivo inteiro* é um ato único, raro e irreversível: o dado
+saiu da instalação.
 
 Critério prático: **se alguém puder perguntar "quem mexeu nisso?" daqui a três
 meses, tem que estar na trilha.** Se a resposta for "ninguém liga", fora.
@@ -196,8 +232,21 @@ quê. Config do plugin que **não** é por canal (ex.: o alerta de desconexão d
 O core mascara (`***`) valores cujas **chaves** casam a denylist de
 [db/repositories/audit_repo.py](../db/repositories/audit_repo.py) (`api_key`,
 `token`, `password`, `secret`, `credentials`, …). Isso é uma rede de segurança,
-**não** uma licença: uma chave de nome inocente (`proxy_url`, `dsn`,
-`page_id`) passa em claro.
+**não** uma licença: uma chave de nome inocente (`proxy_url`, `page_id`) passa
+em claro.
+
+⚠️ **O casamento é por nome EXATO, não por substring** — e isso já custou um
+vazamento real. O `vendas_ia` guardava a conexão com o banco do Nexus na chave
+`nexus_dsn`, uma string que carrega a **senha do banco de produção**. Nenhuma
+entrada da lista casava esse nome, então ela entrou em claro na trilha e ficou
+legível na tela `/audit` **por semanas** — ao lado, na mesma linha, de um
+`openrouter_api_key` corretamente mascarado, o que fazia a trilha *parecer*
+higienizada. `nexus_dsn`, `dsn`, `database_url` e `connection_string` entraram na
+denylist no plano 149·F8; acrescentar um nome ali conserta a trilha de **todos**
+os plugins de uma vez, e é o primeiro passo sempre que um segredo novo aparece.
+
+Isso não substitui a regra abaixo: a denylist é o que pega o descuido, não o que
+autoriza mandar o segredo.
 
 Regra do plugin: **não coloque o segredo no payload.** Registre que ele mudou:
 
@@ -289,3 +338,30 @@ tabela: a ação nova aparece no filtro **assim que a primeira linha for gravada
 | Plugin de canal (`channel:<id>`) | `storages/plugins/telegram/routes.py`, `.../whatsapp_cloud/routes.py` |
 | Config global de plugin de canal | [assets/plugin_examples/gowa/routes.py](../assets/plugin_examples/gowa/routes.py) → `/alert-settings` |
 | Segredo revelado (exceção ao GET) | `storages/plugins/website/routes.py` → `/reveal-hmac` |
+
+---
+
+## Apêndice — resumo migrado do `CLAUDE.md` (plano 139)
+
+> O `CLAUDE.md` carrega hoje só a regra curta e o link para este guia. O texto abaixo é o
+> que ele trazia antes do corte — o contrato do seam `audit()`, o write path e as regras
+> de escopo. Mantido aqui verbatim para não se perder.
+
+### Auditoria de plugins
+
+A trilha (`audit_log`, tela `/audit`) é dirigida pelo bus: o listener `*` ([server/audit_listener.py](../server/audit_listener.py)) confere cada evento contra a allowlist `AUDITABLE_EVENTS` ([db/audit_actions.py](../db/audit_actions.py)). Essa allowlist é a **vocabulário do CORE** — plugin não a edita (o core não conhece plugin por nome, mesmo princípio dos canais/RBAC). O plugin registra as próprias ações pelo seam `audit()`:
+
+```python
+from plugins.context import audit
+audit("protocolos", "config.geral", before=antes, after=depois)
+# → ação  protocolos.config.geral   recurso  plugin:protocolos   ator: usuário logado
+```
+
+- **Contrato** ([plugins/context.py](../plugins/context.py) `audit()`): a ação é namespaceada com o id do plugin (`namespaced_action`) e validada contra `PLUGIN_ACTION_RE` (`<plugin_id>.<recurso>.<verbo>`; fora do formato ⇒ WARNING e a linha é descartada, a rota segue). `resource_type` default `"plugin"`, `resource_id` default = id do plugin (o filtro "ID do recurso" lista tudo daquele plugin). Fire-and-forget, nunca levanta, respeita o master `audit_enabled`. O ator sai do `ContextVar` da request (o usuário logado) — `actor_type="ai"/"system"` só para autor não-humano (executor externo, job).
+- **Write path** ([server/audit_listener.py](../server/audit_listener.py) `record()`): o ÚNICO caminho de escrita fora do listener. Aplica o gate global + resolução de ator; um ator forçado (`ai`) não herda id/rótulo do humano da request.
+- **Segredo nunca entra**: o `audit_repo` mascara por NOME de chave (rede de segurança, não licença) — o plugin registra `{"secret_definido": True}`, não o valor. Conteúdo já versionado (prompt de agente, código de tool) entra como PONTEIRO (`{key, version}`), não como cópia.
+- **Plugin de CANAL grava no CANAL**: um provider (gowa/telegram/whatsapp_cloud/website/facebook_messenger/instagram) passa `resource_type="channel", resource_id=<channel_id>` — as ações dele são sobre um canal, e assim caem no MESMO recurso dos eventos `channel.*` do core: **um filtro por canal devolve a história inteira** (criado/editado/desconectado pelo core + webhook redirecionado/Página assinada pelo plugin). Config que não é por canal (ex.: o alerta de desconexão do `gowa`, global) mantém o default `plugin:<id>`.
+- **Settings declarativas já são auditadas** pelo core (`plugin.settings.changed` → `plugin.settings_update`, com diff): plugin que só tem `settings.py` (ex.: `guarda_ia`) não precisa de nada.
+- **O que auditar**: configuração, mudança de estado com dono (fechar/atribuir/aprovar), escrita em recurso do core, ação com efeito externo. **O que não**: GET/listagem, teste de conexão, preferência pessoal por-usuário, evento de alto volume.
+- **CONVERSA NUNCA ENTRA NA TRILHA** (regra dura): enviar/receber mensagem num canal não gera linha nenhuma — nem envio do operador, nem resposta da IA, nem inbound do cliente, nem reação/edição/recibo/presença. O histórico de `messages` já é esse registro. Ficam fora da allowlist de propósito: `message.*`, `presence.changed`, `receipt.changed` e `channel.status_changed` (read que roda a cada poll). Travado por `test_audit_ignores_message_traffic` (webhook inbound + envio do operador ⇒ `audit_log` intacta) e `test_audit_message_events_stay_out_of_allowlist`.
+- Guia completo + checklist: [docs/PLUGINS_AUDITAVEIS.md](../docs/PLUGINS_AUDITAVEIS.md). Plugins que já usam: `protocolos` (config + operação), `melhorias` (aprovações + executor com ator `ai`), `vendas_ia` (`/seed`), e os 6 providers de canal (`gowa` alerta de desconexão; `telegram`/`whatsapp_cloud`/`facebook_messenger`/`instagram` webhook+assinatura; `website` revelação do segredo HMAC).

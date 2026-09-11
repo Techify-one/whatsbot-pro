@@ -17,7 +17,6 @@ from fastapi import Depends, Request
 
 from db.repositories import conversation_label_repo as label_repo, conversation_repo
 from plugins.events import emit_with_filter
-from server import system_notices
 from server.authz import permission_denied, current_user
 from server.deps import require_permission, install_exception_handlers
 from server.helpers import _ok, _err
@@ -30,6 +29,11 @@ _MAX_NAME = 40
 
 def register_routes(app, deps):
     ws_manager = deps.ws_manager
+
+    # A escrita das etiquetas DA CONVERSA (+ WS + bus + cards no fio) mora no
+    # serviço, compartilhada com a fachada /api/v1. Import diferido pelo mesmo
+    # motivo das fases B3/B4 (o serviço importa de volta em ``server``).
+    from app.services import conversation_service as conv_svc
 
     install_exception_handlers(app)
 
@@ -126,6 +130,12 @@ def register_routes(app, deps):
 
     @app.put("/api/atendimentos/{conv_id}/labels")
     async def set_conversation_labels(conv_id: int, body: dict, request: Request):
+        """Substitui as etiquetas da conversa.
+
+        A escrita + os três efeitos (broadcast ``conversation_labels_changed``,
+        evento ``conversation.labeled`` e os cards no fio) vivem em
+        ``conversation_service.apply_labels`` desde o plano de API, para que a
+        fachada ``/api/v1`` produza EXATAMENTE as mesmas consequências."""
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
@@ -135,33 +145,7 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get, conv_id)
         if not conv:
             return _err("Conversa não encontrada.", 404)
-
-        previous = await asyncio.to_thread(label_repo.get_names_for_conversation, conv_id)
-        result = await asyncio.to_thread(
-            label_repo.set_for_conversation, conv_id, [str(x) for x in names_in])
-        result_names = [r["name"] for r in result]
-
-        try:
-            await ws_manager.broadcast("conversation_labels_changed", {
-                "conversation_id": conv_id, "contact_id": conv.get("contact_id"),
-                "labels": result_names, "ts": time.time()})
-        except Exception as e:  # noqa: BLE001
-            logger.debug("conversation_labels_changed broadcast failed: %s", e)
-        await emit_with_filter("conversation.labeled", {
-            "conversation_id": conv_id, "contact_id": conv.get("contact_id"),
-            "labels": result_names, "ts": time.time()})
-
-        # Chat notices (grupo `conv_labels`): one card per added/removed label.
         actor = (current_user(request) or {}).get("name") or None
-        prev_set, now_set = set(previous), set(result_names)
-        for name in (now_set - prev_set):
-            await asyncio.to_thread(
-                system_notices.emit_conversation_notice,
-                event_type="conv_label_added", conversation_id=conv_id,
-                contact_id=conv.get("contact_id"), actor=actor, label=name)
-        for name in (prev_set - now_set):
-            await asyncio.to_thread(
-                system_notices.emit_conversation_notice,
-                event_type="conv_label_removed", conversation_id=conv_id,
-                contact_id=conv.get("contact_id"), actor=actor, label=name)
+        result_names = await conv_svc.apply_labels(
+            deps, conv, names_in, actor_name=actor)
         return _ok({"conversation_id": conv_id, "labels": result_names})
