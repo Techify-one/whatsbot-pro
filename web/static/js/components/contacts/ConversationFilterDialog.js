@@ -1,8 +1,9 @@
 // Chatwoot-style "Filtrar atendimentos" builder (plano 10 FF6+). Opened from the funnel
 // icon in the inbox toolbar. Each row is a clause: [dimensão] [operador] [valor] [🗑].
 // Dimensions: Status (Aberta/Fechada/Todas), Canais, Agente (atendente humano +
-// IA), Etiqueta, Última atividade — MAIS os atributos personalizados (dinâmicos),
-// de contato e de atendimento, que aparecem conforme cadastrados (plano 05).
+// IA), Time (plano 153 — independente do Agente), Etiqueta, Última atividade —
+// MAIS os atributos personalizados (dinâmicos), de contato e de atendimento,
+// que aparecem conforme cadastrados (plano 05).
 //
 // Operators:
 //   - Status / Canais / Agente / Etiqueta → "Igual a" (eq) / "Diferente" (ne)
@@ -32,6 +33,7 @@ const CORE_DIMENSIONS = [
   { key: 'channel',      label: 'Canais',           ops: ['eq', 'ne'],                valueType: 'channel' },
   { key: 'contact_type', label: 'Tipo de contato',  ops: ['eq', 'ne'],                valueType: 'contact_type' },
   { key: 'agent',      label: 'Agente',              ops: ['eq', 'ne'],                valueType: 'agent' },
+  { key: 'team',       label: 'Time',                ops: ['eq', 'ne'],                valueType: 'team' },
   { key: 'tag',        label: 'Etiqueta do contato', ops: ['eq', 'ne'],                valueType: 'tag' },
   { key: 'conv_label', label: 'Etiqueta da conversa', ops: ['eq', 'ne'],               valueType: 'conv_label' },
   { key: 'ai',         label: 'IA',                  ops: ['eq', 'ne'],                valueType: 'ai_state' },
@@ -57,7 +59,7 @@ const ATTR_TYPE_MAP = {
 };
 
 // Valores cujo input é multi-select (lista). As demais são escalares.
-const MULTI_TYPES = new Set(['channel', 'contact_type', 'agent', 'tag', 'conv_label', 'attr_list']);
+const MULTI_TYPES = new Set(['channel', 'contact_type', 'agent', 'team', 'tag', 'conv_label', 'attr_list']);
 const isMultiType = (valueType) => MULTI_TYPES.has(valueType);
 const emptyValueFor = (dimDesc) => (dimDesc && isMultiType(dimDesc.valueType) ? [] : '');
 const isEmptyValue = (v) => v == null || v === '' || (Array.isArray(v) && v.length === 0);
@@ -179,7 +181,7 @@ function DimensionPicker({ dimensions, value, onChange }) {
   </div>`;
 }
 
-function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames, convLabelNames, onChange }) {
+function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, teams, tagNames, convLabelNames, onChange }) {
   const t = dimDesc.valueType;
   const cls = `${FIELD} flex-1 min-w-0`;
   if (t === 'status') {
@@ -205,6 +207,10 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
       ...agentsUsers.map(u => ({ value: 'user:' + u.id, label: u.name, group: 'Atendentes' })),
       ...agentsAi.map(a => ({ value: 'ai:' + a.agent_key, label: a.display_name, group: 'Agentes de IA' })),
     ];
+    return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
+  }
+  if (t === 'team') {
+    const options = (teams || []).map(team => ({ value: String(team.id), label: team.name }));
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
   }
   if (t === 'tag') {
@@ -264,7 +270,7 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, tagNames
   </div>`;
 }
 
-export function ConversationFilterDialog({ filters, channels, agentsUsers, agentsAi, tagNames,
+export function ConversationFilterDialog({ filters, channels, agentsUsers, agentsAi, teams, tagNames,
   convLabelNames = [], contactAttrDefs = [], convAttrDefs = [],
   sortBy, onSortChange, readSortOptions = [], timeSortOptions = [], onApply, onClose }) {
   useProviderCatalog();  // re-render quando o catálogo de providers carregar (opções de tipo)
@@ -328,7 +334,7 @@ export function ConversationFilterDialog({ filters, channels, agentsUsers, agent
               ${dim.ops.map(op => html`<option key=${op} value=${op}>${OP_LABELS[op]}</option>`)}
             </select>
             <${ValueInput} clause=${c} dimDesc=${dim} channels=${channels} agentsUsers=${agentsUsers}
-              agentsAi=${agentsAi} tagNames=${tagNames} convLabelNames=${convLabelNames}
+              agentsAi=${agentsAi} teams=${teams} tagNames=${tagNames} convLabelNames=${convLabelNames}
               onChange=${(v) => patch(c.id, { value: v })} />
             <button onClick=${() => removeRow(c.id)} title="Remover filtro"
               class="shrink-0 w-[30px] h-[30px] flex items-center justify-center rounded-md text-wa-secondary hover:bg-wa-hover hover:text-red-400 transition-colors">

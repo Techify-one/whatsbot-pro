@@ -25,7 +25,7 @@ from server.client_ip import audit_ip
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import (audit_purge_loop, empty_conversation_sweep_loop,
                                webhook_delivery_loop)
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes, api_keys as api_keys_routes, webhooks_out as webhooks_out_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, teams as teams_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes, api_keys as api_keys_routes, webhooks_out as webhooks_out_routes
 from server.routes import v1 as v1_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
@@ -835,6 +835,8 @@ def create_app(
     @app.get("/users/{user_id:int}")
     @app.get("/users/roles")
     @app.get("/users/roles/{role_key:str}")
+    @app.get("/users/teams")
+    @app.get("/users/teams/{team_id:str}")
     # short_code pode conter "/" (ex.: "/saud") → :path tolera o segmento extra
     # mesmo quando um proxy decodifica %2F antes de chegar aqui.
     @app.get("/quick-replies/{short_code:path}")
@@ -850,6 +852,7 @@ def create_app(
         channel_id: str | None = None,
         user_id: int | None = None,
         role_key: str | None = None,
+        team_id: str | None = None,
         short_code: str | None = None,
         scope: str | None = None,
         attr_key: str | None = None,
@@ -882,6 +885,7 @@ def create_app(
     auth.register_routes(app, deps)
     users_routes.register_routes(app, deps)
     roles_routes.register_routes(app, deps)
+    teams_routes.register_routes(app, deps)
     conversations_routes.register_routes(app, deps)
     conversation_labels_routes.register_routes(app, deps)
     saved_filters_routes.register_routes(app, deps)

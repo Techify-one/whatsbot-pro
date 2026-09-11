@@ -89,7 +89,7 @@ function addClause(params, cl) {
     return addScalarClause(params, 'status', op, value);
   }
   if (dim === 'channel' || dim === 'contact_type' || dim === 'agent'
-      || dim === 'ai' || dim === 'starter') {
+      || dim === 'ai' || dim === 'starter' || dim === 'team') {
     return addScalarClause(params, dim, op, value);
   }
   if (dim === 'activity') return addActivityClause(params, op, value);
@@ -105,7 +105,7 @@ function clauseParamKey(cl) {
   if (dim === 'conv_label') return 'conv_labels';
   if (dim === 'status') return value === 'all' ? null : 'status';
   if (dim === 'channel' || dim === 'contact_type' || dim === 'agent'
-      || dim === 'ai' || dim === 'starter' || dim === 'activity') return dim;
+      || dim === 'ai' || dim === 'starter' || dim === 'activity' || dim === 'team') return dim;
   const m = String(dim).match(/^cattr:(contact|conversation):([a-z][a-z0-9_]{0,63})$/);
   if (m) return m[1] === 'conversation' ? `cattr:${m[2]}` : `cattr:contact:${m[2]}`;
   return '__unsupported__';

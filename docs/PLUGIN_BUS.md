@@ -70,6 +70,7 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | `channel.duplicate_refused` | sweep de identidade recusou um canal duplicado ([channel_identity.py](../app/services/channel_identity.py)) — ator `system` |
 | `channel.status_changed` | leitura de status ao vivo. **Fora da auditoria de propósito** (é read, roda a cada poll) |
 | `conversation.pinned` | `conversation_service.pin` — fixar/desafixar a conversa |
+| `conversation.team_assigned` / `.team_unassigned` | `conversation_service.assign_team` (plano 153 — Times) — atribuir/desatribuir o TIME de uma conversa, INDEPENDENTE do `assignee_user_id` (D1: os dois convivem, nenhum limpa o outro). `{conversation_id, team_id, previous_team_id, ts}`. WS event continua `conversation_assigned` (reuso) |
 | `conversation.labeled` | PUT das etiquetas de UMA conversa (`{conversation_id, contact_id, labels, ts}`) |
 | `conversation_label.created` / `.updated` / `.deleted` | CRUD do registro GLOBAL de etiquetas (`/api/conversation-labels`) |
 | `custom_attribute.created` / `.updated` / `.deleted` | CRUD da definição de atributo customizado (`{definition, ts}`) |

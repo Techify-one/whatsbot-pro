@@ -106,6 +106,11 @@ KNOWN_EVENTS: set[str] = {
     "conversation.attribute_set", "conversation.ai_takeover",
     # Fixar/desafixar a conversa (``conversation_service.pin``).
     "conversation.pinned",
+    # Atribuir/desatribuir TIME (plano 153 — ``conversation_service.assign_team``).
+    # Simétrico a .assigned/.unassigned mas para ``team_id``, INDEPENDENTE do
+    # assignee_user_id (D1 — os dois convivem). Payload: conversation_id, team_id,
+    # previous_team_id, ts. WS event continua ``conversation_assigned`` (reuso, D7).
+    "conversation.team_assigned", "conversation.team_unassigned",
     # Etiquetas de CONVERSA (``server/routes/conversation_labels.py``):
     # ``conversation.labeled`` é a atribuição de UMA conversa; os três
     # ``conversation_label.*`` são o CRUD do registro GLOBAL de etiquetas.

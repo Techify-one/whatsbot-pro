@@ -16,7 +16,7 @@ import {
   setConversationAi, deleteConversation, deleteContact,
   archiveConversation, pinConversation,
   getMe, getAssignableAgents, getUsers, getTags,
-  getContactConversation, getConversation, assignConversation, assignAgent,
+  getContactConversation, getConversation, assignConversation, assignAgent, assignTeam,
   getConversationLabels, createConversationLabel,
 } from '../../../services/api.js';
 import { resolveConversation } from '../../../utils/resolveConversation.js';
@@ -57,6 +57,7 @@ export function useConversationActions({
   const [users, setUsers] = useState([]);
   const [agentsUsers, setAgentsUsers] = useState([]);         // assignable human agents
   const [agentsAi, setAgentsAi] = useState([]);               // assignable AI agents
+  const [teams, setTeams] = useState([]);                     // times (plano 153)
   const [ctxMenu, setCtxMenu] = useState(null);
   // Conversation-level data for the open context menu (assignee/resolve). Resolved
   // lazily on right-click since the sidebar rows are contact-level only.
@@ -228,6 +229,17 @@ export function useConversationActions({
     }
   }, [patchCtxConv]);
 
+  // Atribuir/desatribuir o TIME de uma conversa (plano 153) — INDEPENDENTE do
+  // assignee/agente (D1): só o campo team_id muda, o resto do menu não reage.
+  const handleAssignTeam = useCallback(async (convId, teamId) => {
+    const res = await assignTeam(convId, teamId);
+    if (res && res.ok && res.data && res.data.conversation) {
+      patchCtxConv({ team_id: res.data.conversation.team_id });
+    } else {
+      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atribuir time.' }));
+    }
+  }, [patchCtxConv]);
+
   const handleResolveConversation = useCallback(async (convId, status) => {
     // Funnel through resolveConversation so the beforeResolve filter (plugins) runs
     // here too. Pass an object so the filter gets the conversation id for context.
@@ -306,6 +318,7 @@ export function useConversationActions({
       if (res && res.ok && res.data) {
         setAgentsUsers(Array.isArray(res.data.users) ? res.data.users : []);
         setAgentsAi(Array.isArray(res.data.ai_agents) ? res.data.ai_agents : []);
+        setTeams(Array.isArray(res.data.teams) ? res.data.teams : []);
       }
     }).catch(() => {});
     // silent: read best-effort — sem `users.manage` o backend responde 403 e a
@@ -339,11 +352,11 @@ export function useConversationActions({
 
   return {
     globalTags, setGlobalTags,
-    currentUserId, currentUser, users, agentsUsers, agentsAi,
+    currentUserId, currentUser, users, agentsUsers, agentsAi, teams,
     ctxMenu, setCtxMenu, ctxConv, setCtxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
-    handleAssignConversation, handleAssignAgent, handleResolveConversation,
+    handleAssignConversation, handleAssignAgent, handleAssignTeam, handleResolveConversation,
     resolveAssignee,
     convLabelRegistry, setConvLabelRegistry,
     handleCreateConvLabel, applyConvLabelResults,

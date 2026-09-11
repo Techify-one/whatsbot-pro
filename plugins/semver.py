@@ -87,7 +87,14 @@ logger = logging.getLogger(__name__)
 # última rede para o endpoint fora do ar — "nenhum destino" deixou de ser o
 # desfecho padrão de quem não tem env. Plugin que precise do seam declara
 # ``">=1.8,<2.0"``; quem só quer degradar continua em ``">=1.0,<2.0"``.
-WHATSBOT_API_VERSION = "1.8.0"
+# 1.9.0: ADITIVA no catálogo — ``conversation.team_assigned``/``.team_unassigned``
+# (plano 153: Times, agrupamento de atendentes independente do assignee_user_id
+# individual). Produtor: ``conversation_service.assign_team``. Simétrico a
+# ``.assigned``/``.unassigned`` mas para ``team_id``; o WS event continua
+# ``conversation_assigned`` (reuso, sem nome novo no transporte). Plugin que
+# precise do seam declara ``">=1.9,<2.0"``; quem só quer degradar continua em
+# ``">=1.0,<2.0"``.
+WHATSBOT_API_VERSION = "1.9.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

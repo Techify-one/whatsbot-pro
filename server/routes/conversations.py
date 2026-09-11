@@ -17,7 +17,7 @@ from fastapi import File, Request, UploadFile
 
 from app.services import template_service as tpl_svc
 from db.repositories import (conversation_repo, custom_attribute_repo, contact_repo,
-                             message_repo, user_repo, agent_repo, mention_repo)
+                             message_repo, user_repo, agent_repo, mention_repo, team_repo)
 from db.repositories.custom_attribute_validate import validate_value
 from server.avatars import avatar_version
 from channels import audio_transcode, media_limits, video_transcode
@@ -279,6 +279,7 @@ def register_routes(app, deps):
             return denied
         users = await asyncio.to_thread(user_repo.list_all)
         agents = await asyncio.to_thread(agent_repo.list_all)
+        teams = await asyncio.to_thread(team_repo.list_all)
         human_list = [
             {"id": u["id"], "name": u.get("name") or u.get("email"),
              "email": u.get("email"), "is_admin": bool(u.get("is_admin"))}
@@ -288,7 +289,8 @@ def register_routes(app, deps):
             {"agent_key": a["agent_key"], "display_name": a.get("display_name") or a["agent_key"]}
             for a in agents if a.get("enabled")
         ]
-        return _ok({"users": human_list, "ai_agents": ai_list})
+        team_list = [{"id": t["id"], "name": t["name"]} for t in teams]
+        return _ok({"users": human_list, "ai_agents": ai_list, "teams": team_list})
 
     @app.get("/api/mentions/unread-count")
     async def mentions_unread_count(request: Request):
@@ -554,6 +556,24 @@ def register_routes(app, deps):
                                      actor_id=actor_id, actor_name=actor_name)
         if conv == "blocked":
             return _err("Atribuição bloqueada por um plugin.", status=403)
+        if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        return _ok({"conversation": conv})
+
+    @app.post("/api/atendimentos/{conv_id}/assign-team")
+    async def assign_team(conv_id: int, body: dict, request: Request):
+        """Set/clear the TEAM of a conversation (plano 153) — reuses
+        conversation.assign (D6), the same permission "Atribuir atendente" uses.
+        Independent of the human assignee (D1): never goes through _transfer."""
+        denied = permission_denied(request, "conversation.assign")
+        if denied:
+            return denied
+        team_id = body.get("team_id")
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
+        _aid, actor_name = _actor(request)
+        conv = await conv_svc.assign_team(deps, _conv, team_id, actor_name=actor_name)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})

@@ -211,7 +211,7 @@ function RowTags({ tags, globalTags, expanded, onToggle }) {
 export function ContactList({ contacts, loading, search, onSearchChange, selected, onSelect, onContextMenu, onDropFiles, typingState, aiRespondingState, operatorTypingState, showArchived, onToggleArchived, globalTags, labelRegistry, onStartConversation, onNewConversation, checkingPhone, checkPhoneError, wsConnected, autoReply, onToggleAutoReply,
   selectionMode, selectedKeys, onEnterSelection, onExitSelection, onToggleSelect, onSelectAll, onClearSelection, onDeselectAll, onBulkAI, onBulkArchive, onBulkTag, onBulkRemoveAllTags, onBulkPin, onBulkMarkRead, onBulkMarkUnread, onBulkAssign, onCreateLabel,
   currentUserId,
-  statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, resolveAssignee, hasIdentity,
+  statusFilter, onStatusChange, assignmentTab, onAssignmentChange, tabCounts, sortBy, onSortChange, tagFilter, onTagFilterChange, advFilters, onAdvFiltersChange, channels, agentsUsers, agentsAi, teams, resolveAssignee, hasIdentity,
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
   loadMore = null, loadingMore = false, hasMore = false, gearMenu = null }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
@@ -617,6 +617,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
           channels=${channels}
           agentsUsers=${agentsUsers}
           agentsAi=${agentsAi}
+          teams=${teams}
           globalTags=${globalTags}
           hasIdentity=${hasIdentity}
         />

@@ -143,6 +143,7 @@ function matchOne(c, dim, value) {
   if (dim === 'contact_type') return (c.contact_type || 'outros') === value; // tipo do CONTATO (canal de origem)
   if (dim === 'tag') return (c.tags || []).includes(value);           // etiqueta do CONTATO
   if (dim === 'conv_label') return (c.conv_labels || []).includes(value); // etiqueta do ATENDIMENTO
+  if (dim === 'team') return String(c.team_id) === value;             // time (plano 153)
   // agent
   if (value === 'none') return c.assignee_user_id == null && !c.active_agent_key;
   if (value.startsWith('user:')) return String(c.assignee_user_id) === value.slice(5);
@@ -204,7 +205,7 @@ export function clauseMatches(c, cl, now) {
   if (cattr) return attrMatches(c, cattr[1], cattr[2], op, value);
   // channel / tag / conv_label / agent — valor pode ser lista (multi-select). eq = "é
   // uma de" (OR); ne = "não é nenhuma de". Escalar legado é tratado como lista de 1.
-  if (dim === 'channel' || dim === 'contact_type' || dim === 'tag' || dim === 'conv_label' || dim === 'agent') {
+  if (dim === 'channel' || dim === 'contact_type' || dim === 'tag' || dim === 'conv_label' || dim === 'agent' || dim === 'team') {
     const list = Array.isArray(value) ? value : [value];
     if (list.length === 0) return true;             // cláusula incompleta → ignorada
     const hit = list.some(v => matchOne(c, dim, v));
@@ -562,6 +563,7 @@ export function buildRows(contacts, conversations, opts = {}) {
           // right-click toggle. WS patches keep this in sync as `conv_ai_active`.
           conv_ai_active: cv.ai_active,
           assignee_user_id: cv.assignee_user_id,
+          team_id: cv.team_id,
           active_agent_key: cv.active_agent_key,
           // plano 28: provenance drives the sidebar visibility gate (an 'inbound'
           // conversation shows at t=0 even before its first message is persisted).
@@ -672,6 +674,7 @@ export function convRowToSidebarRow(p) {
     conv_status: p.status,
     conv_ai_active: p.ai_active,
     assignee_user_id: p.assignee_user_id,
+    team_id: p.team_id,
     active_agent_key: p.active_agent_key,
     conv_custom_attributes: p.custom_attributes || {},
     conv_labels: p.labels || [],

@@ -10,15 +10,15 @@ import logging
 import time
 
 from sqlalchemy import (select, update, func, delete as sa_delete,
-                        insert as sa_insert, case, exists, false as sa_false,
-                        literal)
+                        insert as sa_insert, and_, case, exists, false as sa_false,
+                        literal, or_)
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
 from db.repositories import conversation_query, conversation_label_repo
 from db.tables import (conversations, contacts, conversation_counters,
                        inboxes, messages, unread_msg_ids, conversation_label_links,
-                       mentions)
+                       mentions, teams, team_members)
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +478,31 @@ def _notify_private_enabled() -> bool:
         return False
 
 
+def _team_visible_clause(current_user_id: int | None):
+    """Uma conversa some da LISTAGEM (não do acesso direto — D3 do plano 154)
+    se: (a) não tem time, OU (b) o time não está com restrict_visibility
+    ligado, OU (c) o usuário É membro daquele time, OU (d) o time tem
+    ``visible_to_assignee`` ligado E o usuário é o ASSIGNEE desta conversa
+    específica (plano 155 — exceção individual: só ele, não o resto de fora do
+    time, volta a ver). Só é chamada quando o usuário já está escopado por
+    caixa (inbox_ids is not None) — quem tem conversation.read_all/admin nunca
+    passa por aqui (D5)."""
+    restricted_team_ids = select(teams.c.id).where(teams.c.restrict_visibility == 1)
+    assignee_exempt_team_ids = select(teams.c.id).where(teams.c.visible_to_assignee == 1)
+    member_team_ids = (select(team_members.c.team_id)
+                       .where(team_members.c.user_id == current_user_id)
+                       if current_user_id is not None
+                       else select(team_members.c.team_id).where(sa_false()))
+    assignee_match = (conversations.c.assignee_user_id == current_user_id
+                      if current_user_id is not None else sa_false())
+    return or_(
+        conversations.c.team_id.is_(None),
+        conversations.c.team_id.notin_(restricted_team_ids),
+        conversations.c.team_id.in_(member_team_ids),
+        and_(conversations.c.team_id.in_(assignee_exempt_team_ids), assignee_match),
+    )
+
+
 def _attach_labels(rows: list[dict]) -> list[dict]:
     """Enrich finalized conversation rows with their conversation-label names.
 
@@ -540,6 +565,7 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
     if inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
                           else sa_false())
+        stmt = stmt.where(_team_visible_clause(current_user_id))
     if contact_ids is not None:
         stmt = stmt.where(conversations.c.contact_id.in_(contact_ids) if contact_ids
                           else sa_false())
@@ -563,6 +589,7 @@ def list_filtered(where, *, inbox_ids: list[int] | None = None,
     if inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
                           else sa_false())
+        stmt = stmt.where(_team_visible_clause(current_user_id))
     stmt = (stmt.order_by(conversations.c.is_pinned.desc(),
                           conversations.c.last_activity_at.desc())
             .limit(limit).offset(offset))
@@ -609,6 +636,7 @@ def count_tab_counts(where, *, inbox_ids: list[int] | None = None,
     if inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
                           else sa_false())
+        stmt = stmt.where(_team_visible_clause(current_user_id))
     with get_engine().connect() as conn:
         row = conn.execute(stmt).mappings().first() or {}
     return {
@@ -862,6 +890,12 @@ def set_pinned(conv_id: int, is_pinned: int) -> dict | None:
 
 def set_assignee(conv_id: int, assignee_user_id: int | None) -> dict | None:
     return _update(conv_id, {"assignee_user_id": assignee_user_id})
+
+
+def set_team(conv_id: int, team_id: int | None) -> dict | None:
+    """Bind/unbind a team to this conversation (plano 153). Independent of
+    ``assignee_user_id`` (D1) — pure data write, no exclusion with anything else."""
+    return _update(conv_id, {"team_id": team_id})
 
 
 def set_ai_active(conv_id: int, ai_active: int) -> dict | None:

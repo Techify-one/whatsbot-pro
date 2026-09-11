@@ -479,8 +479,10 @@ Index("idx_webhook_deliveries_endpoint", webhook_deliveries.c.endpoint_id)
 
 # ── Inbox e Conversas (plano 01 Fase 1) ────────────────────────────────────
 # Modelo 3 níveis: Contact → ContactInbox (identidade da pessoa num canal) →
-# Conversation (thread de atendimento). assignee_user_id/team_id são NULLABLE
-# SEM FK por robustez de ordem de migration (P1). channel_id liga p/ channels.id
+# Conversation (thread de atendimento). assignee_user_id é NULLABLE SEM FK por
+# robustez de ordem de migration (P1); team_id é NULLABLE COM FK para teams.id
+# (ON DELETE SET NULL — plano 153 D4: apagar um time só limpa a etiqueta).
+# channel_id liga p/ channels.id
 # "default" (plano 02 faz ALTER aditivo depois). conversation_id em messages é
 # aditivo. custom_attributes de conversa é JSON/JSONB nativo (NUNCA TEXT — coord
 # plano 05). status só open|closed (P3); is_archived ortogonal (P10).
@@ -531,6 +533,31 @@ inbox_members = Table(
 )
 Index("idx_inbox_members_user", inbox_members.c.user_id)
 
+# Times (plano 153) — agrupam atendentes para filtro/transferência de atendimento,
+# INDEPENDENTE do assignee_user_id individual (D1: os dois convivem, nenhum limpa o
+# outro). Cópia estrutural de inboxes/inbox_members acima — mesmo padrão N:N.
+teams = Table(
+    "teams",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", Text, nullable=False),
+    Column("description", Text, nullable=False, server_default=""),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Column("restrict_visibility", Integer, nullable=False, server_default="0"),  # 1 = esconde da listagem pra quem está na caixa mas não é do time — plano 154
+    Column("visible_to_assignee", Integer, nullable=False, server_default="0"),  # 1 = quem está atribuído à conversa a vê mesmo fora do time (só com restrict_visibility=1) — plano 155
+)
+
+team_members = Table(
+    "team_members",
+    metadata,
+    Column("team_id", Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", Float, nullable=False),
+    PrimaryKeyConstraint("team_id", "user_id"),
+)
+Index("idx_team_members_user", team_members.c.user_id)
+
 atendimentos = Table(
     "atendimentos",                                             # RENOMEADA de "conversations" (nomenclatura Atendimento)
     metadata,
@@ -544,7 +571,7 @@ atendimentos = Table(
     Column("is_archived", Integer, nullable=False, server_default="0"),  # ortogonal (P10)
     Column("is_pinned", Integer, nullable=False, server_default="0"),    # fixar no topo por CONVERSA (plano 54)
     Column("assignee_user_id", Integer),                        # NULLABLE sem FK (P1)
-    Column("team_id", Integer),                                 # NULLABLE sem FK
+    Column("team_id", Integer, ForeignKey("teams.id", ondelete="SET NULL")),  # NULLABLE, FK (plano 153)
     Column("priority", Text),
     Column("ai_active", Integer, nullable=False, server_default="1"),   # gate IA nível 3
     Column("active_agent_key", Text),                          # plano 06: agente da conversa
@@ -564,6 +591,7 @@ atendimentos = Table(
 )
 Index("idx_atend_inbox_status", atendimentos.c.inbox_id, atendimentos.c.status)
 Index("idx_atend_assignee_status", atendimentos.c.assignee_user_id, atendimentos.c.status)
+Index("idx_atend_team_status", atendimentos.c.team_id, atendimentos.c.status)
 Index("idx_atend_contact", atendimentos.c.contact_id)
 Index("idx_atend_contact_inbox", atendimentos.c.contact_inbox_id)
 Index("idx_atend_last_activity", atendimentos.c.last_activity_at)

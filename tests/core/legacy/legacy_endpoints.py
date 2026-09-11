@@ -5830,6 +5830,7 @@ for path in [
     "/ai/variables/nome_empresa", "/ai/tools", "/ai/tools/save_contact_info",
     "/plugins/lembretes", "/channels/default",
     "/users/1", "/users/roles", "/users/roles/gestor",
+    "/users/teams", "/users/teams/1",
     "/quick-replies/saudacao",
     "/custom-attributes/contact", "/custom-attributes/contact/empresa",
     "/custom-attributes/conversation/prioridade",

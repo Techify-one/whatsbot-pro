@@ -242,6 +242,61 @@ def test_cap_estourado_escala_pra_humano(routing_world, monkeypatch):
         config_repo.set("ai_max_route_depth", 5)
 
 
+def test_transfer_to_human_encerra_roteamento_sem_cair_no_default(routing_world, monkeypatch):
+    """Bug real (atendimento 666, plugin escola_ia): o roteador chama
+    ``transfer_to_human`` (zera ``active_agent_key`` + ``ai_active=0`` na
+    conversa, como a tool real faz). ``_resolve_next`` não pode confundir esse
+    NULL com "sem handoff, cai no agente default" — o motor global de fallback
+    seguiria rodando um agente sem relação nenhuma com a conversa."""
+    contact, conv = routing_world
+    handler = _FakeHandler()
+
+    conversation_repo.set_agent(conv["id"], "roteador29")
+    dynamic_registry.invalidate()
+    first_result = EngineResult(
+        reply="", executed_tools=[{
+            "tool": "transferir_agente",
+            "args": {"agente": "roteador29", "motivo": "devolve pro roteador"},
+            "result": "Transferência registrada: ...",
+        }], usage=None)
+    first_spec = agent_factory.AgentSpec(
+        agent_key="comercial29", base_prompt="Você vende.",
+        model_config={"model": "test/model"})
+
+    async def _fake_run_async(handler, contact, sender, messages, active_tools,
+                              model_config=None):
+        # Simula o efeito real da tool transfer_to_human: fecha o gate e
+        # desvincula o agente — sem apontar pra nenhum outro spoke.
+        conversation_repo.assign_agent(
+            conv["id"], assignee_user_id=None, active_agent_key=None, ai_active=0)
+        return EngineResult(
+            reply="já te transfiro", executed_tools=[{
+                "tool": "transfer_to_human",
+                "args": {"reason": "fora do escopo"},
+                "result": "Transferência realizada.",
+            }], usage=None)
+
+    monkeypatch.setattr(agno_engine, "run_async", _fake_run_async)
+
+    try:
+        result, combined, _, steps = asyncio.run(
+            agent_run_service._continue_routing(
+                handler, contact, PHONE, [{"role": "user", "content": "oi"}],
+                first_spec, first_result, first_result.executed_tools, None,
+                disable_tools=False))
+
+        # Só o hop pro roteador — NENHUM hop extra pro agente default.
+        assert [(s["from"], s["to"]) for s in steps] == [("comercial29", "roteador29")]
+        assert result.reply == "já te transfiro"
+        assert not handler.dispatched, "não deveria escalar (routing_halted) nem re-forçar transfer_to_human"
+    finally:
+        # transfer_to_human deixou ai_active=0 de propósito — devolve o gate
+        # aberto pra não vazar estado pros outros testes deste módulo (mesmo
+        # PHONE/conversa reaproveitados pela fixture).
+        conversation_repo.assign_agent(
+            conv["id"], assignee_user_id=None, active_agent_key=None, ai_active=1)
+
+
 def test_handoff_sem_motivo_injeta_sintetica_sem_linha_motivo(routing_world, monkeypatch):
     contact, conv = routing_world
     handler = _FakeHandler()

@@ -103,6 +103,8 @@
       "conversation.pinned",
       "conversation.reopened",
       "conversation.status_changed",
+      "conversation.team_assigned",
+      "conversation.team_unassigned",
       "conversation.transferred_to_human",
       "conversation.unassigned",
       "conversation.updated",
@@ -214,5 +216,5 @@
       "validate_services(plugin_id, raw)"
     ]
   },
-  "whatsbot_api_version": "1.8.0"
+  "whatsbot_api_version": "1.9.0"
 }

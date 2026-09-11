@@ -5,6 +5,7 @@ import { updateConversationLabels } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { TagPicker } from './TagPicker.js';
 import { AssigneeList } from './AssigneeList.js';
+import { TeamPickerList } from './TeamPickerList.js';
 import { clampFlyoutOffset } from './menuLayout.js';
 
 const html = htm.bind(h);
@@ -18,7 +19,7 @@ const FLYOUT_WIDTH = 264;
 // a linha da sidebar É um atendimento, e rotular a partir dela precisa afetar só
 // aquele atendimento. As tags de contato continuam sendo editadas exclusivamente
 // no painel "Dados do contato".
-export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, convLabels, labelRegistry, isArchived, isUnread, isPinned, conv, convLoading, convError, users, agentsUsers, agentsAi, currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onLabelsUpdate, onArchive, onPin, onDeleteConversation, onCreateLabel, onClose }) {
+export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, convLabels, labelRegistry, isArchived, isUnread, isPinned, conv, convLoading, convError, users, agentsUsers, agentsAi, teams = [], currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onAssignTeam, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onLabelsUpdate, onArchive, onPin, onDeleteConversation, onCreateLabel, onClose }) {
   // P48 (hide, don't disable): each affordance is gated by the permission that
   // its backend call actually enforces. `can` is permissive with no user
   // identity (open/legacy install) — see hasPermission.
@@ -77,6 +78,15 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
   }
   const me = currentUserId != null ? { id: currentUserId } : null;
   const pickAssign = (payload) => { if (onAssignAgent && conv && conv.id != null) onAssignAgent(conv.id, payload); };
+
+  // Conversation-level menu state (assign TEAM — plano 153). INDEPENDENTE do
+  // assignee/agente acima (D1) — seção própria, contrato próprio (onPick(teamId)).
+  const currentTeamId = conv ? conv.team_id : null;
+  const showTeamSection = (teams.length > 0 || currentTeamId != null) && can('conversation.assign');
+  const teamLabel = currentTeamId != null
+    ? ((teams.find(t => t.id === currentTeamId) || {}).name || `#${currentTeamId}`)
+    : null;
+  const pickTeam = (teamId) => { if (onAssignTeam && conv && conv.id != null) onAssignTeam(conv.id, teamId); };
 
   useEffect(() => {
     function handleClick(e) {
@@ -141,7 +151,7 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
     const flyH = el.getBoundingClientRect().height;
     const rowTop = rowEl.getBoundingClientRect().top;
     setFlyoutTop(clampFlyoutOffset(rowTop, flyH, window.innerHeight));
-  }, [openSub, pos, flyoutSide, convLoading, conv && conv.id, labelRegistry, humanAgents.length, aiAgents.length]);
+  }, [openSub, pos, flyoutSide, convLoading, conv && conv.id, labelRegistry, humanAgents.length, aiAgents.length, teams.length]);
 
   const { left, top } = pos;
 
@@ -311,6 +321,41 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
                     onPick=${(payload) => { pickAssign(payload); }}
                     showAssignToMe=${currentUserId != null}
                     searchPlaceholder="Buscar atendentes"
+                  />
+                </div>
+              `}
+            </div>
+          ` : null}
+        </div>
+      ` : null}
+
+      <!-- Conversation: assign TEAM (flyout) — plano 153, INDEPENDENTE do atendente acima -->
+      ${showTeamSection ? html`
+        <div class="relative" onMouseEnter=${() => openSubmenu('team')} onMouseLeave=${scheduleClose}>
+          <button
+            onClick=${() => openSubmenu('team')}
+            class="w-full text-left px-4 py-[10px] text-[14.5px] hover:bg-wa-hover transition-colors flex items-center gap-3 ${openSub === 'team' ? 'bg-wa-hover text-wa-text' : 'text-wa-text'}"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+              <path d="M16.5 13c-1.2 0-3.07.34-4.5 1-1.43-.67-3.3-1-4.5-1C5.33 13 1 14.08 1 16.25V19h22v-2.75c0-2.17-4.33-3.25-6.5-3.25zm-4 5.5h-10v-1.25c0-.54 2.56-1.75 4.5-1.75s4.5 1.21 4.5 1.75v1.25zm7.5 0h-6v-1.25c0-.68-.35-1.24-.87-1.7.71-.24 1.47-.4 2.37-.4 1.94 0 4.5 1.21 4.5 1.75v1.6zM7.5 12c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zm0-4.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5S6 9.83 6 9s.67-1.5 1.5-1.5zm9 4.5c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zm0-4.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5S15 9.83 15 9s.67-1.5 1.5-1.5z"/>
+            </svg>
+            <span class="shrink-0">Atribuir time</span>
+            ${teamLabel ? html`<span class="text-[11px] text-wa-secondary truncate" title=${teamLabel}>${teamLabel}</span>` : null}
+            <${SubArrow} />
+          </button>
+          ${openSub === 'team' ? html`
+            <div ref=${flyoutRef} class=${flyoutCls} style="top:${flyoutTop}px">
+              ${convLoading ? html`
+                <div class="px-4 py-[10px] text-[13px] text-wa-secondary animate-pulse-slow">Carregando conversa...</div>
+              ` : !conv ? html`
+                <div class="px-4 py-[10px] text-[13px] text-wa-secondary">Nenhuma conversa para este contato</div>
+              ` : html`
+                <div class="max-h-[70vh] overflow-y-auto wa-scrollbar">
+                  <${TeamPickerList}
+                    teams=${teams}
+                    currentTeamId=${currentTeamId}
+                    onPick=${(teamId) => { pickTeam(teamId); }}
+                    searchPlaceholder="Buscar times"
                   />
                 </div>
               `}

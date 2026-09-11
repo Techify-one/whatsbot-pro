@@ -1277,3 +1277,28 @@ export async function deleteRole(id) {
 export async function resetRole(id) {
   return request('POST', `/api/roles/${id}/reset`);
 }
+
+// Times (plano 153) — CRUD gated por users.manage (D5, mesma permissão de
+// "Usuários"/"Grupos de permissão"). Independente de assignee_user_id (D1).
+export async function getTeams() {
+  return request('GET', '/api/teams');
+}
+
+export async function createTeam(data) {
+  return request('POST', '/api/teams', data);
+}
+
+export async function updateTeam(id, data) {
+  return request('PUT', `/api/teams/${id}`, data);
+}
+
+export async function deleteTeam(id) {
+  return request('DELETE', `/api/teams/${id}`);
+}
+
+// Atribuir/desatribuir o TIME de uma conversa — reusa conversation.assign (D6).
+export async function assignTeam(convId, teamId) {
+  return request('POST', `/api/atendimentos/${convId}/assign-team`, {
+    team_id: teamId == null ? null : teamId,
+  });
+}

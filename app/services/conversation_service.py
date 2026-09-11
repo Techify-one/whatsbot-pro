@@ -87,6 +87,7 @@ async def _broadcast(deps, ws_event: str, bus_event: str, conv: dict, **extra):
         "contact_id": conv.get("contact_id"),
         "status": conv.get("status"),
         "assignee_user_id": conv.get("assignee_user_id"),
+        "team_id": conv.get("team_id"),
         "active_agent_key": conv.get("active_agent_key"),
         "ai_active": conv.get("ai_active"),
         "is_archived": conv.get("is_archived"),
@@ -602,6 +603,29 @@ async def set_agent(deps, conv: dict, agent_key: str | None, *,
         ag = await asyncio.to_thread(agent_repo.get, updated["active_agent_key"])
         agent_name = (ag or {}).get("display_name") or updated["active_agent_key"]
     await _emit_notice(updated, "agent_changed", actor_name=actor_name, agent=agent_name)
+    return updated
+
+
+async def assign_team(deps, conv: dict, team_id: int | None, *,
+                      actor_name: str | None = None) -> dict | None:
+    """Set/clear the TEAM of a conversation (plano 153). Emits
+    ``conversation.team_assigned`` (team set) OR ``conversation.team_unassigned``
+    (team cleared) — the WS event stays ``conversation_assigned`` (D7, reused).
+
+    Plano 153 D1 — time e atendente individual são INDEPENDENTES: esta função
+    NUNCA passa por :func:`_transfer` (o cotovelo que unifica assignee/agente/IA
+    porque os três SÃO mutuamente exclusivos). Time não exclui nada — pura
+    escrita de campo, no molde de :func:`set_agent`."""
+    updated = await asyncio.to_thread(conversation_repo.set_team, conv["id"], team_id)
+    if not updated:
+        return None
+    previous_team_id = conv.get("team_id")
+    if team_id:
+        await _broadcast(deps, "conversation_assigned", "conversation.team_assigned", updated,
+                         previous_team_id=previous_team_id)
+    else:
+        await _broadcast(deps, "conversation_assigned", "conversation.team_unassigned", updated,
+                         previous_team_id=previous_team_id)
     return updated
 
 

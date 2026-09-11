@@ -107,6 +107,36 @@ aditiva). Contrato completo em [docs/PLUGINS.md](PLUGINS.md).
 
 ---
 
+## 1.9.0 — 2026-09-10 · `conversation.team_assigned` / `.team_unassigned` — Times (plano 153)
+
+**Aditiva no catálogo.** Um plugin que não escute os eventos novos não muda em
+nada.
+
+### O seam
+
+`conversation.team_assigned` / `conversation.team_unassigned` — produtor:
+[`app/services/conversation_service.py`](../app/services/conversation_service.py)
+`assign_team()`. Payload: `conversation_id, team_id, previous_team_id, ts` — o
+mesmo formato de `.assigned`/`.unassigned`, trocando `assignee_user_id` por
+`team_id`.
+
+Time é um agrupamento de atendentes **independente** do `assignee_user_id`
+individual: atribuir a um time não limpa o atendente, e vice-versa (os dois
+convivem). Por isso `assign_team()` NUNCA passa pelo cotovelo `_transfer` que
+unifica assignee/agente de IA/gate da IA (esses três SÃO mutuamente
+exclusivos) — é uma escrita de campo isolada, como `set_agent()`.
+
+O WS event continua `conversation_assigned` (reuso, sem nome novo no
+transporte) — só o `bus_event` do plugin varia, no mesmo idioma que
+`assign_unified`/`set_ai` já usam.
+
+### Migração
+
+Nenhuma para plugin existente. Quem escutar os eventos novos declara
+`">=1.9,<2.0"`.
+
+---
+
 ## 1.8.0 — 2026-08-20 · `filter.provisioning.message` — a frase do provisionamento vem junto com o número (e os dois têm rede)
 
 **Aditiva no catálogo.** Um plugin que não registre o filtro novo não muda em

@@ -125,6 +125,8 @@ def _build_clause(clause, ctx: FilterContext):
         return _scalar_clause(conversations.c.priority, op, [str(v) for v in values])
     if kind == "assignee":
         return _assignee_clause(op, values, ctx)
+    if kind == "team":
+        return _team_clause(op, values)
     if kind == "reltime":
         threshold = _resolve_reltime(values[0] if values else "", ctx.now)
         return conversations.c.last_activity_at > threshold
@@ -230,6 +232,24 @@ def _assignee_clause(op: str, values: list, ctx: FilterContext):
     if op == "in":
         return col.in_(resolved)
     raise FilterError(f"Operador {op!r} não permitido para assignee.")  # pragma: no cover
+
+
+def _team_clause(op: str, values: list):
+    """Molde EXATO de ``_assignee_clause``, sobre ``team_id`` — sem o caso 'me'
+    (um time não é uma identidade de sessão)."""
+    col = conversations.c.team_id
+    if op == "is_present":
+        return col.isnot(None)
+    if op == "is_not_present":
+        return col.is_(None)
+    resolved = [_to_int(v, "team") for v in values]
+    if not resolved:
+        raise FilterError("Filtro de time requer um valor.")
+    if op == "equal_to":
+        return col == resolved[0]
+    if op == "in":
+        return col.in_(resolved)
+    raise FilterError(f"Operador {op!r} não permitido para team.")  # pragma: no cover
 
 
 def _agent_clause(op: str, values: list):

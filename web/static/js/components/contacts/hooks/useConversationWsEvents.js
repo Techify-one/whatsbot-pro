@@ -374,7 +374,16 @@ export function useConversationWsEvents(opts) {
     // (traz linhas PRA DENTRO num status change) permanece.
     const vs = viewSpecRef && viewSpecRef.current;
     const serverGate = !!(vs && vs.serverMode);
-    const needsServer = serverGate && specNeedsServer(vs);
+    // `previous_team_id` só vem em conversation.team_assigned/.team_unassigned
+    // (assign_team, plano 153/154) — sinaliza que o TIME da conversa mudou. A
+    // visibilidade por time (restrict_visibility + a exceção visible_to_assignee)
+    // só o SERVIDOR decide (`_team_visible_clause`, que olha membresia do usuário e
+    // as duas flags do time) — o drop-gate local abaixo (`rowMatchesView`) não
+    // conhece time nenhum, então NUNCA pode confirmar sozinho que a linha deve
+    // sumir. Força o refetch mesmo fora do serverMode: `list_conversations`
+    // (caminho default) aplica a MESMA cláusula que `list_filtered`.
+    const teamVisibilityChanged = data.previous_team_id !== undefined;
+    const needsServer = (serverGate && specNeedsServer(vs)) || teamVisibilityChanged;
     if (needsServer) scheduleListRefetch();
     setContacts(prev => {
       let next = applyConversationEvent(prev, data);

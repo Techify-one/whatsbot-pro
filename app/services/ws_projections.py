@@ -22,8 +22,8 @@ broadcast in two places.
 The bus event → WS event mapping is the inverse of the explicit
 ``(ws_event, bus_event)`` pairs the lifecycle service passed to
 ``broadcast_and_emit``. Several bus events fold onto one WS name
-(``conversation.assigned`` and ``conversation.unassigned`` both → the panel's
-``conversation_assigned`` row update) — the mapping is N:1, never 1:N, so a static
+(``conversation.assigned`` / ``.unassigned`` / ``.team_assigned`` / ``.team_unassigned``
+all → the panel's ``conversation_assigned`` row update) — the mapping is N:1, never 1:N, so a static
 table is faithful. Verbs that have NO paired lifecycle broadcast today
 (``conversation.reopened`` / ``.attribute_set`` / ``.transferred_to_human`` /
 ``.agent_changed`` / ``.ai_takeover``) are intentionally ABSENT from the map: they
@@ -47,6 +47,8 @@ _LIFECYCLE_WS_EVENT: dict[str, str] = {
     "conversation.status_changed": "conversation_status_changed",
     "conversation.assigned": "conversation_assigned",
     "conversation.unassigned": "conversation_assigned",
+    "conversation.team_assigned": "conversation_assigned",
+    "conversation.team_unassigned": "conversation_assigned",
     "conversation.ai_toggled": "conversation_ai_toggled",
     "conversation.archived": "conversation_archived",
     "conversation.updated": "conversation_updated",

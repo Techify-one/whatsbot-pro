@@ -518,7 +518,7 @@ test('specsEqual / isDefaultSpec', () => {
 const ENRICHED = {
   id: 42, contact_id: 7, contact_name: 'Bia', contact_phone: '5511', contact_is_group: 0,
   inbox_id: 3, channel_id: 'wa1', channel_provider: 'gowa', channel_name: 'WA',
-  origin: 'inbound', status: 'open', ai_active: 1, assignee_user_id: null, active_agent_key: 'default',
+  origin: 'inbound', status: 'open', ai_active: 1, assignee_user_id: null, team_id: 9, active_agent_key: 'default',
   is_archived: 0, is_pinned: 0, has_unread_mention: false,
   last_message: 'oi', last_message_role: 'user', last_message_ts: 1000,
   last_message_status: '', last_message_msg_id: 'm1', unread_count: 2,
@@ -534,6 +534,7 @@ test('convRowToSidebarRow: enriched row → sidebar row shape (identity not conf
   assert.equal(r.phone, '5511');
   assert.equal(r.conv_status, 'open');
   assert.equal(r.conv_ai_active, 1);
+  assert.equal(r.team_id, 9);
   assert.equal(r.active_agent_key, 'default');
   assert.deepEqual(r.conv_labels, ['VIP']);
   assert.deepEqual(r.conv_custom_attributes, { plano: 'ouro' });
@@ -551,7 +552,7 @@ test('convRowToSidebarRow shape ≡ buildRows shape for the key sidebar fields',
   const contact = { id: 7, phone: '5511', name: 'Bia' };
   const conv = {
     id: 42, contact_id: 7, channel_id: 'wa1', channel_provider: 'gowa', channel_name: 'WA',
-    status: 'open', ai_active: 1, assignee_user_id: null, active_agent_key: 'default',
+    status: 'open', ai_active: 1, assignee_user_id: null, team_id: 9, active_agent_key: 'default',
     custom_attributes: { plano: 'ouro' }, labels: ['VIP'], origin: 'inbound',
     last_message: 'oi', last_message_role: 'user', last_message_ts: 1000,
     last_message_status: '', last_message_msg_id: 'm1', unread_count: 2, has_unread_mention: false,
@@ -559,7 +560,7 @@ test('convRowToSidebarRow shape ≡ buildRows shape for the key sidebar fields',
   const fromBuild = buildRows([contact], [conv])[0];
   const fromWs = convRowToSidebarRow(ENRICHED);
   for (const k of ['contact_id', 'conversation_id', 'name', 'phone', 'channel_id',
-    'conv_status', 'conv_ai_active', 'active_agent_key', 'conv_labels', 'origin',
+    'conv_status', 'conv_ai_active', 'team_id', 'active_agent_key', 'conv_labels', 'origin',
     'last_message', 'last_message_ts', 'unread_count']) {
     assert.deepEqual(fromWs[k], fromBuild[k], `field ${k} must match buildRows`);
   }
@@ -728,6 +729,10 @@ test('rowMatchesView: dims avançadas channel/agent/ai/starter/contact_type', ()
   assert.equal(rowMatchesView({ ...base, origin: 'inbound' }, adv({ dim: 'starter', op: 'eq', value: 'customer' }), NOW), true);
   assert.equal(rowMatchesView({ ...base, contact_type: 'telegram' }, adv({ dim: 'contact_type', op: 'eq', value: 'telegram' }), NOW), true);
   assert.equal(rowMatchesView({ ...base, contact_type: 'whatsapp' }, adv({ dim: 'contact_type', op: 'eq', value: 'telegram' }), NOW), false);
+  // team (plano 153) — independente de assignee_user_id/active_agent_key (D1)
+  assert.equal(rowMatchesView({ ...base, team_id: 3 }, adv({ dim: 'team', op: 'eq', value: '3' }), NOW), true);
+  assert.equal(rowMatchesView({ ...base, team_id: 4 }, adv({ dim: 'team', op: 'eq', value: '3' }), NOW), false);
+  assert.equal(rowMatchesView({ ...base, team_id: 3, assignee_user_id: 5 }, adv({ dim: 'team', op: 'ne', value: '3' }), NOW), false);
 });
 
 test('rowMatchesView: AND composto — todas as dimensões precisam casar', () => {

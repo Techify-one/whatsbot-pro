@@ -18,6 +18,7 @@
  * @property {number} [id] - contact id (legacy contact-only rows match by this).
  * @property {string} [conv_status]
  * @property {number|null} [assignee_user_id]
+ * @property {number|null} [team_id]
  * @property {string|null} [active_agent_key]
  * @property {boolean} [conv_ai_active]
  * @property {string[]} [conv_labels] - etiquetas da CONVERSA (não as tags do contato).
@@ -29,6 +30,7 @@
  * @property {number} [conversation_id]
  * @property {string} [status]
  * @property {number|null} [assignee_user_id]
+ * @property {number|null} [team_id]
  * @property {string|null} [active_agent_key]
  * @property {boolean} [ai_active]
  * @property {string[]} [labels] - snapshot de `conversation_labels_changed`.
@@ -70,6 +72,7 @@ export function conversationPatch(row, ev) {
   if (!ev) return patch;
   if (ev.status !== undefined) patch.conv_status = ev.status;
   if (ev.assignee_user_id !== undefined) patch.assignee_user_id = ev.assignee_user_id;
+  if (ev.team_id !== undefined) patch.team_id = ev.team_id;
   if (ev.active_agent_key !== undefined) patch.active_agent_key = ev.active_agent_key;
   if (ev.ai_active !== undefined) patch.conv_ai_active = ev.ai_active;
   // `conversation_labels_changed` carries the conversation's label snapshot as

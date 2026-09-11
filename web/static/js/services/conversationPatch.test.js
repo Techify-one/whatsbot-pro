@@ -35,6 +35,15 @@ test('conversationPatch: only present keys are written', () => {
   assert.deepEqual(conversationPatch(row, { assignee_user_id: null }), { assignee_user_id: null });
 });
 
+test('conversationPatch: team_id (plano 153) is patched independently of assignee_user_id', () => {
+  const row = { conversation_id: 7 };
+  assert.deepEqual(conversationPatch(row, { team_id: 3 }), { team_id: 3 });
+  // team_id can be explicitly null (unassign the team) and must be written
+  assert.deepEqual(conversationPatch(row, { team_id: null }), { team_id: null });
+  // an event that only carries assignee_user_id must NOT touch team_id, and vice-versa (D1)
+  assert.deepEqual(conversationPatch(row, { assignee_user_id: 5 }), { assignee_user_id: 5 });
+});
+
 test('conversationPatch: empty event → empty patch', () => {
   assert.deepEqual(conversationPatch({ conversation_id: 7 }, {}), {});
 });

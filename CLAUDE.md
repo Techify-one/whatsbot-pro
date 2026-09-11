@@ -245,6 +245,10 @@ O loop de raciocínio + tool calling roda no **AGNO** ([agent/agno_engine.py](ag
 
 ⚠️ **A IA pode se despedir ao transferir** (plano 122): `transfer_to_human` fecha o gate DENTRO do turno, e o guard descartava a despedida que aquele mesmo turno acabou de escrever — foram **226 transferências mudas** em produção. O perdão é o kwarg `allow_self_handoff`, derivado pelo call site do próprio turno. **A época vem PRIMEIRO e o perdão nunca a alcança** — inverter as duas linhas devolve o bug do plano 96 em silêncio. O card "🤖 A IA assumiu a conversa" fica no predicado **ESTRITO** (não recebe o perdão): turno que terminou em transferência não é takeover.
 
+⚠️ **Time (`atendimentos.team_id`, plano 153) é campo INDEPENDENTE do `assignee_user_id`** — `conversation_service.assign_team` nunca passa pelo cotovelo `_transfer` (que existe só porque assignee/agente-de-IA/gate-da-IA SÃO mutuamente exclusivos); é escrita isolada, como `set_agent`.
+
+⚠️ **`teams.restrict_visibility` (plano 154) só afeta a LISTAGEM** — esconde a conversa da sidebar/`/filter`/`/count` para quem está na caixa mas não é do time; abrir por ID/link continua 200 SEMPRE (D3, sem exceção nenhuma), `_inbox_hidden`/`_guard_conv` intactos. **`teams.visible_to_assignee` (plano 155) é um 2º flag ANINHADO** — com os dois ligados, quem é `assignee_user_id` de UMA conversa daquele time volta a vê-la na listagem mesmo fora do time (exceção por pessoa/conversa, não reabre o time inteiro); sozinho (sem `restrict_visibility`) não faz nada. `conversation.read_all`/admin sempre veem tudo.
+
 **Filtro de histórico por regex** (plano 43): lista-negra GLOBAL em `ai_history_exclude_patterns` (default `[]`), cada linha testada como `f"{role}\t{content}"` com `re.search`. [agent/history_filter.py](agent/history_filter.py) é **fail-open** em todo nível. `message_repo.get_context(..., exclude=...)` faz over-fetch (cap 200) — cortar linhas **não encolhe** a janela abaixo de `max_context_messages`.
 
 ## Memória por contato

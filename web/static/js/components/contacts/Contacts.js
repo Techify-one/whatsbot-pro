@@ -140,11 +140,11 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   });
   const {
     globalTags, setGlobalTags,
-    currentUserId, currentUser, users, agentsUsers, agentsAi,
+    currentUserId, currentUser, users, agentsUsers, agentsAi, teams,
     ctxMenu, setCtxMenu, ctxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
-    handleAssignConversation, handleAssignAgent, handleResolveConversation,
+    handleAssignConversation, handleAssignAgent, handleAssignTeam, handleResolveConversation,
     resolveAssignee,
     convLabelRegistry, setConvLabelRegistry,
     handleCreateConvLabel, applyConvLabelResults,
@@ -437,6 +437,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           channels=${channelOptions}
           agentsUsers=${agentsUsers}
           agentsAi=${agentsAi}
+          teams=${teams}
           resolveAssignee=${resolveAssignee}
           hasIdentity=${currentUserId != null}
           selected=${selectedKey}
@@ -617,10 +618,12 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           users=${users}
           agentsUsers=${agentsUsers}
           agentsAi=${agentsAi}
+          teams=${teams}
           currentUserId=${currentUserId}
           currentUser=${currentUser}
           onAssignConversation=${handleAssignConversation}
           onAssignAgent=${handleAssignAgent}
+          onAssignTeam=${handleAssignTeam}
           onResolveConversation=${handleResolveConversation}
           onToggleAI=${handleToggleAI}
           onEditContact=${(phone) => {
