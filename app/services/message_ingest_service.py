@@ -347,7 +347,7 @@ class MessageIngestService:
                 channel_id=channel_id,
             )
             if out_description:
-                await asyncio.to_thread(
+                saved_transcription = await asyncio.to_thread(
                     contact.add_message, "transcription", out_description)
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
@@ -355,7 +355,9 @@ class MessageIngestService:
                     "message": {
                         "role": "transcription",
                         "content": out_description,
-                        "ts": time.time(),
+                        "ts": (saved_transcription or {}).get("ts", time.time()),
+                        "conversation_id": (saved_transcription or {}).get("conversation_id"),
+                        "_id": (saved_transcription or {}).get("id"),
                     },
                 })
 

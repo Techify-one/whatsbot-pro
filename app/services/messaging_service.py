@@ -651,14 +651,16 @@ class MessagingService:
                 channel_id=channel_id,
             )
             if transcription:
-                contact.add_message("transcription", transcription)
+                saved_transcription = contact.add_message("transcription", transcription)
                 await ws_manager.broadcast("new_message", {
                     "phone": phone,
                     "channel_id": channel_id,
                     "message": {
                         "role": "transcription",
                         "content": transcription,
-                        "ts": time.time(),
+                        "ts": (saved_transcription or {}).get("ts", time.time()),
+                        "conversation_id": (saved_transcription or {}).get("conversation_id"),
+                        "_id": (saved_transcription or {}).get("id"),
                     },
                 })
 
@@ -1461,13 +1463,16 @@ class MessagingService:
             # Fall through to private so the transcription is not lost.
 
         # private target (or fallback after a failed chat send)
-        await asyncio.to_thread(contact.add_message, "transcription", transcription)
+        saved = await asyncio.to_thread(contact.add_message, "transcription", transcription)
         await ws_manager.broadcast("new_message", {
             "phone": phone,
+            "channel_id": channel_id,
             "message": {
                 "role": "transcription",
                 "content": transcription,
-                "ts": time.time(),
+                "ts": (saved or {}).get("ts", time.time()),
+                "conversation_id": (saved or {}).get("conversation_id"),
+                "_id": (saved or {}).get("id"),
             },
         })
 
@@ -2008,13 +2013,16 @@ class MessagingService:
                                                                channel_id=channel_id)
                     else:
                         # Image/document content — delivered as a private panel card.
-                        contact.add_message("transcription", transcription)
+                        saved_transcription = contact.add_message("transcription", transcription)
                         await ws_manager.broadcast("new_message", {
                             "phone": phone,
+                            "channel_id": channel_id,
                             "message": {
                                 "role": "transcription",
                                 "content": transcription,
-                                "ts": time.time(),
+                                "ts": (saved_transcription or {}).get("ts", time.time()),
+                                "conversation_id": (saved_transcription or {}).get("conversation_id"),
+                                "_id": (saved_transcription or {}).get("id"),
                             },
                         })
 

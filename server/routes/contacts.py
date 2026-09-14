@@ -1569,8 +1569,9 @@ def register_routes(app, deps):
 
         # Visible "Transcrição privada" card — only when the channel opted in.
         if card_text:
+            saved_transcription = None
             try:
-                await asyncio.to_thread(
+                saved_transcription = await asyncio.to_thread(
                     lambda: agent_handler._get_contact(
                         phone, channel_id=resolved_channel).add_message(
                         "transcription", card_text))
@@ -1582,7 +1583,9 @@ def register_routes(app, deps):
                 "message": {
                     "role": "transcription",
                     "content": card_text,
-                    "ts": time.time(),
+                    "ts": (saved_transcription or {}).get("ts", time.time()),
+                    "conversation_id": (saved_transcription or {}).get("conversation_id"),
+                    "_id": (saved_transcription or {}).get("id"),
                 },
             })
 
@@ -1678,8 +1681,9 @@ def register_routes(app, deps):
             except Exception as e:
                 logger.error("[Private] Image description failed for %s: %s", phone, e)
             if card_text:
+                saved_transcription = None
                 try:
-                    await asyncio.to_thread(
+                    saved_transcription = await asyncio.to_thread(
                         lambda: agent_handler._get_contact(
                             phone, channel_id=resolved_channel).add_message(
                             "transcription", card_text))
@@ -1691,7 +1695,9 @@ def register_routes(app, deps):
                     "message": {
                         "role": "transcription",
                         "content": card_text,
-                        "ts": time.time(),
+                        "ts": (saved_transcription or {}).get("ts", time.time()),
+                        "conversation_id": (saved_transcription or {}).get("conversation_id"),
+                        "_id": (saved_transcription or {}).get("id"),
                     },
                 })
         return note_msg
