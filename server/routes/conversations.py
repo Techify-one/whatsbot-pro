@@ -467,6 +467,14 @@ def register_routes(app, deps):
             # Telegram) não muda em nada.
             "session_open": outbound.session_open(channel_id, last_inbound_ts,
                                                   by_human=True),
+            # QUANDO a janela fecha, não só SE está aberta (plano 159): o compositor
+            # mostra a contagem regressiva. São os dois campos que faltavam — o
+            # carimbo do último inbound e o tamanho EFETIVO da janela do atendente,
+            # do MESMO helper que o `session_open` acima usa (nunca recalculado
+            # aqui). `0` = canal sem janela (GOWA/Telegram) ⇒ o painel não exibe
+            # nada; o cliente não tem como adivinhar se são 24h ou 7 dias.
+            "last_inbound_ts": last_inbound_ts,
+            "session_window_hours": outbound.window_hours(channel_id, by_human=True),
             # A janela da IA é OUTRA (capability ``ai_window_hours``) e some antes
             # da do atendente: com a tag HUMAN_AGENT ligada o compositor fica
             # aberto 7 dias, mas o filtro do plugin cala a IA às 24h. Sem este

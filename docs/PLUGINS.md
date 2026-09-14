@@ -47,6 +47,36 @@ storages/plugins/<id>/
 5. **Wiring**: `agent_handler.register_plugin_tools/prompts` adicionam ao registry. `app.include_router` monta o router em `/api/plugins/<id>`. `app.mount` serve `static/` em `/plugins/<id>/static`. `screens[].path` é registrado como rota SPA dinâmica.
 6. **Toggle**: enable/disable atualiza a tabela `plugins` e dispara `schedule_restart` (`os._exit(0)` após delay; supervisor relança — Coolify/Docker `restart: unless-stopped` ou launcher do EXE).
 
+### 🚫 Prompt fragment não pode fazer rede — nem I/O caro (plano 153)
+
+Um `PROMPT_FRAGMENTS` roda **síncrono, no event loop**, a cada mensagem **e a cada hop de
+roteamento**. Não há `await` no caminho: [agent/prompt_builder.py](../agent/prompt_builder.py) faz
+`chunk = fragment_fn(contact, ctx)` sem checar `iscoroutinefunction`, e
+[app/services/agent_run_service.py](../app/services/agent_run_service.py) chama
+`_build_system_prompt(...)` direto de dentro de um `async def`, sem `asyncio.to_thread`.
+
+**Consequência:** uma chamada HTTP dentro de um fragmento congela o **processo inteiro** — webhook,
+WebSocket, painel, todas as outras conversas — por todo o tempo da chamada, e não uma conversa. Com
+timeout de 8s e uma plataforma lenta, é o servidor parado 8s por mensagem.
+
+O padrão que funciona, e que o `vendas_ia` usa: **monte fora do caminho quente, guarde em tabela, e
+deixe o fragmento apenas LER.** O gatilho é um filtro `async` (esses o bus aguarda,
+[plugins/events.py:630](../plugins/events.py#L630)), um handler de evento (handler síncrono roda em
+`asyncio.to_thread`, `events.py:553`) ou uma task do `lifecycle`.
+
+⚠️ **`await` cede o event loop na REDE, nunca na CPU.** Trocar a busca bloqueante por `await`
+resolve metade: `json.loads` de 1,25 MB e a renderização de milhares de linhas travam o loop igual a
+um `time.sleep`. Parse e render pesados vão para `asyncio.to_thread` junto com o HTTP — ou, mais
+simples, o trabalho inteiro vira uma função síncrona chamada por um único `to_thread`.
+
+⚠️ **Filtro pode ser `async`; fragmento não.** O bus aguarda `filter.*` assíncrono, mas
+`PROMPT_FRAGMENTS` não tem esse seam — declarar o fragmento `async def` faz o `prompt_builder`
+concatenar a **coroutine** no prompt, não o texto.
+
+Trave isso com um teste de contrato no seu plugin: falhe se o módulo do fragmento importar `httpx`
+(o `vendas_ia` verifica pela árvore sintática, para o comentário que explica a regra não derrubar o
+teste que a impõe).
+
 ### Settings declarativas (Pydantic Valves)
 
 Plugin declara `class Settings(BaseModel)` em `settings.py`. O endpoint `GET /api/plugins/<id>/settings` retorna `model_json_schema()` + valores atuais; `PUT` valida via Pydantic e persiste em `config_repo` com prefixo `plugin.<id>.<field>`. Frontend (`PluginSettingsForm.js`) renderiza form genérico para string/int/float/bool/enum.
@@ -107,6 +137,21 @@ Referências: `auto_signature` (settings declarativas, na Loja de Plugins — re
 🚫 **Tela de plugin NUNCA abre `new WebSocket('/ws')`** (plano 107). O socket cru não leva o `?token=` e o servidor o fecha com **4401** assim que existe ≥1 usuário ([websocket.py](../server/routes/websocket.py) — o gate do plano 48 F0). É uma falha **silenciosa e permanente**: sem `onerror`/`onclose` nada é logado, e a tela simplesmente para de atualizar sozinha (foi assim que `protocolos`, `agendamento_retorno`, `lembretes` e a tela core `/tools` passaram meses sem tempo real, cada um com o mesmo bug). O transporte é sempre o **barramento único e autenticado** do core — `api.services.subscribe(handlers)` (plugin services **≥ 2.1**) ou, equivalente, `import { subscribe } from '/static/js/services/wsBus.js'`. Ele entrega **qualquer** nome de evento, inclusive o `plugin_<id>_*` que o próprio plugin emite pelo `plugins.context.broadcast` — ao contrário do `api.services.useWebSocket`, cujo mapa de eventos é fixo nos nomes do CORE. Devolve a função de unsubscribe; o efeito a retorna direto. ⚠️ Se o handler dispara refetch caro, ponha **debounce com jitter**: um evento costuma significar cache invalidado em todas as réplicas, e N operadores recarregando no mesmo instante trocam um bug de UX por um de carga.
 
 Um `frontend_extends` recebe `buildPluginApi(id)` e negocia duas superfícies separadas no manifest: `frontend_api_version` (registry/slots/overrides) e `plugin_services_version` (`api.services`). A allowlist atual de serviços é 2.x (2.1 acrescentou `subscribe`); manifest legado sem o segundo campo recebe o adapter 1.x. O objeto expõe `api.pluginServicesVersion` (superfície negociada) e `api.pluginServicesHostVersion` (mais nova do host); ainda assim, faça feature detection da função antes de chamar. Range incompatível ou malformado faz o core pular o módulo (fail-closed). O parser de frontend aceita `*`, comparadores AND (`>=2.0,<3.0`), `^` e `~`; uma declaração numérica como `"2.0"` significa compatibilidade por MAJOR, não igualdade exata, e `||` não é aceito.
+
+### Os DOIS slots do cabeçalho da conversa (plano 159)
+
+A barra do cabeçalho do chat tem **dois** pontos de extensão, e a diferença entre eles é *onde pintam*, não *o que aceitam*:
+
+| Slot | Onde aparece | Para quê | ctx |
+|---|---|---|---|
+| `conversation.header.primary` | **na barra**, entre o botão Resolver/Reabrir e o (⋮) | a ação de **um clique** que o atendente usa o tempo todo — o `protocolos` registra aqui o botão "Protocolo" | `{conv, user}` |
+| `conversation.header.actions` | **dentro do menu (⋮)** | todo o resto (plano 10 FF3) | `{conv, user}` |
+
+Os dois vivem em [ConversationHeaderActions.js](../web/static/js/components/contacts/ConversationHeaderActions.js) e herdam o `if (sandbox) return null` dele. Espaço na barra é caro (o cabeçalho já tem nome do contato, busca e menu): registre **um botão curto**, nunca uma lista. Vazio ⇒ o cabeçalho fica byte-idêntico.
+
+⚠️ **Atalho que precisa de Ctrl+clique tem de ser um `<a href>` de verdade.** Ctrl/⌘+clique e clique do meio são gestos **nativos do navegador sobre uma âncora**: num `<button>` eles simplesmente não fazem nada, e o predicado compartilhado ([spaLink.js](../web/static/js/services/spaLink.js)) existe justamente para o `onClick` saber quando **não** interceptar. E o `href` tem de estar **pronto antes do clique** — resolver o alvo dentro do handler significa um `await` antes do `window.open`, que o bloqueador de popup recusa em silêncio (plano 136). No `protocolos` isso é o que obriga o alvo do card a vir resolvido em lote pelo backend.
+
+⚠️ **`shouldOpenInNewTab` é módulo do core, não API declarada** — importe de forma **defensiva** (`import()` dinâmico com um piso local `e.ctrlKey || e.metaKey || e.button === 1`). Import rígido de módulo do core faz o plugin inteiro deixar de carregar num core anterior.
 
 ### Override de componente (plano 92 · B1)
 

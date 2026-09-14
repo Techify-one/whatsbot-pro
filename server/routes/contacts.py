@@ -754,6 +754,11 @@ def register_routes(app, deps):
                 # a mesma janela que a rota de envio dele enxerga.
                 data["session_open"] = outbound.session_open(channel, last_ts,
                                                              by_human=True)
+                # QUANDO a janela fecha (plano 159) — ver a nota em
+                # routes/conversations.py. Mesmo helper, nunca recalculado aqui.
+                data["last_inbound_ts"] = last_ts
+                data["session_window_hours"] = outbound.window_hours(channel,
+                                                                     by_human=True)
                 # Janela da IA — ver a nota em routes/conversations.py. Ela fecha
                 # antes da do operador nos canais Meta, e é ela que decide se os
                 # toggles de instrução para a IA aparecem no compositor.

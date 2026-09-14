@@ -256,6 +256,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // nada acontecer. Ausente no payload (canal sem restrição, core antigo) ⇒
   // aberta, e o compositor fica como sempre foi.
   const aiWindowClosed = !sandbox && !!contact && contact.ai_window_open === false;
+  // QUANDO a janela do atendente fecha (plano 159) — a faixa de contagem regressiva
+  // acima do compositor. Os dois campos vêm CRUS do payload e são avaliados pelo
+  // módulo puro `sessionWindow.js`: `undefined` (core anterior) e `0` (canal sem
+  // janela) dão no mesmo, a faixa não existe. ⚠️ É a janela do ATENDENTE, já com a
+  // extensão `human_window_hours` aplicada no servidor — não a da IA, que é outra.
+  const lastInboundTs = sandbox ? null : (contact && contact.last_inbound_ts);
+  const sessionWindowHours = sandbox ? null : (contact && contact.session_window_hours);
   // Message context-menu capability gates (plano — editar/apagar mensagem):
   //  • revokeSupported: default TRUE — só esconde "Apagar" quando o canal declara
   //    explicitamente que NÃO revoga (WhatsApp Cloud). GOWA e a visão legada
@@ -1117,6 +1124,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       <${Composer}
         sandbox=${sandbox} canSend=${canSend} templatesSupported=${templatesSupported} sessionClosed=${sessionClosed}
         aiWindowClosed=${aiWindowClosed}
+        lastInboundTs=${lastInboundTs} sessionWindowHours=${sessionWindowHours}
         composer=${composerUi} autocomplete=${autocomplete} media=${media} audio=${audio}
         quotedInfo=${quotedInfo} openTemplatePicker=${openTemplatePicker} handleKeyDown=${handleKeyDown} currentUser=${currentUser} />
       ` : html`

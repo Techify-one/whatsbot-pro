@@ -128,6 +128,24 @@ Recusa é **resultado normal**, não erro: vira `mantido` com o motivo legível 
 **Notas privadas chegam ao LLM** — `private_note` não está na lista de roles excluídos do contexto ([db/repositories/message_repo.py](../db/repositories/message_repo.py)) e vira `[Nota privada do operador]: …` ([agent/memory.py](../agent/memory.py)). É o que faz uma automação externa conseguir informar uma compra confirmada sem nenhuma mudança de core. ⚠️ Essa nota precisa nascer com `ai_read` **falso** (o default): uma nota que a IA lê dispararia um turno e ela responderia ao cliente.
 
 
+## O bloco da oferta no prompt: tipo de conteúdo e a descrição que NÃO entra (plano 157)
+
+O plugin `vendas_ia` injeta `## CONTEÚDO DESTA OFERTA` no system prompt — a ementa pronta, lida do `plugin_vendas_ia_dossie` por chave primária, porque o fragmento roda **síncrono no event loop a cada mensagem e a cada hop**.
+
+**Contar por TIPO, nunca num balde só.** A plataforma classifica cada item em `kind` (`course` / `minicourse` / `combo` / `exam`) e sempre mandou o campo em `GET /api/v1/courses`; o plugin não o lia. O cabeçalho dizia *"Ementa dos cursos que esta oferta libera (9 cursos, 142 aulas)"* para **1 curso completo + 8 minicursos**, e a IA parafraseou — foi assim que um cliente ouviu "o combo reúne 9 cursos" (em produção). Agora o rótulo entra na linha `=` de cada item (dossiê e índice, mesma gramática) e o cabeçalho diz `(1 curso, 8 minicursos, 142 aulas)`, com a instrução explícita de separar por tipo.
+
+- ⚠️ **A quebra é GRAVADA (coluna `tipos` JSONB), não calculada.** Contar na hora de imprimir — ou percorrer o texto para contar — é CPU no event loop, o mesmo erro de fazer rede, só que mais barato. O mapa de rótulos vive em `conteudo.py`, um módulo **folha** de propósito: `prompts.py` o importa, e um import transitivo de rede ali derrubaria o contrato que proíbe rede no fragmento.
+- ⚠️ **`kind` desconhecido sai CRU, e ausente não sai.** Cair em "Curso" por padrão seria inventar informação de venda justamente no campo que o conserto existe para acertar. Por isso a busca por **intenção** (`/api/v1/search`, que projeta enxuto e não traz `kind`) devolve resultado **sem** a chave `tipo`.
+- ⚠️ **Formato novo do dossiê ⇒ apagar o cache na migration.** O texto já gravado foi renderizado sem o tipo, e o cabeçalho novo descreveria um corpo velho. O dossiê e o índice são cache puro e se remontam sozinhos (~6s por oferta); nesse intervalo o bloco fica **ausente, nunca errado** — e `prompts` mantém o fallback para a linha sem `tipos`.
+
+**A descrição da OFERTA não alimenta a IA.** Aquele campo é o texto da **página de checkout**: a plataforma o sincroniza com a Cloudflare e o reescreve a partir de lá, então ele é copy para quem está pagando. Ele chegava ao modelo por um caminho só — o retorno de `pesquisar_ofertas` — e saiu de lá e do snapshot local. O canal da IA para a oferta é a **Instrução interna para a IA** (`promptDinamicoIa`, aba IA), que tem bloco próprio e rotulado (`## INSTRUÇÃO DESTA OFERTA`, marcado como interno justamente para a IA não repetir cru ao cliente).
+
+- ⚠️ **Isso não tira a oferta da busca.** Quem ranqueia é a plataforma, com `search_vector` do lado do servidor, e ela continua lendo a descrição — a oferta segue sendo **encontrada** por palavras que só existem lá. O que deixa de acontecer é o TEXTO viajar para o contexto.
+- ⚠️ A descrição do **curso** e do **módulo** ficam: são a ementa, o que a IA usa para responder "o que tem dentro?".
+
+⚠️ **Comentário de migration de plugin não pode conter `;`** — o runner splita o arquivo por esse caractere **antes** de remover comentários. Três comentários (dois deles *inline*, no fim de uma linha de coluna) deixaram o `vendas_ia` **impossível de instalar do zero** entre a 2.2.0 e a 2.3.0: a montagem parava na 004 com `syntax error at end of input` e o plugin ficava com erro de carga. Instalação existente nunca percebeu — migration já registrada em `plugin_migrations` não roda de novo. O teste que agora trava isso varre **todas** as migrations e **todo** comentário, inline incluído.
+
+
 ## Tool editável pela tela (core E plugin)
 
 As tools que aparecem em **Configurações de IA → Tools** (`/ai/tools`) com `v1` + `instalada` + **Editar código / Histórico / Excluir** são as que têm linha em `ai_tools`. São três procedências, e a coluna `kind` as separa:

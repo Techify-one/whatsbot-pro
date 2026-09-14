@@ -29,6 +29,13 @@
 //                                   channelId, contact}           below the header)
 //     • conversation.header.actions, conversation.info.panel,
 //       gear.menu.items, app.overlay                            (pre-existing)
+//     • conversation.header.primary — ctx {conv, user}          (ConversationHeaderActions,
+//                                                                NA BARRA, ao lado do
+//                                                                botão Resolver)
+//       Irmão do `conversation.header.actions`, que é pintado DENTRO do menu (⋮).
+//       Este aqui é para a ação de UM clique (o `protocolos` registra o botão
+//       "Protocolo"); espaço é caro, registre um botão curto, nunca uma lista.
+//       Herda o `if (sandbox) return null` do componente hospedeiro.
 //     • ai.settings.sections — ctx {}                            (AI settings tab,
 //                                   at the bottom of "Configurações")
 //     • channel.card.rows   — ctx {channel, descriptor}          (ChannelCard, no

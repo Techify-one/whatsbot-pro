@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useRef, useEffect } from 'preact/hooks';
+import { useRef, useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { SendIcon, EmojiIcon, AttachIcon, MicIcon, StopIcon, TemplateIcon } from './icons.js';
 import { MediaTray } from './MediaTray.js';
@@ -9,6 +9,7 @@ import { hasPermission } from '../../utils/permissions.js';
 import { templatePickerAvailable } from './TemplatePickerHost.js';
 import { highlightComposerMarkup } from '../../utils/formatWhatsApp.js';
 import { syncMirror } from '../../utils/composerMirror.js';
+import { windowState } from '../../services/sessionWindow.js';
 
 const html = htm.bind(h);
 
@@ -38,9 +39,25 @@ function formatRecordTime(secs) {
 // áudio, que é modal de verdade.
 export function Composer({
   sandbox, canSend, templatesSupported, sessionClosed, aiWindowClosed = false,
+  lastInboundTs = null, sessionWindowHours = null,
   composer, autocomplete, media, audio, quotedInfo, openTemplatePicker, handleKeyDown,
   currentUser = null,
 }) {
+  // Faixa "Janela do cliente" (plano 159): quanto falta para o cliente sair da
+  // janela de texto livre. O QUANTO sai do módulo puro (`sessionWindow.js`); o
+  // RELÓGIO mora aqui — o módulo é testável justamente por não ter um.
+  const [agora, setAgora] = useState(() => Date.now());
+  const janela = windowState({ lastInboundTs, windowHours: sessionWindowHours, now: agora });
+  const contandoJanela = janela.applies && janela.open;
+  useEffect(() => {
+    // Só existe timer enquanto há o que contar: canal sem janela, conversa sem
+    // inbound e janela já expirada não montam intervalo nenhum. Re-sincroniza o
+    // relógio quando um inbound novo reabre a janela (o WS reescreve o carimbo).
+    if (!contandoJanela) return undefined;
+    setAgora(Date.now());
+    const id = setInterval(() => setAgora(Date.now()), 60 * 1000);
+    return () => clearInterval(id);
+  }, [contandoJanela, lastInboundTs, sessionWindowHours]);
   // P48: the /atalho quick-reply picker only shows for users who can manage them.
   const canQuickReply = sandbox || hasPermission(currentUser, 'quickreply.manage');
   const {
@@ -200,6 +217,23 @@ export function Composer({
             Mensagem Privada
           </button>
         </div>
+        <!-- Janela do cliente AINDA ABERTA: quanto falta (plano 159). Chip compacto
+             ao lado do seletor de modo, e nao uma linha inteira: e informacao de
+             relance, nao aviso. MUTUAMENTE EXCLUSIVO com a faixa de fora-da-janela
+             abaixo por construcao (a janela so conta enquanto o prazo nao venceu).
+             Some sozinho em canal sem janela. Sem crase neste comentario: ela
+             fecharia o template literal. -->
+        ${contandoJanela && !sessionClosed ? html`
+          <span
+            class="inline-flex items-center gap-[5px] text-[12px] px-[10px] py-[3px] rounded-full border whitespace-nowrap ${janela.urgent ? 'text-amber-600 dark:text-amber-400 border-amber-500/50 bg-amber-500/10' : 'text-wa-secondary border-wa-border bg-wa-bg'}"
+            title=${janela.urgent
+              ? 'Menos de 1h: depois disso só será possível voltar a escrever quando o cliente responder.'
+              : 'Tempo restante da janela de mensagens livres com o cliente.'}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            Janela: <span class="font-medium">${janela.label}</span>
+          </span>
+        ` : ''}
         ${mode === 'private' && aiWindowClosed ? html`
           <!-- Janela da IA fechada (capability ai_window_hours): o filtro do canal
                aborta o turno inteiro, então oferecer "IA lê" seria prometer o que o

@@ -630,6 +630,14 @@ export function shapeConvData(d) {
     // `false` explícito bloqueia; `undefined` (canal sem restrição, core antigo)
     // mantém o compositor como sempre foi.
     ai_window_open: d.ai_window_open,
+    // QUANDO a janela do atendente fecha (plano 159): carimbo do último inbound +
+    // tamanho EFETIVO da janela em horas, para a faixa de contagem regressiva do
+    // compositor. Vêm CRUS pela mesma razão dos dois acima — `undefined` (core
+    // anterior, resposta sem o campo) tem de ser distinguível de `0` (canal SEM
+    // janela: GOWA/Telegram), e os dois significam "não exibir nada". ⚠️ Whitelist:
+    // esquecer a chave aqui faz o campo sumir sem erro nenhum.
+    last_inbound_ts: d.last_inbound_ts,
+    session_window_hours: d.session_window_hours,
     // Message context-menu capability hints: hide "Apagar" where the channel can't
     // revoke (Cloud), show "Editar" only where it can edit. Preserved as-is (a real
     // `false` from the backend must survive so the gate can distinguish it from

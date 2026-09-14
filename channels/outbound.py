@@ -62,11 +62,23 @@ class OutboundRouter:
         tag). Only the operator-initiated send paths pass it; the AI never does, so
         the AI can never reach a human-only escape hatch.
         """
+        return self._window_open(self.window_hours(channel_id, by_human=by_human),
+                                 last_inbound_ts)
+
+    def window_hours(self, channel_id: str, *, by_human: bool = False) -> int:
+        """Tamanho EFETIVO da janela de texto livre, em horas (``0`` = sem janela).
+
+        Extraído de :meth:`session_open` (plano 159 F1) para que exista UMA conta só:
+        o painel precisa saber QUANDO a janela fecha, não apenas SE está aberta, e
+        recalcular ``max(session, human)`` na rota faria rota e tela discordarem
+        sobre a mesma regra na primeira vez que uma das duas mudasse. Quem expõe o
+        número ao cliente chama isto; ninguém recalcula.
+        """
         caps = self.capabilities(channel_id)
         hours = caps.session_window_hours
         if by_human:
             hours = max(hours, getattr(caps, "human_window_hours", 0) or 0)
-        return self._window_open(hours, last_inbound_ts)
+        return int(hours or 0)
 
     def ai_window_open(self, channel_id: str, last_inbound_ts: float | None) -> bool:
         """Whether the AI is allowed to speak on ``channel_id`` right now.

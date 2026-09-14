@@ -11,9 +11,17 @@
 // (que desliga/religa a IA via set_ai) continua no menu de contexto da sidebar e no
 // painel de informações do atendimento.
 //
-// Na barra fica SÓ o "Resolver"/"Reabrir" (ação principal do atendente, um clique).
-// O resto — informações do atendimento e as ações que os plugins injetam no slot
-// `conversation.header.actions` — mora no menu (⋮) do canto, ver ConversationMenu.js.
+// Na barra fica SÓ o "Resolver"/"Reabrir" (ação principal do atendente, um clique)
+// e o slot `conversation.header.primary`. O resto — informações do atendimento e as
+// ações que os plugins injetam no slot `conversation.header.actions` — mora no menu
+// (⋮) do canto, ver ConversationMenu.js.
+//
+// SÃO DOIS SLOTS, de propósito (plano 159 F0):
+//   • conversation.header.primary — AO LADO do Resolver, na barra. Para a ação de UM
+//     clique que o atendente usa o tempo todo (o `protocolos` põe aqui o "Protocolo").
+//     Espaço é caro: registre um botão curto, nunca uma lista.
+//   • conversation.header.actions — DENTRO do (⋮). Para todo o resto (plano 10 FF3).
+// Os dois recebem o MESMO ctx `{conv, user}`. Não redistribua o que já está no menu.
 
 import { h } from 'preact';
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
@@ -29,6 +37,7 @@ import { resolveConversation } from '../../utils/resolveConversation.js';
 import { ConversationMenu } from './ConversationMenu.js';
 import { InfoIcon } from './icons.js';
 import { getFilters } from '../../plugins/registry.js';
+import { Slot } from '../../plugins/Slot.js';
 import { useWebSocket } from '../../hooks/useWebSocket.js';
 
 const html = htm.bind(h);
@@ -194,6 +203,10 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
           ${isOpen ? 'Aberta' : 'Fechada'}
         </span>
       `) : null}
+
+      <!-- Ação principal dos plugins: fica NA BARRA, ao lado do Resolver (plano 159).
+           Vazio ⇒ não renderiza nada, o cabeçalho fica byte-idêntico. -->
+      <${Slot} name="conversation.header.primary" ctx=${{ conv, user }} />
 
       <!-- Menu (⋮): ações do core + extension point dos plugins (o MESMO slot
            conversation.header.actions de antes — só mudou onde é pintado). -->

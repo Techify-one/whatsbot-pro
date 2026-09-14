@@ -281,6 +281,8 @@ Info é salva automaticamente via tool calling do LLM e injetada no system promp
 ## Fotos de perfil (avatars)
 
 [server/avatars.py](server/avatars.py) cacheia as fotos de perfil em disco em `statics/avatars/<phone>.jpg` (servidas pelo mount estático). Como o WhatsApp não emite evento de "foto mudou", a atualização é por re-fetch do GOWA (ao abrir a conversa e numa varredura periódica de fundo — `AVATAR_REFRESH_INTERVAL = 1800s` em [server/background.py](server/background.py)), sobrescrevendo o arquivo só quando os bytes diferem. O frontend faz cache-bust pelo mtime (`avatar_v`); uma mudança dispara o WS `avatar_updated` `{phone, v}` pra atualizar ao vivo sem reload.
+- **Contador da janela do cliente** (plano 159): chip ao lado do seletor Responder/Mensagem Privada com o tempo restante, do módulo puro [sessionWindow.js](web/static/js/services/sessionWindow.js) sobre `last_inbound_ts` + `session_window_hours` **efetivo** (`OutboundRouter.window_hours(by_human=True)` — a MESMA conta do `session_open`). ⚠️ O tamanho vem do servidor, nunca de "24h" no cliente (Meta com `human_agent_tag` = 7 dias), e `shapeConvData` é **whitelist**: campo não listado lá some sem erro.
+- **Atalhos conversa ⇄ protocolo** (plano 159): slot `conversation.header.primary` (NA BARRA, ao lado do Resolver — o `conversation.header.actions` é dentro do ⋮) + ícone no card do Kanban. ⚠️ Ctrl+clique exige `<a href>` com o alvo **já resolvido**: `window.open` depois de `await` é recusado em silêncio.
 
 ## @menções em grupos
 

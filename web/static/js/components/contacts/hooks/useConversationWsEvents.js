@@ -897,10 +897,17 @@ export function useConversationWsEvents(opts) {
       // manual. Um inbound que acaba de chegar deixa qualquer janela aberta
       // (canal com janela: 0h de idade; canal sem janela: sempre aberta), então
       // `true` vale para todo provider — mesmo raciocínio do `session_open`.
+      // O CARIMBO também acompanha (plano 159): a faixa de contagem regressiva conta
+      // a partir do `last_inbound_ts`, então sem atualizá-lo aqui ela seguiria
+      // marcando o tempo do inbound ANTERIOR — indo a zero (e depois some) numa
+      // janela que o cliente acabou de reabrir. `session_window_hours` NÃO muda: é
+      // do canal, não da mensagem.
       if (message.role === 'user') {
         setContactData(prev => (prev
-          && (prev.session_open !== true || prev.ai_window_open !== true))
-          ? { ...prev, session_open: true, ai_window_open: true } : prev);
+          && (prev.session_open !== true || prev.ai_window_open !== true
+              || prev.last_inbound_ts !== message.ts))
+          ? { ...prev, session_open: true, ai_window_open: true,
+              last_inbound_ts: message.ts } : prev);
       }
     }
 

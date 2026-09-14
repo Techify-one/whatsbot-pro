@@ -30,6 +30,10 @@ _SECRET_KEYS = frozenset({
     "password_hash", "token", "secret", "credentials", "authorization",
     "verify_token", "client_secret", "private_key",
     "nexus_dsn", "dsn", "database_url", "connection_string",
+    # ``plataforma_api_key`` (plugin vendas_ia, plano 153·F1) — a credencial da
+    # API da plataforma de cursos. Adicionado no MESMO commit da rota
+    # write-only que a grava, para não repetir o incidente do nexus_dsn acima.
+    "plataforma_api_key",
 })
 _REDACTED = "***"
 
