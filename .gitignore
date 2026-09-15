@@ -40,6 +40,7 @@ server/_reload_trigger.py
 PLANO_setup_wizard.md
 .claude/projects
 docs-planos/
+
 # Migração de histórico Chatwoot (dumps + CSVs de PRODUÇÃO — nunca versionar)
 plano-importacao-historico-chatwoot/
 
