@@ -78,3 +78,13 @@ box.scrollWidth - box.clientWidth   // deve ser 0
 ```
 
 E o teste barato que impede a recaída: um `node --test` que lê o fonte e exige a classe, com a **mensagem de falha carregando o número medido** — quem vê o vermelho precisa saber o que volta a acontecer, não só o que sumiu. Exemplo em `plugins/melhorias/tests/js/layout_guard.test.js` no repositório de plugins.
+
+---
+
+## Componente de multi-seleção (`OptionListSelect`) — "Selecionar todos" (plano 162)
+
+[web/static/js/components/OptionListSelect.js](../web/static/js/components/OptionListSelect.js) é o **único** componente de multi-seleção usado em toda tela com filtro de lista (conversas, contatos, plugin `protocolos`) — mudar aqui propaga para todos os call sites de uma vez, sem tocar em nenhum deles.
+
+- **"Selecionar todos" soma ao que já está marcado, nunca substitui**, e alcança **só as opções visíveis** (pós-busca) — buscar "suporte", marcar tudo, limpar a busca e buscar de novo para marcar outro subconjunto é um fluxo válido; substituir apagaria a 1ª seleção sem aviso, e alcançar o universo inteiro marcaria itens escondidos pela busca sem o usuário ver.
+- **Modo `grouped` (ex.: filtro "Agente" da tela de conversas, que mistura atendentes humanos e agentes de IA em dois grupos visuais) usa um link "selecionar todos" POR GRUPO**, no cabeçalho de cada grupo — não um botão único no rodapé. Decisão explícita do produto: um botão global marcaria os dois grupos juntos, quando o caso de uso é "todos os agentes de IA" ou "todos os atendentes", não os dois ao mesmo tempo. Filtros `multiple` sem `grouped` continuam com um único botão no rodapé, ao lado de "Limpar seleção".
+- Item com `group` vazio sob `grouped=true` fica sem controle de seleção em massa — não acontece em nenhum call site hoje (só o filtro "Agente" usa `grouped+multiple`, sempre com `group` preenchido); é uma limitação teórica documentada, não um bug.

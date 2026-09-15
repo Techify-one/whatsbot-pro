@@ -64,6 +64,13 @@ export function OptionListSelect({
     } else { onChange(v); setOpen(false); setQ(''); }
   };
   const clear = () => onChange(multiple ? [] : '');
+  // Soma `values` (visíveis, pós-busca) à seleção atual — nunca substitui e nunca alcança
+  // itens escondidos pela busca. Reusada pelo botão de rodapé (ungrouped) e pelos links por grupo.
+  const selectAllVisible = (values) => {
+    const set = new Set(arr);
+    values.forEach((v) => set.add(v));
+    onChange(opts.filter((o) => set.has(o.value)).map((o) => o.value));  // preserva ordem das opções
+  };
 
   // Agrupa o subconjunto visível preservando a ordem de aparição dos grupos.
   const groups = [];
@@ -98,13 +105,21 @@ export function OptionListSelect({
       <div class="max-h-[200px] overflow-auto py-1">
         ${visible.length === 0 ? html`<div class="px-3 py-2 text-[13px] text-wa-secondary">Nenhuma opção encontrada.</div>`
           : groups.map((g) => html`<div key=${'g' + g}>
-              ${(grouped && g) ? html`<div class="px-3 pt-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wide text-wa-secondary">${g}</div>` : null}
+              ${(grouped && g) ? html`<div class="px-3 pt-1.5 pb-0.5 flex items-center justify-between gap-2">
+                <span class="text-[11px] font-semibold uppercase tracking-wide text-wa-secondary">${g}</span>
+                ${multiple ? html`<button type="button" onClick=${() => selectAllVisible(byGroup.get(g).map((o) => o.value))}
+                  class="text-[11px] text-wa-teal hover:underline shrink-0">selecionar todos</button>` : null}
+              </div>` : null}
               ${byGroup.get(g).map(rowFor)}
             </div>`)}
       </div>
       <div class="flex items-center justify-between gap-2 px-2 py-1.5 border-t border-wa-border">
-        <button type="button" onClick=${clear} disabled=${!has}
-          class="text-[12px] ${has ? 'text-wa-secondary hover:text-red-500' : 'text-wa-secondary opacity-40 cursor-not-allowed'}">Limpar seleção</button>
+        <div class="flex items-center gap-3">
+          <button type="button" onClick=${clear} disabled=${!has}
+            class="text-[12px] ${has ? 'text-wa-secondary hover:text-red-500' : 'text-wa-secondary opacity-40 cursor-not-allowed'}">Limpar seleção</button>
+          ${(multiple && !grouped) ? html`<button type="button" onClick=${() => selectAllVisible(visible.map((o) => o.value))}
+            class="text-[12px] text-wa-teal hover:underline">Selecionar todos</button>` : null}
+        </div>
         ${multiple ? html`<button type="button" onClick=${() => setOpen(false)} class="text-[12px] text-wa-teal">Concluir</button>` : html`<span></span>`}
       </div>
     </div>` : null}
