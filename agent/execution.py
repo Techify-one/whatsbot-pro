@@ -49,6 +49,17 @@ def set_current_contact_id(contact_id: int | None) -> None:
     _current_contact_id.set(contact_id)
 
 
+def get_current_step_agent() -> str | None:
+    """Agent executing the CURRENT hop (or None outside a tracked turn).
+
+    Precise answer to "who is calling right now" in a within-turn multi-agent
+    turn: ``atendimentos.active_agent_key`` only says who the conversation is
+    BOUND to (and is NULL on a conversation that never stamped an agent), while
+    this is set per hop by ``agent_run_service``.
+    """
+    return _current_step_agent.get()
+
+
 def get_current_contact_id() -> int | None:
     """Get the contact of the current turn (or None if not tracking)."""
     return _current_contact_id.get()

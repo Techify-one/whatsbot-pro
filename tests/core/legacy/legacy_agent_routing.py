@@ -93,14 +93,21 @@ check("agente vazio -> erro", r.startswith("Erro:"))
 r = transferir_agente.execute(ctx, {"agente": "inexistente"})
 check("destino inexistente -> erro lista disponíveis", "não existe" in r)
 
-print("\ntransferir_agente — enforcement spoke→router (plano 30 F5):")
+print("\ntransferir_agente — coerção spoke→router (plano 30 F5 + fix 2026-09):")
 # A conversa nasce vinculada ao agente default (não-router, carimbado por
 # default_agent_key_for_inbox na criação); com um roteador configurado, um
-# não-router SÓ pode devolver pro roteador (D4) — destino livre exigiria não
-# ter roteador (P4) ou conversa sem agente ativo.
-r = transferir_agente.execute(ctx, {"agente": "suporte"})
-check("não-router p/ outro agente -> bloqueado", r.startswith("Erro"))
-check("bloqueio cita a rota de escape (roteador)", "triagem" in r)
+# não-router SÓ chega ao roteador (D4) — pedir outro agente COAGE o destino pro
+# roteador em vez de recusar. Destino livre exigiria não ter roteador (P4) ou
+# conversa sem agente ativo.
+args = {"agente": "suporte", "motivo": "problema técnico"}
+r = transferir_agente.execute(ctx, args)
+check("não-router p/ outro agente -> coagido, não erro", not r.startswith("Erro"))
+check("coerção cita o roteador", "Triagem" in r)
+check("pedido original carimbado no motivo",
+      "'suporte'" in args["motivo"] and "problema técnico" in args["motivo"])
+check("conversa vai pro roteador, não pro spoke pedido",
+      conversation_repo.get_open_for_contact(c["id"])["active_agent_key"] == "triagem")
+conversation_repo.set_agent(conv["id"], agent_repo.DEFAULT_AGENT_KEY)  # volta ao spoke
 
 print("\ntransferir_agente — handoff persistente:")
 r = transferir_agente.execute(ctx, {"agente": "triagem"})

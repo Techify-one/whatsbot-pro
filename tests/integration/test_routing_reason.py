@@ -297,6 +297,96 @@ def test_transfer_to_human_encerra_roteamento_sem_cair_no_default(routing_world,
             conv["id"], assignee_user_id=None, active_agent_key=None, ai_active=1)
 
 
+def test_spoke_pede_outro_spoke_e_o_turno_segue_pelo_roteador(routing_world, monkeypatch):
+    """Produção, conversa 17020: o comercial pediu ``transferir_agente(fechamento)``.
+
+    Antes, a tool RECUSAVA (spoke→spoke) e a recusa gastava a única chamada do
+    ``call_limit: 1``; a correção que a própria mensagem de erro mandava fazer
+    (devolver ao roteador) era bloqueada pelo hook, ``active_agent_key`` não
+    mudava e ``run_with_routing`` encerrava o turno sem fechar nada.
+
+    Agora a tool REAL (não um resultado fabricado) coage o destino pro roteador
+    numa chamada só, e o turno segue: roteador revisitado recebe o pedido original
+    no motivo e manda pro fechamento. Quem identifica o chamador é o ContextVar
+    que ``_run_hop`` carimba a cada hop.
+    """
+    from agent.tools import transferir_agente
+
+    contact, conv = routing_world
+    handler = _FakeHandler()
+    agent_repo.save("fechamento29", display_name="Fechamento",
+                    prompt="Você encerra.", model_config={"model": "test/model"},
+                    tool_names=None, enabled=True)
+    agent_repo.save("roteador29", display_name="Roteador",
+                    prompt="Você roteia.", model_config={"model": "test/model"},
+                    tool_names=None, enabled=True, is_router=True,
+                    routing_targets=["comercial29", "fechamento29"])
+    dynamic_registry.invalidate()
+
+    # 1º hop (já rodado): o roteador mandou pro comercial.
+    conversation_repo.set_agent(conv["id"], "comercial29")
+    dynamic_registry.invalidate()
+    first_result = EngineResult(
+        reply="", executed_tools=[{
+            "tool": "transferir_agente",
+            "args": {"agente": "comercial29", "motivo": "dúvida sobre o plano"},
+            "result": "Transferência registrada: ...",
+        }], usage=None)
+    first_spec = agent_factory.AgentSpec(
+        agent_key="roteador29", base_prompt="Você roteia.",
+        model_config={"model": "test/model"})
+
+    captured = []
+
+    def _call_real_tool(args):
+        out = transferir_agente.execute(type("Ctx", (), {"contact": contact})(), args)
+        dynamic_registry.invalidate()
+        return [{"tool": "transferir_agente", "args": args, "result": out}]
+
+    async def _fake_run_async(handler, contact, sender, messages, active_tools,
+                              model_config=None):
+        captured.append(messages)
+        if len(captured) == 1:
+            # Comercial: pede o FECHAMENTO direto (o que a IA fez em produção).
+            return EngineResult(reply="", usage=None, executed_tools=_call_real_tool(
+                {"agente": "fechamento29", "motivo": "cliente pediu para encerrar"}))
+        if len(captured) == 2:
+            # Roteador revisitado: aplica a regra de negócio e manda pro fechamento.
+            return EngineResult(reply="", usage=None, executed_tools=_call_real_tool(
+                {"agente": "fechamento29", "motivo": "encerrar atendimento"}))
+        return EngineResult(reply="atendimento encerrado, até mais!",
+                            executed_tools=[], usage=None)
+
+    monkeypatch.setattr(agno_engine, "run_async", _fake_run_async)
+
+    try:
+        result, combined, _, steps = asyncio.run(
+            agent_run_service._continue_routing(
+                handler, contact, PHONE, [{"role": "user", "content": "pode encerrar"}],
+                first_spec, first_result, first_result.executed_tools, None,
+                disable_tools=False))
+
+        # A chamada do comercial foi UMA e não foi erro — nada para o call_limit barrar.
+        comercial_calls = [t for t in combined if t["tool"] == "transferir_agente"
+                           and "devolvida ao roteador" in (t.get("result") or "")]
+        assert len(comercial_calls) == 1
+        # O turno seguiu até o fechamento, passando pelo hub.
+        assert [(s["from"], s["to"]) for s in steps] == [
+            ("roteador29", "comercial29"),
+            ("comercial29", "roteador29"),
+            ("roteador29", "fechamento29")]
+        assert result.reply == "atendimento encerrado, até mais!"
+        assert conversation_repo.get(conv["id"])["active_agent_key"] == "fechamento29"
+        # O roteador decidiu sabendo para onde o comercial queria mandar.
+        synthetic = [m for m in captured[1]
+                     if m["role"] == "user" and "[REDIRECIONAMENTO de" in m["content"]]
+        assert "pediu encaminhamento para 'fechamento29'" in synthetic[-1]["content"]
+        assert "cliente pediu para encerrar" in synthetic[-1]["content"]
+    finally:
+        conversation_repo.set_agent(conv["id"], None)
+        agent_repo.delete("fechamento29")
+
+
 def test_handoff_sem_motivo_injeta_sintetica_sem_linha_motivo(routing_world, monkeypatch):
     contact, conv = routing_world
     handler = _FakeHandler()

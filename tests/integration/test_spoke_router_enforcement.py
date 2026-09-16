@@ -1,11 +1,16 @@
-"""Plano 30 · F5 (WS4) — spoke só devolve pro roteador (enforcement em execute).
+"""Plano 30 · F5 (WS4) — spoke só chega ao roteador (enforcement em execute).
 
 Hoje a allowlist só vale quando o agente ATUAL é o roteador; um spoke pula toda
 validação e transfere pra qualquer agente enabled. O ramo novo: agente atual
-não-router (spoke) ⇒ destino permitido = só o roteador (``get_router()``);
-mensagem de bloqueio cita a rota de escape. Política P4: sem roteador no banco,
-não bloqueia (degrada pro comportamento legado — não trava quem não usa
-hub-and-spoke).
+não-router (spoke) ⇒ destino permitido = só o roteador (``get_router()``).
+Política P4: sem roteador no banco, não bloqueia (degrada pro comportamento
+legado — não trava quem não usa hub-and-spoke).
+
+Spoke→spoke é COAGIDO, não recusado (fix 2026-09): a recusa gastava a única
+chamada permitida pelo ``call_limit: 1`` de ``ai_engine.hooks`` e a correção que
+a própria mensagem de erro pedia era bloqueada — o handoff não acontecia e o
+turno morria em silêncio. Aqui o destino é reescrito pro roteador e o pedido
+original vai carimbado no ``motivo``.
 
 Rodar: venv/bin/python -m pytest tests/integration/test_spoke_router_enforcement.py -q
 """
@@ -16,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.execution import _current_step_agent
 from agent.tools import transferir_agente
 from db.repositories import agent_repo, contact_repo, conversation_repo
 
@@ -88,15 +94,37 @@ def test_spoke_devolve_pro_roteador_ok(hub):
     assert conversation_repo.get(conv["id"])["active_agent_key"] == ROUTER
 
 
-def test_spoke_para_outro_spoke_bloqueado(hub):
+def test_spoke_para_outro_spoke_e_coagido_pro_roteador(hub):
+    """O pedido não é recusado: o DESTINO é reescrito pro hub."""
     ctx, conv = hub
     _set_current(conv, VENDAS)
     r = transferir_agente.execute(ctx, {"agente": SUPORTE})
-    assert r.startswith("Erro"), r
-    # A mensagem orienta a rota de escape: devolver ao roteador.
-    assert ROUTER in r and "transferir_agente" in r
-    # O handoff NÃO foi persistido.
-    assert conversation_repo.get(conv["id"])["active_agent_key"] == VENDAS
+    assert not r.startswith("Erro"), r
+    assert "devolvida ao roteador" in r
+    # O handoff FOI persistido — no roteador, não no spoke pedido.
+    assert conversation_repo.get(conv["id"])["active_agent_key"] == ROUTER
+
+
+def test_coercao_carimba_o_pedido_no_motivo(hub):
+    """O roteador precisa saber PARA ONDE o spoke queria mandar.
+
+    ``_last_transfer_reason`` lê ``args['motivo']`` da chamada REGISTRADA, não o
+    retorno da tool — por isso a escrita é in place no dict recebido.
+    """
+    ctx, conv = hub
+    _set_current(conv, VENDAS)
+    args = {"agente": SUPORTE, "motivo": "cliente quer cancelar"}
+    transferir_agente.execute(ctx, args)
+    assert f"pediu encaminhamento para '{SUPORTE}'" in args["motivo"]
+    assert "cliente quer cancelar" in args["motivo"]
+
+
+def test_coercao_sem_motivo_ainda_registra_o_pedido(hub):
+    ctx, conv = hub
+    _set_current(conv, VENDAS)
+    args = {"agente": SUPORTE}
+    transferir_agente.execute(ctx, args)
+    assert args["motivo"] == f"Vendas pediu encaminhamento para '{SUPORTE}'"
 
 
 def test_sem_roteador_nao_bloqueia_spoke(hub):
@@ -123,8 +151,44 @@ def test_roteador_desabilitado_nao_trava_spoke(hub):
 
 
 def test_conversa_sem_agente_ativo_segue_legado(hub):
-    """Sem active_agent_key não dá pra classificar o atual — sem enforcement."""
+    """Sem active_agent_key E sem hop em execução — nada para classificar."""
     ctx, conv = hub
     _set_current(conv, None)
     r = transferir_agente.execute(ctx, {"agente": SUPORTE})
     assert r.startswith("Transferência registrada"), r
+
+
+def test_hop_em_execucao_classifica_conversa_sem_agente(hub):
+    """O FURO que a linha da conversa deixava: ``active_agent_key`` NULL.
+
+    Uma conversa que nunca carimbou agente (nasceu com a IA off, ou caiu no
+    agente padrão) respondia por um spoke sem estar vinculada a ele — e a
+    validação de papel era pulada inteira. O ContextVar do hop sabe quem
+    executa.
+    """
+    ctx, conv = hub
+    _set_current(conv, None)
+    token = _current_step_agent.set(VENDAS)
+    try:
+        r = transferir_agente.execute(ctx, {"agente": SUPORTE})
+    finally:
+        _current_step_agent.reset(token)
+    assert "devolvida ao roteador" in r, r
+    assert conversation_repo.get(conv["id"])["active_agent_key"] == ROUTER
+
+
+def test_hop_em_execucao_vence_a_linha_da_conversa(hub):
+    """Divergiram? Quem manda é quem está executando ESTE hop.
+
+    Num turno multi-agente a conversa já pode estar gravada no destino do hop
+    anterior enquanto outro agente ainda executa.
+    """
+    ctx, conv = hub
+    _set_current(conv, ROUTER)
+    token = _current_step_agent.set(VENDAS)
+    try:
+        r = transferir_agente.execute(ctx, {"agente": SUPORTE})
+    finally:
+        _current_step_agent.reset(token)
+    assert "devolvida ao roteador" in r, r
+    assert conversation_repo.get(conv["id"])["active_agent_key"] == ROUTER

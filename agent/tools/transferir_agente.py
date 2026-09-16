@@ -7,6 +7,14 @@ resolve a precedência conversa→inbox→default a cada requisição.
 
 Valida que o destino existe e está ativo; se o agente atual for um roteador
 (``is_router``) com ``routing_targets``, exige que o destino esteja na allowlist.
+
+Spoke→spoke é COAGIDO, não recusado: um agente especializado que pede outro
+especialista tem o destino reescrito para o roteador, com o pedido original
+carimbado no motivo. Recusar custava uma volta no LLM e uma 2ª chamada da tool —
+que o teto ``call_limit: 1`` de ``ai_engine.hooks`` barrava, deixando o handoff
+sem acontecer e o turno morrendo em silêncio. A intenção do spoke é legítima
+(a conversa precisa seguir); só a rota é que não é dele — quem escolhe destino é
+o hub. Nada aqui casa nome de agente: o papel vem do flag ``is_router``.
 """
 
 import logging
@@ -14,6 +22,37 @@ import logging
 from db.repositories import agent_repo, conversation_repo
 
 logger = logging.getLogger(__name__)
+
+
+def _caller_agent_key(conv: dict) -> str | None:
+    """O agente que executa ESTE hop — quem de fato está chamando a tool.
+
+    O ContextVar de execução é a fonte precisa: ``active_agent_key`` da conversa
+    pode estar NULL (conversa que nunca carimbou agente responde pelo default) e
+    aí a validação de papel era pulada inteira. Cai na linha da conversa quando
+    o ContextVar não estiver disponível.
+    """
+    try:
+        from agent.execution import get_current_step_agent
+        key = get_current_step_agent()
+        if key:
+            return key
+    except Exception:
+        pass
+    return conv.get("active_agent_key")
+
+
+def _record_intent(args: dict, caller: dict, pedido: str) -> None:
+    """Carimba o pedido original do spoke no motivo, IN PLACE.
+
+    O motivo que chega ao roteador sai do ``args['motivo']`` da chamada
+    REGISTRADA (``agent_run_service._last_transfer_reason``), nunca do retorno
+    desta tool — por isso a escrita tem de ser no próprio dict recebido.
+    """
+    quem = caller.get("display_name") or caller.get("agent_key") or "o agente anterior"
+    motivo = str(args.get("motivo") or "").strip()
+    pedido_txt = f"{quem} pediu encaminhamento para '{pedido}'"
+    args["motivo"] = f"{pedido_txt}. {motivo}" if motivo else pedido_txt
 
 
 TRANSFERIR_AGENTE_TOOL = {
@@ -69,6 +108,7 @@ def execute(ctx, args: dict) -> str | None:
     if not target:
         return "Erro: informe a chave do agente de destino em 'agente'."
 
+    coerced_from = None
     try:
         target_agent = agent_repo.get(target)
         if not target_agent or not target_agent.get("enabled"):
@@ -86,7 +126,7 @@ def execute(ctx, args: dict) -> str | None:
 
         # Validação pelo papel do agente ATUAL (plano 30 F5 — hub-and-spoke):
         # roteador respeita a própria allowlist; spoke SÓ devolve pro roteador.
-        current_key = conv.get("active_agent_key")
+        current_key = _caller_agent_key(conv)
         if current_key:
             current = agent_repo.get(current_key)
             if current and current.get("is_router"):
@@ -102,11 +142,12 @@ def execute(ctx, args: dict) -> str | None:
                 # o comportamento legado em vez de virar deadlock.
                 router = agent_repo.get_router()
                 if router and router.get("enabled") and target != router["agent_key"]:
-                    return (
-                        "Erro: agentes especializados só transferem a conversa "
-                        "de volta ao roteador. Devolva usando transferir_agente "
-                        f"com agente='{router['agent_key']}' e informe o motivo."
-                    )
+                    # COERÇÃO, não recusa: reescreve o destino para o hub e leva
+                    # junto o pedido original, para o roteador decidir com ele.
+                    coerced_from = target
+                    target = router["agent_key"]
+                    target_agent = router
+                    _record_intent(args, current, coerced_from)
 
         conversation_repo.set_agent(conv["id"], target)
         logger.info("Handoff: conversa %s -> agente '%s' (motivo=%s)",
@@ -149,5 +190,10 @@ def execute(ctx, args: dict) -> str | None:
         return "Erro ao transferir o atendimento."
 
     label = target_agent.get("display_name") or target
+    if coerced_from:
+        return (f"Agentes especializados não transferem direto entre si. A conversa "
+                f"foi devolvida ao roteador '{label}', com o seu pedido "
+                f"('{coerced_from}') registrado no motivo — ele decide o próximo "
+                f"destino. NÃO chame transferir_agente de novo nesta mensagem.")
     return (f"Transferência registrada: as próximas mensagens desta conversa serão "
             f"atendidas por '{label}'.")
