@@ -1283,16 +1283,26 @@ class MessagingService:
                                    agent_key: str | None = None):
         """Broadcast private messages for each tool call executed by the LLM.
 
-        ``agent_key`` (do ProcessResult do turno) atribui os cards de tool ao agente
-        que os executou, para o painel exibir "Ferramenta IA - <NOME>"."""
+        Cada card é assinado pelo agente que EXECUTOU aquela tool: ``tc["agent_key"]``
+        (carimbado por hop em ``agent_run_service``, plano 164) vence; ``agent_key``
+        (do ``ProcessResult`` do turno — o último hop) é só o fallback para entradas
+        sem carimbo, ex. motor chamado fora de ``run_turn``."""
         ws_manager = self.ws_manager
         agent_handler = self.agent_handler
         settings = self.settings
-        # Nome exibível do agente (resolvido 1× para todos os cards deste turno).
-        agent_name = await asyncio.to_thread(agent_repo.display_name_for, agent_key)
+        # Nome exibível por agente, resolvido sob demanda e cacheado por chamada —
+        # um turno multi-hop assina cards de agentes diferentes.
+        name_cache: dict[str | None, str | None] = {}
+
+        async def _display_name(key: str | None) -> str | None:
+            if key not in name_cache:
+                name_cache[key] = await asyncio.to_thread(agent_repo.display_name_for, key)
+            return name_cache[key]
 
         contact = agent_handler._get_contact(phone, channel_id=channel_id)
         for tc in tool_calls:
+            card_agent_key = tc.get("agent_key") or agent_key
+            agent_name = await _display_name(card_agent_key)
             tool_name = tc.get("tool", "unknown")
             args = tc.get("args", {})
             # Format: tool name + each arg on its own line
@@ -1317,7 +1327,7 @@ class MessagingService:
             saved = None
             try:
                 saved = await asyncio.to_thread(
-                    contact.add_message, "tool_call", content, agent_key=agent_key)
+                    contact.add_message, "tool_call", content, agent_key=card_agent_key)
             except Exception as e:
                 logger.error("[ToolCall] failed to save tool_call card for %s: %s",
                              phone, e)
@@ -1326,8 +1336,8 @@ class MessagingService:
                 "content": content,
                 "ts": (saved or {}).get("ts", time.time()),
             }
-            if agent_key:
-                tc_message["agent_key"] = agent_key
+            if card_agent_key:
+                tc_message["agent_key"] = card_agent_key
             if agent_name:
                 tc_message["agent_name"] = agent_name
             if saved and saved.get("conversation_id") is not None:

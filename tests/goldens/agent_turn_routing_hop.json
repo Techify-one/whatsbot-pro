@@ -1,16 +1,20 @@
 {
   "events": {
     "sequence": [
+      "execution.started",
       "llm.before",
       "tool.before",
       "conversation.agent_changed",
       "tool.after",
       "tool.before",
       "tool.after",
-      "llm.after"
+      "llm.after",
+      "execution.ended"
     ],
     "set": [
       "conversation.agent_changed",
+      "execution.ended",
+      "execution.started",
       "llm.after",
       "llm.before",
       "tool.after",
@@ -40,6 +44,7 @@
     "reply": "aqui é o Vendas, posso ajudar com seu pedido!",
     "tool_calls": [
       {
+        "agent_key": "default",
         "args": {
           "agente": "vendas"
         },
@@ -47,6 +52,7 @@
         "tool": "transferir_agente"
       },
       {
+        "agent_key": "vendas",
         "args": {
           "agente": "vendas"
         },

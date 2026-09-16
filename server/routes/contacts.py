@@ -31,6 +31,10 @@ from server.pagination import (CAP_LIST, CAP_MSGS, PAGE_LIST, PAGE_MSGS,
                                clamp_limit, clamp_offset)
 from plugins.events import emit as emit_event, apply_filter, emit_with_filter
 from server.routes.sandbox import SANDBOX_CONTACT_PREFIX
+from server.execution import (
+    aensure_execution, astamp_execution_channel, aset_execution_texts,
+    atrack_step, set_current_contact_id,
+)
 # ``app.services.messaging_service`` is imported INSIDE ``register_routes`` (not
 # at module top) to avoid a latent import cycle: ``server.app`` loads this module,
 # and ``messaging_service`` imports back into ``server``. Deferring to call time
@@ -1092,216 +1096,234 @@ def register_routes(app, deps):
         # privada iniciada num canal não-default (ex.: Telegram) misfila pro
         # WhatsApp 'default'.
         run_channel = _channel_for(phone, conversation_id)
-        # Private-AI tasks are fire-and-forget and do not live in processing_tasks.
-        # The same abort generation still scopes them: a manual send/assignment that
-        # happens while their LLM is running invalidates this specific reply without
-        # permanently disabling the AI for the next customer turn.
-        private_abort_epoch = (messaging._abort_epoch(run_channel, phone)
-                               if abort_epoch is None else abort_epoch)
-        run_wire = await asyncio.to_thread(_wire_target, phone, conversation_id)
+        async with aensure_execution(phone, "private_note") as (exec_id, opened_here):
+            if opened_here:
+                contact_for_exec = await asyncio.to_thread(
+                    agent_handler._get_contact, phone, channel_id=run_channel)
+                await astamp_execution_channel(contact_for_exec, run_channel)
+                if getattr(contact_for_exec, "id", None):
+                    set_current_contact_id(contact_for_exec.id)
+                await aset_execution_texts(input_text=text[:2000] if text else None)
+            # Private-AI tasks are fire-and-forget and do not live in processing_tasks.
+            # The same abort generation still scopes them: a manual send/assignment that
+            # happens while their LLM is running invalidates this specific reply without
+            # permanently disabling the AI for the next customer turn.
+            private_abort_epoch = (messaging._abort_epoch(run_channel, phone)
+                                   if abort_epoch is None else abort_epoch)
+            run_wire = await asyncio.to_thread(_wire_target, phone, conversation_id)
 
-        async def _may_reply_in_chat_now(allow_self_handoff: bool = False) -> bool:
-            """Espelha ``MessagingService._cycle_may_continue`` (plano 122).
+            async def _may_reply_in_chat_now(allow_self_handoff: bool = False) -> bool:
+                """Espelha ``MessagingService._cycle_may_continue`` (plano 122).
 
-            Época PRIMEIRO — o perdão jamais a alcança. Ele só existe para o turno
-            que chamou ``transfer_to_human`` e portanto fechou o próprio gate."""
-            if messaging._abort_epoch(run_channel, phone) != private_abort_epoch:
-                return False
-            if allow_self_handoff:
-                return True
-            return await asyncio.to_thread(
-                _private_ai_conversation_open, run_channel, phone)
+                Época PRIMEIRO — o perdão jamais a alcança. Ele só existe para o turno
+                que chamou ``transfer_to_human`` e portanto fechou o próprio gate."""
+                if messaging._abort_epoch(run_channel, phone) != private_abort_epoch:
+                    return False
+                if allow_self_handoff:
+                    return True
+                return await asyncio.to_thread(
+                    _private_ai_conversation_open, run_channel, phone)
 
-        async def _blocked_notice() -> None:
-            aviso = ("⚠️ A resposta da IA ao cliente foi interrompida porque um "
-                     "atendente assumiu a conversa. Desmarque \"responder no chat\" "
-                     "para receber a resposta como nota privada, ou devolva a "
-                     "conversa à IA.")
-            try:
-                def _save_aviso():
-                    c = agent_handler._get_contact(phone, channel_id=run_channel)
-                    return c.add_message("system_notice", aviso)
-                saved = await asyncio.to_thread(_save_aviso)
-                await ws_manager.broadcast("new_message", {
-                    "phone": phone, "channel_id": run_channel,
-                    "message": saved or {"role": "system_notice", "content": aviso,
-                                         "ts": time.time()},
-                })
-            except Exception:
-                logger.exception("[PrivateAI] falha ao gravar o card de bloqueio de %s",
-                                 phone)
-
-        try:
-            result = await agent_handler.aprocess_message(
-                phone, text,
-                save_user_message=False,
-                save_response=False,
-                channel_id=run_channel,
-            )
-            reply_text = (result.reply or "").strip()
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.exception("[PrivateAI] aprocess_message failed for %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Erro ao processar IA: {e}")
-            return
-
-        if result.tool_calls:
-            try:
-                await deps.broadcast_tool_calls(
-                    phone, result.tool_calls, result.contact_info,
-                    channel_id=run_channel, agent_key=result.agent_key)
-            except Exception as e:
-                logger.warning("[PrivateAI] broadcast_tool_calls failed for %s: %s",
-                               phone, e)
-
-        if not reply_text:
-            return
-
-        # Plano 96 I9/P1 — a IA da nota privada era o ÚNICO caminho de saída sem
-        # gate nenhum (3 dos 22 incidentes medidos): com "IA lê" + "responder no
-        # chat" ligados, ela mandava ao cliente mesmo numa conversa já assumida por
-        # um humano. Pior: o toggle só se reseta ao TROCAR de conversa, então quem
-        # o liga para instruir a IA segue com ele ligado nas notas seguintes.
-        # Gate só no caminho que FALA com o cliente — ``reply_in_chat=False`` vira
-        # nota privada e nunca sai do painel, então não é gateado.
-        #
-        # ⚠️ Aqui é o gate POR-CONVERSA (`_conversation_ai_active`), não o veredito
-        # composto `ai_may_speak`: o master global `auto_reply` (default OFF numa
-        # instalação nova) e o `ai_enabled` do canal governam a IA responder SOZINHA
-        # a um inbound. Esta resposta foi PEDIDA por um humano — barrá-la pelo
-        # interruptor de automação apagaria o recurso inteiro em instalação com a
-        # automação desligada, que não é o problema que o plano 96 ataca (D1: o que
-        # cala é o HUMANO no comando daquela conversa).
-        #
-        # Plano 122 — o perdão do turno que transferiu. Sem ele, uma IA privada com
-        # "responder no chat" que chame ``transfer_to_human`` cai aqui e grava um
-        # card FALSO ("um atendente assumiu a conversa" — ninguém assumiu).
-        handed_off = _turn_handed_off(result.tool_calls)
-        if reply_in_chat and not await _may_reply_in_chat_now(handed_off):
-            logger.info("[PrivateAI] resposta não enviada a %s — a conversa está "
-                        "com um atendente humano", phone)
-            await _blocked_notice()
-            return
-
-        # The LLM may return a JSON array of strings when split_messages is on.
-        parts = (parse_split_reply(reply_text)
-                 if settings.get("split_messages", True) else [reply_text])
-        filter_source = "private_ai" if reply_in_chat else "private_ai_note"
-        # Plugin filter on the part list (can reorder/add/remove).
-        parts = await apply_filter("filter.reply.parts", parts, {"phone": phone, "source": filter_source})
-        if parts is None or not parts:
-            return
-
-        for i, part in enumerate(parts):
-            part = await apply_filter(
-                "filter.reply.part", part,
-                {"phone": phone, "index": i, "total": len(parts), "source": filter_source},
-            )
-            if part is None:
-                continue
-
-            if not reply_in_chat:
-                # AI reply stays in the panel as a private note. Bind the note to
-                # the SAME channel as the conversation (senão cairia no inbox
-                # 'default' e não roteria no painel — plano 11) and use the row
-                # add_message RETURNS (id/ts/conversation_id) instead of a racy
-                # get_last.
-                note_channel = run_channel
-                saved_note = None
+            async def _blocked_notice() -> None:
+                aviso = ("⚠️ A resposta da IA ao cliente foi interrompida porque um "
+                         "atendente assumiu a conversa. Desmarque \"responder no chat\" "
+                         "para receber a resposta como nota privada, ou devolva a "
+                         "conversa à IA.")
                 try:
-                    def _save_note(p=part):
-                        contact = agent_handler._get_contact(phone, channel_id=note_channel)
-                        return contact.add_message("private_note", p)
-                    saved_note = await asyncio.to_thread(_save_note)
-                except Exception as e:
-                    logger.error("[PrivateAI] failed to save private note: %s", e)
-                note_msg = {
-                    "role": "private_note",
-                    "content": part,
-                    "ts": (saved_note or {}).get("ts", time.time()),
-                    "status": None,
-                    "conversation_id": (saved_note or {}).get("conversation_id"),
-                }
-                if saved_note and saved_note.get("id"):
-                    note_msg["_id"] = saved_note["id"]
-                if saved_note and saved_note.get("msg_id"):
-                    note_msg["msg_id"] = saved_note["msg_id"]
-                await ws_manager.broadcast(
-                    "new_message",
-                    {"phone": phone, "channel_id": note_channel, "message": note_msg})
-                continue
+                    def _save_aviso():
+                        c = agent_handler._get_contact(phone, channel_id=run_channel)
+                        return c.add_message("system_notice", aviso)
+                    saved = await asyncio.to_thread(_save_aviso)
+                    await ws_manager.broadcast("new_message", {
+                        "phone": phone, "channel_id": run_channel,
+                        "message": saved or {"role": "system_notice", "content": aviso,
+                                             "ts": time.time()},
+                    })
+                except Exception:
+                    logger.exception("[PrivateAI] falha ao gravar o card de bloqueio de %s",
+                                     phone)
 
-            channel_id = run_channel
-            # WIRE-ONLY transform (e.g. signature): reaches the contact but not the
-            # saved copy (save below keeps using `part`).
-            wire_text = part
-            _wired = await apply_filter(
-                "filter.outbound.text", part,
-                {"phone": phone, "channel_id": channel_id, "source": "private_ai",
-                 "index": i, "total": len(parts)},
-            )
-            if _wired is not None:
-                wire_text = _wired
-            # Same last-moment rule as the normal AI pipeline. The initial check
-            # above is not enough: plugins and a multi-part response create another
-            # window in which the operator can take over.
-            if not await _may_reply_in_chat_now(handed_off):
-                logger.info("[PrivateAI] split de %s/%s interrompido na parte %d/%d",
-                            run_channel, phone, i + 1, len(parts))
+            try:
+                result = await agent_handler.aprocess_message(
+                    phone, text,
+                    save_user_message=False,
+                    save_response=False,
+                    channel_id=run_channel,
+                )
+                reply_text = (result.reply or "").strip()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.exception("[PrivateAI] aprocess_message failed for %s: %s", phone, e)
+                await atrack_step("error", {"error": str(e), "phase": "aprocess_message"},
+                                  status="error")
+                await _emit_send_error(ws_manager, phone, f"Erro ao processar IA: {e}")
+                return
+
+            if result.tool_calls:
+                try:
+                    await deps.broadcast_tool_calls(
+                        phone, result.tool_calls, result.contact_info,
+                        channel_id=run_channel, agent_key=result.agent_key)
+                except Exception as e:
+                    logger.warning("[PrivateAI] broadcast_tool_calls failed for %s: %s",
+                                   phone, e)
+
+            if not reply_text:
+                return
+
+            # Plano 96 I9/P1 — a IA da nota privada era o ÚNICO caminho de saída sem
+            # gate nenhum (3 dos 22 incidentes medidos): com "IA lê" + "responder no
+            # chat" ligados, ela mandava ao cliente mesmo numa conversa já assumida por
+            # um humano. Pior: o toggle só se reseta ao TROCAR de conversa, então quem
+            # o liga para instruir a IA segue com ele ligado nas notas seguintes.
+            # Gate só no caminho que FALA com o cliente — ``reply_in_chat=False`` vira
+            # nota privada e nunca sai do painel, então não é gateado.
+            #
+            # ⚠️ Aqui é o gate POR-CONVERSA (`_conversation_ai_active`), não o veredito
+            # composto `ai_may_speak`: o master global `auto_reply` (default OFF numa
+            # instalação nova) e o `ai_enabled` do canal governam a IA responder SOZINHA
+            # a um inbound. Esta resposta foi PEDIDA por um humano — barrá-la pelo
+            # interruptor de automação apagaria o recurso inteiro em instalação com a
+            # automação desligada, que não é o problema que o plano 96 ataca (D1: o que
+            # cala é o HUMANO no comando daquela conversa).
+            #
+            # Plano 122 — o perdão do turno que transferiu. Sem ele, uma IA privada com
+            # "responder no chat" que chame ``transfer_to_human`` cai aqui e grava um
+            # card FALSO ("um atendente assumiu a conversa" — ninguém assumiu).
+            handed_off = _turn_handed_off(result.tool_calls)
+            if reply_in_chat and not await _may_reply_in_chat_now(handed_off):
+                logger.info("[PrivateAI] resposta não enviada a %s — a conversa está "
+                            "com um atendente humano", phone)
                 await _blocked_notice()
                 return
-            state.recently_sent[f"{channel_id}:{run_wire}:{wire_text[:120]}"] = time.time()
-            send_failed = False
-            send_error = ""
-            msg_id = None
-            try:
-                msg_id = await asyncio.to_thread(
-                    _route_send_text, channel_id, run_wire, wire_text)
-            except GOWASendError as e:
-                logger.error("[PrivateAI] send failed for %s: %s", phone, e)
-                send_failed = True
-                send_error = str(e)
-            except Exception as e:
-                logger.error("[PrivateAI] send failed for %s: %s", phone, e)
-                send_failed = True
-                send_error = str(e)
 
-            if send_failed:
-                msg_id = None
-            if msg_id:
-                # Prefixed — same format ``_ingest_echo`` looks up (o id cru nunca
-                # casava). Ver o gotcha "Echo do próprio envio" em docs/OPERACAO.md.
-                state.processed_messages.add(f"{channel_id}:{msg_id}")
-
-            try:
-                msg_data = await asyncio.to_thread(
-                    agent_handler.save_assistant_message, phone, part,
-                    msg_id=msg_id,
-                    status="failed" if send_failed else "sent",
-                    channel_id=run_channel, agent_key=result.agent_key,
-                )
-            except Exception as e:
-                logger.error("[PrivateAI] failed to save assistant message: %s", e)
-                msg_data = {
-                    "role": "assistant", "content": part, "ts": time.time(),
-                    "status": "failed" if send_failed else "sent", "msg_id": msg_id,
-                }
-
-            if send_failed:
-                await _emit_send_error(
-                    ws_manager, phone, f"Falha ao enviar resposta da IA: {send_error}")
+            # The LLM may return a JSON array of strings when split_messages is on.
+            parts = (parse_split_reply(reply_text)
+                     if settings.get("split_messages", True) else [reply_text])
+            filter_source = "private_ai" if reply_in_chat else "private_ai_note"
+            # Plugin filter on the part list (can reorder/add/remove).
+            parts = await apply_filter("filter.reply.parts", parts, {"phone": phone, "source": filter_source})
+            if parts is None or not parts:
                 return
-            await ws_manager.broadcast("new_message", {
-                "phone": phone, "channel_id": channel_id, "message": msg_data,
+
+            for i, part in enumerate(parts):
+                part = await apply_filter(
+                    "filter.reply.part", part,
+                    {"phone": phone, "index": i, "total": len(parts), "source": filter_source},
+                )
+                if part is None:
+                    continue
+
+                if not reply_in_chat:
+                    # AI reply stays in the panel as a private note. Bind the note to
+                    # the SAME channel as the conversation (senão cairia no inbox
+                    # 'default' e não roteria no painel — plano 11) and use the row
+                    # add_message RETURNS (id/ts/conversation_id) instead of a racy
+                    # get_last.
+                    note_channel = run_channel
+                    saved_note = None
+                    try:
+                        def _save_note(p=part):
+                            contact = agent_handler._get_contact(phone, channel_id=note_channel)
+                            return contact.add_message("private_note", p)
+                        saved_note = await asyncio.to_thread(_save_note)
+                    except Exception as e:
+                        logger.error("[PrivateAI] failed to save private note: %s", e)
+                    note_msg = {
+                        "role": "private_note",
+                        "content": part,
+                        "ts": (saved_note or {}).get("ts", time.time()),
+                        "status": None,
+                        "conversation_id": (saved_note or {}).get("conversation_id"),
+                    }
+                    if saved_note and saved_note.get("id"):
+                        note_msg["_id"] = saved_note["id"]
+                    if saved_note and saved_note.get("msg_id"):
+                        note_msg["msg_id"] = saved_note["msg_id"]
+                    await ws_manager.broadcast(
+                        "new_message",
+                        {"phone": phone, "channel_id": note_channel, "message": note_msg})
+                    continue
+
+                channel_id = run_channel
+                # WIRE-ONLY transform (e.g. signature): reaches the contact but not the
+                # saved copy (save below keeps using `part`).
+                wire_text = part
+                _wired = await apply_filter(
+                    "filter.outbound.text", part,
+                    {"phone": phone, "channel_id": channel_id, "source": "private_ai",
+                     "index": i, "total": len(parts)},
+                )
+                if _wired is not None:
+                    wire_text = _wired
+                # Same last-moment rule as the normal AI pipeline. The initial check
+                # above is not enough: plugins and a multi-part response create another
+                # window in which the operator can take over.
+                if not await _may_reply_in_chat_now(handed_off):
+                    logger.info("[PrivateAI] split de %s/%s interrompido na parte %d/%d",
+                                run_channel, phone, i + 1, len(parts))
+                    await _blocked_notice()
+                    return
+                state.recently_sent[f"{channel_id}:{run_wire}:{wire_text[:120]}"] = time.time()
+                send_failed = False
+                send_error = ""
+                msg_id = None
+                try:
+                    msg_id = await asyncio.to_thread(
+                        _route_send_text, channel_id, run_wire, wire_text)
+                except GOWASendError as e:
+                    logger.error("[PrivateAI] send failed for %s: %s", phone, e)
+                    send_failed = True
+                    send_error = str(e)
+                except Exception as e:
+                    logger.error("[PrivateAI] send failed for %s: %s", phone, e)
+                    send_failed = True
+                    send_error = str(e)
+
+                if send_failed:
+                    msg_id = None
+                if msg_id:
+                    # Prefixed — same format ``_ingest_echo`` looks up (o id cru nunca
+                    # casava). Ver o gotcha "Echo do próprio envio" em docs/OPERACAO.md.
+                    state.processed_messages.add(f"{channel_id}:{msg_id}")
+
+                try:
+                    msg_data = await asyncio.to_thread(
+                        agent_handler.save_assistant_message, phone, part,
+                        msg_id=msg_id,
+                        status="failed" if send_failed else "sent",
+                        channel_id=run_channel, agent_key=result.agent_key,
+                        execution_id=exec_id,
+                    )
+                except Exception as e:
+                    logger.error("[PrivateAI] failed to save assistant message: %s", e)
+                    msg_data = {
+                        "role": "assistant", "content": part, "ts": time.time(),
+                        "status": "failed" if send_failed else "sent", "msg_id": msg_id,
+                    }
+
+                if send_failed:
+                    await _emit_send_error(
+                        ws_manager, phone, f"Falha ao enviar resposta da IA: {send_error}")
+                    return
+                await ws_manager.broadcast("new_message", {
+                    "phone": phone, "channel_id": channel_id, "message": msg_data,
+                })
+                await emit_with_filter("message.sent", {
+                    "phone": phone, "channel_id": channel_id, "text": part, "msg_id": msg_id,
+                    "conversation_id": (msg_data or {}).get("conversation_id"),
+                    "media_type": None, "media_path": None,
+                    "source": "private_ai", "status": "sent",
+                    "ts": time.time(),
+                })
+
+            await atrack_step("response_sent", {
+                "phone": phone, "channel_id": run_channel,
+                "parts": len(parts),
+                "reply_preview": "\n".join(parts)[:200],
             })
-            await emit_with_filter("message.sent", {
-                "phone": phone, "channel_id": channel_id, "text": part, "msg_id": msg_id,
-                "conversation_id": (msg_data or {}).get("conversation_id"),
-                "media_type": None, "media_path": None,
-                "source": "private_ai", "status": "sent",
-                "ts": time.time(),
-            })
+            await aset_execution_texts(output_text="\n".join(parts)[:2000] or None)
 
     def _parse_mentions_field(raw: str) -> list:
         """Decodifica o campo multipart ``mentions`` (JSON de user_ids). Silencioso."""

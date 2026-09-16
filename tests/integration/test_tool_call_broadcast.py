@@ -10,6 +10,11 @@ reaparecia no F5, lendo do banco). Espelha o padrão ``private_note``
 salva.
 
 Rodar: venv/bin/python -m pytest tests/integration/test_tool_call_broadcast.py -q
+
+Plano 164 F1 adiciona: cada card assinado pelo agente que EXECUTOU a tool
+(``tc["agent_key"]``), com o ``agent_key`` do turno só como fallback — bug real
+na conversa 17028 (todos os 6 cards de um turno comercial→roteador→fechamento
+saíram assinados "BIA Fechamento").
 """
 
 from __future__ import annotations
@@ -127,3 +132,91 @@ def test_tool_call_card_single_channel_still_routes(build_app):
     assert saved and saved["role"] == "tool_call"
     assert msg.get("conversation_id") == conv["id"] == saved["conversation_id"]
     assert "🔧 set_custom_attribute" in msg.get("content", "")
+
+
+def test_tool_call_card_signed_by_hop_agent_not_turn_agent(build_app):
+    """Plano 164: cada card assina o AGENTE QUE EXECUTOU aquela tool
+    (``tc["agent_key"]``), não o agente final do turno — reproduz a conversa
+    17028 (comercial→roteador→fechamento, todos os cards saíram "Fechamento")."""
+    from db.repositories import agent_repo, message_repo
+
+    built = build_app(["gowa"])
+    deps = built.app.state.deps
+    handler = built.agent_handler
+    phone = "5511930000033"
+
+    agent_repo.save("p164_comercial", display_name="BIA Comercial",
+                    prompt="x", model_config={"model": "test/model"},
+                    tool_names=None, enabled=True)
+    agent_repo.save("p164_fechamento", display_name="BIA Fechamento",
+                    prompt="x", model_config={"model": "test/model"},
+                    tool_names=None, enabled=True)
+    try:
+        contact = handler._get_contact(phone)
+        contact.add_message("user", "oi")
+
+        events: list = []
+        original = _capture_broadcasts(deps.ws_manager, events)
+        try:
+            asyncio.run(deps.broadcast_tool_calls(
+                phone,
+                [{"tool": "set_custom_attribute",
+                  "args": {"key": "plano", "value": "pro"},
+                  "result": "Atributo salvo.",
+                  "agent_key": "p164_comercial"},
+                 {"tool": "finalizar_atendimentos_protocolos_ia",
+                  "args": {}, "result": "Atendimento encerrado."}],
+                None, agent_key="p164_fechamento"))
+        finally:
+            deps.ws_manager.broadcast = original
+
+        cards = [d for e, d in events
+                 if e == "new_message" and (d.get("message") or {}).get("role") == "tool_call"]
+        assert len(cards) == 2
+
+        comercial_card = cards[0]["message"]
+        assert comercial_card["agent_key"] == "p164_comercial"
+        assert comercial_card["agent_name"] == "BIA Comercial"
+
+        # Sem carimbo por hop ⇒ cai no fallback do agente do TURNO (fechamento).
+        fechamento_card = cards[1]["message"]
+        assert fechamento_card["agent_key"] == "p164_fechamento"
+        assert fechamento_card["agent_name"] == "BIA Fechamento"
+
+        rows = [m for m in message_repo.get_all(contact.id) if m["role"] == "tool_call"]
+        assert len(rows) == 2
+        assert rows[0]["agent_key"] == "p164_comercial"
+        assert rows[1]["agent_key"] == "p164_fechamento"
+    finally:
+        agent_repo.delete("p164_comercial")
+        agent_repo.delete("p164_fechamento")
+
+
+def test_tool_call_card_falls_back_to_turn_agent_when_unstamped(build_app):
+    """Sem ``agent_key`` em NENHUM lugar (motor chamado fora de ``run_turn``,
+    ex. ``rotinas_ia``): o card sai sem assinatura, como sempre foi."""
+    built = build_app(["gowa"])
+    deps = built.app.state.deps
+    handler = built.agent_handler
+    phone = "5511930000034"
+
+    contact = handler._get_contact(phone)
+    contact.add_message("user", "oi")
+
+    events: list = []
+    original = _capture_broadcasts(deps.ws_manager, events)
+    try:
+        asyncio.run(deps.broadcast_tool_calls(
+            phone,
+            [{"tool": "set_custom_attribute", "args": {"key": "plano", "value": "pro"},
+              "result": "Atributo salvo."}],
+            None))
+    finally:
+        deps.ws_manager.broadcast = original
+
+    cards = [d for e, d in events
+             if e == "new_message" and (d.get("message") or {}).get("role") == "tool_call"]
+    assert len(cards) == 1
+    msg = cards[0]["message"]
+    assert "agent_key" not in msg
+    assert "agent_name" not in msg

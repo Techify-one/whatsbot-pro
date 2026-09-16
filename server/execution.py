@@ -14,7 +14,10 @@ Usage pattern in async code (webhook.py, sandbox.py):
 """
 
 import asyncio
+import logging
 import time
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from agent.execution import (  # noqa: F401 — re-export
     set_current_execution,
@@ -30,6 +33,8 @@ from agent.execution import (  # noqa: F401 — re-export
     prune_executions,
 )
 from plugins.events import emit_with_filter
+
+logger = logging.getLogger(__name__)
 
 # Module-level cache: exec_id -> {"phone", "trigger_type", "started_at"}
 # Used to compute duration_ms and route phone/trigger into the ``ended``
@@ -135,3 +140,45 @@ async def astamp_execution_channel(contact, channel_id: str, *,
         )
     except Exception:
         pass
+
+
+@asynccontextmanager
+async def aensure_execution(phone: str, trigger_type: str) -> AsyncIterator[tuple[int | None, bool]]:
+    """Guarantee a tracked execution around ``async with`` body, without nesting.
+
+    Yields ``(exec_id, opened_here)``. If an execution is already open in the
+    current context (webhook/sandbox already opened one before calling into a
+    turn), it is reused and left OPEN — ``opened_here=False`` tells the caller
+    not to close it and not to (re)stamp channel/texts that the outer opener
+    already owns (plano 164 item 2).
+
+    Only the opener closes: on normal exit ``completed``; on cancellation
+    ``cancelled`` (re-raised, so the surrounding task still observes the
+    cancel); on any other exception ``failed`` with the error message
+    (re-raised unchanged). Failing to even OPEN the execution (DB down) must
+    never block the turn — same fail-open spirit as ``track_step`` — so that
+    path logs a warning and yields ``(None, False)`` instead of raising.
+    """
+    existing = get_current_execution_id()
+    if existing is not None:
+        yield (existing, False)
+        return
+
+    try:
+        exec_id = await astart_execution(phone, trigger_type)
+    except Exception:
+        logger.warning("aensure_execution: failed to open execution (%s/%s)",
+                       phone, trigger_type, exc_info=True)
+        yield (None, False)
+        return
+
+    try:
+        yield (exec_id, True)
+    except asyncio.CancelledError:
+        await aend_execution(exec_id, error="cancelled")
+        raise
+    except Exception as exc:
+        await aend_execution(exec_id, error=str(exc))
+        raise
+    else:
+        await aend_execution(exec_id)

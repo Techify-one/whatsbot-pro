@@ -1,12 +1,16 @@
 {
   "events": {
     "sequence": [
+      "execution.started",
       "llm.before",
       "tool.before",
       "tool.after",
-      "llm.after"
+      "llm.after",
+      "execution.ended"
     ],
     "set": [
+      "execution.ended",
+      "execution.started",
       "llm.after",
       "llm.before",
       "tool.after",
@@ -43,6 +47,7 @@
     "reply": "pronto, Carlos, anotei seus dados!",
     "tool_calls": [
       {
+        "agent_key": "default",
         "args": {
           "email": "carlos@exemplo.com",
           "name": "Carlos Souza"

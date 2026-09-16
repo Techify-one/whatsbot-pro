@@ -73,6 +73,46 @@ def routing_world(_engine_ready):
     dynamic_registry.invalidate()
 
 
+def test_hop_tools_carregam_agent_key_de_quem_executou(routing_world, monkeypatch):
+    """Plano 164 F1: a entrada de ``executed_tools`` do hop carrega o agente
+    que a rodou, não o agente final do turno (bug real: conversa 17028, todos
+    os cards saíram assinados pelo último hop)."""
+    contact, conv = routing_world
+    handler = _FakeHandler()
+
+    conversation_repo.set_agent(conv["id"], "roteador29")
+    dynamic_registry.invalidate()
+    first_result = EngineResult(
+        reply="", executed_tools=[{
+            "tool": "transferir_agente",
+            "args": {"agente": "roteador29", "motivo": "quero a oferta X"},
+            "result": "Transferência registrada: ...",
+        }], usage=None)
+    first_spec = agent_factory.AgentSpec(
+        agent_key="comercial29", base_prompt="Você vende.",
+        model_config={"model": "test/model"})
+
+    async def _fake_run_async(handler, contact, sender, messages, active_tools,
+                              model_config=None):
+        return EngineResult(reply="resposta do roteador", executed_tools=[
+            {"tool": "set_custom_attribute", "args": {"key": "plano", "value": "x"},
+             "result": "Atributo salvo."},
+        ], usage=None)
+
+    monkeypatch.setattr(agno_engine, "run_async", _fake_run_async)
+
+    result, combined, _, steps = asyncio.run(
+        agent_run_service._continue_routing(
+            handler, contact, PHONE, [{"role": "user", "content": "quero a oferta X"}],
+            first_spec, first_result, first_result.executed_tools, None,
+            disable_tools=False))
+
+    hop_tool = [t for t in combined if t["tool"] == "set_custom_attribute"]
+    assert len(hop_tool) == 1
+    assert hop_tool[0]["agent_key"] == "roteador29", (
+        "a tool rodou no hop do roteador — o card não pode assinar outro agente")
+
+
 def test_hop_recebe_motivo_e_steps_carregam_reason(routing_world, monkeypatch):
     contact, conv = routing_world
     handler = _FakeHandler()
@@ -238,6 +278,9 @@ def test_cap_estourado_escala_pra_humano(routing_world, monkeypatch):
         assert "Limite de roteamento atingido" in args["reason"]
         forced = [t for t in combined if t.get("forced")]
         assert forced and forced[-1]["tool"] == "transfer_to_human"
+        # Plano 164 P4: a escalada forçada assina o ÚLTIMO agente do roteamento
+        # — foi o hop dele que deixou o handoff pendente.
+        assert forced[-1]["agent_key"] == steps[-1]["to"]
     finally:
         config_repo.set("ai_max_route_depth", 5)
 

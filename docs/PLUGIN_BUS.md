@@ -52,7 +52,7 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 
 | Evento | Source |
 |--------|--------|
-| `llm.before` / `llm.after` | `aprocess_message`/`process_message` antes/depois de `chat.completions.create`. `after`: `reply, tool_calls, usage, latency_ms` |
+| `llm.before` / `llm.after` | `aprocess_message`/`process_message` antes/depois de `chat.completions.create`. `after`: `reply, tool_calls, usage, latency_ms`. Cada entrada de `tool_calls[]` ganha `agent_key` (plano 164, aditivo) — o agente que EXECUTOU aquele hop num turno com routing, não necessariamente o agente final do turno |
 | `tool.before` / `tool.after` | `_dispatch_tool`. `after`: `result, error, latency_ms` |
 | `contact.updated` | PUT `/api/contacts/{phone}/info` |
 | `contact.ai_toggled` | POST `/api/contacts/{phone}/toggle-ai` |

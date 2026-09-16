@@ -251,6 +251,8 @@ O loop de raciocínio + tool calling roda no **AGNO** ([agent/agno_engine.py](ag
 
 **Filtro de histórico por regex** (plano 43): lista-negra GLOBAL em `ai_history_exclude_patterns` (default `[]`), cada linha testada como `f"{role}\t{content}"` com `re.search`. [agent/history_filter.py](agent/history_filter.py) é **fail-open** em todo nível. `message_repo.get_context(..., exclude=...)` faz over-fetch (cap 200) — cortar linhas **não encolhe** a janela abaixo de `max_context_messages`.
 
+⚠️ **Card de tool é assinado pelo agente que EXECUTOU (plano 164)**, não pelo agente final do turno; `aensure_execution` garante `executions`/`execution_steps` também fora do webhook (nota privada, plugin) sem aninhar.
+
 ## Memória por contato
 
 Cada contato é armazenado na tabela `contacts` com campos normalizados:

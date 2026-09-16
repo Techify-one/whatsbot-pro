@@ -35,6 +35,7 @@ from agent.execution import (
 from agent.handler import ProcessResult
 from channels import ai_settings
 from plugins.events import apply_filter, emit_with_filter
+from server.execution import aensure_execution, astamp_execution_channel, aset_execution_texts
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,21 @@ def _hop_called_transfer_to_human(executed_tools: list[dict] | None) -> bool:
     """
     return any(e.get("tool") == "transfer_to_human" and not e.get("skipped")
                for e in (executed_tools or []))
+
+
+def _stamp_agent(entries: list[dict] | None, agent_key: str | None) -> None:
+    """Tag each tool-call entry with the agent that ran its hop (plano 164).
+
+    In place, ``setdefault`` (never overwrites an existing carimbo) so calling
+    this more than once on the same list — e.g. the first hop's entries are
+    shared by reference with ``_continue_routing``'s ``combined`` copy — is
+    harmless. A falsy ``agent_key`` leaves the entry unstamped, so
+    ``broadcast_tool_calls`` falls back to the turn's agent.
+    """
+    if not agent_key:
+        return
+    for entry in (entries or []):
+        entry.setdefault("agent_key", agent_key)
 
 
 async def _run_routing_hop(handler, contact, sender, context_messages, spec, *,
@@ -226,6 +242,7 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
                 hop.usage.get("total_tokens", 0))
             for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 acc_usage[k] = acc_usage.get(k, 0) + hop.usage.get(k, 0)
+        _stamp_agent(hop.executed_tools, spec.agent_key)
         combined.extend(hop.executed_tools or [])
         last_hop["agent"] = agent_key
         last_hop["executed"] = hop.executed_tools
@@ -254,7 +271,8 @@ async def _continue_routing(handler, contact, sender, context_messages, first_sp
                 {"reason": motivo})
             combined.append({"tool": "transfer_to_human",
                              "args": {"reason": motivo},
-                             "result": feedback, "forced": True})
+                             "result": feedback, "forced": True,
+                             "agent_key": last_hop["agent"]})
             logger.warning("Routing halted for %s (%s) — escalado pra humano",
                            sender, chain)
         except Exception:
@@ -276,185 +294,190 @@ async def run_turn(handler, sender: str, text: str, *,
     contact/conversation to the originating channel's inbox (plano 11) so agent
     resolution honours conversation→inbox→default.
     """
-    if not handler.api_key:
-        return ProcessResult(reply="[WhatsBot] API key não configurada.")
+    async with aensure_execution(sender, "ai_turn") as (exec_id, opened_here):
+        if not handler.api_key:
+            return ProcessResult(reply="[WhatsBot] API key não configurada.")
 
-    contact = handler._get_contact(sender, channel_id=channel_id)
+        contact = handler._get_contact(sender, channel_id=channel_id)
+        if opened_here:
+            await astamp_execution_channel(contact, channel_id)
+            await aset_execution_texts(input_text=(text or "")[:2000] or None)
 
-    media_type: str | None = None
-    media_path: str | None = None
-    if image_path:
-        media_type = "image"
-        media_path = image_path
-    elif audio_path:
-        media_type = "audio"
-        media_path = audio_path
+        media_type: str | None = None
+        media_path: str | None = None
+        if image_path:
+            media_type = "image"
+            media_path = image_path
+        elif audio_path:
+            media_type = "audio"
+            media_path = audio_path
 
-    if save_user_message:
-        contact.add_message("user", text or "", media_type=media_type, media_path=media_path)
+        if save_user_message:
+            contact.add_message("user", text or "", media_type=media_type, media_path=media_path)
 
-    # Per-channel overrides (plano 21): context size + split format follow the
-    # channel's config, falling back to the global (handler) value.
-    eff_max_context = ai_settings.value(
-        channel_id, "max_context_messages", handler.max_context_messages)
-    eff_split = bool(ai_settings.value(
-        channel_id, "split_messages", handler.split_messages))
+        # Per-channel overrides (plano 21): context size + split format follow the
+        # channel's config, falling back to the global (handler) value.
+        eff_max_context = ai_settings.value(
+            channel_id, "max_context_messages", handler.max_context_messages)
+        eff_split = bool(ai_settings.value(
+            channel_id, "split_messages", handler.split_messages))
 
-    context_messages = contact.get_context_messages(eff_max_context)
-    if eff_split:
-        context_messages = handler._encode_history_for_split(context_messages)
+        context_messages = contact.get_context_messages(eff_max_context)
+        if eff_split:
+            context_messages = handler._encode_history_for_split(context_messages)
 
-    # Plano 37 A1: memória compacta de tool. O role ``tool_call`` é excluído do
-    # contexto do LLM (get_context) e o motor roda stateless, então o modelo
-    # re-executa as mesmas tools todo turno. Injeta um bloco ``system`` curto
-    # ("já executadas / atributos já definidos") que atravessa split_messages
-    # (concatenado ao system prompt) e é herdado por todos os hops de routing.
-    # Best-effort + kill-switch: falha ou OFF ⇒ segue sem o bloco.
-    try:
-        from agent import tool_memory
-        _mem_block = tool_memory.build_block(contact)
-        if _mem_block:
-            context_messages = [*context_messages,
-                                {"role": "system", "content": _mem_block}]
-    except Exception:
-        logger.debug("tool_memory: injeção falhou para %s", sender, exc_info=True)
+        # Plano 37 A1: memória compacta de tool. O role ``tool_call`` é excluído do
+        # contexto do LLM (get_context) e o motor roda stateless, então o modelo
+        # re-executa as mesmas tools todo turno. Injeta um bloco ``system`` curto
+        # ("já executadas / atributos já definidos") que atravessa split_messages
+        # (concatenado ao system prompt) e é herdado por todos os hops de routing.
+        # Best-effort + kill-switch: falha ou OFF ⇒ segue sem o bloco.
+        try:
+            from agent import tool_memory
+            _mem_block = tool_memory.build_block(contact)
+            if _mem_block:
+                context_messages = [*context_messages,
+                                    {"role": "system", "content": _mem_block}]
+        except Exception:
+            logger.debug("tool_memory: injeção falhou para %s", sender, exc_info=True)
 
-    # Config-in-DB: resolve the DB-driven agent for this contact + the
-    # filter.agent.resolve seam. Always returns a spec; a genuinely broken DB
-    # raises AgentResolutionError, which we isolate to this one conversation
-    # (error card, nothing sent to client).
-    try:
-        agent_spec = await _resolve_agent_spec(handler, contact, sender)
-    except agent_factory.AgentResolutionError as e:
-        handler._emit_resolution_error(contact, sender, e)
-        # aborted: já sinalizado com card próprio — não é mudez do motor.
-        return ProcessResult(reply="", aborted=True)
-    set_execution_agent_key(agent_spec.agent_key)
-    set_current_step_agent(agent_spec.agent_key)
-    # The AI is now handling this message: attribute the conversation to it so
-    # the inbox shows its assignee chip (covers reopened/legacy threads).
-    handler._ensure_conversation_agent(contact, agent_spec)
-    model = agent_spec.model_config.get("model") or agent_factory.DEFAULT_MODEL
-    model_config = agent_spec.model_config
-    base_prompt = agent_spec.base_prompt
+        # Config-in-DB: resolve the DB-driven agent for this contact + the
+        # filter.agent.resolve seam. Always returns a spec; a genuinely broken DB
+        # raises AgentResolutionError, which we isolate to this one conversation
+        # (error card, nothing sent to client).
+        try:
+            agent_spec = await _resolve_agent_spec(handler, contact, sender)
+        except agent_factory.AgentResolutionError as e:
+            handler._emit_resolution_error(contact, sender, e)
+            # aborted: já sinalizado com card próprio — não é mudez do motor.
+            return ProcessResult(reply="", aborted=True)
+        set_execution_agent_key(agent_spec.agent_key)
+        set_current_step_agent(agent_spec.agent_key)
+        # The AI is now handling this message: attribute the conversation to it so
+        # the inbox shows its assignee chip (covers reopened/legacy threads).
+        handler._ensure_conversation_agent(contact, agent_spec)
+        model = agent_spec.model_config.get("model") or agent_factory.DEFAULT_MODEL
+        model_config = agent_spec.model_config
+        base_prompt = agent_spec.base_prompt
 
-    system_prompt_str = handler._build_system_prompt(
-        contact, base_prompt=base_prompt, split_messages=eff_split)
-    system_prompt_str = await apply_filter(
-        "filter.system_prompt", system_prompt_str, {"phone": sender}
-    )
-    if system_prompt_str is None:
-        # aborted: silêncio intencional de plugin (contrato do filter) — não é
-        # mudez do motor (plano 31 F4).
-        return ProcessResult(reply="", aborted=True)
-
-    messages = [
-        {"role": "system", "content": system_prompt_str},
-        *context_messages,
-    ]
-    messages = await apply_filter(
-        "filter.llm.messages", messages, {"phone": sender}
-    )
-    if messages is None:
-        # aborted: idem — plugin cancelou o turno de propósito.
-        return ProcessResult(reply="", aborted=True)
-
-    active_tools = [] if disable_tools else handler._select_active_tools(agent_spec)
-    active_tools = await apply_filter(
-        "filter.llm.tools", active_tools, {"phone": sender}
-    )
-    if active_tools is None:
-        active_tools = []
-
-    try:
-        _llm_t0 = time.monotonic()
-        await emit_with_filter("llm.before", {
-            "phone": sender,
-            "model": model,
-            "message_count": len(messages),
-            "has_tools": bool(active_tools),
-            "tool_count": len(active_tools),
-            "image_path": image_path,
-            "audio_path": audio_path,
-            "ts": time.time(),
-        })
-
-        # Delegate the reasoning + tool-calling loop to the AGNO engine.
-        # Tool filters/events (filter.tool.args/result, tool.before/after)
-        # are applied inside the wrapped tool entrypoints; usage is reported
-        # via AGNO RunMetrics rather than an OpenAI response object.
-        result = await agno_engine.run_async(
-            handler, contact, sender, messages, active_tools,
-            model_config=model_config,
+        system_prompt_str = handler._build_system_prompt(
+            contact, base_prompt=base_prompt, split_messages=eff_split)
+        system_prompt_str = await apply_filter(
+            "filter.system_prompt", system_prompt_str, {"phone": sender}
         )
-        reply = result.reply
-        executed_tools = result.executed_tools
-        usage_dict = result.usage
+        if system_prompt_str is None:
+            # aborted: silêncio intencional de plugin (contrato do filter) — não é
+            # mudez do motor (plano 31 F4).
+            return ProcessResult(reply="", aborted=True)
 
-        if usage_dict:
-            handler._record_usage_tokens(
-                sender, "text", model,
-                usage_dict.get("prompt_tokens", 0),
-                usage_dict.get("completion_tokens", 0),
-                usage_dict.get("total_tokens", 0),
+        messages = [
+            {"role": "system", "content": system_prompt_str},
+            *context_messages,
+        ]
+        messages = await apply_filter(
+            "filter.llm.messages", messages, {"phone": sender}
+        )
+        if messages is None:
+            # aborted: idem — plugin cancelou o turno de propósito.
+            return ProcessResult(reply="", aborted=True)
+
+        active_tools = [] if disable_tools else handler._select_active_tools(agent_spec)
+        active_tools = await apply_filter(
+            "filter.llm.tools", active_tools, {"phone": sender}
+        )
+        if active_tools is None:
+            active_tools = []
+
+        try:
+            _llm_t0 = time.monotonic()
+            await emit_with_filter("llm.before", {
+                "phone": sender,
+                "model": model,
+                "message_count": len(messages),
+                "has_tools": bool(active_tools),
+                "tool_count": len(active_tools),
+                "image_path": image_path,
+                "audio_path": audio_path,
+                "ts": time.time(),
+            })
+
+            # Delegate the reasoning + tool-calling loop to the AGNO engine.
+            # Tool filters/events (filter.tool.args/result, tool.before/after)
+            # are applied inside the wrapped tool entrypoints; usage is reported
+            # via AGNO RunMetrics rather than an OpenAI response object.
+            result = await agno_engine.run_async(
+                handler, contact, sender, messages, active_tools,
+                model_config=model_config,
             )
+            reply = result.reply
+            executed_tools = result.executed_tools
+            _stamp_agent(executed_tools, agent_spec.agent_key)
+            usage_dict = result.usage
 
-        # Within-turn routing (config-in-DB): a mid-turn handoff lets the new
-        # agent answer this same message. No-op when no handoff occurred, so
-        # the single-agent path is unchanged.
-        result, executed_tools, usage_dict, routing_steps = await _continue_routing(
-            handler, contact, sender, context_messages, agent_spec,
-            result, executed_tools, usage_dict, disable_tools=disable_tools)
-        reply = result.reply
-        # Agente que EFETIVAMENTE respondeu: o último hop do routing (ou o resolvido
-        # no início, sem handoff). Capturado ANTES de qualquer efeito colateral do
-        # turno (ex.: transfer_to_human zera o active_agent_key da conversa), então é
-        # a fonte confiável para atribuir a resposta e os cards de tool ao agente.
-        final_agent_key = routing_steps[-1]["to"] if routing_steps else agent_spec.agent_key
+            if usage_dict:
+                handler._record_usage_tokens(
+                    sender, "text", model,
+                    usage_dict.get("prompt_tokens", 0),
+                    usage_dict.get("completion_tokens", 0),
+                    usage_dict.get("total_tokens", 0),
+                )
 
-        if save_response:
-            contact.add_message("assistant", reply, agent_key=final_agent_key)
-        logger.info("Processed message from %s", sender)
+            # Within-turn routing (config-in-DB): a mid-turn handoff lets the new
+            # agent answer this same message. No-op when no handoff occurred, so
+            # the single-agent path is unchanged.
+            result, executed_tools, usage_dict, routing_steps = await _continue_routing(
+                handler, contact, sender, context_messages, agent_spec,
+                result, executed_tools, usage_dict, disable_tools=disable_tools)
+            reply = result.reply
+            # Agente que EFETIVAMENTE respondeu: o último hop do routing (ou o resolvido
+            # no início, sem handoff). Capturado ANTES de qualquer efeito colateral do
+            # turno (ex.: transfer_to_human zera o active_agent_key da conversa), então é
+            # a fonte confiável para atribuir a resposta e os cards de tool ao agente.
+            final_agent_key = routing_steps[-1]["to"] if routing_steps else agent_spec.agent_key
 
-        updated_info = None
-        # ``skipped`` marca a chamada que NÃO rodou (bloqueada por filter ou por
-        # limite de tool — agno_engine). Sem o filtro, um save_contact_info
-        # bloqueado faria o turno reportar dados de contato como salvos, e isso
-        # vaza para o payload de ``llm.after`` que os plugins leem. Mesmo molde de
-        # ``messaging_service`` no set_custom_attribute (plano 91·F5).
-        if any(tc.get("tool") == "save_contact_info" and not tc.get("skipped")
-               for tc in executed_tools):
-            updated_info = dict(contact.info)
-            updated_info["observations"] = list(updated_info.get("observations", []))
+            if save_response:
+                contact.add_message("assistant", reply, agent_key=final_agent_key)
+            logger.info("Processed message from %s", sender)
 
-        await emit_with_filter("llm.after", {
-            "phone": sender,
-            "model": model,
-            "reply": reply,
-            "tool_calls": executed_tools,
-            "usage": usage_dict,
-            "latency_ms": int((time.monotonic() - _llm_t0) * 1000),
-            "ts": time.time(),
-        })
+            updated_info = None
+            # ``skipped`` marca a chamada que NÃO rodou (bloqueada por filter ou por
+            # limite de tool — agno_engine). Sem o filtro, um save_contact_info
+            # bloqueado faria o turno reportar dados de contato como salvos, e isso
+            # vaza para o payload de ``llm.after`` que os plugins leem. Mesmo molde de
+            # ``messaging_service`` no set_custom_attribute (plano 91·F5).
+            if any(tc.get("tool") == "save_contact_info" and not tc.get("skipped")
+                   for tc in executed_tools):
+                updated_info = dict(contact.info)
+                updated_info["observations"] = list(updated_info.get("observations", []))
 
-        return ProcessResult(reply=reply, tool_calls=executed_tools,
-                             contact_info=updated_info, agent_key=final_agent_key)
+            await emit_with_filter("llm.after", {
+                "phone": sender,
+                "model": model,
+                "reply": reply,
+                "tool_calls": executed_tools,
+                "usage": usage_dict,
+                "latency_ms": int((time.monotonic() - _llm_t0) * 1000),
+                "ts": time.time(),
+            })
 
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.error("LLM error for %s: %s", sender, e)
-        track_step("error", {"error": str(e), "phase": "llm_call"}, status="error")
-        await emit_with_filter("llm.after", {
-            "phone": sender, "model": model,
-            "reply": "", "tool_calls": [], "usage": None,
-            "error": str(e),
-            "latency_ms": int((time.monotonic() - locals().get("_llm_t0", time.monotonic())) * 1000),
-            "ts": time.time(),
-        })
-        error_msg = str(e)
-        if "401" in error_msg or "unauthorized" in error_msg.lower():
-            return ProcessResult(reply="[WhatsBot] API key inválida. Verifique sua chave Techify.")
-        if "429" in error_msg or "rate" in error_msg.lower():
-            return ProcessResult(reply="[WhatsBot] Limite de requisições atingido. Tente novamente em instantes.")
-        return ProcessResult(reply="[WhatsBot] Erro ao processar mensagem. Tente novamente.")
+            return ProcessResult(reply=reply, tool_calls=executed_tools,
+                                 contact_info=updated_info, agent_key=final_agent_key)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("LLM error for %s: %s", sender, e)
+            track_step("error", {"error": str(e), "phase": "llm_call"}, status="error")
+            await emit_with_filter("llm.after", {
+                "phone": sender, "model": model,
+                "reply": "", "tool_calls": [], "usage": None,
+                "error": str(e),
+                "latency_ms": int((time.monotonic() - locals().get("_llm_t0", time.monotonic())) * 1000),
+                "ts": time.time(),
+            })
+            error_msg = str(e)
+            if "401" in error_msg or "unauthorized" in error_msg.lower():
+                return ProcessResult(reply="[WhatsBot] API key inválida. Verifique sua chave Techify.")
+            if "429" in error_msg or "rate" in error_msg.lower():
+                return ProcessResult(reply="[WhatsBot] Limite de requisições atingido. Tente novamente em instantes.")
+            return ProcessResult(reply="[WhatsBot] Erro ao processar mensagem. Tente novamente.")
