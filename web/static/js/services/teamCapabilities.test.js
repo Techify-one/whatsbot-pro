@@ -77,6 +77,26 @@ test('normaliza modos legado e novo no CRUD', () => {
   assert.equal(accessModeOf({ access_mode: 'private' }), 'private');
 });
 
+test('CRUD administrativo preserva catálogos, routing e contagem para U2', () => {
+  const response = normalizeTeamAdminResponse({
+    ok: true,
+    data: {
+      teams: [{
+        id: 8, name: 'Vendas', routing_mode: 'fixed_ai',
+        default_agent_key: 'sales', ai_assignable: true, conversation_count: 0,
+      }],
+      users: [{ id: 2, name: 'Ana', is_active: true }],
+      ai_agents: [{ agent_key: 'sales', display_name: 'Vendas IA', enabled: true }],
+    },
+  });
+
+  assert.equal(response.data.teams[0].routing_mode, 'fixed_ai');
+  assert.equal(response.data.teams[0].default_agent_key, 'sales');
+  assert.equal(response.data.teams[0].conversation_count, 0);
+  assert.equal(response.data.users[0].name, 'Ana');
+  assert.equal(response.data.ai_agents[0].agent_key, 'sales');
+});
+
 test('normaliza booleanos SQL 1/0 sem marcar time ativo como inativo', () => {
   const data = normalizeAssignableCatalog({ teams: [
     { id: 1, name: 'Ativo', is_active: 1, readable: 1, assignable: 1, routable: 0 },

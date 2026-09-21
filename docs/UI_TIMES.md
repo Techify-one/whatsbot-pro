@@ -8,9 +8,9 @@ no backend; a interface apenas representa capabilities devolvidas pelas APIs.
 - Sidebar: pilha compacta à direita. O responsável ocupa a primeira linha e o
   time fica logo abaixo; quando só um existe, não se reserva uma linha vazia.
 - Operação em lote: o fluxo futuro usa preflight e resultado tudo-ou-nada. Não
-  há chamada de bulk no frontend até o contrato R1/R3 ser publicado.
-- Administração: a superfície futura é `/teams`, separada de Usuários e Grupos.
-  O deep-link legado poderá redirecionar somente para quem tiver `team.manage`.
+  há chamada de bulk no frontend até os endpoints da fase R3 serem publicados.
+- Administração: a superfície é `/teams`, separada de Usuários e Grupos. O
+  deep-link legado é normalizado somente depois do gate `team.manage`.
 - Acesso: os rótulos são `Aberto`, `Oculto da lista` e `Privado`. “Restrito” não
   é usado porque não informa se o link direto também está protegido.
 - Distribuição: `Manual`, `Round-robin`, `Atendente fixo` e `Agente de IA` são
@@ -91,5 +91,20 @@ Acesso                              Distribuição
   [ ] Responsável pode visualizar   ( ) Agente de IA   [destino]
 ```
 
-Os protótipos de administração não são código de produção. A implementação dos
-campos depende do contrato administrativo/routing das fases U2 e R1/R3.
+## Administração U2
+
+Create e edit usam o mesmo `TeamForm` e enviam uma única intenção com dados,
+membros, acesso e distribuição. A UI espera que o catálogo administrativo
+`GET /api/teams?include_inactive=true`, gated por `team.manage`, entregue:
+
+```text
+{
+  teams: [{ ..., conversation_count }],
+  users: [{ id, name, email, is_active }],
+  ai_agents: [{ agent_key, display_name, enabled }]
+}
+```
+
+Assim, alguém com `team.manage` não precisa receber `users.manage`. O hard delete
+só aparece para time inativo quando `conversation_count === 0`; ausência da
+contagem falha fechada. A tela não chama endpoints de routing/bulk.
