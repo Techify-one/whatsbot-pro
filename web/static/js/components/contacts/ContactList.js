@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { SearchIcon, DefaultAvatar, GroupAvatar, SingleCheckIcon, DoubleCheckIcon, ClockIcon, ArchiveIcon } from './icons.js';
 import { formatTime, avatarUrl } from './utils.js';
@@ -20,6 +20,7 @@ import { useDrafts } from '../../hooks/useDrafts.js';
 // Selo IA/IA OFF: o veredito EFETIVO (gate do servidor espelhado), não a coluna crua.
 import { aiEffectivelyOn } from '../../services/conversationRows.js';
 import { shouldOpenInNewTab } from '../../services/spaLink.js';
+import { buildTeamMap, teamPresentation } from '../../services/teamPresentation.js';
 
 const html = htm.bind(h);
 
@@ -35,8 +36,27 @@ function AssigneeChip({ assignee }) {
     ? html`<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 2a2 2 0 012 2v1h3a2 2 0 012 2v2h1a2 2 0 010 4h-1v2a2 2 0 01-2 2h-3v1a2 2 0 01-4 0v-1H7a2 2 0 01-2-2v-2H4a2 2 0 010-4h1V7a2 2 0 012-2h3V4a2 2 0 012-2zm-3 7a1 1 0 00-1 1v4a1 1 0 002 0v-4a1 1 0 00-1-1zm6 0a1 1 0 00-1 1v4a1 1 0 002 0v-4a1 1 0 00-1-1z"/></svg>`
     : html`<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>`;
   return html`
-    <span class="flex items-center gap-[3px] text-[10px] ${cls} max-w-[110px]" title=${'Atribuída a ' + assignee.label}>
+    <span class="flex items-center justify-end gap-[3px] min-w-0 w-full text-[10px] ${cls} max-w-[110px]" title=${'Atribuída a ' + assignee.label}>
       ${icon}<span class="truncate">${assignee.label}</span>
+    </span>
+  `;
+}
+
+// Compact team identity for a conversation row. The full value remains
+// available to pointer and assistive technologies when the visible label is
+// truncated in a narrow sidebar.
+function TeamChip({ team }) {
+  if (!team) return null;
+  return html`
+    <span
+      class="flex items-center justify-end gap-[3px] min-w-0 w-full max-w-[110px] text-[10px] leading-[12px] text-wa-secondary"
+      title=${team.title}
+      aria-label=${team.title}
+    >
+      <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" class="shrink-0" aria-hidden="true">
+        <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-.32 0-.63.05-.91.14.57.8.91 1.79.91 2.86s-.34 2.06-.91 2.86c.28.09.59.14.91.14zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>
+      </svg>
+      <span class="truncate">${team.label}</span>
     </span>
   `;
 }
@@ -215,6 +235,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
   savedFilters, activeFilter, anyFilterActive, onApplySavedFilter, onSaveCurrentFilter, onOverwriteSavedFilter, onRenameSavedFilter, onRemoveSavedFilter, onClearFilters,
   loadMore = null, loadingMore = false, hasMore = false, gearMenu = null }) {
   const headerBg = wsConnected === false ? 'bg-[#6b2c2c]' : showArchived ? 'bg-[#2a3942]' : 'bg-wa-teal';
+  const teamsById = useMemo(() => buildTeamMap(teams), [teams]);
   // Rascunhos (services/drafts.js): re-renderiza quando o compositor — ou outra
   // aba do navegador — mexe no mapa, e resolve o texto de cada linha aqui. A
   // chave do rascunho É o rowKeyFor (a conversa é a dona do texto); truncado no
@@ -652,7 +673,10 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                   </div>
                 ` : null}
               </div>`
-            : contacts.map(c => html`
+            : contacts.map(c => {
+              const assignee = resolveAssignee ? resolveAssignee(c) : null;
+              const team = teamPresentation(c.team_id, teamsById);
+              return html`
                 <div
                   key=${rowKeyFor(c)}
                   onClick=${(e) => {
@@ -724,10 +748,10 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                          não há dado (linha sem canal / sem atendente). -->
                     <div class="flex items-center justify-between gap-[6px] min-w-0 mb-[1px]">
                       <${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} margin=${false} />
-                      ${resolveAssignee ? html`<span class="ml-auto shrink-0"><${AssigneeChip} assignee=${resolveAssignee(c)} /></span>` : null}
+                      ${assignee ? html`<span class="ml-auto min-w-0 max-w-[45%]"><${AssigneeChip} assignee=${assignee} /></span>` : null}
                     </div>
-                    <div class="flex justify-between items-baseline">
-                      <span class="text-wa-text text-[17px] truncate leading-[21px]">
+                    <div class="flex justify-between items-center gap-[6px] min-w-0">
+                      <span class="min-w-0 text-wa-text text-[17px] truncate leading-[21px]">
                         ${c.is_group
                           ? (c.group_name || c.name || c.phone)
                           : html`<span class=${c.name && c.name.startsWith('~') ? 'underline decoration-1 underline-offset-2' : ''} title=${c.name && c.name.startsWith('~') ? 'Nome obtido do WhatsApp (ainda não renomeado)' : null}>${(c.name || '').replace(/^~/, '') || c.phone}</span>`
@@ -750,12 +774,7 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                             : html`<span class="ml-[6px] text-[10px] font-semibold text-green-400 bg-green-500/15 rounded px-[5px] py-[1px] align-middle">IA</span>`
                         }
                       </span>
-                      <!-- Linha 2 (dir.): só fixado + hora. O atendente subiu para a linha do
-                           canal, então esta coluna deixou de ser uma pilha. -->
-                      <span class="flex items-center gap-[4px] ml-[6px] shrink-0">
-                        ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : ''}
-                        <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
-                      </span>
+                      ${team ? html`<span class="ml-auto min-w-0 max-w-[45%]"><${TeamChip} team=${team} /></span>` : null}
                     </div>
                     ${(c.conv_labels && c.conv_labels.length > 0) ? html`<${RowTags}
                       tags=${c.conv_labels}
@@ -795,8 +814,10 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                             })() : ''}${c.last_message ? c.last_message.substring(0, 80) : ''}
                           </span>`
                       }
-                      ${(c.unread_ai_count > 0 || c.unread_count > 0 || c.has_unread_mention || c.has_user_mention) ? html`
-                        <div class="flex items-center gap-[4px] ml-auto pl-[6px] shrink-0">
+                      <div class="flex items-center gap-[4px] ml-auto pl-[6px] shrink-0">
+                        ${c.is_pinned ? html`<span class="text-wa-secondary" title="Conversa fixada"><${PinIcon} /></span>` : null}
+                        <span class="text-wa-secondary text-[12px] leading-[14px]">${formatTime(c.last_message_ts)}</span>
+                        ${(c.unread_ai_count > 0 || c.unread_count > 0 || c.has_unread_mention || c.has_user_mention) ? html`
                           ${c.has_user_mention ? html`
                             <span class="text-violet-400 font-bold text-[17px] leading-none" title="Você foi mencionado numa nota privada">@</span>
                           ` : null}
@@ -813,14 +834,15 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                               ${c.unread_count}
                             </span>
                           ` : null}
-                        </div>
-                      ` : null}
+                        ` : null}
+                      </div>
                       <!-- Plugin extension point: per-row badges (SLA/prioridade/…). Empty by default. -->
                       <${Slot} name="sidebar.row.badges" ctx=${{ row: c }} />
                     </div>
                   </div>
                 </div>
-              `)
+              `;
+            })
         }
         <!-- plano 69 F4: "mostrando X de Y" — só quando o TOTAL da aba (server-side)
              supera o carregado. Verdadeiro agora que a lista é a filtrada (F2/F3);
