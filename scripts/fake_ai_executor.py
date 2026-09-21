@@ -23,6 +23,12 @@ O que dá para exercitar (comandos digitados no chat do painel):
                   write-through — antes matava a sessão global, hoje é bolha comum
     /legado       401 como resposta da IA, sem kind (executor antigo)
     /tool         cartão de ferramenta (running → done)
+    /pergunta     a IA PERGUNTA (1 pergunta, 3 opções) e ESPERA a resposta
+    /perguntas    duas perguntas, uma delas com multi-seleção
+    /pergunta_dup duas perguntas com o MESMO texto (o gateway deve recusar)
+    /parar        resposta longa e lenta, para exercitar o botão Parar
+    /fila         demora 25s — digite enquanto isso para testar a fila
+    /esforco      imprime o nível de esforço que o gateway mandou
     /aprovacao    registra uma aprovação ✓/✕ e espera a decisão
     /mutacao      lê os agentes pelo bridge _internal e propõe mudar um prompt
                   (só grava de verdade com --allow-mutations)
@@ -88,6 +94,12 @@ HELP = """**Executor falso** — comandos disponíveis:
 - `/prosa401` — análise LEGÍTIMA citando um 401 em prosa (NÃO é falha)
 - `/legado` — 401 como resposta da IA, sem `kind` (executor antigo)
 - `/tool` — cartão de ferramenta
+- `/pergunta` — a IA PERGUNTA e espera você responder (destrava ao responder)
+- `/perguntas` — duas perguntas, uma com multi-seleção
+- `/pergunta_dup` — bloco inválido (dois enunciados iguais) — deve ser recusado
+- `/parar` — resposta longa e lenta, para testar o botão Parar
+- `/fila` — demora 25s: digite nesse meio-tempo para ver a fila
+- `/esforco` — mostra o nível de esforço que o gateway mandou
 - `/aprovacao` — cartão de aprovação ✓/✕
 - `/mutacao` — lê os agentes pelo bridge e propõe mudar um prompt
 - `/erro` — evento de erro sem `kind` (executor antigo — cai na heurística)
@@ -128,12 +140,28 @@ class Conversation:
         self.pending: dict[str, dict] = {}   # approval_id → contexto
         self.turns = 0
         self.auth_error_idx = 0
+        # plano 150: parar o turno, esforço vigente e perguntas bloqueando.
+        self.stop = threading.Event()
+        self.effort = ""
+        self.questions: dict[str, dict] = {}   # question_id → {event, answer}
 
 
 # TTL fictício do token OAuth. O executor real não renova sozinho (decisão do
 # operador), então a expiração é evento RECORRENTE — é o que o monitor
 # preventivo (fase 2) sonda pelo /health.
 TOKEN_TTL_SEC = 8 * 3600
+
+
+# O que este executor falso sabe fazer (plano 150). Anunciado na abertura, na
+# retomada e no /health — nunca sondável, porque campo desconhecido é
+# descartado em silêncio pelo executor real.
+CAPABILITIES = {"ask_user": True, "effort": True, "interrupt": True,
+                "activity": False}
+
+
+def caps_payload() -> dict:
+    """Fragmento a mesclar nas respostas. Vazio com ``--legacy-caps``."""
+    return {} if STATE.legacy_caps else {"capabilities": dict(CAPABILITIES)}
 
 
 def iso_utc(ts: float) -> str:
@@ -155,6 +183,10 @@ class State:
         # Plano 62 · B: ligada, OMITE a chave ``kind`` do write-through e finge
         # ser o executor antigo (o gateway cai na heurística estrita).
         self.legacy_untyped = False
+        # plano 150 · F2: ligada, OMITE a chave ``capabilities`` das respostas
+        # e finge ser um executor anterior à negociação — é a única forma
+        # honesta de exercitar esse caminho sem ter uma build antiga à mão.
+        self.legacy_caps = False
 
     def renew(self) -> None:
         """Sessão viva de novo: o relógio do TTL recomeça."""
@@ -251,14 +283,29 @@ def say(conv: Conversation, text: str, *, persist: bool = True,
     mid = "m-" + secrets.token_hex(5)
     emit(conv, "message_start", {"messageId": mid})
     words = text.split(" ")
+    sent, cut = [], False
     for i in range(0, len(words), 6):
-        emit(conv, "message_chunk",
-             {"messageId": mid, "delta": " ".join(words[i:i + 6]) + " "})
+        # O Parar precisa cortar NO MEIO do stream — um fake que só checa no
+        # início não prova nada sobre a interrupção.
+        if conv.stop.is_set():
+            cut = True
+            break
+        piece = " ".join(words[i:i + 6])
+        sent.append(piece)
+        emit(conv, "message_chunk", {"messageId": mid, "delta": piece + " "})
         time.sleep(chunk_delay)
-    emit(conv, "message_end", {"messageId": mid, "content": text})
+    partial = " ".join(sent) if cut else text
+    end = {"messageId": mid, "content": partial}
+    if cut:
+        # A marca é o que impede a meia resposta de virar a "análise final".
+        end["interrupted"] = True
+    emit(conv, "message_end", end)
     if persist:
-        persist_message(conv, {"conversation_id": conv.id, "role": "assistant",
-                               "content": text}, typed=typed)
+        body = {"conversation_id": conv.id, "role": "assistant",
+                "content": partial}
+        if cut:
+            body["interrupted"] = True
+        persist_message(conv, body, typed=typed)
 
 
 # ── Turnos ───────────────────────────────────────────────────────────────────
@@ -424,6 +471,63 @@ def _run_turn(conv: Conversation, text: str) -> None:
                   f"O bridge recusou a leitura: {(res or {}).get('error')}")
         return
 
+    if cmd == "/pergunta":
+        ans = ask(conv, [{
+            "question": "Qual regra aplicar fora do horário comercial?",
+            "header": "Horário", "multiSelect": False,
+            "options": [
+                {"label": "Informar a janela",
+                 "description": "Dizer o horário e quando a equipe responde"},
+                {"label": "Só pedir desculpa",
+                 "description": "Sem prometer prazo nenhum"},
+                {"label": "Encaminhar ao humano",
+                 "description": "Abrir atendimento mesmo fora do horário"}]}])
+        say(conv, f"Entendi: **{ans}**. Sigo por esse caminho."
+                  if ans else "Ninguém respondeu — sigo pela melhor hipótese.")
+        return
+
+    if cmd == "/perguntas":
+        ans = ask(conv, [
+            {"question": "Qual regra aplicar fora do horário comercial?",
+             "header": "Horário", "multiSelect": False,
+             "options": [{"label": "Informar a janela", "description": "com prazo"},
+                         {"label": "Só pedir desculpa", "description": "sem prazo"}]},
+            {"question": "Onde a mudança vale?",
+             "header": "Escopo", "multiSelect": True,
+             "options": [{"label": "Só este agente", "description": "escopo mínimo"},
+                         {"label": "Todos os agentes", "description": "vale para a base toda"},
+                         {"label": "Só neste horário", "description": "condicional"}]}])
+        say(conv, f"Anotado: {ans}")
+        return
+
+    if cmd == "/pergunta_dup":
+        # Duas perguntas com o MESMO enunciado — o write-through DEVE recusar
+        # com 400 (o `answers` do SDK é indexado pelo texto e colapsaria).
+        q = {"question": "Qual regra?", "header": "R", "multiSelect": False,
+             "options": [{"label": "A"}, {"label": "B"}]}
+        out = call_gateway(conv, "/questions", {
+            "conversation_id": conv.id, "question_id": "q-dup-" + secrets.token_hex(3),
+            "questions": [q, dict(q)]})
+        say(conv, f"O gateway respondeu ao bloco duplicado: `{out}` "
+                  "(esperado: recusa).")
+        return
+
+    if cmd == "/parar":
+        say(conv, ("Vou escrever uma análise bem longa de propósito para dar "
+                   "tempo de você clicar em Parar. ") + ("palavra " * 400),
+            chunk_delay=0.25)
+        return
+
+    if cmd == "/fila":
+        time.sleep(25)
+        say(conv, "Voltei. As mensagens que você enfileirou chegam agora, "
+                  "uma por vez e na ordem.")
+        return
+
+    if cmd == "/esforco":
+        say(conv, f"O gateway me mandou o esforço: **{conv.effort or '(nenhum)'}**.")
+        return
+
     if cmd == "/aprovacao":
         propose_approval(conv, kind="demo", tool_name="atualizar_prompt_do_agente",
                          tool_input={"agent_key": "(exemplo)",
@@ -441,6 +545,32 @@ def _run_turn(conv: Conversation, text: str) -> None:
         return
     say(conv, f"Recebi: “{body[:180]}”. Anotado — posso propor um ajuste no prompt "
               f"se você quiser (`/aprovacao` ou `/mutacao`).")
+
+
+def ask(conv: Conversation, questions: list, *, timeout: float = 300.0) -> dict | None:
+    """Faz uma pergunta ao operador e BLOQUEIA o turno até a resposta.
+
+    É a fidelidade que importa: no executor real o ``canUseTool`` fica
+    pendurado segurando a query inteira. Um fake que respondesse sozinho
+    testaria o cartão, não o caso que interessa — a conversa travada esperando
+    um humano.
+    """
+    qid = "q-" + secrets.token_hex(5)
+    ev = threading.Event()
+    conv.questions[qid] = {"event": ev, "answer": None}
+    call_gateway(conv, "/questions", {
+        "conversation_id": conv.id, "question_id": qid,
+        "tool_use_id": "toolu_" + secrets.token_hex(6),
+        "questions": questions, "allow_free_text": True})
+    emit(conv, "question_needed", {"questionId": qid, "questions": questions,
+                                   "allowFreeText": True})
+    logger.info("conversa %s: PERGUNTA %s — esperando o operador", conv.id, qid)
+    if not ev.wait(timeout):
+        logger.info("conversa %s: pergunta %s expirou", conv.id, qid)
+        return None
+    answer = conv.questions.pop(qid, {}).get("answer")
+    emit(conv, "question_resolved", {"questionId": qid, "source": "human"})
+    return answer
 
 
 def propose_approval(conv: Conversation, *, kind: str, tool_name: str,
@@ -570,7 +700,8 @@ class Handler(BaseHTTPRequestHandler):
             # milissegundos e sufixo `Z` (ex.: "2026-07-29T19:09:18.334Z"), NÃO
             # epoch. O real também manda `service`. Se este falso divergir, o
             # monitor da fase 2 nasce testado contra o formato errado.
-            self._json({"ok": True, "service": "whatsbot-ai-server", "claude": {
+            self._json({"ok": True, "service": "whatsbot-ai-server",
+                        **caps_payload(), "claude": {
                 "authenticated": STATE.authenticated,
                 "mode": "oauth",
                 "expires_at": iso_utc(STATE.expires_at) if STATE.authenticated else None,
@@ -624,10 +755,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "conversation not found"}, 404)
                 return
             handler = {"messages": self._message, "approve": self._approve,
-                       "cancel": self._cancel, "resume": self._resume}.get(action)
+                       "cancel": self._cancel, "resume": self._resume,
+                       "interrupt": self._interrupt,
+                       "effort": self._effort}.get(action)
             if handler:
                 handler(cid, conv, payload)
                 return
+        # /conversations/{cid}/questions/{qid}/answer
+        if (len(parts) == 5 and parts[0] == "conversations"
+                and parts[2] == "questions" and parts[4] == "answer"):
+            conv = STATE.get(parts[1])
+            if not conv:
+                self._json({"error": "conversation not found"}, 404)
+                return
+            self._answer_question(conv, parts[3], payload)
+            return
         self._json({"error": "not found"}, 404)
 
     # -- implementações -------------------------------------------------------
@@ -641,9 +783,11 @@ class Handler(BaseHTTPRequestHandler):
                             payload.get("userId"), str(payload.get("model") or ""))
         with STATE.lock:
             STATE.convs[cid] = conv
-        logger.info("conversa %s CRIADA (user=%s callback=%s)",
-                    cid, conv.user_id, conv.callback_url)
-        self._json({"ok": True, "conversationId": cid})
+        conv.effort = str(payload.get("effort") or "")
+        logger.info("conversa %s CRIADA (user=%s callback=%s effort=%s)",
+                    cid, conv.user_id, conv.callback_url, conv.effort or "-")
+        self._json({"ok": True, "conversationId": cid, **caps_payload(),
+                    "effort": conv.effort})
 
     def _resume(self, cid: str, conv: Conversation | None, payload: dict) -> None:
         """Recria o runner hidratando do histórico — é o que devolve vida a uma
@@ -653,10 +797,16 @@ class Handler(BaseHTTPRequestHandler):
         conv.turns = len(payload.get("history") or [])
         with STATE.lock:
             STATE.convs[cid] = conv
+        conv.effort = str(payload.get("effort") or "")
         logger.info("conversa %s RETOMADA (%s turnos de histórico)", cid, conv.turns)
-        self._json({"ok": True, "resumed": True})
+        self._json({"ok": True, "resumed": True, **caps_payload(),
+                    "effort": conv.effort})
 
     def _message(self, cid: str, conv: Conversation, payload: dict) -> None:
+        # Turno novo começa limpo: a marca de parada vale para UM turno.
+        conv.stop.clear()
+        if payload.get("effort"):
+            conv.effort = str(payload["effort"])   # carona do gateway
         text = str(payload.get("text") or "")
         if not text and payload.get("parts"):
             text = " ".join(p.get("text", "") for p in payload["parts"]
@@ -674,6 +824,34 @@ class Handler(BaseHTTPRequestHandler):
                     "APROVADA" if approved else "RECUSADA")
         threading.Thread(target=resolve_approval,
                          args=(conv, aid, approved, reason), daemon=True).start()
+        self._json({"ok": True})
+
+    def _interrupt(self, cid: str, conv: Conversation, payload: dict) -> None:
+        """Para o TURNO — a conversa continua viva (≠ /cancel, que a destrói)."""
+        conv.stop.set()
+        logger.info("conversa %s: turno INTERROMPIDO (%s)", cid,
+                    payload.get("reason") or "user_stop")
+        self._json({"ok": True, "interrupted": True})
+
+    def _effort(self, cid: str, conv: Conversation, payload: dict) -> None:
+        conv.effort = str(payload.get("effort") or "")
+        # `next_turn` é a resposta honesta com um turno em voo: recriar a query
+        # do SDK no meio dele perderia a resposta em andamento.
+        applied = "now" if not conv.stop.is_set() else "next_turn"
+        logger.info("conversa %s: esforço → %s (%s)", cid, conv.effort or "-", applied)
+        self._json({"ok": True, "effort": conv.effort, "applied": applied})
+
+    def _answer_question(self, conv: Conversation, qid: str, payload: dict) -> None:
+        """Destrava o turno que estava pendurado no ``ask()``."""
+        slot = conv.questions.get(qid)
+        if not slot:
+            self._json({"error": "question not found"}, 404)
+            return
+        upd = payload.get("updatedInput") or {}
+        slot["answer"] = upd.get("answers") or upd.get("response") or ""
+        slot["event"].set()
+        logger.info("conversa %s: pergunta %s RESPONDIDA → %r",
+                    conv.id, qid, slot["answer"])
         self._json({"ok": True})
 
     def _cancel(self, cid: str, conv: Conversation, payload: dict) -> None:
@@ -789,6 +967,10 @@ def main() -> None:
     ap.add_argument("--legacy-untyped", action="store_true",
                     help="OMITE a chave 'kind' do write-through (finge ser o "
                          "executor antigo, sem declaração de tipagem)")
+    ap.add_argument("--legacy-caps", action="store_true",
+                    help="OMITE a chave 'capabilities' das respostas (finge ser "
+                         "um executor anterior à negociação: o painel tem de "
+                         "esconder esforço, Parar e perguntas SEM erro nenhum)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -802,6 +984,7 @@ def main() -> None:
     STATE.allow_mutations = args.allow_mutations
     STATE.verify = not args.insecure
     STATE.legacy_untyped = args.legacy_untyped
+    STATE.legacy_caps = args.legacy_caps
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
