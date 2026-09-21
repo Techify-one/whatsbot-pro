@@ -244,6 +244,17 @@ def conversation_count(team_id: int) -> int:
             .where(conversations.c.team_id == team_id)).scalar() or 0)
 
 
+def conversation_counts() -> dict[int, int]:
+    """Conversation totals for every team, in one administration query."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(conversations.c.team_id, func.count())
+            .where(conversations.c.team_id.is_not(None))
+            .group_by(conversations.c.team_id)
+        ).all()
+    return {int(team_id): int(count) for team_id, count in rows}
+
+
 def private_membership_blockers(user_id: int) -> list[dict]:
     """Active private teams that would lose their last active member."""
     other_members = team_members.alias("other_team_members")

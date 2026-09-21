@@ -23,6 +23,7 @@ from server.avatars import avatar_version
 from channels import audio_transcode, media_limits, video_transcode
 from db import filters as conv_filters
 from db.filters.translate import FilterContext
+from domain.team_routing import TeamRoutingError
 from server.authz import (permission_denied, has_permission, current_user,
                           visible_inbox_ids, conversation_access_scope,
                           can_assign_team, can_assign_user_to_conversation)
@@ -298,13 +299,34 @@ def register_routes(app, deps):
             {"agent_key": a["agent_key"], "display_name": a.get("display_name") or a["agent_key"]}
             for a in agents if a.get("enabled")
         ]
-        team_list = [{
-            "id": t["id"], "name": t["name"], "access_mode": t["access_mode"],
-            "readable": (scope.read_any_team or t["id"] in scope.team_ids
-                         or t["access_mode"] != "private"),
-            "assignable": bool(can_assign_any or (can_assign_own and t["id"] in scope.team_ids)),
-        } for t in teams]
-        return _ok({"users": human_list, "ai_agents": ai_list, "teams": team_list})
+        team_list = []
+        for team in teams:
+            member_target = team["id"] in scope.team_ids
+            routable = bool(can_assign_any or (can_assign_own and member_target))
+            reason = None
+            if not routable:
+                reason = ("Você precisa pertencer a este time para encaminhar."
+                          if can_assign_own else
+                          "Você não tem permissão para encaminhar conversas.")
+            team_list.append({
+                "id": team["id"], "name": team["name"],
+                "is_active": bool(team.get("is_active")),
+                "access_mode": team["access_mode"],
+                "readable": (scope.read_any_team or member_target
+                             or team["access_mode"] != "private"),
+                "assignable": routable,
+                "routable": routable,
+                "unavailable_reason": reason,
+            })
+        return _ok({
+            "users": human_list, "ai_agents": ai_list, "teams": team_list,
+            "capabilities": {
+                "can_manage_teams": has_permission(request, "team.manage"),
+                "can_assign_own_team": bool(can_assign_own),
+                "can_assign_any_team": bool(can_assign_any),
+                "can_route_team": bool(can_assign_own or can_assign_any),
+            },
+        })
 
     @app.get("/api/mentions/unread-count")
     async def mentions_unread_count(request: Request):
@@ -628,6 +650,49 @@ def register_routes(app, deps):
             await deps.ws_manager.broadcast(
                 "conversation_access_changed", {"team_id": changed_team_id})
         return _ok({"conversation": conv})
+
+    @app.post("/api/atendimentos/{conv_id}/route-team")
+    async def route_team(conv_id: int, body: dict, request: Request):
+        """Route ownership through a team's configured distribution strategy."""
+        if (not has_permission(request, "conversation.team.assign")
+                and not has_permission(request, "conversation.team.assign_any")):
+            return _err("Permissão negada.", status=403)
+        raw_team_id = body.get("team_id")
+        if raw_team_id in (None, "") or isinstance(raw_team_id, bool):
+            return _err("Time inválido.", status=400)
+        try:
+            team_id = int(raw_team_id)
+        except (TypeError, ValueError):
+            return _err("Time inválido.", status=400)
+        target = await asyncio.to_thread(team_repo.get, team_id)
+        if not target or not target.get("is_active"):
+            return _err("Time não encontrado.", status=404)
+        _conv, err = await _guard_conv(request, conv_id)
+        if err:
+            return err
+        if not await asyncio.to_thread(
+                can_assign_team, request, _conv.get("team_id"), team_id):
+            return _err("Você não pode encaminhar esta conversa para esse time.", status=403)
+        _actor_id, actor_name = _actor(request)
+        try:
+            routed = await conv_svc.route_team(
+                deps, _conv, team_id, actor_name=actor_name)
+        except TeamRoutingError as exc:
+            status = 404 if exc.code in {"team_not_found", "conversation_not_found"} else 409
+            return _err(str(exc), status=status)
+        if not routed:
+            return _err("Conversa não encontrada.", status=404)
+        _updated, routing = routed
+        user = current_user(request)
+        conversation = await asyncio.to_thread(
+            conversation_repo.get_with_channel, conv_id,
+            ((user or {}).get("id")))
+        if not conversation:
+            return _err("Conversa não encontrada.", status=404)
+        for changed_team_id in {_conv.get("team_id"), team_id} - {None}:
+            await deps.ws_manager.broadcast(
+                "conversation_access_changed", {"team_id": changed_team_id})
+        return _ok({"conversation": conversation, "routing": routing.to_dict()})
 
     @app.post("/api/atendimentos/{conv_id}/assign-me")
     async def assign_me(conv_id: int, request: Request):

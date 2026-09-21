@@ -113,6 +113,54 @@ def test_team_create_requires_name(client):
     assert r.status_code == 400, r.text
 
 
+def test_team_crud_exposes_routing_fields_counts_and_editor_catalogs(client):
+    from db.repositories import agent_repo, conversation_repo, team_repo
+
+    admin = _mk_user("teams_crud_admin@test.com", admin=True)
+    member = _mk_user("teams_routing_editor_member@test.com")
+    _auth(client, admin)
+    response = client.post("/api/teams", json={
+        "name": "Distribuição API",
+        "access_mode": "list_hidden",
+        "visible_to_assignee": True,
+        "member_user_ids": [member["id"]],
+        "routing_mode": "fixed_user",
+        "default_user_id": member["id"],
+        "ai_assignable": True,
+    })
+    assert response.status_code == 200, response.text
+    team = response.json()["data"]["team"]
+    _CREATED_TEAM_IDS.append(team["id"])
+    assert team["routing_mode"] == "fixed_user"
+    assert team["default_user_id"] == member["id"]
+    assert team["default_agent_key"] is None
+    assert team["ai_assignable"] is True
+    assert team["visible_to_assignee"] == 1
+
+    conv_id, _contact_id = _open_conv("5511970000090")
+    conversation_repo.set_team(conv_id, team["id"])
+    response = client.get("/api/teams")
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    listed = next(item for item in data["teams"] if item["id"] == team["id"])
+    assert listed["conversation_count"] >= 1
+    assert any(user["id"] == member["id"] for user in data["users"])
+    assert all(agent.get("agent_key") for agent in data["ai_agents"])
+    assert all(agent_repo.get(agent["agent_key"])["enabled"] for agent in data["ai_agents"])
+
+    default_agent = agent_repo.get_default()
+    response = client.put(f"/api/teams/{team['id']}", json={
+        "routing_mode": "fixed_ai",
+        "default_user_id": None,
+        "default_agent_key": default_agent["agent_key"],
+    })
+    assert response.status_code == 200, response.text
+    updated = response.json()["data"]["team"]
+    assert updated["routing_mode"] == "fixed_ai"
+    assert updated["default_user_id"] is None
+    assert updated["default_agent_key"] == default_agent["agent_key"]
+
+
 def test_team_crud_requires_team_manage(client):
     """``users.manage`` não substitui a permissão dedicada de times."""
     legacy_manager = _mk_user(
@@ -202,6 +250,14 @@ def test_assignable_agents_includes_teams(client):
     assert row["name"] == "Vendas"
     assert row["readable"] is True
     assert row["assignable"] is True
+    assert row["routable"] is True
+    assert row["unavailable_reason"] is None
+    assert data["capabilities"] == {
+        "can_manage_teams": True,
+        "can_assign_own_team": True,
+        "can_assign_any_team": True,
+        "can_route_team": True,
+    }
 
 
 # ── assign-team: grava, reflete na resposta, gated por conversation.assign ──
@@ -321,6 +377,96 @@ def test_assign_team_emits_team_assigned_and_unassigned(client, captured_events)
     assert len(unassigned) == 1, f"expected 1 team_unassigned, got {names}"
     assert unassigned[0]["previous_team_id"] == team["id"]
     assert "conversation.team_assigned" not in names
+
+
+def test_route_team_manual_returns_result_emits_once_and_aborts_cycle(
+        client, captured_events):
+    from db.repositories import agent_repo, conversation_repo, message_repo, team_repo
+
+    admin = _mk_user("teams_crud_admin@test.com", admin=True)
+    _auth(client, admin)
+    team = team_repo.create("Rota Manual API", routing_mode="manual")
+    _CREATED_TEAM_IDS.append(team["id"])
+    conv_id, _contact_id = _open_conv("5511970000091")
+    agent = agent_repo.get_default()
+    conversation_repo.assign_agent(
+        conv_id, assignee_user_id=None,
+        active_agent_key=agent["agent_key"], ai_active=1)
+    conv_before = conversation_repo.get_with_channel(conv_id)
+    key = (conv_before["channel_id"], conv_before["contact_phone"])
+    before_epoch = client.app.state.deps.state.ai_abort_epochs.get(key, 0)
+    captured_events.clear()
+
+    response = client.post(
+        f"/api/atendimentos/{conv_id}/route-team", json={"team_id": team["id"]})
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["conversation"]["team_id"] == team["id"]
+    assert data["conversation"]["channel_id"] == conv_before["channel_id"]
+    assert data["routing"]["strategy"] == "manual"
+    assert data["routing"]["after"] == {
+        "team_id": team["id"], "assignee_user_id": None,
+        "active_agent_key": None, "ai_active": False,
+    }
+    assert client.app.state.deps.state.ai_abort_epochs.get(key, 0) == before_epoch + 1
+
+    _drain()
+    names = [name for name, _payload in captured_events]
+    assert names.count("conversation.team_assigned") == 1
+    assert names.count("conversation.unassigned") == 1
+    assert names.count("conversation.ai_toggled") == 1
+    notices = [m for m in message_repo.get_by_conversation(conv_id)
+               if m.get("role") == "conversation_event"
+               and "encaminhou a conversa para Rota Manual API" in m.get("content", "")]
+    assert len(notices) == 1
+
+
+def test_route_team_round_robin_returns_distributed_user(client):
+    from db.repositories import inbox_member_repo, team_repo
+
+    admin = _mk_user("teams_crud_admin@test.com", admin=True)
+    attendant = _mk_user("teams_route_rr@test.com")
+    inbox_id = _mk_inbox("plan166_route_rr")
+    inbox_member_repo.set_members(inbox_id, [admin["id"], attendant["id"]])
+    team = team_repo.create(
+        "Rota RR API", routing_mode="round_robin",
+        member_user_ids=[attendant["id"]])
+    _CREATED_TEAM_IDS.append(team["id"])
+    conv_id, _contact_id = _open_conv_in_inbox("5511970000092", inbox_id)
+    _auth(client, admin)
+
+    response = client.post(
+        f"/api/atendimentos/{conv_id}/route-team", json={"team_id": team["id"]})
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["routing"]["strategy"] == "round_robin"
+    assert data["routing"]["used_fallback"] is False
+    assert data["conversation"]["assignee_user_id"] == attendant["id"]
+    assert data["conversation"]["active_agent_key"] is None
+
+
+def test_route_team_enforces_membership_and_rejects_inactive(client):
+    from db.repositories import inbox_member_repo, team_repo
+
+    inbox_id = _mk_inbox("plan166_route_auth")
+    outsider = _mk_user(
+        "teams_route_out@test.com",
+        custom_perms=["conversation.read", "conversation.team.assign"])
+    inbox_member_repo.set_members(inbox_id, [outsider["id"]])
+    team = team_repo.create("Rota restrita")
+    _CREATED_TEAM_IDS.append(team["id"])
+    conv_id, _contact_id = _open_conv_in_inbox("5511970000093", inbox_id)
+    _auth(client, outsider)
+    assert client.post(
+        f"/api/atendimentos/{conv_id}/route-team",
+        json={"team_id": team["id"]}).status_code == 403
+
+    admin = _mk_user("teams_crud_admin@test.com", admin=True)
+    _auth(client, admin)
+    team_repo.deactivate(team["id"])
+    assert client.post(
+        f"/api/atendimentos/{conv_id}/route-team",
+        json={"team_id": team["id"]}).status_code == 404
 
 
 # ── Filtro server-side (registry + translate) via /api/atendimentos/filter ──

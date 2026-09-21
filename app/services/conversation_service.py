@@ -48,7 +48,9 @@ import logging
 import time
 
 from db.repositories import (conversation_repo, contact_repo, user_repo,
-                             agent_repo, tag_repo, config_repo)
+                             agent_repo, tag_repo, config_repo, team_repo)
+from app.services import team_routing_service
+from domain.team_routing import TeamRoutingResult
 from server import sound_catalog, system_notices
 from plugins.events import apply_filter, emit_with_filter
 from domain.events import (emit_domain, ConversationReopened,
@@ -627,6 +629,69 @@ async def assign_team(deps, conv: dict, team_id: int | None, *,
         await _broadcast(deps, "conversation_assigned", "conversation.team_unassigned", updated,
                          previous_team_id=previous_team_id)
     return updated
+
+
+async def route_team(deps, conv: dict, team_id: int, *,
+                     actor_name: str | None = None) -> tuple[dict, TeamRoutingResult] | None:
+    """Run canonical team routing, then publish its effects post-commit.
+
+    ``team_routing_service`` owns the single transaction. Nothing below runs
+    until it returns successfully, so a rollback cannot leak a notice or event.
+    """
+    result = await team_routing_service.route_to_team(conv["id"], team_id)
+    updated = await asyncio.to_thread(conversation_repo.get, conv["id"])
+    if not updated:
+        return None
+
+    team = await asyncio.to_thread(team_repo.get, team_id)
+    await _broadcast(
+        deps, "conversation_assigned", "conversation.team_assigned", updated,
+        previous_team_id=result.before.team_id,
+        routing_strategy=result.strategy,
+        routing_fallback_reason=result.fallback_reason,
+    )
+
+    ownership_changed = (
+        result.before.assignee_user_id != result.after.assignee_user_id
+        or result.before.active_agent_key != result.after.active_agent_key
+    )
+    if ownership_changed:
+        ownership_event = (
+            "conversation.assigned"
+            if (result.after.assignee_user_id is not None
+                or result.after.active_agent_key is not None)
+            else "conversation.unassigned"
+        )
+        await _broadcast(
+            deps, "conversation_assigned", ownership_event, updated,
+            routing_strategy=result.strategy,
+            routing_fallback_reason=result.fallback_reason,
+        )
+    if result.before.ai_active != result.after.ai_active:
+        await _broadcast(
+            deps, "conversation_ai_toggled", "conversation.ai_toggled", updated,
+            routing_strategy=result.strategy,
+            routing_fallback_reason=result.fallback_reason,
+        )
+
+    # An operator routing to a human or the safe queue invalidates any reply
+    # already in flight. Fixed-AI is an AI-to-AI transition and must not abort.
+    if result.after.active_agent_key is None:
+        _abort_ai_cycle(deps, updated)
+
+    target_name = None
+    if result.after.assignee_user_id is not None:
+        user = await asyncio.to_thread(user_repo.get, result.after.assignee_user_id)
+        target_name = (user or {}).get("name") or (user or {}).get("email")
+    elif result.after.active_agent_key:
+        agent = await asyncio.to_thread(agent_repo.get, result.after.active_agent_key)
+        target_name = ((agent or {}).get("display_name")
+                       or result.after.active_agent_key)
+    await _emit_notice(
+        updated, "team_routed", actor_name=actor_name,
+        team=(team or {}).get("name") or f"time #{team_id}", target=target_name,
+    )
+    return updated, result
 
 
 async def set_ai(deps, conv: dict, active: int, *, actor_id=None,

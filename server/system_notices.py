@@ -101,6 +101,16 @@ def _f_unassigned(actor=None, **_) -> str:
     )
 
 
+def _f_team_routed(actor=None, team=None, target=None, **_) -> str:
+    destination = _q(team) or "o time"
+    suffix = f" Distribuída para {_q(target)}." if target else ""
+    return _with_actor(
+        actor,
+        f"👥 {actor} encaminhou a conversa para {destination}.{suffix}",
+        f"👥 Conversa encaminhada para {destination}.{suffix}",
+    )
+
+
 def _f_tag_added(actor=None, tag=None, **_) -> str:
     return _with_actor(
         actor,
@@ -228,7 +238,7 @@ def _f_attribute_set(actor=None, attribute=None, value=None, count=None, **_) ->
 #
 # ``register_notice_group`` / ``register_notice`` são o ÚNICO ponto de mutação de
 # ``EVENT_GROUPS`` / ``EVENT_GROUP_OF`` / ``FORMATTERS``. O core dogfooda os dois:
-# ``_seed_core_notices`` abaixo registra os 5 grupos e os 19 tipos por aqui (em
+# ``_seed_core_notices`` abaixo registra os grupos e tipos por aqui (em
 # vez de literais de dict), e um plugin pode adicionar avisos próprios via
 # ``plugins.context.register_notice``/``register_notice_group`` SEM dar patch nos
 # dicts do core. O texto produzido permanece byte-idêntico (as goldens de
@@ -282,6 +292,7 @@ def _seed_core_notices() -> None:
     register_notice("assigned", "assignment", _f_assigned)
     register_notice("assigned_me", "assignment", _f_assigned_me)
     register_notice("unassigned", "assignment", _f_unassigned)
+    register_notice("team_routed", "assignment", _f_team_routed)
     register_notice("tag_added", "tags", _f_tag_added)
     register_notice("tag_removed", "tags", _f_tag_removed)
     register_notice("conv_label_added", "conv_labels", _f_conv_label_added)
