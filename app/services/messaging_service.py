@@ -362,12 +362,12 @@ async def broadcast_and_emit(deps, ws_event: str, bus_event: str, payload: dict,
 
 
 def _turn_handed_off(tool_calls) -> bool:
-    """Este turno terminou transferindo o atendimento para um humano?
+    """Este turno terminou entregando o atendimento fora da IA atual?
 
-    Plano 122 — o discriminador do perdão de ``_cycle_may_continue``: só um turno
-    que de fato chamou ``transfer_to_human`` pode falar depois de o gate ter sido
-    fechado, porque foi ele próprio quem o fechou
-    ([transfer_to_human.py:96-98] grava ``ai_active=0``).
+    Plano 122/166 — o discriminador do perdão de ``_cycle_may_continue``:
+    ``transfer_to_human`` e um ``transfer_to_team`` que terminou em humano/fila
+    podem falar depois de fecharem o próprio gate. Fixed-AI não precisa do perdão
+    e continua o roteamento dentro do turno.
 
     ``not skipped`` é obrigatório e não é detalhe: um ``filter.tool.args`` que
     aborte a tool ([agno_engine.py:239/287]) deixa a entrada em ``tool_calls`` com
@@ -375,8 +375,8 @@ def _turn_handed_off(tool_calls) -> bool:
     não há nada a perdoar.  Mesma forma dos predicados irmãos
     ([:648] e agent_run_service.py:105/402).
     """
-    return any(tc.get("tool") == "transfer_to_human" and not tc.get("skipped")
-               for tc in (tool_calls or []))
+    from agent.handoff import turn_handed_off
+    return turn_handed_off(tool_calls)
 
 
 # ── service context ───────────────────────────────────────────────────────────

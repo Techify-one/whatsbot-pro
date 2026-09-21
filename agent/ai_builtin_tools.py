@@ -1,7 +1,7 @@
 """Built-in (core) tools as editable code-in-DB rows (``kind='builtin'``).
 
-The four core tools (``save_contact_info``, ``transfer_to_human``,
-``set_custom_attribute``, ``transferir_agente``) are ALSO seeded into the
+The core tools (``save_contact_info``, ``transfer_to_human``,
+``set_custom_attribute``, ``transferir_agente``, ``transfer_to_team``) are ALSO seeded into the
 ``ai_tools`` table so the unified Tools UI can show them with version / edit /
 history exactly like user code-in-DB tools.
 
@@ -39,6 +39,7 @@ from agent.tools import save_contact_info as _m_save
 from agent.tools import set_custom_attribute as _m_attr
 from agent.tools import transfer_to_human as _m_transfer
 from agent.tools import transferir_agente as _m_agent
+from agent.tools import transfer_to_team as _m_team
 from db.repositories import tool_repo
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ BUILTIN_MODULES: dict[str, types.ModuleType] = {
     "transfer_to_human": _m_transfer,
     "set_custom_attribute": _m_attr,
     "transferir_agente": _m_agent,
+    "transfer_to_team": _m_team,
 }
 
 # Tools que NASCEM DESLIGADAS numa instalação nova (plano 30 D3/D7). O conjunto
@@ -57,7 +59,7 @@ BUILTIN_MODULES: dict[str, types.ModuleType] = {
 # ``default_override_enabled`` → ``tool_overrides.enabled``) para os gates nunca
 # divergirem no nascimento. Bancos existentes não são tocados — os seeds só
 # criam rows ausentes.
-OFF_BY_DEFAULT_TOOLS: set[str] = {"transferir_agente"}
+OFF_BY_DEFAULT_TOOLS: set[str] = {"transferir_agente", "transfer_to_team"}
 
 # Builtins com delete REAL liberado pela UI (plano 30 WS3/D2 — escopo inicial
 # deliberadamente mínimo; a infra de tombstone generaliza depois se precisar).

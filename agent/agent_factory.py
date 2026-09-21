@@ -247,8 +247,8 @@ def _resolve_active_agent(contact) -> dict | None:
     return dynamic_registry.get_default_agent()
 
 
-def _transfer_tool_available(handler, agent: dict) -> bool:
-    """``transferir_agente`` está acionável por ESTE agente neste turno?
+def _tool_available(handler, agent: dict, tool_name: str) -> bool:
+    """Whether one registered tool is actionable for this agent this turn.
 
     Falso quando o ``tool_names`` do agente exclui a tool, ou quando ela não
     está ativa no registry (nasce OFF no plano 30 F3, pode ter sido desativada
@@ -256,14 +256,19 @@ def _transfer_tool_available(handler, agent: dict) -> bool:
     introspecção assumem disponível (comportamento anterior).
     """
     tool_names = agent.get("tool_names")
-    if tool_names is not None and "transferir_agente" not in tool_names:
+    if tool_names is not None and tool_name not in tool_names:
         return False
     if handler is None:
         return True
     try:
-        return bool(handler.is_tool_active("transferir_agente"))
+        return bool(handler.is_tool_active(tool_name))
     except Exception:  # noqa: BLE001
         return True
+
+
+def _transfer_tool_available(handler, agent: dict) -> bool:
+    """Backward-compatible helper for the AI-to-AI transfer tool."""
+    return _tool_available(handler, agent, "transferir_agente")
 
 
 def _router_destinations_section(router: dict) -> str:
@@ -292,6 +297,23 @@ def _router_destinations_section(router: dict) -> str:
         "(entre parênteses) e um motivo curto:\n"
         + "\n".join(lines)
         + "\n--- Fim dos agentes disponíveis ---"
+    )
+
+
+def _team_destinations_section(agent: dict) -> str:
+    """Prompt section generated from the executor's exact team allowlist."""
+    from agent.tools.transfer_to_team import team_destinations
+
+    destinations = team_destinations(agent)
+    if not destinations:
+        return ""
+    lines = [f"- {team['id']} — {team['name']}" for team in destinations]
+    return (
+        "\n\n--- Times disponíveis para encaminhamento ---\n"
+        "Quando a conversa precisar de uma destas equipes, chame "
+        "transfer_to_team com o team_id exato e um motivo curto:\n"
+        + "\n".join(lines)
+        + "\n--- Fim dos times disponíveis ---"
     )
 
 
@@ -340,6 +362,13 @@ def build_for_contact(handler, contact) -> AgentSpec:
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "AI engine: seção de destinos do roteador falhou (%s)", e)
+
+        if _tool_available(handler, agent, "transfer_to_team"):
+            try:
+                rendered += _team_destinations_section(agent)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "AI engine: seção de destinos de times falhou (%s)", e)
 
         # Coerção tolerante do container (plano 34 F2): aceita dict pronto OU
         # string JSON (duplo-codificada) via coerce_json, caindo em {} — assim um

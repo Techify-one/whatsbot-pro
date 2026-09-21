@@ -38,6 +38,11 @@ from agno.tools.function import Function
 from config.settings import LLM_API_BASE_URL
 from ai_engine.hooks import check_hooks as _hooks_check
 from agent.execution import track_step, mark_execution_has_ai
+from agent.handoff import (
+    TEAM_HANDOFF_TERMINAL_FIELD,
+    clear_team_handoff_outcome,
+    consume_team_handoff_outcome,
+)
 from plugins.events import (
     apply_filter,
     apply_filter_sync,
@@ -251,7 +256,9 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
         await emit_with_filter("tool.before", {
             "phone": sender, "tool_name": name, "args": args, "ts": time.time(),
         })
+        clear_team_handoff_outcome()
         feedback = handler._dispatch_tool(contact, name, args)
+        team_handoff_terminal = consume_team_handoff_outcome()
         await emit_with_filter("tool.after", {
             "phone": sender, "tool_name": name, "args": args,
             "result": feedback, "error": None,
@@ -264,7 +271,10 @@ def _make_async_entrypoint(handler, contact, sender, tool_name, executed, hooks_
             )
             feedback = "" if fr is None else fr
 
-        executed.append({"tool": name, "args": args, "result": feedback})
+        executed_call = {"tool": name, "args": args, "result": feedback}
+        if team_handoff_terminal is not None:
+            executed_call[TEAM_HANDOFF_TERMINAL_FIELD] = team_handoff_terminal
+        executed.append(executed_call)
         track_step("tool_executed", {
             "tool": name, "args": args, "result": _truncate_result(feedback),
         })
@@ -299,7 +309,9 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
         emit_with_filter_sync("tool.before", {
             "phone": sender, "tool_name": name, "args": args, "ts": time.time(),
         })
+        clear_team_handoff_outcome()
         feedback = handler._dispatch_tool(contact, name, args)
+        team_handoff_terminal = consume_team_handoff_outcome()
         emit_with_filter_sync("tool.after", {
             "phone": sender, "tool_name": name, "args": args,
             "result": feedback, "error": None,
@@ -312,7 +324,10 @@ def _make_sync_entrypoint(handler, contact, sender, tool_name, executed, hooks_c
             )
             feedback = "" if fr is None else fr
 
-        executed.append({"tool": name, "args": args, "result": feedback})
+        executed_call = {"tool": name, "args": args, "result": feedback}
+        if team_handoff_terminal is not None:
+            executed_call[TEAM_HANDOFF_TERMINAL_FIELD] = team_handoff_terminal
+        executed.append(executed_call)
         track_step("tool_executed", {
             "tool": name, "args": args, "result": _truncate_result(feedback),
         })

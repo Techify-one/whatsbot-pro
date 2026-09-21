@@ -755,6 +755,18 @@ def test_tool_pulada_por_filtro_nao_ganha_perdao(cycle):
     assert _turn_handed_off([{"tool": "transfer_to_human"}]) is True
     assert _turn_handed_off([{"tool": "transfer_to_human", "skipped": True}]) is False
     assert _turn_handed_off([{"tool": "transferir_agente"}]) is False
+    assert _turn_handed_off([{
+        "tool": "transfer_to_team",
+        "team_handoff_terminal": True,
+    }]) is True
+    assert _turn_handed_off([{
+        "tool": "transfer_to_team",
+        "team_handoff_terminal": False,
+    }]) is False
+    assert _turn_handed_off([{
+        "tool": "transfer_to_team", "skipped": True,
+        "team_handoff_terminal": True,
+    }]) is False
     assert _turn_handed_off(None) is False
 
     _transfer_closes_the_gate(cycle.conv["id"])
@@ -762,6 +774,40 @@ def test_tool_pulada_por_filtro_nao_ganha_perdao(cycle):
         CHANNEL, cycle.phone, "não deveria sair",
         allow_self_handoff=_turn_handed_off(
             [{"tool": "transfer_to_human", "skipped": True}])))
+    assert sent is False
+    assert cycle.outbound.sent == []
+
+
+def test_team_handoff_terminal_entrega_despedida(cycle):
+    """Humano/fila via time recebe o mesmo perdão estreito do handoff humano."""
+    from app.services.messaging_service import _turn_handed_off
+
+    _transfer_closes_the_gate(cycle.conv["id"])
+    calls = [{
+        "tool": "transfer_to_team",
+        "team_handoff_terminal": True,
+    }]
+    sent = asyncio.run(cycle.svc._send_with_typing_guard(
+        CHANNEL, cycle.phone, "encaminhei para a equipe",
+        allow_self_handoff=_turn_handed_off(calls)))
+    assert sent is True
+    assert cycle.outbound.sent == ["encaminhei para a equipe"]
+
+
+def test_team_handoff_perdao_nao_sobrevive_takeover_concorrente(cycle):
+    """O epoch do operador continua vencendo antes do perdão do time."""
+    from app.services.messaging_service import _turn_handed_off
+
+    epoch = cycle.svc._abort_epoch(CHANNEL, cycle.phone)
+    _transfer_closes_the_gate(cycle.conv["id"])
+    abort_ai_cycle(cycle.deps, CHANNEL, cycle.phone)
+    calls = [{
+        "tool": "transfer_to_team",
+        "team_handoff_terminal": True,
+    }]
+    sent = asyncio.run(cycle.svc._send_with_typing_guard(
+        CHANNEL, cycle.phone, "resposta obsoleta", abort_epoch=epoch,
+        allow_self_handoff=_turn_handed_off(calls)))
     assert sent is False
     assert cycle.outbound.sent == []
 

@@ -15,6 +15,10 @@ from sqlalchemy import delete as sa_delete
 
 from agent import ai_builtin_tools
 from agent.tools.transferir_agente import TRANSFERIR_AGENTE_TOOL, execute
+from agent.tools.transfer_to_team import (
+    TRANSFER_TO_TEAM_TOOL,
+    execute as execute_team,
+)
 from db.engine import get_engine
 from db.repositories import tool_override_repo, tool_repo
 from db.tables import tool_overrides
@@ -62,6 +66,26 @@ def test_transferir_agente_nasce_off_nos_dois_seeds(_engine_ready):
         tool_override_repo.ensure(name, None, default_enabled=False)
         assert tool_override_repo.get(name)["enabled"], (
             "ensure em row existente não pode regredir o enabled do operador")
+    finally:
+        _restore_enabled(name)
+
+
+def test_transfer_to_team_nasce_off_nos_dois_seeds_e_nao_e_deletavel(_engine_ready):
+    name = "transfer_to_team"
+    try:
+        _wipe_tool_state(name)
+        ai_builtin_tools.seed_builtin_tools()
+        row = tool_repo.get(name)
+        assert row is not None and row.get("kind") == "builtin"
+        assert not row.get("enabled"), "ai_tools: transfer_to_team deve nascer OFF"
+        assert ai_builtin_tools.default_override_enabled(name) is False
+        assert ai_builtin_tools.is_deletable(row) is False
+
+        from agent.tool_registry import ToolRegistry
+        registry = ToolRegistry()
+        registry.register_tool(TRANSFER_TO_TEAM_TOOL, execute_team)
+        override = tool_override_repo.get(name)
+        assert override is not None and not override["enabled"]
     finally:
         _restore_enabled(name)
 

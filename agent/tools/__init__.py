@@ -30,6 +30,10 @@ from agent.tools.transferir_agente import (
     TRANSFERIR_AGENTE_TOOL,
     execute as _exec_transferir_agente,
 )
+from agent.tools.transfer_to_team import (
+    TRANSFER_TO_TEAM_TOOL,
+    execute as _exec_transfer_to_team,
+)
 
 # (schema, executor) tuples — registered by AgentHandler at construction time.
 CORE_TOOLS: list[tuple[dict, callable]] = [
@@ -37,6 +41,7 @@ CORE_TOOLS: list[tuple[dict, callable]] = [
     (TRANSFER_TO_HUMAN_TOOL, _exec_transfer_to_human),
     (SET_CUSTOM_ATTRIBUTE_TOOL, _exec_set_custom_attribute),
     (TRANSFERIR_AGENTE_TOOL, _exec_transferir_agente),
+    (TRANSFER_TO_TEAM_TOOL, _exec_transfer_to_team),
 ]
 
 # Backward-compatible flat list of schemas (some logging/track_step code reads it).
