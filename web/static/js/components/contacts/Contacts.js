@@ -140,7 +140,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   });
   const {
     globalTags, setGlobalTags,
-    currentUserId, currentUser, users, agentsUsers, agentsAi, teams,
+    currentUserId, currentUser, users, agentsUsers, agentsAi, teams, teamCapabilities,
     ctxMenu, setCtxMenu, ctxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
@@ -619,6 +619,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           agentsUsers=${agentsUsers}
           agentsAi=${agentsAi}
           teams=${teams}
+          teamCapabilities=${teamCapabilities}
           currentUserId=${currentUserId}
           currentUser=${currentUser}
           onAssignConversation=${handleAssignConversation}

@@ -3,6 +3,10 @@ import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { updateConversationLabels } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
+import {
+  assignableTeamOptions,
+  currentTeamReference,
+} from '../../services/teamCapabilities.js';
 import { TagPicker } from './TagPicker.js';
 import { AssigneeList } from './AssigneeList.js';
 import { TeamPickerList } from './TeamPickerList.js';
@@ -19,7 +23,7 @@ const FLYOUT_WIDTH = 264;
 // a linha da sidebar É um atendimento, e rotular a partir dela precisa afetar só
 // aquele atendimento. As tags de contato continuam sendo editadas exclusivamente
 // no painel "Dados do contato".
-export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, convLabels, labelRegistry, isArchived, isUnread, isPinned, conv, convLoading, convError, users, agentsUsers, agentsAi, teams = [], currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onAssignTeam, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onLabelsUpdate, onArchive, onPin, onDeleteConversation, onCreateLabel, onClose }) {
+export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, convLabels, labelRegistry, isArchived, isUnread, isPinned, conv, convLoading, convError, users, agentsUsers, agentsAi, teams = [], teamCapabilities = null, currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onAssignTeam, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onLabelsUpdate, onArchive, onPin, onDeleteConversation, onCreateLabel, onClose }) {
   // P48 (hide, don't disable): each affordance is gated by the permission that
   // its backend call actually enforces. `can` is permissive with no user
   // identity (open/legacy install) — see hasPermission.
@@ -82,10 +86,18 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
   // Conversation-level menu state (assign TEAM — plano 153). INDEPENDENTE do
   // assignee/agente acima (D1) — seção própria, contrato próprio (onPick(teamId)).
   const currentTeamId = conv ? conv.team_id : null;
-  const showTeamSection = (teams.length > 0 || currentTeamId != null) && can('conversation.assign');
-  const teamLabel = currentTeamId != null
-    ? ((teams.find(t => t.id === currentTeamId) || {}).name || `#${currentTeamId}`)
-    : null;
+  const currentTeam = currentTeamReference(teams, {
+    id: currentTeamId,
+    name: conv && conv.team_name,
+  });
+  const teamDestinations = assignableTeamOptions(teams);
+  // O catálogo já traz a decisão do backend. Não reutilizar conversation.assign
+  // (responsável humano/IA) nem inferir a partir de membresia local.
+  const canAssignTeam = teamCapabilities && teamCapabilities.provided
+    ? teamCapabilities.can_assign_own_team || teamCapabilities.can_assign_any_team
+    : teamDestinations.length > 0;
+  const showTeamSection = currentTeamId != null || (canAssignTeam && teamDestinations.length > 0);
+  const teamLabel = currentTeam ? currentTeam.name : null;
   const pickTeam = (teamId) => { if (onAssignTeam && conv && conv.id != null) onAssignTeam(conv.id, teamId); };
 
   useEffect(() => {
@@ -339,7 +351,7 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
               <path d="M16.5 13c-1.2 0-3.07.34-4.5 1-1.43-.67-3.3-1-4.5-1C5.33 13 1 14.08 1 16.25V19h22v-2.75c0-2.17-4.33-3.25-6.5-3.25zm-4 5.5h-10v-1.25c0-.54 2.56-1.75 4.5-1.75s4.5 1.21 4.5 1.75v1.25zm7.5 0h-6v-1.25c0-.68-.35-1.24-.87-1.7.71-.24 1.47-.4 2.37-.4 1.94 0 4.5 1.21 4.5 1.75v1.6zM7.5 12c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zm0-4.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5S6 9.83 6 9s.67-1.5 1.5-1.5zm9 4.5c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zm0-4.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5S15 9.83 15 9s.67-1.5 1.5-1.5z"/>
             </svg>
-            <span class="shrink-0">Atribuir time</span>
+            <span class="shrink-0">${canAssignTeam ? 'Atribuir time' : 'Time'}</span>
             ${teamLabel ? html`<span class="text-[11px] text-wa-secondary truncate" title=${teamLabel}>${teamLabel}</span>` : null}
             <${SubArrow} />
           </button>
@@ -354,6 +366,7 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
                   <${TeamPickerList}
                     teams=${teams}
                     currentTeamId=${currentTeamId}
+                    currentTeamName=${conv && conv.team_name}
                     onPick=${(teamId) => { pickTeam(teamId); }}
                     searchPlaceholder="Buscar times"
                   />

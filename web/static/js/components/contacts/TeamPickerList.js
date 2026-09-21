@@ -10,6 +10,11 @@
 import { h } from 'preact';
 import { useState } from 'preact/hooks';
 import htm from 'htm';
+import {
+  assignableTeamOptions,
+  currentTeamReference,
+  teamUnavailableReason,
+} from '../../services/teamCapabilities.js';
 
 const html = htm.bind(h);
 
@@ -20,6 +25,7 @@ function TeamIcon() {
 export function TeamPickerList({
   teams = [],
   currentTeamId = null,
+  currentTeamName = '',
   onPick,
   busy = false,
   autoFocus = true,
@@ -28,20 +34,46 @@ export function TeamPickerList({
   const [search, setSearch] = useState('');
 
   const q = search.trim().toLowerCase();
-  // O catálogo também traz times apenas legíveis para preservar o nome do time
-  // atual. Eles não podem virar destino de uma atribuição sem a capability.
-  const filtered = teams.filter(t =>
-    (t.assignable !== false || t.id === currentTeamId)
-    && (!q || (t.name || '').toLowerCase().includes(q)));
-  const currentTeam = teams.find(t => t.id === currentTeamId);
-  const canClear = currentTeamId != null && (!currentTeam || currentTeam.assignable !== false);
+  const currentTeam = currentTeamReference(teams, {
+    id: currentTeamId,
+    name: currentTeamName,
+  });
+  const destinations = assignableTeamOptions(teams);
+  const options = currentTeam && !destinations.some(t => String(t.id) === String(currentTeam.id))
+    ? [...destinations, currentTeam]
+    : destinations;
+  const filtered = options.filter(t => !q || (t.name || '').toLowerCase().includes(q));
+  const canClear = !!(currentTeam && currentTeam.assignable === true);
 
   const rowCls = (active) =>
     `w-full text-left px-3 py-1.5 text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-2 ${active ? 'text-wa-teal font-medium' : 'text-wa-text'}`;
 
   const pick = (teamId) => {
-    const target = teamId == null ? currentTeam : teams.find(t => t.id === teamId);
-    if (!busy && (!target || target.assignable !== false) && onPick) onPick(teamId);
+    const target = teamId == null
+      ? currentTeam
+      : teams.find(t => String(t.id) === String(teamId));
+    if (!busy && target && target.assignable === true && onPick) onPick(teamId);
+  };
+
+  const renderOption = (team) => {
+    const reason = teamUnavailableReason(team, 'assignable');
+    const reasonId = reason ? `team-option-${team.id}-reason` : null;
+    return html`
+      <button key=${'t' + team.id} onClick=${() => pick(team.id)}
+        disabled=${busy || team.assignable !== true}
+        aria-describedby=${reasonId}
+        class="${rowCls(String(currentTeamId) === String(team.id))} disabled:opacity-60 disabled:cursor-not-allowed">
+        <span class="text-wa-secondary"><${TeamIcon} /></span>
+        <span class="min-w-0">
+          <span class="block truncate">${team.name}</span>
+          ${reason ? html`
+            <span id=${reasonId} class="block text-[11px] leading-tight text-wa-secondary">
+              ${reason}
+            </span>
+          ` : null}
+        </span>
+      </button>
+    `;
   };
 
   return html`
@@ -61,16 +93,10 @@ export function TeamPickerList({
           <span class="w-[15px] shrink-0"></span> Nenhum time
         </button>
       ` : null}
-      ${filtered.length > 0 ? filtered.map(t => html`
-        <button key=${'t' + t.id} onClick=${() => pick(t.id)}
-          disabled=${busy || t.assignable === false}
-          title=${t.assignable === false ? 'Você não tem permissão para mover esta conversa deste time.' : ''}
-          class="${rowCls(currentTeamId === t.id)} disabled:opacity-50 disabled:cursor-not-allowed">
-          <span class="text-wa-secondary"><${TeamIcon} /></span>
-          <span class="truncate">${t.name}</span>
-        </button>
-      `) : html`
-        <div class="px-3 py-2 text-[13px] text-wa-secondary">Nenhum time encontrado</div>
+      ${filtered.length > 0 ? filtered.map(renderOption) : html`
+        <div class="px-3 py-2 text-[13px] text-wa-secondary">
+          ${q ? 'Nenhum time encontrado' : 'Nenhum time disponível para atribuição'}
+        </div>
       `}
     </div>
   `;

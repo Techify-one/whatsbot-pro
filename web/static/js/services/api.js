@@ -14,6 +14,10 @@ import {
   authHeaders as _authHeadersBase,
   handleUnauthorized,
 } from './httpClient.js';
+import {
+  normalizeAssignableCatalogResponse,
+  normalizeTeamAdminResponse,
+} from './teamCapabilities.js';
 
 const BASE = '';
 
@@ -613,10 +617,13 @@ export async function getContactConversation(phone, { includeClosed = false } = 
   return request('GET', `/api/contacts/${encodeURIComponent(phone)}/atendimento${qs}`);
 }
 
-// Agents that can take a conversation (plano 10): {users:[...], ai_agents:[...]}.
-// Gated by conversation.read so attendants (not only admins) can transfer.
+// Catálogo operacional (plano 166/U1). O adapter mantém o shape legado e
+// acrescenta capabilities explícitas por time; falhas conservam error/status.
+// Routing/bulk só entram aqui após o contrato R1/R3 existir no backend.
 export async function getAssignableAgents() {
-  return request('GET', '/api/atendimentos/assignable-agents');
+  return normalizeAssignableCatalogResponse(
+    await request('GET', '/api/atendimentos/assignable-agents'),
+  );
 }
 
 // Unified assignment (plano 10): route a conversation to a human or an AI agent.
@@ -1279,21 +1286,24 @@ export async function resetRole(id) {
 }
 
 // Times — CRUD administrativo gated pela permissão dedicada `team.manage`.
+// O adapter aceita access_mode novo e os flags legado sem esconder error/status.
 // Continua independente de assignee_user_id (D1).
-export async function getTeams() {
-  return request('GET', '/api/teams');
+export async function getTeams({ includeInactive = false } = {}) {
+  const query = includeInactive ? '?include_inactive=true' : '';
+  return normalizeTeamAdminResponse(await request('GET', `/api/teams${query}`));
 }
 
 export async function createTeam(data) {
-  return request('POST', '/api/teams', data);
+  return normalizeTeamAdminResponse(await request('POST', '/api/teams', data));
 }
 
 export async function updateTeam(id, data) {
-  return request('PUT', `/api/teams/${id}`, data);
+  return normalizeTeamAdminResponse(await request('PUT', `/api/teams/${id}`, data));
 }
 
-export async function deleteTeam(id) {
-  return request('DELETE', `/api/teams/${id}`);
+export async function deleteTeam(id, { hard = false } = {}) {
+  const query = hard ? '?hard=true' : '';
+  return normalizeTeamAdminResponse(await request('DELETE', `/api/teams/${id}${query}`));
 }
 
 // Atribuir/desatribuir o TIME de uma conversa — permissões dedicadas de time.

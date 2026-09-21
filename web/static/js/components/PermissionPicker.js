@@ -4,19 +4,14 @@
 // (subheaders). The /api/roles catalog carries `tier` ("core"/"plugin") and
 // `group` per item (see domain/permission_catalog.PERMISSION_GROUPS +
 // rbac_repo.list_catalog). `template.*` is a core key but shows under Plugins.
-// The permission `conversation.read_all` is flagged as currently inert (needs
-// inbox membership, plano 01) so the operator knows toggling it has no effect.
+// A descrição canônica vem do backend. Não mantemos avisos locais por chave:
+// eles envelhecem quando a policy muda e podem contradizer o contrato vigente.
 
 import { h } from 'preact';
 import htm from 'htm';
 import { CORE_GROUP_ORDER } from './permissionGroupOrder.js';
 
 const html = htm.bind(h);
-
-// Permissions that exist in the catalog but are not enforced by any endpoint yet.
-const INERT_PERMISSIONS = {
-  'conversation.read_all': 'requer membership de inbox — sem efeito por enquanto',
-};
 
 function tierOf(p) {
   return p.tier || (p.plugin_id ? 'plugin' : 'core');
@@ -57,9 +52,6 @@ function GroupBlock({ name, perms, sel, disabled, onToggle }) {
             <span class="flex-1 min-w-0">
               <span class="text-[13px] text-wa-text">${p.description || p.key}</span>
               <span class="text-[11px] text-wa-secondary font-mono ml-1">${p.key}</span>
-              ${INERT_PERMISSIONS[p.key] ? html`
-                <span class="block text-[11px] text-amber-600">${INERT_PERMISSIONS[p.key]}</span>
-              ` : null}
             </span>
           </label>
         `)}

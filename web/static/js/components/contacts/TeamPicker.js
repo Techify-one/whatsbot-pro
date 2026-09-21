@@ -9,6 +9,11 @@ import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { getAssignableAgents, assignTeam } from '../../services/api.js';
+import {
+  EMPTY_TEAM_CAPABILITIES,
+  assignableTeamOptions,
+  currentTeamReference,
+} from '../../services/teamCapabilities.js';
 import { TeamPickerList } from './TeamPickerList.js';
 
 const html = htm.bind(h);
@@ -23,6 +28,7 @@ function TeamIcon() {
 
 export function TeamPicker({ conv, onChange }) {
   const [teams, setTeams] = useState([]);
+  const [capabilities, setCapabilities] = useState(EMPTY_TEAM_CAPABILITIES);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const ref = useRef(null);
@@ -35,6 +41,7 @@ export function TeamPicker({ conv, onChange }) {
     getAssignableAgents().then(r => {
       if (!alive || !r || !r.ok || !r.data) return;
       setTeams(Array.isArray(r.data.teams) ? r.data.teams : []);
+      setCapabilities(r.data.capabilities || EMPTY_TEAM_CAPABILITIES);
     }).catch(() => {});
     return () => { alive = false; };
   }, []);
@@ -63,10 +70,31 @@ export function TeamPicker({ conv, onChange }) {
     `;
   }
 
-  const currentTeam = conv.team_id != null ? teams.find(t => t.id === conv.team_id) : null;
+  const currentTeam = currentTeamReference(teams, {
+    id: conv.team_id,
+    name: conv.team_name,
+  });
   const currentLabel = conv.team_id == null
     ? 'Nenhum'
-    : (currentTeam ? currentTeam.name : (conv.team_name || `#${conv.team_id}`));
+    : currentTeam.name;
+  const destinations = assignableTeamOptions(teams);
+  const canAssignTeam = capabilities.provided
+    ? capabilities.can_assign_own_team || capabilities.can_assign_any_team
+    : destinations.length > 0;
+
+  if (!canAssignTeam) {
+    return html`
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-wa-iconActive text-[13px] font-medium">Time atribuído</span>
+        </div>
+        <div class="w-full flex items-center gap-2 bg-wa-panel text-wa-text text-[14px] rounded-[8px] px-3 py-2 border border-wa-border">
+          <span class="text-wa-secondary shrink-0"><${TeamIcon} /></span>
+          <span class="truncate ${currentLabel === 'Nenhum' ? 'text-wa-secondary' : ''}">${currentLabel}</span>
+        </div>
+      </div>
+    `;
+  }
 
   return html`
     <div>
@@ -92,6 +120,7 @@ export function TeamPicker({ conv, onChange }) {
             <${TeamPickerList}
               teams=${teams}
               currentTeamId=${conv.team_id}
+              currentTeamName=${conv.team_name}
               onPick=${pick}
               busy=${busy}
             />

@@ -20,6 +20,7 @@ import {
   getConversationLabels, createConversationLabel,
 } from '../../../services/api.js';
 import { resolveConversation } from '../../../utils/resolveConversation.js';
+import { EMPTY_TEAM_CAPABILITIES } from '../../../services/teamCapabilities.js';
 
 // GET /api/conversation-labels devolve uma LISTA ordenada; as superfícies que
 // consomem etiquetas (TagPicker, RowTags) falam o mapa {nome: {color}} das tags
@@ -58,6 +59,7 @@ export function useConversationActions({
   const [agentsUsers, setAgentsUsers] = useState([]);         // assignable human agents
   const [agentsAi, setAgentsAi] = useState([]);               // assignable AI agents
   const [teams, setTeams] = useState([]);                     // times (plano 153)
+  const [teamCapabilities, setTeamCapabilities] = useState(EMPTY_TEAM_CAPABILITIES);
   const [ctxMenu, setCtxMenu] = useState(null);
   // Conversation-level data for the open context menu (assignee/resolve). Resolved
   // lazily on right-click since the sidebar rows are contact-level only.
@@ -319,6 +321,7 @@ export function useConversationActions({
         setAgentsUsers(Array.isArray(res.data.users) ? res.data.users : []);
         setAgentsAi(Array.isArray(res.data.ai_agents) ? res.data.ai_agents : []);
         setTeams(Array.isArray(res.data.teams) ? res.data.teams : []);
+        setTeamCapabilities(res.data.capabilities || EMPTY_TEAM_CAPABILITIES);
       }
     }).catch(() => {});
     // silent: read best-effort — sem `users.manage` o backend responde 403 e a
@@ -352,7 +355,7 @@ export function useConversationActions({
 
   return {
     globalTags, setGlobalTags,
-    currentUserId, currentUser, users, agentsUsers, agentsAi, teams,
+    currentUserId, currentUser, users, agentsUsers, agentsAi, teams, teamCapabilities,
     ctxMenu, setCtxMenu, ctxConv, setCtxConv,
     handleToggleAI, handleMarkUnread, handleMarkRead,
     handleArchive, handleDelete, handleDeleteConversation, handlePin,
