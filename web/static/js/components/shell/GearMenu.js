@@ -186,6 +186,9 @@ export function GearMenu({ tab, onTabChange, pluginScreens, hasPassword, onLogou
           <${MenuItem} gated=${can('users.manage')} active=${tab === 'users'} href=${CORE_TAB_PATHS.users} onClick=${() => { onTabChange('users'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`}
           >Usuários</${MenuItem}>
+          <${MenuItem} gated=${can('team.manage')} active=${tab === 'teams'} href=${CORE_TAB_PATHS.teams} onClick=${() => { onTabChange('teams'); close(); }}
+            icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16.5 13c-1.2 0-3.07.34-4.5 1-1.43-.67-3.3-1-4.5-1C5.33 13 1 14.08 1 16.25V19h22v-2.75c0-2.17-4.33-3.25-6.5-3.25zm-4 5.5h-10v-1.25c0-.54 2.56-1.75 4.5-1.75s4.5 1.21 4.5 1.75v1.25zm4-6.5c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zm-9 0c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3z"/></svg>`}
+          >Times</${MenuItem}>
           <${MenuItem} gated=${can('apikey.manage') || can('webhook.manage')} active=${tab === 'api-keys'} href=${CORE_TAB_PATHS['api-keys']} onClick=${() => { onTabChange('api-keys'); close(); }}
             icon=${html`<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12.65 10A6 6 0 1 0 7 14a5.9 5.9 0 0 0 5.65-4H17v4h2v-4h2v-4h-8.35zM7 14a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/></svg>`}
           >API e Webhooks</${MenuItem}>

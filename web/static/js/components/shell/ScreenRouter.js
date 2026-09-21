@@ -23,6 +23,7 @@ import QuickReplies from '../QuickReplies.js';
 import CustomAttributesManager from '../CustomAttributesManager.js';
 import RuntimePanel from '../RuntimePanel.js';
 import UsersManager from '../UsersManager.js';
+import TeamsManager from '../TeamsManager.js';
 import AuditLog from '../AuditLog.js';
 import IntegrationsScreen from '../IntegrationsScreen.js';
 import AgentEngine from '../ai/AgentEngine.js';
@@ -90,6 +91,15 @@ export function ScreenRouter({
     return html`<div class="w-full p-4">
         <${PageHeader} title="Usuários" onBack=${() => setTab('contacts')} />
         <${UsersManager} initialEntity=${entFor('users')} />
+      </div>`;
+  }
+  if (tab === 'teams') {
+    if (!hasPermission(currentUser, 'team.manage')) {
+      return html`<${PermissionDenied} label="a administração de times" />`;
+    }
+    return html`<div class="w-full p-4">
+        <${PageHeader} title="Times" onBack=${() => setTab('contacts')} />
+        <${TeamsManager} initialEntity=${entFor('teams')} />
       </div>`;
   }
   if (tab === 'api-keys') {

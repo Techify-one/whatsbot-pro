@@ -29,6 +29,7 @@ test('tabFromPathPure: core paths map to their tab', () => {
   assert.equal(tabFromPathPure('/', [], null), 'contacts');
   assert.equal(tabFromPathPure('/contacts', [], null), 'contatos');
   assert.equal(tabFromPathPure('/channels', [], null), 'channels');
+  assert.equal(tabFromPathPure('/teams', [], null), 'teams');
   assert.equal(tabFromPathPure('/ai', [], null), 'ai');
 });
 test('tabFromPathPure: /protocolos e o alias /attendances → aba attendances', () => {
@@ -72,6 +73,12 @@ test('pathForTab: plugin tab resolves to the screen path; unknown → /', () => 
   assert.equal(pathForTab('plugin:orders:/orders', SCREENS), '/orders');
   assert.equal(pathForTab('plugin:ghost:/ghost', SCREENS), '/');
   assert.equal(pathForTab('nope', []), '/');
+});
+
+test('Times tem rota própria e não depende da rota de Usuários', () => {
+  assert.equal(CORE_ROUTES['/teams'], 'teams');
+  assert.equal(CORE_TAB_PATHS.teams, '/teams');
+  assert.equal(pathForTab('teams', []), '/teams');
 });
 
 // ── legacyRedirectTarget ─────────────────────────────────────────────────────

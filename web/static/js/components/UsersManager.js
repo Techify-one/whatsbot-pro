@@ -9,7 +9,6 @@ import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import PermissionPicker from './PermissionPicker.js';
 import RolesManager from './RolesManager.js';
-import TeamsManager from './TeamsManager.js';
 import { useDeepLink, entityPath, basePath } from '../hooks/useDeepLink.js';
 import {
   getUsers,
@@ -226,21 +225,17 @@ function PasswordModal({ user, onSubmit, onCancel, busy }) {
 const SUBTABS = [
   { id: 'users', label: 'Usuários' },
   { id: 'roles', label: 'Grupos de permissão' },
-  { id: 'teams', label: 'Times' },
 ];
 
 function _subtabPath(id) {
   if (id === 'roles') return entityPath('users', { sub: 'roles' });
-  if (id === 'teams') return entityPath('users', { sub: 'teams' });
   return basePath('users');
 }
 
 export default function UsersManager({ initialEntity }) {
-  // Sub-view (Usuários | Papéis | Times) espelha a URL: /users[/{id}] vs
-  // /users/roles[/{key}] vs /users/teams[/{id}].
+  // Sub-view (Usuários | Papéis) espelha a URL.
   const [view, setView] = useState(() => (
     initialEntity && initialEntity.sub === 'roles' ? 'roles'
-    : initialEntity && initialEntity.sub === 'teams' ? 'teams'
     : 'users'));
   const [users, setUsers] = useState([]);
   const [roleDefs, setRoleDefs] = useState([]);
@@ -279,12 +274,11 @@ export default function UsersManager({ initialEntity }) {
   // Sub-view segue a URL (deep-link / back-forward).
   useEffect(() => {
     setView(initialEntity && initialEntity.sub === 'roles' ? 'roles'
-      : initialEntity && initialEntity.sub === 'teams' ? 'teams'
       : 'users');
   }, [initialEntity]);
 
-  // Deep-link /users/<id> (sub-view Usuários). RolesManager/TeamsManager cuidam de
-  // /users/roles/<key> e /users/teams/<id>.
+  // Deep-link /users/<id> (sub-view Usuários). RolesManager cuida de
+  // /users/roles/<key>; Times vive em /teams e não passa por esta tela.
   const pushUrl = useDeepLink({
     tab: 'users',
     resolve: initialEntity && !initialEntity.sub ? { id: initialEntity.id } : null,
@@ -356,8 +350,7 @@ export default function UsersManager({ initialEntity }) {
       </div>
 
       ${view === 'roles' ? html`<${RolesManager} initialEntity=${initialEntity} />`
-      : view === 'teams' ? html`<${TeamsManager} initialEntity=${initialEntity} />` : html`
-      <div>
+      : html`<div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">
           Usuários do painel e seus grupos de permissão. Cada grupo concede um conjunto de permissões.
