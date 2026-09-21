@@ -14,7 +14,8 @@ import asyncio
 
 from fastapi import Depends, Request
 
-from db.repositories import contact_repo
+from db.repositories import contact_repo, conversation_repo
+from server.authz import conversation_access_scope
 from server.routes.v1._common import (V1_PREFIX, V1Error, contact_dto, not_found,
                                       page_params, require, visible_inboxes)
 
@@ -23,6 +24,25 @@ def register_routes(app, deps):
     agent_handler = deps.agent_handler
     ws_manager = deps.ws_manager
     from app.services import contact_service as contact_svc
+
+    async def _require_contact_scope(request: Request, contact: dict, *,
+                                     require_all: bool = False) -> None:
+        """Hide a contact when its conversations are outside the caller's scope.
+
+        Reads may proceed when at least one conversation is visible. Contact-wide
+        mutations must be authorized for every conversation because they change
+        shared data (and deletion also removes every thread).
+        """
+        conversations = await asyncio.to_thread(
+            conversation_repo.list_for_contact, contact["id"])
+        if not conversations:
+            return
+        scope = conversation_access_scope(request)
+        decisions = [scope.allows(conversation, "write" if require_all else "direct")
+                     for conversation in conversations]
+        allowed = all(decisions) if require_all else any(decisions)
+        if not allowed:
+            raise not_found("Contato não encontrado.")
 
     @app.get(f"{V1_PREFIX}/contacts", tags=["contacts"],
              summary="Listar/pesquisar contatos",
@@ -39,7 +59,8 @@ def register_routes(app, deps):
         lim, off = page_params(limit, offset)
         page = await asyncio.to_thread(
             contact_repo.list_contacts_page, q, archived, visible_inboxes(request),
-            limit=lim, offset=off, sort=sort)
+            limit=lim, offset=off, sort=sort,
+            access_scope=conversation_access_scope(request))
         return {"items": [contact_dto(r) for r in page["items"]],
                 "total": page["total"], "limit": lim, "offset": off,
                 "has_more": page["has_more"]}
@@ -56,6 +77,7 @@ def register_routes(app, deps):
             contact_repo.contact_hidden_by_inbox_scope, row["id"], visible_inboxes(request))
         if hidden:
             raise not_found("Contato não encontrado.")
+        await _require_contact_scope(request, row)
         return contact_dto(row)
 
     @app.post(f"{V1_PREFIX}/contacts", status_code=201, tags=["contacts"],
@@ -72,6 +94,8 @@ def register_routes(app, deps):
         if not phone:
             raise V1Error("Campo 'phone' é obrigatório.", code="missing_field")
         existing = await asyncio.to_thread(contact_repo.get_by_phone, phone)
+        if existing is not None:
+            await _require_contact_scope(request, existing, require_all=True)
         # ``_get_contact`` materializa a linha pelo mesmo caminho do painel
         # (respeitando o seed de IA por canal), sem duplicar regra aqui.
         await asyncio.to_thread(agent_handler._get_contact, phone)
@@ -90,8 +114,10 @@ def register_routes(app, deps):
         """Edição explícita: campo escalar presente no corpo SUBSTITUI (string
         vazia limpa); ausente fica intocado; atributo enviado como ``null`` é
         removido. Mesma semântica do painel — é a mesma função."""
-        if await asyncio.to_thread(contact_repo.get_by_phone, phone) is None:
+        contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
+        if contact is None:
             raise not_found("Contato não encontrado.")
+        await _require_contact_scope(request, contact, require_all=True)
         info, err = await contact_svc.update_info(agent_handler, phone, body)
         if err:
             raise V1Error(err, code="invalid_attribute")
@@ -102,6 +128,10 @@ def register_routes(app, deps):
                 summary="Excluir contato (e todas as conversas)",
                 dependencies=[Depends(require("contact.delete"))])
     async def delete_contact(phone: str, request: Request):
+        contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
+        if contact is None:
+            raise not_found("Contato não encontrado.")
+        await _require_contact_scope(request, contact, require_all=True)
         if not await contact_svc.delete_contact(agent_handler, ws_manager, phone):
             raise not_found("Contato não encontrado.")
         return {"deleted": True, "phone": phone}
@@ -121,6 +151,7 @@ def register_routes(app, deps):
         contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
         if contact is None:
             raise not_found("Contato não encontrado.")
+        await _require_contact_scope(request, contact, require_all=True)
         previous = await asyncio.to_thread(
             lambda: list(agent_handler._get_contact(phone).tags))
         new_tags = await apply_filter(

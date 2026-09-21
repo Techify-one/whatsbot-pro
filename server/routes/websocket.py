@@ -22,15 +22,16 @@ def register_routes(app, deps):
         # a USER session is then required. Genuinely zero-user install → no check.
         has_users = await asyncio.to_thread(user_repo.has_any)
         enforce = rbac_enforced(settings) or has_users
+        user = None
         if enforce:
             token = websocket.query_params.get("token", "")
-            kind, _user = await asyncio.to_thread(resolve_request_token, token)
+            kind, user = await asyncio.to_thread(resolve_request_token, token)
             if kind != "user":
                 await websocket.accept()
                 await websocket.close(code=4401, reason="Unauthorized")
                 return
 
-        await ws_manager.connect(websocket)
+        await ws_manager.connect(websocket, user_id=(user or {}).get("id"))
         # Send initial state
         try:
             await websocket.send_text(json.dumps({"event": "status", "data": {

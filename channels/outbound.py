@@ -20,6 +20,8 @@ import logging
 import time
 
 from channels.base import ChannelCapabilities, SendResult
+from domain.media_access import (grant_public_outbox,
+                                 grant_public_outbox_payload)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +142,10 @@ class OutboundRouter:
         if inst is None:
             return SendResult(ok=False, error="channel_not_registered")
         try:
+            # Messenger/Instagram (and some Cloud flows) pull local media from
+            # our public_base_url during this provider call. Re-open an already
+            # persisted path only for that short delivery window.
+            grant_public_outbox(path_or_url)
             return inst.send_media(chat_id, kind, path_or_url,
                                    caption=caption, filename=filename)
         except Exception as e:  # noqa: BLE001
@@ -151,6 +157,7 @@ class OutboundRouter:
         if inst is None:
             return SendResult(ok=False, error="channel_not_registered")
         try:
+            grant_public_outbox_payload(components)
             return inst.send_template(chat_id, template_name, lang=lang,
                                       components=components)
         except NotImplementedError:

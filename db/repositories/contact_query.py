@@ -166,7 +166,8 @@ def _export_row(row, tags_list: list[str]) -> dict:
     }
 
 
-def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500):
+def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500,
+                    access_scope=None):
     """Gerador de contatos p/ export CSV, em CHUNKS (plano 50 F11) — memória constante.
 
     Pagina a leitura de ``chunk`` em ``chunk`` (offset) e, por chunk, carrega as tags
@@ -176,10 +177,16 @@ def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500):
 
     Nota: offset entre chunks pode driftar se a base mudar DURANTE o export (insert/
     delete concorrente) — aceitável p/ um snapshot de export. Groups são pulados."""
-    if inbox_ids is not None and not inbox_ids:
+    scoped = access_scope is not None and not access_scope.is_unrestricted
+    if not scoped and access_scope is None and inbox_ids is not None and not inbox_ids:
         return
     base = select(contacts).where(contacts.c.is_group == 0)
-    if inbox_ids is not None:
+    if scoped:
+        base = base.where(contacts.c.id.in_(
+            select(conversations.c.contact_id).where(
+                access_scope.collection_clause("list"))
+        ))
+    elif access_scope is None and inbox_ids is not None:
         base = base.where(contacts.c.id.in_(
             select(conversations.c.contact_id).where(
                 conversations.c.inbox_id.in_(inbox_ids))
@@ -199,7 +206,7 @@ def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500):
             offset += chunk
 
 
-def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
+def list_for_export(inbox_ids: list[int] | None = None, *, access_scope=None) -> list[dict]:
     """Return non-group contacts with full info + tags, for CSV export.
 
     ``inbox_ids`` scopes by inbox membership (plano inboxes/canais §4.7), mirroring
@@ -210,7 +217,7 @@ def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
 
     Materializa :func:`iter_for_export` (batch de tags, sem N+1). O endpoint usa o
     gerador direto p/ streaming; esta forma-lista fica p/ callers que querem tudo."""
-    return list(iter_for_export(inbox_ids))
+    return list(iter_for_export(inbox_ids, access_scope=access_scope))
 
 
 def get_full_contact(variants: list[str]) -> dict | None:

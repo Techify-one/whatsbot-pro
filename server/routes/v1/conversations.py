@@ -25,6 +25,7 @@ from db.filters.translate import FilterContext
 from db.repositories import conversation_repo, custom_attribute_repo
 from server.routes.v1._common import (V1_PREFIX, V1Error, conversation_dto, forbidden,
                                       not_found, page_params, require, visible_inboxes)
+from server.authz import conversation_access_scope, can_assign_user_to_conversation
 
 
 def _filter_context(request: Request) -> FilterContext:
@@ -41,14 +42,13 @@ def _filter_context(request: Request) -> FilterContext:
 def register_routes(app, deps):
     from app.services import conversation_service as conv_svc
 
-    async def _load(request: Request, conv_id: int) -> dict:
+    async def _load(request: Request, conv_id: int, surface: str = "write") -> dict:
         """Conversa + escopo de caixa. 404 (não 403) quando fora do escopo — a
         existência de uma conversa de outra caixa não deve vazar."""
         conv = await asyncio.to_thread(conversation_repo.get, conv_id)
         if conv is None:
             raise not_found("Conversa não encontrada.")
-        vis = visible_inboxes(request)
-        if vis is not None and conv.get("inbox_id") not in vis:
+        if not conversation_access_scope(request).allows(conv, surface):
             raise not_found("Conversa não encontrada.")
         return conv
 
@@ -67,13 +67,14 @@ def register_routes(app, deps):
         """Listagem simples. Para consulta rica use ``POST /conversations/filter``."""
         lim, off = page_params(limit, offset, default=50, cap=200)
         user = getattr(request.state, "user", None)
+        scope = conversation_access_scope(request)
         rows = await asyncio.to_thread(
             conversation_repo.list_conversations,
             status=status, inbox_id=inbox_id, assignee_user_id=assignee_user_id,
             is_archived=1 if archived else 0,
             inbox_ids=visible_inboxes(request),
             current_user_id=(user.get("id") if user else None),
-            limit=lim, offset=off)
+            limit=lim, offset=off, access_scope=scope)
         return {"items": [conversation_dto(r) for r in rows],
                 "limit": lim, "offset": off, "has_more": len(rows) >= lim}
 
@@ -107,11 +108,12 @@ def register_routes(app, deps):
         except (TypeError, ValueError, IndexError, KeyError):
             raise V1Error("Filtro inválido.", code="invalid_filter")
         user = getattr(request.state, "user", None)
+        scope = conversation_access_scope(request)
         rows = await asyncio.to_thread(
             conversation_repo.list_filtered, where,
             inbox_ids=visible_inboxes(request),
             current_user_id=(user.get("id") if user else None),
-            limit=spec.limit + 1, offset=spec.offset)
+            limit=spec.limit + 1, offset=spec.offset, access_scope=scope)
         has_more = len(rows) > spec.limit
         if has_more:
             rows = rows[:spec.limit]
@@ -133,16 +135,18 @@ def register_routes(app, deps):
         except (TypeError, ValueError, IndexError, KeyError):
             raise V1Error("Filtro inválido.", code="invalid_filter")
         user = getattr(request.state, "user", None)
+        scope = conversation_access_scope(request)
         return await asyncio.to_thread(
             conversation_repo.count_tab_counts, where,
             inbox_ids=visible_inboxes(request),
-            current_user_id=(user.get("id") if user else None))
+            current_user_id=(user.get("id") if user else None),
+            access_scope=scope)
 
     @app.get(f"{V1_PREFIX}/conversations/{{conv_id}}", tags=["conversations"],
              summary="Obter uma conversa",
              dependencies=[Depends(require("conversation.read"))])
     async def get_conversation(conv_id: int, request: Request):
-        await _load(request, conv_id)
+        await _load(request, conv_id, "direct")
         user = getattr(request.state, "user", None)
         conv = await asyncio.to_thread(
             conversation_repo.get_with_channel, conv_id,
@@ -175,6 +179,11 @@ def register_routes(app, deps):
         """``{"assignee_user_id": <id>|null}``. ``null`` desatribui (e, por
         contrato do core, NÃO devolve a conversa para a IA)."""
         conv = await _load(request, conv_id)
+        if not await asyncio.to_thread(
+                can_assign_user_to_conversation, conv, body.get("assignee_user_id")):
+            raise V1Error(
+                "O atendente não pode acessar este time privado.",
+                status=409, code="assignee_team_conflict")
         actor_id, actor_name = _actor(request)
         result = await conv_svc.assign(deps, conv, body.get("assignee_user_id"),
                                        actor_id=actor_id, actor_name=actor_name)

@@ -17,7 +17,7 @@ from fastapi import Depends, Request
 
 from db.repositories import conversation_label_repo as label_repo, conversation_repo
 from plugins.events import emit_with_filter
-from server.authz import permission_denied, current_user
+from server.authz import permission_denied, current_user, conversation_access_scope
 from server.deps import require_permission, install_exception_handlers
 from server.helpers import _ok, _err
 from server.pagination import CAP_LIST
@@ -105,6 +105,9 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.read")
         if denied:
             return denied
+        conv = await asyncio.to_thread(conversation_repo.get, conv_id)
+        if not conversation_access_scope(request).allows(conv, "direct"):
+            return _err("Conversa não encontrada.", 404)
         rows = await asyncio.to_thread(label_repo.get_for_conversation, conv_id)
         return _ok({"conversation_id": conv_id, "labels": rows})
 
@@ -125,6 +128,12 @@ def register_routes(app, deps):
                 ids.append(int(x))
             except (TypeError, ValueError):
                 continue
+        scope = conversation_access_scope(request)
+        conversations = await asyncio.to_thread(
+            conversation_repo.get_many, ids) if ids else []
+        if len(conversations) != len(set(ids)) or any(
+                not scope.allows(conv, "direct") for conv in conversations):
+            return _err("Uma ou mais conversas não foram encontradas.", 404)
         by_conv = await asyncio.to_thread(label_repo.get_for_conversations, ids)
         return _ok({"labels_by_conv": by_conv})
 
@@ -143,7 +152,7 @@ def register_routes(app, deps):
         if not isinstance(names_in, list):
             return _err("labels deve ser uma lista.")
         conv = await asyncio.to_thread(conversation_repo.get, conv_id)
-        if not conv:
+        if not conversation_access_scope(request).allows(conv, "write"):
             return _err("Conversa não encontrada.", 404)
         actor = (current_user(request) or {}).get("name") or None
         result_names = await conv_svc.apply_labels(

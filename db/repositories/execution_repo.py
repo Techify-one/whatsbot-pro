@@ -8,7 +8,7 @@ import time
 from sqlalchemy import and_, delete as sa_delete, func, insert as sa_insert, select, update as sa_update
 
 from db.engine import get_engine
-from db.tables import execution_steps, executions
+from db.tables import conversations, execution_steps, executions
 
 
 def create(phone: str, trigger_type: str = "webhook", *,
@@ -195,7 +195,8 @@ def _exec_filters(phone: str | None, status: str | None,
                   msg_id: str | None = None,
                   only_ai: bool = False,
                   agent_key: str | None = None,
-                  channel_ids: list[str] | None = None) -> list:
+                  channel_ids: list[str] | None = None,
+                  access_scope=None) -> list:
     """Shared WHERE clauses for list_executions/count (plano 36 F4 + Nexus).
 
     The Nexus-style filters (``search_input``/``search_output`` ILIKE, ``msg_id``
@@ -239,6 +240,11 @@ def _exec_filters(phone: str | None, status: str | None,
             clauses.append(executions.c.agent_key.in_(keys))
     if channel_ids:
         clauses.append(executions.c.channel_id.in_(channel_ids))
+    if (access_scope is not None
+            and (access_scope.inbox_ids is not None or not access_scope.read_any_team)):
+        accessible_ids = select(conversations.c.id).where(
+            access_scope.collection_clause("direct"))
+        clauses.append(executions.c.conversation_id.in_(accessible_ids))
     return clauses
 
 
@@ -253,7 +259,8 @@ def list_executions(limit: int = 50, offset: int = 0,
                     msg_id: str | None = None,
                     only_ai: bool = False,
                     agent_key: str | None = None,
-                    channel_ids: list[str] | None = None) -> list[dict]:
+                    channel_ids: list[str] | None = None,
+                    access_scope=None) -> list[dict]:
     """List executions (newest first) with step count and duration."""
     step_count = (
         select(func.count())
@@ -272,7 +279,7 @@ def list_executions(limit: int = 50, offset: int = 0,
         phone, status, conversation_id, date_from, date_to,
         search_input=search_input, search_output=search_output,
         msg_id=msg_id, only_ai=only_ai, agent_key=agent_key,
-        channel_ids=channel_ids,
+        channel_ids=channel_ids, access_scope=access_scope,
     )
     if where_clauses:
         stmt = stmt.where(and_(*where_clauses))
@@ -299,14 +306,15 @@ def count(phone: str | None = None, status: str | None = None,
           msg_id: str | None = None,
           only_ai: bool = False,
           agent_key: str | None = None,
-          channel_ids: list[str] | None = None) -> int:
+          channel_ids: list[str] | None = None,
+          access_scope=None) -> int:
     """Count total executions for pagination (honours the same filters as list)."""
     stmt = select(func.count()).select_from(executions)
     where_clauses = _exec_filters(
         phone, status, conversation_id, date_from, date_to,
         search_input=search_input, search_output=search_output,
         msg_id=msg_id, only_ai=only_ai, agent_key=agent_key,
-        channel_ids=channel_ids,
+        channel_ids=channel_ids, access_scope=access_scope,
     )
     if where_clauses:
         stmt = stmt.where(and_(*where_clauses))

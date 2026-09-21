@@ -230,7 +230,8 @@ def message_content_predicate(pattern: ColumnElement[str]) -> ColumnElement[bool
     )
 
 
-def build_q_clause(q: str, *, include_messages: bool = True) -> ColumnElement[bool] | None:
+def build_q_clause(q: str, *, include_messages: bool = True,
+                   access_scope=None) -> ColumnElement[bool] | None:
     """The search ``q`` as a SQL boolean expression over ``contacts`` (plano 62 F5).
 
     Replaces the post-SELECT Python filter (``contact_repo._apply_q_filter``), so
@@ -280,16 +281,19 @@ def build_q_clause(q: str, *, include_messages: bool = True) -> ColumnElement[bo
     ]
 
     if include_messages and len(folded) >= TRIGRAM_MIN_LEN:
-        content_match = (
-            select(messages.c.contact_id)
-            .where(message_content_predicate(pattern))
-        )
+        content_match = select(messages.c.contact_id).where(
+            message_content_predicate(pattern))
+        if access_scope is not None and not access_scope.is_unrestricted:
+            content_match = content_match.select_from(messages.join(
+                conversations, conversations.c.id == messages.c.conversation_id))
+            content_match = content_match.where(
+                access_scope.collection_clause("list"))
         clauses.append(contacts.c.id.in_(content_match))
 
     return or_(*clauses)
 
 
-def build_content_matches_query(q: str, contact_ids: list[int]) -> Select:
+def build_content_matches_query(q: str, contact_ids: list[int], *, access_scope=None) -> Select:
     """Most recent searchable message matching ``q``, one row per contact id.
 
     Backs ``match_snippet``/``match_msg_id`` for the rows of the CURRENT page
@@ -298,18 +302,23 @@ def build_content_matches_query(q: str, contact_ids: list[int]) -> Select:
     contact_id, ts DESC, id DESC`` picks the freshest match deterministically
     (the legacy scan relied on ``ts DESC`` row order, leaving ties to the
     planner)."""
-    return (
+    stmt = (
         select(messages.c.contact_id, messages.c.id, messages.c.content)
         .where(messages.c.contact_id.in_(contact_ids))
         .where(message_content_predicate(_folded_pattern(q)))
         .order_by(messages.c.contact_id, messages.c.ts.desc(), messages.c.id.desc())
         .distinct(messages.c.contact_id)
     )
+    if access_scope is not None and not access_scope.is_unrestricted:
+        stmt = stmt.select_from(messages.join(
+            conversations, conversations.c.id == messages.c.conversation_id))
+        stmt = stmt.where(access_scope.collection_clause("list"))
+    return stmt
 
 
 def build_list_contacts_query(*, archived: bool,
                               inbox_ids: list[int] | None,
-                              sort: str = "recency") -> Select:
+                              sort: str = "recency", access_scope=None) -> Select:
     """Build the ``list_contacts`` SELECT as a SQLAlchemy Core statement.
 
     Plano 62 F1 — the per-contact "latest row" lookups are LEFT JOIN LATERAL
@@ -356,8 +365,12 @@ def build_list_contacts_query(*, archived: bool,
         .order_by(messages.c.ts.desc(), messages.c.id.desc())
         .limit(1)
         .correlate(contacts)
-        .lateral("lm")
     )
+    if access_scope is not None and not access_scope.is_unrestricted:
+        lm = lm.select_from(messages.join(
+            conversations, conversations.c.id == messages.c.conversation_id))
+        lm = lm.where(access_scope.collection_clause("list"))
+    lm = lm.lateral("lm")
 
     # conv: active conversation per contact (LEFT JOIN LATERAL … LIMIT 1 on the
     # highest id — plano 62 F1).
@@ -373,8 +386,10 @@ def build_list_contacts_query(*, archived: bool,
         .order_by(conversations.c.id.desc())
         .limit(1)
         .correlate(contacts)
-        .lateral("conv")
     )
+    if access_scope is not None and not access_scope.is_unrestricted:
+        conv = conv.where(access_scope.collection_clause("list"))
+    conv = conv.lateral("conv")
 
     # Dead column kept as a fixed 0 for row-shape compat (plano 62 F1 — the
     # correlated COUNT had zero consumers and cost a full per-contact scan).
@@ -406,7 +421,14 @@ def build_list_contacts_query(*, archived: bool,
         .where(contacts.c.is_archived == (1 if archived else 0))
     )
 
-    if inbox_ids is not None:
+    if access_scope is not None and not access_scope.is_unrestricted:
+        scope = (
+            select(conversations.c.id)
+            .where(conversations.c.contact_id == contacts.c.id)
+            .where(access_scope.collection_clause("list"))
+        ).exists()
+        stmt = stmt.where(scope)
+    elif inbox_ids is not None:
         scope = (
             select(conversations.c.id)
             .where(conversations.c.contact_id == contacts.c.id)
@@ -430,7 +452,7 @@ def build_list_contacts_query(*, archived: bool,
 
 
 def build_count_contacts_query(*, archived: bool,
-                               inbox_ids: list[int] | None) -> Select:
+                               inbox_ids: list[int] | None, access_scope=None) -> Select:
     """COUNT dos contatos que :func:`build_list_contacts_query` listaria (plano 50 F5).
 
     Espelha só o ``WHERE`` (archived + escopo de inbox) — sem os joins de preview/
@@ -446,7 +468,14 @@ def build_count_contacts_query(*, archived: bool,
         .select_from(contacts)
         .where(contacts.c.is_archived == (1 if archived else 0))
     )
-    if inbox_ids is not None:
+    if access_scope is not None and not access_scope.is_unrestricted:
+        scope = (
+            select(conversations.c.id)
+            .where(conversations.c.contact_id == contacts.c.id)
+            .where(access_scope.collection_clause("list"))
+        ).exists()
+        stmt = stmt.where(scope)
+    elif inbox_ids is not None:
         scope = (
             select(conversations.c.id)
             .where(conversations.c.contact_id == contacts.c.id)

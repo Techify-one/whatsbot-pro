@@ -13,7 +13,8 @@ from fastapi import Body, File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from gowa.client import GOWASendError
 
-from db.repositories import contact_repo, message_repo, config_repo, conversation_repo, tag_repo
+from db.repositories import (contact_repo, message_repo, config_repo,
+                             conversation_repo, tag_repo, inbox_repo)
 from db.repositories import custom_attribute_repo as ca_repo
 from db.repositories import mention_repo, inbox_member_repo
 from db.repositories.custom_attribute_validate import validate_value
@@ -23,7 +24,7 @@ from channels import audio_transcode, media_limits, video_transcode
 from agent import group_mentions
 from server import system_notices
 from server.authz import (current_user, permission_denied, can_access_inbox,
-                          visible_inbox_ids)
+                          visible_inbox_ids, conversation_access_scope)
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
 from server.upload_names import unique_media_name
@@ -202,8 +203,42 @@ def register_routes(app, deps):
         from app.services.messaging_service import resolve_inbox_id
         return resolve_inbox_id(conversation_id, channel_id)
 
+    async def _contact_scope_denied(request: Request, phone: str, *,
+                                    conversation_id=None, channel_id=None,
+                                    surface: str = "write", require_all: bool = False):
+        """404 when a contact-scoped operation would cross a private conversation.
+
+        Legacy endpoints address a phone rather than a conversation.  An explicit
+        conversation/channel is checked exactly; contact-wide destructive/state
+        changes require access to every existing conversation.
+        """
+        contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
+        if contact is None:
+            return None
+        conversations = await asyncio.to_thread(
+            conversation_repo.list_for_contact, contact["id"])
+        selected = conversations
+        if conversation_id:
+            try:
+                wanted = int(conversation_id)
+            except (TypeError, ValueError):
+                return _err("Conversa não encontrada.", status=404)
+            selected = [c for c in conversations if int(c["id"]) == wanted]
+            if not selected:
+                return _err("Conversa não encontrada.", status=404)
+        elif channel_id:
+            inbox = await asyncio.to_thread(inbox_repo.get_by_channel, str(channel_id))
+            selected = ([c for c in conversations
+                         if inbox and c.get("inbox_id") == inbox.get("id")])
+        if not selected:
+            return None
+        scope = conversation_access_scope(request)
+        decisions = [scope.allows(conv, surface) for conv in selected]
+        allowed = all(decisions) if require_all else any(decisions)
+        return None if allowed else _err("Contato não encontrado.", status=404)
+
     async def _inbox_guard_veredict(request: Request, conversation_id=None,
-                                    channel_id=None):
+                                    channel_id=None, phone: str | None = None):
         """Veredito de DOMÍNIO do gate de inbox (para o ``inbox_guard`` do serviço).
 
         Mesma decisão de :func:`_inbox_send_denied`, mas devolve o dict que
@@ -215,10 +250,23 @@ def register_routes(app, deps):
         if not can_access_inbox(request, inbox_id):
             return {"ok": False, "reason": "inbox_forbidden",
                     "message": "Sem acesso a esta caixa de entrada.", "status": 403}
+        conv = None
+        if conversation_id:
+            conv = await asyncio.to_thread(conversation_repo.get, int(conversation_id))
+        if conv is not None:
+            if not conversation_access_scope(request).allows(conv, "write"):
+                return {"ok": False, "reason": "not_found",
+                        "message": "Conversa não encontrada.", "status": 404}
+        elif phone:
+            hidden = await _contact_scope_denied(
+                request, phone, channel_id=channel_id or "default", surface="write")
+            if hidden:
+                return {"ok": False, "reason": "not_found",
+                        "message": "Conversa não encontrada.", "status": 404}
         return None
 
     async def _inbox_send_denied(request: Request, *, conversation_id=None,
-                                 channel_id=None):
+                                 channel_id=None, phone: str | None = None):
         """403 response if the user may not write to the target conversation's inbox.
 
         Returns ``None`` when allowed (legacy/open, read_all, or member). Closes the
@@ -227,7 +275,40 @@ def register_routes(app, deps):
             _resolve_inbox_id, conversation_id, channel_id)
         if not can_access_inbox(request, inbox_id):
             return _err("Sem acesso a esta caixa de entrada.", status=403)
+        conv = None
+        if conversation_id:
+            conv = await asyncio.to_thread(conversation_repo.get, int(conversation_id))
+        if conv is not None:
+            if not conversation_access_scope(request).allows(conv, "write"):
+                return _err("Conversa não encontrada.", status=404)
+        elif phone:
+            hidden = await _contact_scope_denied(
+                request, phone, channel_id=channel_id or "default", surface="write")
+            if hidden:
+                return hidden
         return None
+
+    async def _message_write_guard(request: Request, *, msg_id: str = "", db_id=None):
+        row = None
+        if db_id:
+            row = await asyncio.to_thread(message_repo.get_by_db_id, int(db_id))
+        if row is None and msg_id:
+            row = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+        if not row:
+            return None, _err("Mensagem não encontrada.", status=404)
+        if not row.get("conversation_id"):
+            # Mensagens históricas podem anteceder a introdução de
+            # ``conversation_id``. Mantemos essa compatibilidade apenas para
+            # atores realmente irrestritos; um usuário escopado não pode usar
+            # a ausência do vínculo para contornar inbox/time.
+            if conversation_access_scope(request).is_unrestricted:
+                return row, None
+            return None, _err("Mensagem não encontrada.", status=404)
+        conv = await asyncio.to_thread(
+            conversation_repo.get, row["conversation_id"])
+        if not conversation_access_scope(request).allows(conv, "write"):
+            return None, _err("Mensagem não encontrada.", status=404)
+        return row, None
 
     def _route_send_text(channel_id, phone, text, mentions=None, reply_to=None) -> str:
         """Send text via the conversation's channel. Raises GOWASendError on failure
@@ -330,11 +411,13 @@ def register_routes(app, deps):
         # conversa-cêntrica carrega esta lista; sem o filtro ela vazava contatos de
         # caixas que o usuário não acessa. Espelha GET /api/conversations.
         inbox_ids = visible_inbox_ids(request)
+        access_scope = conversation_access_scope(request)
         if limit is None:
             # Caminho legado: lista completa (retrocompatível).
             results = await asyncio.to_thread(
                 contact_repo.list_contacts, q, archived, inbox_ids,
-                include_messages=include_messages, filter_where=filter_where)
+                include_messages=include_messages, filter_where=filter_where,
+                access_scope=access_scope)
             for c in results:
                 c["avatar_v"] = avatar_version(settings, c.get("phone", ""))
             return _ok(results)
@@ -344,7 +427,7 @@ def register_routes(app, deps):
         page = await asyncio.to_thread(
             contact_repo.list_contacts_page, q, archived, inbox_ids,
             limit=lim, offset=off, sort=sort, include_messages=include_messages,
-            filter_where=filter_where)
+            filter_where=filter_where, access_scope=access_scope)
         # Cache-busting version for each avatar (file mtime) so updated photos
         # are picked up by the browser instead of the stale cached image.
         for c in page["items"]:
@@ -433,8 +516,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.read")
         if denied:
             return denied
+        access_scope = conversation_access_scope(request)
         count = await asyncio.to_thread(
-            contact_repo.unread_conversation_count, visible_inbox_ids(request))
+            contact_repo.unread_conversation_count, visible_inbox_ids(request),
+            access_scope=access_scope)
         return _ok({"count": count})
 
     @app.get("/api/contacts/export")
@@ -447,6 +532,7 @@ def register_routes(app, deps):
         if denied:
             return denied
         inbox_ids = visible_inbox_ids(request)
+        access_scope = conversation_access_scope(request)
         # Custom attribute definitions (plano 05) become extra CSV columns,
         # dynamically — a newly created attribute shows up here automatically.
         attr_defs = await asyncio.to_thread(ca_repo.list_definitions, "contact")
@@ -472,7 +558,8 @@ def register_routes(app, deps):
                       "address", "ai_enabled", "tags", "type"]
             header.extend(d["attribute_key"] for d in extra_defs)
             yield "﻿" + _format_line(header)   # BOM p/ o Excel abrir UTF-8
-            for r in contact_repo.iter_for_export(inbox_ids):
+            for r in contact_repo.iter_for_export(
+                    inbox_ids, access_scope=access_scope):
                 custom = r.get("custom_attributes") or {}
                 row_out = [
                     r["phone"], r["name"],
@@ -690,6 +777,7 @@ def register_routes(app, deps):
             mark_read = False
         page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
         vis = visible_inbox_ids(request)
+        access_scope = conversation_access_scope(request)
         channel = (channel_id or "").strip()
         def _load():
             data = contact_repo.get_full_contact(phone)
@@ -708,6 +796,14 @@ def register_routes(app, deps):
             # conversa-cêntrica e fecha o vazamento da view legada por contato.
             if contact_repo.contact_hidden_by_inbox_scope(contact_id, vis):
                 return "__hidden__", []
+            contact_conversations = conversation_repo.list_for_contact(contact_id)
+            accessible_conversations = [
+                conv for conv in contact_conversations
+                if access_scope.allows(conv, "direct")
+            ]
+            if contact_conversations and not accessible_conversations:
+                return "__hidden__", []
+            accessible_ids = [conv["id"] for conv in accessible_conversations]
             # Channel-scoped resolution (multicanal): the inbox picker chose a
             # specific channel for a brand-new conversation. Resolve that channel's
             # conversation (may be None) and scope the thread to it, so a new GOWA
@@ -719,10 +815,14 @@ def register_routes(app, deps):
                 if inbox:
                     scoped_conv = conversation_repo.get_latest_for_contact_inbox(
                         contact_id, inbox["id"])
+                if scoped_conv and not access_scope.allows(scoped_conv, "direct"):
+                    return "__hidden__", []
             # Mark as read when viewing contact (skip if mark_read=false)
             msg_ids = []
             if mark_read and (data.get("unread_count", 0) > 0 or data.get("unread_ai_count", 0) > 0):
-                msg_ids = contact_repo.mark_as_read(contact_id)
+                msg_ids = []
+                for accessible_id in accessible_ids:
+                    msg_ids.extend(conversation_repo.mark_conversation_read(accessible_id))
                 data["unread_count"] = 0
                 data["unread_ai_count"] = 0
                 # Update in-memory cache (all channel-variants of this phone)
@@ -782,7 +882,8 @@ def register_routes(app, deps):
             else:
                 _page, _win = message_repo.read_window(
                     page_limit, before_id=before_id, after_id=after_id,
-                    around_id=around_id, at_ts=at_ts, contact_id=contact_id)
+                    around_id=around_id, at_ts=at_ts,
+                    conversation_ids=accessible_ids)
                 data["messages"] = _page
                 _apply_window(data, _win)
             data["marked_read"] = bool(mark_read)
@@ -828,6 +929,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.delete")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, surface="write", require_all=True)
+        if hidden:
+            return hidden
         if not await contact_svc.delete_contact(agent_handler, ws_manager, phone):
             return _err("Contato não encontrado.", status=404)
         return _ok({"message": "Contato apagado."})
@@ -838,6 +943,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.write")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, surface="write", require_all=True)
+        if hidden:
+            return hidden
         archived = body.get("archived")
         if archived is None:
             return _err("Campo 'archived' é obrigatório.")
@@ -864,6 +973,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.write")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, surface="write", require_all=True)
+        if hidden:
+            return hidden
         pinned = body.get("pinned")
         if pinned is None:
             return _err("Campo 'pinned' é obrigatório.")
@@ -904,7 +1017,7 @@ def register_routes(app, deps):
             sent_by_user_id=(_u.get("id") if _u else None),
             sent_by_name=(_u.get("name") if _u else None),
             inbox_guard=lambda: _inbox_guard_veredict(
-                request, body.get("conversation_id"), body.get("channel_id")),
+                request, body.get("conversation_id"), body.get("channel_id"), phone),
         )
         if not result.get("ok"):
             # ``data`` chega preenchido só onde o envelope legado o tinha (o
@@ -937,8 +1050,13 @@ def register_routes(app, deps):
         if not msg_id and not db_id:
             return _err("É necessário msg_id ou db_id.")
 
+        target_msg, access_error = await _message_write_guard(
+            request, msg_id=msg_id, db_id=db_id)
+        if access_error:
+            return access_error
+
         denied_inbox = await _inbox_send_denied(
-            request, conversation_id=body.get("conversation_id"))
+            request, conversation_id=target_msg.get("conversation_id"))
         if denied_inbox:
             return denied_inbox
 
@@ -948,7 +1066,7 @@ def register_routes(app, deps):
             if not msg_id:
                 return _err("Apagar para todos exige uma mensagem já enviada ao WhatsApp.", status=400)
             # Only outgoing (own) messages can be revoked for everyone.
-            msg = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+            msg = target_msg
             if msg and msg.get("role") == "user":
                 return _err("Só é possível apagar para todos as suas próprias mensagens.", status=400)
             if not is_sandbox:
@@ -968,7 +1086,7 @@ def register_routes(app, deps):
         # our DB (flagged revoked) so the panel still shows it.
         was_from_me = True
         if msg_id:
-            msg = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+            msg = target_msg
             was_from_me = (msg or {}).get("role") != "user"
             if not is_sandbox:
                 # "Delete for me" is a GOWA/linked-device local op; no Cloud equivalent.
@@ -980,6 +1098,7 @@ def register_routes(app, deps):
             await asyncio.to_thread(message_repo.mark_revoked_by_id, int(db_id), "me")
         await ws_manager.broadcast("message_deleted", {
             "phone": phone, "msg_id": msg_id or None, "db_id": db_id,
+            "conversation_id": target_msg.get("conversation_id"),
         })
         await emit_with_filter("message.deleted", {
             "phone": phone, "deleted_message_id": msg_id or "",
@@ -1010,14 +1129,9 @@ def register_routes(app, deps):
         if not text:
             return _err("O texto da mensagem não pode ficar vazio.", status=400)
 
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=body.get("conversation_id"))
-        if denied_inbox:
-            return denied_inbox
-
-        msg = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
-        if not msg:
-            return _err("Mensagem não encontrada.", status=404)
+        msg, access_error = await _message_write_guard(request, msg_id=msg_id)
+        if access_error:
+            return access_error
         if msg.get("role") == "user":
             return _err("Só é possível editar as suas próprias mensagens.", status=400)
         if msg.get("media_type"):
@@ -1035,7 +1149,7 @@ def register_routes(app, deps):
         await ws_manager.broadcast("message_edited", {
             "phone": phone, "msg_id": msg_id, "db_id": db_id,
             "content": text, "edited_ts": edited_ts,
-            "conversation_id": body.get("conversation_id"),
+            "conversation_id": msg.get("conversation_id"),
         })
         await emit_with_filter("message.edited", {
             "id": msg_id, "phone": phone, "original_message_id": msg_id,
@@ -1058,10 +1172,9 @@ def register_routes(app, deps):
         if not msg_id:
             return _err("msg_id é obrigatório.")
 
-        denied_inbox = await _inbox_send_denied(
-            request, conversation_id=body.get("conversation_id"))
-        if denied_inbox:
-            return denied_inbox
+        msg, access_error = await _message_write_guard(request, msg_id=msg_id)
+        if access_error:
+            return access_error
 
         if not await asyncio.to_thread(_is_sandbox_contact, phone):
             channel_id = _channel_for(phone, body.get("conversation_id"))
@@ -1071,6 +1184,7 @@ def register_routes(app, deps):
             return _err("Mensagem não encontrada.", status=404)
         await ws_manager.broadcast("message_reaction", {
             "phone": phone, "msg_id": msg_id, "reactions": reactions,
+            "conversation_id": msg.get("conversation_id"),
         })
         await emit_with_filter("message.reaction", {
             "id": msg_id, "phone": phone,
@@ -1409,7 +1523,7 @@ def register_routes(app, deps):
 
         denied_inbox = await _inbox_send_denied(
             request, conversation_id=body.get("conversation_id"),
-            channel_id=body.get("channel_id"))
+            channel_id=body.get("channel_id"), phone=phone)
         if denied_inbox:
             return denied_inbox
 
@@ -1502,7 +1616,8 @@ def register_routes(app, deps):
         if denied:
             return denied
         denied_inbox = await _inbox_send_denied(
-            request, conversation_id=conversation_id, channel_id=channel_id)
+            request, conversation_id=conversation_id, channel_id=channel_id,
+            phone=phone)
         if denied_inbox:
             return denied_inbox
 
@@ -1745,7 +1860,8 @@ def register_routes(app, deps):
         if denied:
             return denied
         denied_inbox = await _inbox_send_denied(
-            request, conversation_id=conversation_id, channel_id=channel_id)
+            request, conversation_id=conversation_id, channel_id=channel_id,
+            phone=phone)
         if denied_inbox:
             return denied_inbox
         try:
@@ -1775,7 +1891,8 @@ def register_routes(app, deps):
         if denied:
             return denied
         denied_inbox = await _inbox_send_denied(
-            request, conversation_id=conversation_id, channel_id=channel_id)
+            request, conversation_id=conversation_id, channel_id=channel_id,
+            phone=phone)
         if denied_inbox:
             return denied_inbox
         try:
@@ -1801,7 +1918,7 @@ def register_routes(app, deps):
 
         denied_inbox = await _inbox_send_denied(
             request, conversation_id=body.get("conversation_id"),
-            channel_id=body.get("channel_id"))
+            channel_id=body.get("channel_id"), phone=phone)
         if denied_inbox:
             return denied_inbox
 
@@ -1865,7 +1982,8 @@ def register_routes(app, deps):
 
         async def _guard():
             return await _inbox_guard_veredict(
-                request, conversation_id=conversation_id, channel_id=channel_id)
+                request, conversation_id=conversation_id, channel_id=channel_id,
+                phone=phone)
 
         return await messaging.send_media_upload(
             phone=phone, kind=kind,
@@ -2011,6 +2129,11 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"), surface="write")
+        if hidden:
+            return hidden
         action = body.get("action", "start")
         # plano 37 (C2): honra channel_id quando o painel inicia conversa nova sem
         # conversation_id ainda — senão o presence cairia no 'default'.
@@ -2049,6 +2172,12 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"), surface="write",
+            require_all=not bool(body.get("conversation_id") or body.get("channel_id")))
+        if hidden:
+            return hidden
         def _mark():
             contact = agent_handler._get_contact(phone)
             return contact.mark_as_read()
@@ -2065,12 +2194,14 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        access_scope = conversation_access_scope(request)
         def _mark():
-            count = contact_repo.mark_all_as_unread()
+            count = contact_repo.mark_all_as_unread(access_scope=access_scope)
             # Keep already-loaded ContactMemory caches consistent.
-            for contact in agent_handler._contacts.values():
-                if contact.unread_count < 1:
-                    contact.unread_count = 1
+            if access_scope.inbox_ids is None and access_scope.read_any_team:
+                for contact in agent_handler._contacts.values():
+                    if contact.unread_count < 1:
+                        contact.unread_count = 1
             return count
         count = await asyncio.to_thread(_mark)
         return _ok({"count": count, "message": "Todas as conversas marcadas como não lidas."})
@@ -2081,12 +2212,14 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        access_scope = conversation_access_scope(request)
         def _mark():
-            count = contact_repo.mark_all_as_read()
+            count = contact_repo.mark_all_as_read(access_scope=access_scope)
             # Keep already-loaded ContactMemory caches consistent.
-            for contact in agent_handler._contacts.values():
-                contact.unread_count = 0
-                contact.unread_ai_count = 0
+            if access_scope.inbox_ids is None and access_scope.read_any_team:
+                for contact in agent_handler._contacts.values():
+                    contact.unread_count = 0
+                    contact.unread_ai_count = 0
             return count
         count = await asyncio.to_thread(_mark)
         return _ok({"count": count, "message": "Todas as conversas marcadas como lidas."})
@@ -2097,6 +2230,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "conversation.reply")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, surface="write", require_all=True)
+        if hidden:
+            return hidden
         def _mark():
             contact = agent_handler._get_contact(phone)
             contact.mark_as_unread()
@@ -2114,6 +2251,9 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(request, phone, surface="direct")
+        if hidden:
+            return hidden
         if "@g.us" not in phone:
             return _ok({"members": []})
         members = await asyncio.to_thread(
@@ -2126,6 +2266,12 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.write")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, conversation_id=body.get("conversation_id"),
+            channel_id=body.get("channel_id"), surface="write",
+            require_all=not bool(body.get("conversation_id") or body.get("channel_id")))
+        if hidden:
+            return hidden
         enabled = body.get("enabled")
         if enabled is None:
             return _err("Campo 'enabled' é obrigatório.")
@@ -2161,6 +2307,11 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.read")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, conversation_id=conversation_id,
+            channel_id=channel_id, surface="direct")
+        if hidden:
+            return hidden
         avatars_dir = statics_outbox_dir.parent / "avatars"
         avatars_dir.mkdir(parents=True, exist_ok=True)
         avatar_path = avatars_dir / f"{phone}.jpg"
@@ -2199,6 +2350,10 @@ def register_routes(app, deps):
         denied = permission_denied(request, "contact.write")
         if denied:
             return denied
+        hidden = await _contact_scope_denied(
+            request, phone, surface="write", require_all=True)
+        if hidden:
+            return hidden
         info, err = await contact_svc.update_info(agent_handler, phone, body)
         if err:
             return _err(err)

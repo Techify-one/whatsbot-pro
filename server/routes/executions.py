@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Request
 
-from db.repositories import execution_repo, usage_repo
-from server.authz import permission_denied
+from db.repositories import conversation_repo, execution_repo, usage_repo
+from server.authz import permission_denied, conversation_access_scope
 from server.helpers import _ok, _err
 from server.pagination import CAP_LIST, PAGE_LIST, clamp_limit, clamp_offset
 
@@ -92,6 +92,7 @@ def register_routes(app, deps):
             search_input=search_input, search_output=search_output,
             msg_id=msg_id, only_ai=bool(only_ai), agent_key=agent_key,
             channel_ids=channel_ids,
+            access_scope=conversation_access_scope(request),
         )
         items = await asyncio.to_thread(
             lambda: execution_repo.list_executions(
@@ -177,6 +178,16 @@ def register_routes(app, deps):
         result = await asyncio.to_thread(execution_repo.get_by_id, execution_id)
         if not result:
             return _err("Execução não encontrada.", status=404)
+        conversation_id = result.get("conversation_id")
+        scope = conversation_access_scope(request)
+        if conversation_id is None:
+            if scope.inbox_ids is not None or not scope.read_any_team:
+                return _err("Execução não encontrada.", status=404)
+        else:
+            conversation = await asyncio.to_thread(
+                conversation_repo.get, conversation_id)
+            if not scope.allows(conversation, "direct"):
+                return _err("Execução não encontrada.", status=404)
         return _ok(result)
 
     @app.delete("/api/executions")

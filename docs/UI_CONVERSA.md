@@ -233,7 +233,7 @@ O atendente atravessa as duas telas o dia inteiro; os dois atalhos são do plugi
 
 ## Última interação do protocolo e filtros "Atendimento"/"Última interação" (plano 160)
 
-Card do Kanban ganhou uma linha `Última interação: <data> · cliente|atendente` (tooltip com as duas datas separadas) e dois filtros novos — válidos no Kanban **e** na Lista, porque entram em `_build_list_where` (o WHERE compartilhado das duas leituras), como `nota`/`vinculo`/`tags`.
+Card do Kanban ganhou uma linha `Última interação: <data> · cliente|atendente` (tooltip com as duas datas separadas) e dois filtros novos — válidos no Kanban **e** na Lista, porque entram em `_build_list_where` (o WHERE compartilhado das duas leituras), como `nota`/`atendente`/`tags`.
 
 - **"Interação" = mensagem do CLIENTE ou do ATENDENTE HUMANO — a IA nunca conta.** ⚠️ **Predicado de humano NÃO é só `sent_by_user_id`**: medido em produção, ele cobre só ~6% das mensagens humanas (a maioria migrada do Chatwoot tem só `sent_by_name`; envio pelo celular vem só com `status='operator'`, sem nome nem uid). O predicado certo, em `logic._HUMAN_MSG_SQL`: `role='assistant' AND status IS DISTINCT FROM 'failed' AND (status='operator' OR sent_by_user_id IS NOT NULL OR sent_by_name<>'')`.
 - ⚠️ **Não usa `atendimentos.last_activity_at`** — esse campo é tocado por QUALQUER linha salva (nota privada, card de sistema de fechamento), então um protocolo fechado ontem mostraria "hoje" só pelo aviso de fechamento. O cálculo é feito na hora (`logic._attach_last_interaction`), restrito às janelas dos CICLOS do próprio protocolo, com uma folga de 10 minutos no início de cada janela: o inbound carimba o `ts` real do provedor e o ciclo só nasce depois do batch, então em mais da metade dos ciclos (medido, 30 dias de produção) a mensagem que abre o atendimento tem `ts` **anterior** ao `started_at` — sem a folga, "nunca interagiu" seria falso numa fração relevante deles. A folga nunca avança sobre o FIM do ciclo anterior da mesma conversa (senão roubaria a última mensagem de um protocolo anterior reaproveitado).
@@ -241,6 +241,18 @@ Card do Kanban ganhou uma linha `Última interação: <data> · cliente|atendent
 - **Filtro "Atendimento" (Aberto/Fechado)** olha o **último ciclo do PRÓPRIO protocolo** (`ended_at IS NULL` ⇒ aberto) — nunca o status da conversa no core. Os dois divergem: uma conversa pode estar aberta no sistema com o ciclo do protocolo mais antigo já fechado (ela foi reaberta e hoje pertence a um protocolo mais novo, ou um lembrete/retorno a reabriu sem criar ciclo — o ciclo só nasce quando alguém escreve). Protocolo sem nenhum ciclo não casa nem "Aberto" nem "Fechado".
 - **Filtro "Última interação"**: de quem (cliente/atendente/qualquer um) × condição (sem interação há mais de N dias, entre datas, nunca teve interação). Protocolo sem NENHUMA interação (do tipo pedido) conta, no modo "sem interação há N dias", a partir do `opened_at` do protocolo — um protocolo parado desde que abriu tem de aparecer. A visualização salva guarda a condição de forma RELATIVA (`{quem, modo:'sem_ha', dias:7}`, nunca uma data fixa), o mesmo princípio do filtro de Período (plano 109) — módulo puro em `interaction_filter.js`.
 - **Custo**: medido em produção (18k protocolos), a agregação sem nenhum outro filtro leva ~400ms; com `status=aberto` (ou qualquer filtro que reduza o recorte), ~12ms. O cache do índice do Kanban (TTL 30s) absorve o resto — os dois filtros entram na chave do cache (`kanban_index._normalized_filters`).
+
+## Painel de filtros da aba Protocolos (plano 165)
+
+O popover "Filtros" empilhava ~26 campos com o nome só no placeholder: bastava preencher dois ("Aberto" do protocolo e "Aberto" do atendimento) para não saber mais o que cada um filtrava. Desde o `protocolos` 2.14.0:
+
+- **Catálogo único** (`static/filter_catalog.js`, puro): para cada filtro nativo, a SEÇÃO dona (Responsável · Protocolo · Atendimento · Contato; "Outros" só como rede para escopo de campo desconhecido), o rótulo CURTO, o rótulo COMPLETO e a ajuda ⓘ. Alimenta o painel, a barra, as fichas e o checklist ⚙ "Configurar filtros da aba" — antes eram duas listas paralelas que já divergiam. A seção "Nativas" deixou de existir.
+- **Rótulo curto dentro da seção, completo fora dela**: "Status" na seção Protocolo, "Status do protocolo" na barra (favorito) e na ficha. Campo personalizado só é qualificado ("Resultado do atendimento") quando o rótulo curto — sem acento e sem caixa — se repete em OUTRA seção; a colisão é medida sobre todos os campos, para o nome de um filtro não mudar conforme a aba. A ajuda de campo personalizado é a `description` já cadastrada; sem descrição, sem ícone. Nativo só tem ⓘ onde o nome não basta (Canal e Busca não têm).
+- **Fichas**: todo filtro ativo que não está visível na barra vira `Rótulo completo: valor ×` ao lado do botão "Filtros"; o × limpa só aquele. Cada seção do painel tem "N ativos · Limpar" e recolhe (o recolhido fica em `localStorage["whatsbot_protocolos_filter_collapsed"]`, por dispositivo). ⚠️ **O painel não tem `overflow`**: os `OptionListSelect` de dentro abrem `absolute` e seriam recortados — a altura se controla recolhendo seções.
+- **Filtro "Atendente" unificado**: "Atendente", "Agente de IA" (plano 162) e "Vínculo do atendente" viraram UM filtro com *Não atribuído / Atendentes / Agentes de IA*. O parâmetro `atendente` (nas 4 rotas `/protocolos`, `/protocolos/counts`, `/grouped/columns`, `/grouped/column`, e na chave do cache do índice) recebe os **mesmos ids das colunas do Kanban agrupado por atendente** — `u:<id>`, `ia:<agent_key>`, `__none__` —, unidos por OR. ⚠️ **A precedência é a da coluna** (`logic._atendente_clause` espelha `grouping._cid`): humano (definitivo ?? dono da conversa) → agente (definitivo ?? espelho) → ninguém. Consequência intencional: protocolo com humano salvo E agente no espelho (27 em produção em 16/09/2026) aparece só no filtro do humano, como no quadro. Os parâmetros `assignee_user_id`, `agente_ia` e `vinculo` foram **retirados**; filtro salvo com essas chaves é traduzido na leitura (`filter_state.normalizeFilterDict`/`normalizeFilterKeys`) — o servidor nunca interpretou `filters` de visualização.
+- ⚠️ **As colunas `provisional_*` continuam** — o que saiu foi só a leitura delas como "vínculo". Elas espelham quem está com a conversa agora: sem elas, 88 dos 92 protocolos abertos (medido em 16/09/2026) cairiam em "Não atribuído" e o filtro não os acharia. A tela também não distingue mais "atendente salvo" de "não salvo": o selo "IA" depende só de a IA estar com um protocolo aberto, o detalhe de protocolo aberto mostra "Atendente atual" sempre e arrastar o card para a coluna do próprio atendente virou no-op (era um gesto escondido que gravava o definitivo).
+- **Filtros no link**: com a barra igual à visualização salva (na origem Pessoal/Equipe escolhida), a URL leva só `?view=`; mexeu, entra `&f=<todos os filtros ativos>` (JSON normalizado, `replaceState`, teto de 2000 caracteres — acima disso o link fica sem `f`) e aparece "Filtros alterados · Descartar" ao lado do salvar. F5 e link colado para um colega reproduzem a tela; trocar de aba, salvar ou descartar tiram o `f`. O `f` carrega busca por nome/telefone para o histórico do navegador — o mesmo dado que já trafegava na query da API.
+- **Recarga**: `resetKey`/`groupResetKey` derivam da querystring que vai ao servidor (`listParams().toString()`), não de uma lista manual de estados — a lista manual tinha esquecido Etiqueta e Agente de IA, e trocar só um deles não recarregava a Lista nem o Kanban.
 
 ## Indicador de digitação entre atendentes (multi-operador)
 
@@ -252,3 +264,23 @@ Com dois atendentes logados (ex.: Luisa e Teste), cada um vê na **linha da conv
 - **Sidebar** ([ContactList.js](../web/static/js/components/contacts/ContactList.js)): precedência do preview — "IA respondendo…" → "digitando…" (cliente) → **"Fulano está digitando…"** → trecho da busca → rascunho → última mensagem.
 - **Balão no chat aberto** ([ContactDetail.js](../web/static/js/components/contacts/ContactDetail.js)): chip flutuante estilo Chatwoot (nome + três pontinhos pulsando) logo acima do compositor, só quando a conversa está ABERTA e o colega está digitando nela. Container de altura zero + `absolute` (`pointer-events-none`): flutua sobre o fim da conversa sem empurrar a rolagem nem o compositor.
 - **Cor**: nome em `wa-text`, resto em `wa-secondary` — nas DUAS superfícies. `wa-teal` (o acento do "digitando" do cliente) mede **2,3:1** sobre `--wa-selected` no tema escuro, e a conversa aberta é justamente a que costuma ter um colega digitando; ver [themeContrast.js](../web/static/js/services/themeContrast.js).
+
+## Conversas privadas por time (plano 166/01)
+
+O modo do time agora é parte da fronteira de acesso, não apenas um filtro da
+sidebar. `list_hidden` preserva o comportamento antigo (some das listas para quem
+está fora, mas o link direto funciona); `private` devolve 404 também no detalhe,
+histórico, escrita, API v1, realtime e mídia. A inbox continua soberana e a exceção
+`visible_to_assignee` vale apenas para o responsável daquela conversa.
+
+Eventos de conversa no WebSocket são enviados somente à audiência atual. Mudança
+de membro/modo/time emite `conversation_access_changed`: o cliente remove de
+imediato as linhas daquele time, fecha o fio selecionado se necessário e refaz a
+consulta ao servidor. Isso evita manter conteúdo revogado até um F5.
+
+Mídia deixou de usar diretamente `media_path`: [MediaContent.js](../web/static/js/components/contacts/MediaContent.js)
+busca `/api/messages/{id}/media` com o Bearer atual, cria uma Blob URL e a revoga
+no cleanup. A URL pública anterior responde 404 quando o arquivo já pertence a
+uma mensagem (uploads ainda não associados e um grant de 120 segundos durante o
+envio mantêm a janela exigida pelo pull dos provedores Meta). Como Blob materializa o
+arquivo completo, áudio/vídeo grande não ganha streaming progressivo neste corte.

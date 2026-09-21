@@ -6,8 +6,8 @@ import json
 import logging
 import time
 
-from sqlalchemy import (and_, case as sa_case, delete as sa_delete, insert as sa_insert,
-                        or_, select, update as sa_update)
+from sqlalchemy import (and_, case as sa_case, delete as sa_delete, false as sa_false,
+                        insert as sa_insert, or_, select, update as sa_update)
 
 from db.engine import get_engine
 from db.repositories._mapping import coerce_json
@@ -149,6 +149,27 @@ def get_by_conversation(conversation_id: int, *, limit: int | None = None,
     return _keyset(cond, limit, before_id, after_id)
 
 
+def get_by_conversations(conversation_ids: list[int], *, limit: int | None = None,
+                         before_id: int | None = None,
+                         after_id: int | None = None) -> list[dict]:
+    """Return a merged history limited to an explicitly authorized set."""
+    cond = messages.c.conversation_id.in_(conversation_ids) if conversation_ids else sa_false()
+    return _keyset(cond, limit, before_id, after_id)
+
+
+def media_path_is_referenced(media_path: str) -> bool:
+    """Whether a persisted message owns this local media path."""
+    normalized = str(media_path or "").lstrip("/")
+    if not normalized:
+        return False
+    with get_engine().connect() as conn:
+        return conn.execute(
+            select(messages.c.id)
+            .where(messages.c.media_path.in_((normalized, "/" + normalized)))
+            .limit(1)
+        ).first() is not None
+
+
 def _keyset(cond, limit: int | None, before_id: int | None,
             after_id: int | None) -> list[dict]:
     """Aplica o cursor keyset e escolhe a DIREÇÃO da leitura.
@@ -227,7 +248,8 @@ def _select_messages(cond, limit: int | None, *, forward: bool = False) -> list[
     return [_row_to_dict(r) for r in reversed(rows)]
 
 
-def _thread_cond(*, conversation_id: int | None, contact_id: int | None):
+def _thread_cond(*, conversation_id: int | None, contact_id: int | None,
+                 conversation_ids: list[int] | None = None):
     """O predicado de pertencimento da thread — conversa (preferida) ou contato.
 
     Espelha a dupla :func:`get_by_conversation` / :func:`get_all`: a view
@@ -235,6 +257,9 @@ def _thread_cond(*, conversation_id: int | None, contact_id: int | None):
     """
     if conversation_id is not None:
         return messages.c.conversation_id == conversation_id
+    if conversation_ids is not None:
+        return (messages.c.conversation_id.in_(conversation_ids)
+                if conversation_ids else sa_false())
     if contact_id is not None:
         return messages.c.contact_id == contact_id
     raise ValueError("informe conversation_id ou contact_id")
@@ -242,7 +267,8 @@ def _thread_cond(*, conversation_id: int | None, contact_id: int | None):
 
 def window_around(*, around_id: int, limit: int,
                   conversation_id: int | None = None,
-                  contact_id: int | None = None) -> dict:
+                  contact_id: int | None = None,
+                  conversation_ids: list[int] | None = None) -> dict:
     """Janela ANCORADA: ``limit`` mensagens **centradas** em ``around_id`` (plano 99).
 
     O bloqueador que este plano removeu: a paginação da thread só sabia andar para
@@ -259,7 +285,8 @@ def window_around(*, around_id: int, limit: int,
     conversa, deep-link velho) NÃO é erro: degrada para a página mais recente com
     ``anchor_id=None``, e quem chamou decide o que dizer ao operador.
     """
-    base = _thread_cond(conversation_id=conversation_id, contact_id=contact_id)
+    base = _thread_cond(conversation_id=conversation_id, contact_id=contact_id,
+                        conversation_ids=conversation_ids)
     older_take = (limit + 1) // 2          # inclui a âncora
     newer_take = limit - older_take
     with get_engine().connect() as conn:
@@ -323,7 +350,8 @@ def read_window(page_limit: int, *, before_id: int | None = None,
                 after_id: int | None = None, around_id: int | None = None,
                 at_ts: float | None = None,
                 conversation_id: int | None = None,
-                contact_id: int | None = None) -> tuple[list[dict], dict]:
+                contact_id: int | None = None,
+                conversation_ids: list[int] | None = None) -> tuple[list[dict], dict]:
     """QUAL janela do histórico ler — a regra única das duas views de thread.
 
     Mora no repo (e não numa rota) porque as DUAS rotas de thread precisam dela —
@@ -344,9 +372,14 @@ def read_window(page_limit: int, *, before_id: int | None = None,
     que acabou antes) NÃO devolve tela vazia: cai na página mais recente com
     ``anchor_id=None``, e o painel avisa que não havia nada naquela data.
     """
-    scope = dict(conversation_id=conversation_id, contact_id=contact_id)
-    reader = get_by_conversation if conversation_id is not None else get_all
-    key = conversation_id if conversation_id is not None else contact_id
+    scope = dict(conversation_id=conversation_id, contact_id=contact_id,
+                 conversation_ids=conversation_ids)
+    if conversation_id is not None:
+        reader, key = get_by_conversation, conversation_id
+    elif conversation_ids is not None:
+        reader, key = get_by_conversations, conversation_ids
+    else:
+        reader, key = get_all, contact_id
 
     anchor = around_id
     if anchor is None and at_ts is not None:
@@ -375,7 +408,8 @@ def read_window(page_limit: int, *, before_id: int | None = None,
 
 
 def first_id_on_or_after(ts: float, *, conversation_id: int | None = None,
-                         contact_id: int | None = None) -> int | None:
+                         contact_id: int | None = None,
+                         conversation_ids: list[int] | None = None) -> int | None:
     """PK da primeira mensagem cronológica com ``ts >= ts`` na thread (plano 99 F3).
 
     É o "ir para data": o cliente converte o DIA escolhido em epoch **no fuso do
@@ -388,7 +422,8 @@ def first_id_on_or_after(ts: float, *, conversation_id: int | None = None,
     WhatsApp faz: aterrissa no dia seguinte com conteúdo). Sem nada depois da data
     ⇒ ``None``. Usa ``idx_msg_conversation_ts``.
     """
-    cond = _thread_cond(conversation_id=conversation_id, contact_id=contact_id)
+    cond = _thread_cond(conversation_id=conversation_id, contact_id=contact_id,
+                        conversation_ids=conversation_ids)
     with get_engine().connect() as conn:
         row = conn.execute(
             select(messages.c.id).where(cond & (messages.c.ts >= ts))

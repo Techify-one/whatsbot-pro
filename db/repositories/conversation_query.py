@@ -14,7 +14,7 @@ from sqlalchemy import exists, literal
 
 from db.repositories._mapping import _PREVIEW_EXCLUDED, coerce_json, media_preview
 from db.tables import (channels, contacts, conversations, inboxes, mentions,
-                       messages, unread_msg_ids)
+                       messages, teams, unread_msg_ids)
 
 
 def last_msg_subq(col, excluded=_PREVIEW_EXCLUDED):
@@ -98,6 +98,8 @@ def enriched_columns(include_private_note: bool = False,
         inboxes.c.channel_id.label("channel_id"),
         channels.c.provider.label("channel_provider"),
         channels.c.display_name.label("channel_name"),
+        teams.c.name.label("team_name"),
+        teams.c.is_active.label("team_is_active"),
         last_msg_subq(messages.c.content, excluded).label("last_msg_content"),
         last_msg_subq(messages.c.role, excluded).label("last_msg_role"),
         last_msg_subq(messages.c.ts, excluded).label("last_msg_ts"),
@@ -118,6 +120,7 @@ def enriched_from():
         .join(contacts, contacts.c.id == conversations.c.contact_id)
         .outerjoin(inboxes, inboxes.c.id == conversations.c.inbox_id)
         .outerjoin(channels, channels.c.id == inboxes.c.channel_id)
+        .outerjoin(teams, teams.c.id == conversations.c.team_id)
     )
 
 

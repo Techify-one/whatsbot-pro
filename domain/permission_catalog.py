@@ -19,11 +19,15 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     ("conversation.read_all", "Ler conversas de qualquer inbox (ignora membership)"),
     ("conversation.reply",    "Responder conversa"),
     ("conversation.assign",   "Atribuir/transferir conversa"),
+    ("conversation.team.assign", "Atribuir conversas entre times dos quais participa"),
+    ("conversation.team.assign_any", "Atribuir conversas a qualquer time"),
+    ("conversation.team.read_any", "Ler conversas privadas de qualquer time"),
     ("conversation.resolve",  "Encerrar/reabrir conversa"),
     ("contact.read",          "Ler dados de contato"),
     ("contact.write",         "Editar dados de contato"),
     ("contact.import",        "Importar lista de contatos (CSV)"),
     ("inbox.manage",          "Criar/editar inboxes e membros"),
+    ("team.manage",           "Criar, editar, desativar e gerenciar membros de times"),
     ("channel.manage",        "Configurar canais/números"),
     ("settings.manage",       "Configurações globais"),
     # Abas de "Configurações Gerais" — acesso granular por aba (a aba "Sons" é
@@ -89,6 +93,7 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
 # a conhece. Chaves core sem entrada caem em ("core", "Outros").
 CORE_GROUP_ORDER: list[str] = [
     "Atendimentos e conversas",
+    "Times",
     "Contatos e etiquetas",
     "Canais e inboxes",
     "IA e agente",
@@ -97,6 +102,7 @@ CORE_GROUP_ORDER: list[str] = [
 ]
 
 _G_ATEND = "Atendimentos e conversas"
+_G_TEAMS = "Times"
 _G_CONTACT = "Contatos e etiquetas"
 _G_CHANNEL = "Canais e inboxes"
 _G_AI = "IA e agente"
@@ -113,6 +119,11 @@ PERMISSION_GROUPS: dict[str, tuple[str, str]] = {
     "conversation.delete": ("core", _G_ATEND),
     "conversation_label.manage": ("core", _G_ATEND),
     "quickreply.manage": ("core", _G_ATEND),
+    # Times
+    "team.manage": ("core", _G_TEAMS),
+    "conversation.team.assign": ("core", _G_TEAMS),
+    "conversation.team.assign_any": ("core", _G_TEAMS),
+    "conversation.team.read_any": ("core", _G_TEAMS),
     # Contatos e etiquetas
     "contact.read": ("core", _G_CONTACT),
     "contact.write": ("core", _G_CONTACT),

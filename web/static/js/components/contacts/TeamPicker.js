@@ -28,7 +28,7 @@ export function TeamPicker({ conv, onChange }) {
   const ref = useRef(null);
 
   // Same source as the context menu's team list (`assignable-agents`), not
-  // `/api/teams` — that CRUD endpoint is gated by `users.manage` and would 403
+  // `/api/teams` — that CRUD endpoint is gated by `team.manage` and would 403
   // for an operator who can merely assign, not administer, teams.
   useEffect(() => {
     let alive = true;
@@ -64,7 +64,9 @@ export function TeamPicker({ conv, onChange }) {
   }
 
   const currentTeam = conv.team_id != null ? teams.find(t => t.id === conv.team_id) : null;
-  const currentLabel = conv.team_id == null ? 'Nenhum' : (currentTeam ? currentTeam.name : `#${conv.team_id}`);
+  const currentLabel = conv.team_id == null
+    ? 'Nenhum'
+    : (currentTeam ? currentTeam.name : (conv.team_name || `#${conv.team_id}`));
 
   return html`
     <div>

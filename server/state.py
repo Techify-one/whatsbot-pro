@@ -53,21 +53,109 @@ class ConnectionManager:
     # dead connection and the socket is pruned — bounding worst-case latency to
     # this timeout instead of the OS TCP timeout (dezenas de segundos).
     SEND_TIMEOUT = 5.0
+    CONVERSATION_EVENTS = {
+        "new_message", "message_status", "message_reaction", "message_edited",
+        "message_revoked", "message_deleted", "chat_presence", "operator_typing",
+        "ai_typing", "messages_read", "mention_created", "conversation_upsert",
+        "conversation_created", "conversation_status_changed",
+        "conversation_assigned", "conversation_archived", "conversation_pinned",
+        "conversation_ai_toggled", "conversation_updated", "conversation_deleted",
+        "conversation_labels_changed", "agent_transfer_alert", "human_transfer_alert",
+    }
 
     def __init__(self):
         self.active: list[WebSocket] = []
+        self._user_ids: dict[WebSocket, int | None] = {}
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, user_id: int | None = None):
         await websocket.accept()
         self.active.append(websocket)
+        self._user_ids[websocket] = user_id
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active:
             self.active.remove(websocket)
+        self._user_ids.pop(websocket, None)
 
     async def broadcast(self, event: str, data: dict):
+        conversation_id = data.get("conversation_id") if isinstance(data, dict) else None
+        if conversation_id is None and isinstance(data, dict):
+            nested = data.get("message")
+            if isinstance(nested, dict):
+                conversation_id = nested.get("conversation_id")
+        if conversation_id is None and event in self.CONVERSATION_EVENTS:
+            conversation_id = await self._resolve_conversation_id(data)
+        if conversation_id is not None:
+            return await self.broadcast_conversation(event, data, int(conversation_id))
+        if event in self.CONVERSATION_EVENTS:
+            # Fail closed: a conversation payload without provable ownership is
+            # never fanned out globally.
+            return
+        return await self._broadcast_targets(event, data, list(self.active))
+
+    async def _resolve_conversation_id(self, data: dict) -> int | None:
+        from db.repositories import contact_repo, conversation_repo, inbox_repo, message_repo
+
+        if not isinstance(data, dict):
+            return None
+        db_id = data.get("db_id")
+        row = None
+        if db_id:
+            row = await asyncio.to_thread(message_repo.get_by_db_id, db_id)
+        if row is None:
+            msg_id = data.get("msg_id")
+            if not msg_id and isinstance(data.get("msg_ids"), list) and data["msg_ids"]:
+                msg_id = data["msg_ids"][0]
+            if msg_id:
+                row = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+        if row and row.get("conversation_id"):
+            return int(row["conversation_id"])
+        phone = data.get("phone")
+        if not phone:
+            return None
+        contact = await asyncio.to_thread(contact_repo.get_by_phone, phone)
+        if not contact:
+            return None
+        channel_id = data.get("channel_id")
+        if channel_id:
+            inbox = await asyncio.to_thread(inbox_repo.get_by_channel, str(channel_id))
+            if inbox:
+                conv = await asyncio.to_thread(
+                    conversation_repo.get_latest_for_contact_inbox,
+                    contact["id"], inbox["id"])
+                return int(conv["id"]) if conv else None
+        conversations_for_contact = await asyncio.to_thread(
+            conversation_repo.list_for_contact, contact["id"])
+        return (int(conversations_for_contact[0]["id"])
+                if len(conversations_for_contact) == 1 else None)
+
+    async def broadcast_conversation(self, event: str, data: dict,
+                                     conversation_id: int):
+        """Send conversation data only to its current authorized audience."""
+        from db.repositories import conversation_repo
+        from server.authz import ConversationAccessScope
+
+        conversation = await asyncio.to_thread(conversation_repo.get, conversation_id)
+        # Deletion events are projected after the row is gone, but their payload
+        # still carries the authorization-relevant snapshot.
+        if not conversation:
+            conversation = data if isinstance(data, dict) else None
+        if not conversation or conversation.get("inbox_id") is None:
+            return
+        scopes: dict[int | None, ConversationAccessScope] = {}
+        targets = []
+        for websocket in list(self.active):
+            user_id = self._user_ids.get(websocket)
+            if user_id not in scopes:
+                scopes[user_id] = await asyncio.to_thread(
+                    ConversationAccessScope.for_user, user_id)
+            if scopes[user_id].allows(conversation, "direct"):
+                targets.append(websocket)
+        return await self._broadcast_targets(event, data, targets)
+
+    async def _broadcast_targets(self, event: str, data: dict,
+                                 targets: list[WebSocket]):
         message = json.dumps({"event": event, "data": data})
-        targets = list(self.active)
         if not targets:
             return
 

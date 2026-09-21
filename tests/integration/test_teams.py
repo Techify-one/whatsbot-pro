@@ -1,7 +1,7 @@
 """Times (plano 153) — CRUD, RBAC, atribuição de conversa e filtro server-side.
 
-Cobre os itens da Fase 8 do plano: CRUD via REST gated por ``users.manage``
-(D5); ``team_ids_for_user`` com um usuário em 2+ times (requisito #3, prova
+Cobre os itens da Fase 8 do plano e do plano 166/01: CRUD via REST gated por
+``team.manage``; ``team_ids_for_user`` com um usuário em 2+ times (requisito #3, prova
 direta); ``assign_team``/``assign-team`` gravando e emitindo
 ``conversation.team_assigned``/``.team_unassigned`` conforme o valor;
 ``assignable-agents`` trazendo ``teams``; filtro server-side (``registry`` +
@@ -12,6 +12,7 @@ novos.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 
@@ -33,7 +34,12 @@ def _cleanup_teams_users(_engine_ready):
         assert user_repo.delete(user_id), f"could not remove teams test user {user_id}"
     _CREATED_USER_IDS.clear()
     for team_id in reversed(_CREATED_TEAM_IDS):
-        team_repo.delete(team_id)
+        try:
+            team_repo.delete(team_id)
+        except team_repo.TeamHasConversations:
+            # Lifecycle contract: linked teams are historical records and cannot
+            # be hard-deleted by test cleanup either.
+            team_repo.deactivate(team_id)
     _CREATED_TEAM_IDS.clear()
 
 
@@ -69,7 +75,7 @@ def _open_conv(phone: str):
     return conv["id"], contact["id"]
 
 
-# ── CRUD via REST (gated by users.manage — D5) ──────────────────────────────
+# ── CRUD via REST (gated by team.manage) ────────────────────────────────────
 
 def test_team_crud_via_rest(client):
     admin = _mk_user("teams_crud_admin@test.com", admin=True)
@@ -95,7 +101,6 @@ def test_team_crud_via_rest(client):
 
     r = client.delete(f"/api/teams/{team['id']}")
     assert r.status_code == 200, r.text
-    _CREATED_TEAM_IDS.remove(team["id"])
 
     r = client.get("/api/teams")
     assert team["id"] not in {t["id"] for t in r.json()["data"]["teams"]}
@@ -108,17 +113,23 @@ def test_team_create_requires_name(client):
     assert r.status_code == 400, r.text
 
 
-def test_team_crud_requires_users_manage(client):
-    """Usuário sem ``users.manage`` toma 403 no CRUD de times (D5)."""
-    user = _mk_user("teams_no_perm@test.com", custom_perms=["conversation.read"])
-    _auth(client, user)
+def test_team_crud_requires_team_manage(client):
+    """``users.manage`` não substitui a permissão dedicada de times."""
+    legacy_manager = _mk_user(
+        "teams_users_manage_only@test.com", custom_perms=["users.manage"])
+    _auth(client, legacy_manager)
 
     assert client.get("/api/teams").status_code == 403
     assert client.post("/api/teams", json={"name": "X"}).status_code == 403
 
+    team_manager = _mk_user(
+        "teams_manage_only@test.com", custom_perms=["team.manage"])
+    _auth(client, team_manager)
 
-def test_team_delete_clears_conversation_team_id_not_break_it(client):
-    """D4: apagar um time com conversa vinculada só limpa a etiqueta."""
+    assert client.get("/api/teams").status_code == 200
+
+
+def test_team_delete_deactivates_and_preserves_conversation_policy(client):
     from db.repositories import team_repo, conversation_repo
     admin = _mk_user("teams_crud_admin@test.com", admin=True)
     _auth(client, admin)
@@ -126,13 +137,36 @@ def test_team_delete_clears_conversation_team_id_not_break_it(client):
     team = team_repo.create("Efêmero")
     conv_id, _ = _open_conv("5511970000001")
     conversation_repo.set_team(conv_id, team["id"])
+    status_before_delete = conversation_repo.get(conv_id)["status"]
 
     r = client.delete(f"/api/teams/{team['id']}")
     assert r.status_code == 200, r.text
 
     conv = conversation_repo.get(conv_id)
-    assert conv["team_id"] is None
-    assert conv["status"] == "open"
+    assert conv["team_id"] == team["id"]
+    assert conv["status"] == status_before_delete
+    assert team_repo.get(team["id"])["is_active"] == 0
+    enriched = conversation_repo.get_with_channel(conv_id)
+    assert enriched["team_name"] == "Efêmero"
+    assert enriched["team_is_active"] == 0
+
+
+def test_last_active_private_member_cannot_be_deactivated_or_deleted(client):
+    from db.repositories import team_repo
+
+    admin = _mk_user("teams_crud_admin@test.com", admin=True)
+    member = _mk_user("teams_private_last_member@test.com")
+    team = team_repo.create(
+        "Privado com último membro", enforce_team_access=True,
+        member_user_ids=[member["id"]])
+    _CREATED_TEAM_IDS.append(team["id"])
+    _auth(client, admin)
+
+    response = client.put(
+        f"/api/users/{member['id']}", json={"is_active": False})
+    assert response.status_code == 409, response.text
+    response = client.delete(f"/api/users/{member['id']}")
+    assert response.status_code == 409, response.text
 
 
 # ── requisito #3: usuário em vários times ao mesmo tempo ────────────────────
@@ -164,7 +198,10 @@ def test_assignable_agents_includes_teams(client):
     assert r.status_code == 200, r.text
     data = r.json()["data"]
     assert "teams" in data
-    assert {"id": team["id"], "name": "Vendas"} in data["teams"]
+    row = next(t for t in data["teams"] if t["id"] == team["id"])
+    assert row["name"] == "Vendas"
+    assert row["readable"] is True
+    assert row["assignable"] is True
 
 
 # ── assign-team: grava, reflete na resposta, gated por conversation.assign ──
@@ -453,12 +490,13 @@ def test_restrict_visibility_hides_from_listing_not_from_direct_access(client):
         "a cláusula não foi aplicada nos 3 pontos (I4/R1)"
     )
 
-    # U4 — conversation.read_all vê tudo, restrito ou não, independente de membership
+    # read_all ignora inbox, não a cerca de time (override é explícito/read_any).
     _auth(client, u_readall)
     r = client.get("/api/atendimentos?limit=200")
     assert r.status_code == 200, r.text
     ids = {c["id"] for c in r.json()["data"]["conversations"]}
-    assert {conv_a, conv_b, conv_c} <= ids
+    assert conv_a not in ids
+    assert {conv_b, conv_c} <= ids
 
 
 # ── Exceção do assignee, aninhada em restrict_visibility (plano 155) ────────
@@ -587,9 +625,199 @@ def test_visible_to_assignee_exempts_only_the_assignee(client):
     assert conv_a in ids_filter
     assert conv_b not in ids_filter
 
-    # conversation.read_all vê tudo, com ou sem o flag, independente de assignee
+    # conversation.read_all não substitui conversation.team.read_any.
     _auth(client, u_readall)
     r = client.get(f"/api/atendimentos?limit=200")
     assert r.status_code == 200, r.text
     ids = {c["id"] for c in r.json()["data"]["conversations"]}
-    assert {conv_a, conv_b} <= ids
+    assert conv_a not in ids
+    assert conv_b not in ids
+
+
+def test_private_team_blocks_direct_messages_and_write_for_non_member(client):
+    from db.repositories import inbox_member_repo, team_repo
+
+    inbox_id = _mk_inbox("plan166_private_ch")
+    member = _mk_user(
+        "plan166_private_member@test.com",
+        custom_perms=["conversation.read", "conversation.reply", "conversation.assign"])
+    outsider = _mk_user(
+        "plan166_private_outsider@test.com",
+        custom_perms=["conversation.read", "conversation.reply",
+                      "contact.read", "contact.write", "contact.delete"])
+    override = _mk_user(
+        "plan166_private_override@test.com",
+        custom_perms=["conversation.read", "conversation.reply",
+                      "conversation.team.read_any"])
+    inbox_member_repo.set_members(
+        inbox_id, [member["id"], outsider["id"], override["id"]])
+    team = team_repo.create(
+        "Plan166 Privado", enforce_team_access=True,
+        member_user_ids=[member["id"]])
+    _CREATED_TEAM_IDS.append(team["id"])
+    assert team["access_mode"] == "private"
+    assert team["restrict_visibility"] == 1
+
+    conv_id, _contact_id = _open_conv_in_inbox("5511970300001", inbox_id)
+    from db.repositories import conversation_repo
+    conversation_repo.set_team(conv_id, team["id"])
+
+    _auth(client, outsider)
+    assert client.get(f"/api/atendimentos/{conv_id}").status_code == 404
+    assert client.get(f"/api/atendimentos/{conv_id}/messages").status_code == 404
+    assert client.post(
+        f"/api/atendimentos/{conv_id}/read").status_code == 404
+    assert client.patch(
+        "/api/v1/contacts/5511970300001",
+        json={"name": "Não deve alterar"}).status_code == 404
+
+    _auth(client, member)
+    assert client.get(f"/api/atendimentos/{conv_id}").status_code == 200
+    assert client.get(f"/api/atendimentos/{conv_id}/messages").status_code == 200
+    assert client.post(
+        f"/api/atendimentos/{conv_id}/assign",
+        json={"assignee_user_id": outsider["id"]}).status_code == 409
+
+    _auth(client, override)
+    assert client.get(f"/api/atendimentos/{conv_id}").status_code == 200
+
+
+def test_team_assignment_requires_membership_or_assign_any(client):
+    from db.repositories import inbox_member_repo, team_repo
+
+    inbox_id = _mk_inbox("plan166_assignment_ch")
+    own_user = _mk_user(
+        "plan166_assign_own@test.com",
+        custom_perms=["conversation.read", "conversation.team.assign"])
+    outsider = _mk_user(
+        "plan166_assign_out@test.com",
+        custom_perms=["conversation.read", "conversation.team.assign"])
+    any_user = _mk_user(
+        "plan166_assign_any@test.com",
+        custom_perms=["conversation.read", "conversation.team.assign_any"])
+    inbox_member_repo.set_members(
+        inbox_id, [own_user["id"], outsider["id"], any_user["id"]])
+    team = team_repo.create("Plan166 Destino", member_user_ids=[own_user["id"]])
+    _CREATED_TEAM_IDS.append(team["id"])
+    conv_id, _contact_id = _open_conv_in_inbox("5511970300002", inbox_id)
+
+    _auth(client, outsider)
+    assert client.post(
+        f"/api/atendimentos/{conv_id}/assign-team",
+        json={"team_id": team["id"]}).status_code == 403
+
+    _auth(client, own_user)
+    assert client.post(
+        f"/api/atendimentos/{conv_id}/assign-team",
+        json={"team_id": team["id"]}).status_code == 200
+
+    _auth(client, any_user)
+    assert client.post(
+        f"/api/atendimentos/{conv_id}/assign-team",
+        json={"team_id": None}).status_code == 200
+
+
+def test_private_team_media_requires_current_conversation_access(client):
+    from db.repositories import (inbox_member_repo, message_repo, team_repo,
+                                 conversation_repo)
+
+    inbox_id = _mk_inbox("plan166_media_ch")
+    member = _mk_user(
+        "plan166_media_member@test.com", custom_perms=["conversation.read"])
+    outsider = _mk_user(
+        "plan166_media_outsider@test.com", custom_perms=["conversation.read"])
+    inbox_member_repo.set_members(inbox_id, [member["id"], outsider["id"]])
+    team = team_repo.create(
+        "Plan166 Mídia Privada", enforce_team_access=True,
+        member_user_ids=[member["id"]])
+    _CREATED_TEAM_IDS.append(team["id"])
+    conv_id, contact_id = _open_conv_in_inbox("5511970300003", inbox_id)
+    conversation_repo.set_team(conv_id, team["id"])
+
+    outbox = client.app.state.deps.statics_outbox_dir
+    outbox.mkdir(parents=True, exist_ok=True)
+    media_file = outbox / "plan166-private.txt"
+    media_file.write_bytes(b"conteudo privado")
+    try:
+        # Provedores Meta fazem pull do upload durante o envio, antes de existir
+        # uma mensagem dona do path; essa janela estreita continua funcional.
+        assert client.get(f"/statics/outbox/{media_file.name}").status_code == 200
+        saved = message_repo.add(
+            contact_id, "assistant", "arquivo", media_type="document",
+            media_path=f"statics/outbox/{media_file.name}",
+            conversation_id=conv_id)
+        message_id = saved["id"]
+
+        _auth(client, outsider)
+        assert client.get(f"/api/messages/{message_id}/media").status_code == 404
+
+        _auth(client, member)
+        response = client.get(f"/api/messages/{message_id}/media")
+        assert response.status_code == 200
+        assert response.content == b"conteudo privado"
+        assert response.headers["cache-control"] == "private, no-store"
+        assert response.headers["content-disposition"].startswith("attachment;")
+        assert client.get(f"/statics/outbox/{media_file.name}").status_code == 404
+
+        # Reenvio/template reutilizado: o router abre somente a janela curta em
+        # que o provedor externo precisa fazer pull do mesmo arquivo.
+        from domain.media_access import grant_public_outbox
+        grant_public_outbox(f"statics/outbox/{media_file.name}")
+        assert client.get(f"/statics/outbox/{media_file.name}").status_code == 200
+    finally:
+        media_file.unlink(missing_ok=True)
+
+
+def test_private_team_websocket_fanout_tracks_membership_changes():
+    from db.repositories import (inbox_member_repo, team_member_repo, team_repo,
+                                 conversation_repo)
+    from server.state import ConnectionManager
+
+    inbox_id = _mk_inbox("plan166_ws_ch")
+    member = _mk_user(
+        "plan166_ws_member@test.com", custom_perms=["conversation.read"])
+    remaining_member = _mk_user(
+        "plan166_ws_remaining@test.com", custom_perms=["conversation.read"])
+    outsider = _mk_user(
+        "plan166_ws_outsider@test.com", custom_perms=["conversation.read"])
+    inbox_member_repo.set_members(
+        inbox_id, [member["id"], remaining_member["id"], outsider["id"]])
+    team = team_repo.create(
+        "Plan166 Realtime Privado", enforce_team_access=True,
+        member_user_ids=[member["id"], remaining_member["id"]])
+    _CREATED_TEAM_IDS.append(team["id"])
+    conv_id, _ = _open_conv_in_inbox("5511970300004", inbox_id)
+    conversation_repo.set_team(conv_id, team["id"])
+
+    class FakeSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def accept(self):
+            return None
+
+        async def send_text(self, payload):
+            self.sent.append(json.loads(payload))
+
+        async def close(self):
+            return None
+
+    async def scenario():
+        manager = ConnectionManager()
+        allowed = FakeSocket()
+        denied = FakeSocket()
+        await manager.connect(allowed, member["id"])
+        await manager.connect(denied, outsider["id"])
+
+        await manager.broadcast(
+            "new_message", {"conversation_id": conv_id, "content": "segredo"})
+        assert [item["event"] for item in allowed.sent] == ["new_message"]
+        assert denied.sent == []
+
+        team_member_repo.set_members(team["id"], [remaining_member["id"]])
+        await manager.broadcast(
+            "new_message", {"conversation_id": conv_id, "content": "novo segredo"})
+        assert len(allowed.sent) == 1, "a audiência deve ser recalculada por evento"
+        assert denied.sent == []
+
+    asyncio.run(scenario())

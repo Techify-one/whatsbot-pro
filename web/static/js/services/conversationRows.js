@@ -564,6 +564,8 @@ export function buildRows(contacts, conversations, opts = {}) {
           conv_ai_active: cv.ai_active,
           assignee_user_id: cv.assignee_user_id,
           team_id: cv.team_id,
+          team_name: cv.team_name || null,
+          team_is_active: cv.team_is_active,
           active_agent_key: cv.active_agent_key,
           // plano 28: provenance drives the sidebar visibility gate (an 'inbound'
           // conversation shows at t=0 even before its first message is persisted).
@@ -683,6 +685,8 @@ export function convRowToSidebarRow(p) {
     conv_ai_active: p.ai_active,
     assignee_user_id: p.assignee_user_id,
     team_id: p.team_id,
+    team_name: p.team_name || null,
+    team_is_active: p.team_is_active,
     active_agent_key: p.active_agent_key,
     conv_custom_attributes: p.custom_attributes || {},
     conv_labels: p.labels || [],

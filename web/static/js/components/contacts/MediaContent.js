@@ -1,13 +1,60 @@
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { AudioPlayer } from './AudioPlayer.js';
+import { authHeaders, handleUnauthorized } from '../../services/httpClient.js';
 // plano 87: fonte única de "o que o cliente escreveu junto da mídia". Antes cada
 // ramo abaixo adivinhava isso com um `startsWith('[…]')` próprio — e errava nos
 // dois sentidos (escondia a legenda da imagem, mostrava a extração do documento).
 import { mediaCaptionOf } from '../../services/messageView.js';
 
 const html = htm.bind(h);
+
+function useAuthorizedMedia(message) {
+  const [state, setState] = useState({ url: null, failed: false });
+  const local = Boolean(message && message._isLocalBlob);
+  // Core/legacy payloads expose the DB primary key as `_id`; the v1 DTO uses
+  // `id`. Both identify the same authorized media endpoint.
+  const messageId = message && (message.id ?? message._id);
+  const raw = message && message.media_path;
+
+  useEffect(() => {
+    if (local) {
+      setState({ url: raw, failed: false });
+      return undefined;
+    }
+    if (!messageId || !raw) {
+      setState({ url: null, failed: Boolean(raw) });
+      return undefined;
+    }
+    const controller = new AbortController();
+    let objectUrl = null;
+    let disposed = false;
+    setState({ url: null, failed: false });
+    fetch(`/api/messages/${messageId}/media`, {
+      headers: authHeaders(), signal: controller.signal,
+    }).then(async (response) => {
+      if (response.status === 401) handleUnauthorized();
+      if (!response.ok) throw new Error(`media ${response.status}`);
+      objectUrl = URL.createObjectURL(await response.blob());
+      if (disposed) {
+        URL.revokeObjectURL(objectUrl);
+        objectUrl = null;
+        return;
+      }
+      setState({ url: objectUrl, failed: false });
+    }).catch((error) => {
+      if (error && error.name !== 'AbortError') setState({ url: null, failed: true });
+    });
+    return () => {
+      disposed = true;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [local, messageId, raw]);
+
+  return state;
+}
 
 // Renders an <img>/<video> for a message's media and, if the file fails to load
 // (e.g. the server lost the file under statics/ — wiped on a deploy without a
@@ -49,16 +96,26 @@ function MediaWithFallback({ kind, src, isLocalBlob, alt, className, style, onCl
 // scrubber vivo criaria uma faixa de 20px onde clicar não marca a mensagem.
 export function MediaContent({ message, displayContent, fmt, selectionMode = false }) {
   const m = message;
+  const protectedKind = ['image', 'audio', 'video', 'sticker', 'document'].includes(m.media_type);
+  const media = useAuthorizedMedia(protectedKind ? m : null);
+  const mediaSrc = m._isLocalBlob ? m.media_path : media.url;
+  if (protectedKind && !m._isLocalBlob && media.failed) {
+    return html`
+      <div class="flex items-center gap-2 rounded-[4px] mb-1 px-3 py-4 bg-wa-hover text-wa-secondary text-[13px]"
+           title="O arquivo de mídia não está disponível ou você não tem mais acesso.">
+        <span>Mídia indisponível</span>
+      </div>`;
+  }
   // A legenda do cliente (coluna `media_caption`; linha legada cai no content
   // com os guards conservadores de `mediaCaptionOf`).
   const caption = mediaCaptionOf(m, displayContent);
   if (m.media_type === 'image') {
     return html`
       <${MediaWithFallback} kind="image"
-        src=${m.media_path} isLocalBlob=${m._isLocalBlob} alt="Imagem"
+        src=${mediaSrc} isLocalBlob=${true} alt="Imagem"
         className="rounded-[4px] max-w-full max-h-[300px] mb-1 cursor-pointer"
         style="min-width:120px"
-        onClick=${() => window.open(m._isLocalBlob ? m.media_path : '/' + m.media_path, '_blank')} />
+        onClick=${() => mediaSrc && window.open(mediaSrc, '_blank')} />
       ${caption
         ? html`<span dangerouslySetInnerHTML=${{ __html: fmt(caption)}}></span>`
         : null}
@@ -66,7 +123,7 @@ export function MediaContent({ message, displayContent, fmt, selectionMode = fal
   }
   if (m.media_type === 'audio') {
     return html`
-      <${AudioPlayer} src=${m.media_path} isLocalBlob=${m._isLocalBlob} disabled=${selectionMode} />
+      <${AudioPlayer} src=${mediaSrc || ''} isLocalBlob=${true} disabled=${selectionMode} />
       ${caption
         ? html`<span class="block text-[12px] text-wa-secondary italic" dangerouslySetInnerHTML=${{ __html: fmt(caption)}}></span>`
         : null}
@@ -75,7 +132,7 @@ export function MediaContent({ message, displayContent, fmt, selectionMode = fal
   if (m.media_type === 'video') {
     return html`
       <${MediaWithFallback} kind="video"
-        src=${m.media_path} isLocalBlob=${m._isLocalBlob}
+        src=${mediaSrc} isLocalBlob=${true}
         className="rounded-[4px] max-w-full max-h-[320px] mb-1"
         style="min-width:180px" />
       ${caption && !caption.startsWith('[Vídeo')
@@ -86,7 +143,7 @@ export function MediaContent({ message, displayContent, fmt, selectionMode = fal
   if (m.media_type === 'sticker') {
     return html`
       <${MediaWithFallback} kind="sticker"
-        src=${m.media_path} isLocalBlob=${m._isLocalBlob} alt="Sticker"
+        src=${mediaSrc} isLocalBlob=${true} alt="Sticker"
         className="max-w-[160px] max-h-[160px] mb-1" />
     `;
   }
@@ -109,7 +166,7 @@ export function MediaContent({ message, displayContent, fmt, selectionMode = fal
     `;
   }
   if (m.media_type === 'document') {
-    const docUrl = m._isLocalBlob ? m.media_path : '/' + m.media_path;
+    const docUrl = mediaSrc || '#';
     // O NOME do arquivo continua saindo do rótulo "[Documento recebido: x.pdf]"
     // que GOWA/sandbox compõem no content; provider que não o componha (Cloud)
     // cai em "Documento", como antes.

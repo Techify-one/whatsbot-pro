@@ -199,7 +199,7 @@ O envio de mídia já funcionava por API antes disto (as rotas do painel aceitam
 
 ### Webhooks de saída (push)
 
-Todo o resto da API é *pull*. Um CRM que precise saber "chegou mensagem" ou "conversa resolvida" teria de fazer polling — o único push era o `/ws`, que exige sessão de painel e não é escopado.
+Todo o resto da API é *pull*. Um CRM que precise saber "chegou mensagem" ou "conversa resolvida" teria de fazer polling — o `/ws` exige sessão de painel e é escopado à audiência atual de cada conversa, portanto não substitui um webhook de integração.
 
 - **Núcleo no core, no MESMO barramento** ([server/webhook_dispatcher.py](../server/webhook_dispatcher.py)): um subscriber `*`, no molde do [server/audit_listener.py](../server/audit_listener.py). Ele só faz o barato — confere a allowlist e **enfileira** uma linha por endpoint; **nada de rede no caminho da request**. Quem POSTa, assina e re-agenda é o loop supervisionado `webhook_delivery` ([server/background.py](../server/background.py)).
 - **Eventos de plugin viajam de graça**: plugin emite no mesmo barramento, então `protocolos`, `retornos` e companhia entregam eventos sem escrever transporte nenhum. Um plugin que precise de formato de terceiro implementa o seu e não passa por aqui.
@@ -225,3 +225,32 @@ Todo o resto da API é *pull*. Um CRM que precise saber "chegou mensagem" ou "co
 | Webhooks de saída | [server/webhook_dispatcher.py](../server/webhook_dispatcher.py) + [db/repositories/webhook_repo.py](../db/repositories/webhook_repo.py) + [server/routes/webhooks_out.py](../server/routes/webhooks_out.py) |
 | Tela (abas Chaves de API / Webhooks) | [web/static/js/components/IntegrationsScreen.js](../web/static/js/components/IntegrationsScreen.js) — rota `/api-keys` |
 | Migrações | `0064_api_keys`, `0065_outbound_webhooks` |
+
+## Times: acesso, atribuição e mídia protegida (plano 166/01)
+
+Times expõem `access_mode` com três valores: `open`, `list_hidden` e `private`.
+O primeiro não restringe; `list_hidden` só retira a conversa de coleções para
+quem está fora do time; `private` também protege detalhe, mensagens, escrita,
+busca, WebSocket e anexos. A inbox continua sendo a fronteira externa: pertencer
+ao time nunca concede acesso a uma inbox.
+
+- `team.manage` administra configuração, membros e lifecycle do time.
+- `conversation.team.assign` move apenas entre origem/destino dos quais o ator participa.
+- `conversation.team.assign_any` libera a atribuição cross-team.
+- `conversation.team.read_any` é o bypass explícito de leitura; `conversation.read_all`
+  sozinho continua ampliando inboxes, não times privados.
+- `GET /api/teams` retorna apenas ativos por padrão; `include_inactive=true` inclui
+  histórico. `DELETE /api/teams/{id}` desativa; hard delete só é aceito sem
+  conversas vinculadas.
+- `GET /api/atendimentos/assignable-agents` inclui, por time, `access_mode`,
+  `readable` e `assignable` para a UI não inferir autorização.
+
+Anexos de mensagem são lidos por `GET /api/messages/{message_id}/media`, com a
+mesma autenticação e policy da conversa. Um path de `/statics/outbox/*` passa a
+responder 404 assim que estiver associado a uma mensagem; `/statics/media/*`
+também responde 404. A janela anterior à persistência e um grant em memória de
+120 segundos durante o envio são mantidos porque provedores Meta buscam o upload
+por URL; isso também permite reutilizar mídia de template sem reabrir o arquivo
+permanentemente. O frontend faz `fetch`
+autenticado e renderiza uma Blob URL; portanto o primeiro corte baixa o arquivo
+inteiro no navegador, sem streaming progressivo por range.

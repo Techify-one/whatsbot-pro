@@ -3,7 +3,6 @@ import htm from 'htm';
 import { formatBubbleTime } from './utils.js';
 import { isSystemCardRole, isCollapsibleCard, collapsedPreview, SYSTEM_CARD_VARIANTS } from '../../services/messageView.js';
 import { parseCta } from '../../services/systemCta.js';
-import { AudioPlayer } from './AudioPlayer.js';
 import { MediaContent } from './MediaContent.js';
 
 const html = htm.bind(h);
@@ -82,11 +81,7 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
             Mensagem privada${m.sent_by_name ? html`<span class="normal-case font-normal opacity-90"> · por ${m.sent_by_name}</span>` : ''}
             ${canCollapse ? html`<span class="opacity-70" aria-hidden="true">▾</span>` : ''}
           </span>
-          ${(m.media_type === 'audio' && m.media_path) ? html`
-            <div class="min-w-[220px] max-w-[280px] my-[2px]">
-              <${AudioPlayer} src=${m.media_path} isLocalBlob=${m._isLocalBlob} />
-            </div>
-          ` : (m.media_type === 'image' || m.media_type === 'document' || m.media_type === 'video') ? html`
+          ${(m.media_type === 'audio' || m.media_type === 'image' || m.media_type === 'document' || m.media_type === 'video') ? html`
             <${MediaContent} message=${m} displayContent=${m.content} fmt=${fmt} />
           ` : html`<span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>`}
           <span class="float-right ml-[8px] mt-[3px] text-[10.5px] leading-[14px] whitespace-nowrap" style="color:#a78bfa;">

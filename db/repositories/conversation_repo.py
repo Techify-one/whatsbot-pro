@@ -239,6 +239,18 @@ def get(conv_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def get_many(conv_ids: list[int]) -> list[dict]:
+    """Load conversation rows in one query, preserving no caller-supplied order."""
+    ids = list(dict.fromkeys(int(conv_id) for conv_id in conv_ids))
+    if not ids:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(conversations).where(conversations.c.id.in_(ids))
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 def assignment_of(conv_id: int) -> dict | None:
     """Só quem "possui" a conversa: ``{assignee_user_id, active_agent_key}``.
 
@@ -274,6 +286,17 @@ def get_latest_for_contact(contact_id: int) -> dict | None:
             .order_by(conversations.c.last_activity_at.desc())
         ).mappings().first()
     return dict(row) if row else None
+
+
+def list_for_contact(contact_id: int) -> list[dict]:
+    """All conversation rows for a contact, newest first (authorization helper)."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(conversations)
+            .where(conversations.c.contact_id == contact_id)
+            .order_by(conversations.c.last_activity_at.desc(), conversations.c.id.desc())
+        ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def get_open_for_contact_inbox(contact_id: int, inbox_id: int) -> dict | None:
@@ -540,7 +563,8 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
                        assignee_user_id: int | None = None, is_archived: int | None = None,
                        inbox_ids: list[int] | None = None, current_user_id: int | None = None,
                        contact_ids: list[int] | None = None,
-                       limit: int = 100, offset: int = 0) -> list[dict]:
+                       limit: int = 100, offset: int = 0,
+                       access_scope=None, access_surface: str = "list") -> list[dict]:
     """List conversations with contact + channel info + last-message preview +
     per-conversation unread, pinned-first then newest. Feeds the conversa-cêntrica
     sidebar and the full-page conversation list (plano 11 D1).
@@ -562,7 +586,9 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
         stmt = stmt.where(conversations.c.assignee_user_id == assignee_user_id)
     if is_archived is not None:
         stmt = stmt.where(conversations.c.is_archived == is_archived)
-    if inbox_ids is not None:
+    if access_scope is not None:
+        stmt = stmt.where(access_scope.collection_clause(access_surface))
+    elif inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
                           else sa_false())
         stmt = stmt.where(_team_visible_clause(current_user_id))
@@ -579,14 +605,16 @@ def list_conversations(*, status: str | None = None, inbox_id: int | None = None
 
 def list_filtered(where, *, inbox_ids: list[int] | None = None,
                   current_user_id: int | None = None,
-                  limit: int = 50, offset: int = 0) -> list[dict]:
+                  limit: int = 50, offset: int = 0, access_scope=None) -> list[dict]:
     """List conversations matching a pre-built (injection-safe) WHERE from db.filters.
 
     ``inbox_ids`` scopes by inbox membership (see :func:`list_conversations`)."""
     stmt = select(*_enriched_columns(_notify_private_enabled(), current_user_id)).select_from(_enriched_from())
     if where is not None:
         stmt = stmt.where(where)
-    if inbox_ids is not None:
+    if access_scope is not None:
+        stmt = stmt.where(access_scope.collection_clause("list"))
+    elif inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
                           else sa_false())
         stmt = stmt.where(_team_visible_clause(current_user_id))
@@ -599,7 +627,7 @@ def list_filtered(where, *, inbox_ids: list[int] | None = None,
 
 
 def count_tab_counts(where, *, inbox_ids: list[int] | None = None,
-                     current_user_id: int | None = None) -> dict:
+                     current_user_id: int | None = None, access_scope=None) -> dict:
     """Count the conversation-hub tabs for a pre-built filter WHERE.
 
     The WHERE comes from ``db.filters`` (same safety boundary used by
@@ -633,7 +661,9 @@ def count_tab_counts(where, *, inbox_ids: list[int] | None = None,
     )
     if where is not None:
         stmt = stmt.where(where)
-    if inbox_ids is not None:
+    if access_scope is not None:
+        stmt = stmt.where(access_scope.collection_clause("list"))
+    elif inbox_ids is not None:
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids) if inbox_ids
                           else sa_false())
         stmt = stmt.where(_team_visible_clause(current_user_id))

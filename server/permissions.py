@@ -24,6 +24,7 @@ ROLE_LABELS = {
 ROLE_DEFAULTS = {
     "gestor": {
         "conversation.read", "conversation.reply", "conversation.assign",
+        "conversation.team.assign", "conversation.team.assign_any", "team.manage",
         "conversation.resolve", "contact.read", "contact.write", "contact.import",
         "channel.manage", "settings.manage", "plugins.manage", "billing.manage",
         # Abas de Configurações Gerais (a aba "Sons" é pessoal, sem permissão).

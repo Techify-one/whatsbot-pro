@@ -9,7 +9,8 @@ import logging
 
 from fastapi import Request
 
-from db.repositories import user_repo, rbac_repo, inbox_repo, inbox_member_repo
+from db.repositories import (user_repo, rbac_repo, inbox_repo, inbox_member_repo,
+                             team_repo)
 from server.auth import hash_password_argon2
 from server.authz import permission_denied
 from server.permissions import ROLE_LABELS, ALL_PERMISSION_KEYS
@@ -141,6 +142,15 @@ def register_routes(app, deps):
         if (will_deactivate or will_remove_admin) and existing.get("is_admin"):
             if await asyncio.to_thread(_count_active_admins) <= 1:
                 return _err("Não é possível remover o último administrador ativo.", status=409)
+        if will_deactivate:
+            blockers = await asyncio.to_thread(
+                team_repo.private_membership_blockers, user_id)
+            if blockers:
+                names = ", ".join(team["name"] for team in blockers)
+                return _err(
+                    "O usuário é o último membro ativo de time privado: " + names
+                    + ". Inclua outro membro ou desative o time primeiro.",
+                    status=409)
 
         if name is not None or is_active is not None:
             await asyncio.to_thread(
@@ -198,6 +208,14 @@ def register_routes(app, deps):
             return _err("Usuário não encontrado.", status=404)
         if existing.get("is_admin") and await asyncio.to_thread(_count_active_admins) <= 1:
             return _err("Não é possível remover o último administrador ativo.", status=409)
+        blockers = await asyncio.to_thread(
+            team_repo.private_membership_blockers, user_id)
+        if blockers:
+            names = ", ".join(team["name"] for team in blockers)
+            return _err(
+                "O usuário é o último membro ativo de time privado: " + names
+                + ". Inclua outro membro ou desative o time primeiro.",
+                status=409)
         await asyncio.to_thread(user_repo.delete, user_id)
         logger.info("User deleted: %s.", existing.get("email"))
         return _ok({"deleted": True})

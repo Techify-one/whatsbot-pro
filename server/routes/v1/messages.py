@@ -25,6 +25,7 @@ from db.repositories import (contact_repo, conversation_repo, inbox_repo,
 from server.pagination import CAP_MSGS, PAGE_MSGS, clamp_limit, clamp_offset
 from server.routes.v1._common import (V1_PREFIX, V1Error, message_dto, not_found,
                                       require, visible_inboxes)
+from server.authz import conversation_access_scope
 
 
 class AmbiguousTarget(Exception):
@@ -35,7 +36,7 @@ class AmbiguousTarget(Exception):
         super().__init__("alvo ambíguo")
 
 
-def _resolve_target(phone: str, conversation_id, channel_id):
+def _resolve_target(phone: str, conversation_id, channel_id, access_scope=None):
     """``(conversation_id, channel_id)`` do alvo do envio.
 
     ⚠️ **Nunca usa ``get_open_for_contact``.** Esse resolvedor é contact-scoped e
@@ -73,7 +74,8 @@ def _resolve_target(phone: str, conversation_id, channel_id):
         return (conv["id"] if conv else None), str(channel_id)
 
     open_convs = conversation_repo.list_conversations(
-        status="open", contact_ids=[contact["id"]], limit=10)
+        status="open", contact_ids=[contact["id"]], limit=10,
+        access_scope=access_scope, access_surface="write")
     if len(open_convs) > 1:
         raise AmbiguousTarget([
             {"conversation_id": c["id"], "channel_id": c.get("channel_id"),
@@ -121,9 +123,10 @@ def register_routes(app, deps):
         message = body.get("message") or ""
 
         try:
+            access_scope = conversation_access_scope(request)
             conversation_id, channel_id = await asyncio.to_thread(
                 _resolve_target, phone, body.get("conversation_id"),
-                body.get("channel_id"))
+                body.get("channel_id"), access_scope)
         except AmbiguousTarget as e:
             raise V1Error(
                 "Este contato tem conversa aberta em mais de uma caixa. Informe "
@@ -140,6 +143,11 @@ def register_routes(app, deps):
             if not authz.can_access_inbox(request, inbox_id):
                 return {"ok": False, "reason": "inbox_forbidden", "status": 403,
                         "message": "Sem acesso a esta caixa de entrada."}
+            if conversation_id:
+                conv = await asyncio.to_thread(conversation_repo.get, conversation_id)
+                if not conversation_access_scope(request).allows(conv, "write"):
+                    return {"ok": False, "reason": "not_found", "status": 404,
+                            "message": "Conversa não encontrada."}
             return None
 
         user = getattr(request.state, "user", None)
@@ -200,8 +208,9 @@ def register_routes(app, deps):
             raise V1Error("O arquivo está vazio.", code="empty_file")
 
         try:
+            access_scope = conversation_access_scope(request)
             conv_id, chan_id = await asyncio.to_thread(
-                _resolve_target, phone, conversation_id, channel_id)
+                _resolve_target, phone, conversation_id, channel_id, access_scope)
         except AmbiguousTarget as e:
             raise V1Error(
                 "Este contato tem conversa aberta em mais de uma caixa. Informe "
@@ -217,6 +226,11 @@ def register_routes(app, deps):
             if not authz.can_access_inbox(request, inbox_id):
                 return {"ok": False, "reason": "inbox_forbidden", "status": 403,
                         "message": "Sem acesso a esta caixa de entrada."}
+            if conv_id:
+                conv = await asyncio.to_thread(conversation_repo.get, conv_id)
+                if not conversation_access_scope(request).allows(conv, "write"):
+                    return {"ok": False, "reason": "not_found", "status": 404,
+                            "message": "Conversa não encontrada."}
             return None
 
         user = getattr(request.state, "user", None)
@@ -381,8 +395,7 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get, conv_id)
         if conv is None:
             raise not_found("Conversa não encontrada.")
-        vis = visible_inboxes(request)
-        if vis is not None and conv.get("inbox_id") not in vis:
+        if not conversation_access_scope(request).allows(conv, "direct"):
             raise not_found("Conversa não encontrada.")
         page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
         rows, window = await asyncio.to_thread(
@@ -410,8 +423,7 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get, conv_id)
         if conv is None:
             raise not_found("Conversa não encontrada.")
-        vis = visible_inboxes(request)
-        if vis is not None and conv.get("inbox_id") not in vis:
+        if not conversation_access_scope(request).allows(conv, "direct"):
             raise not_found("Conversa não encontrada.")
         from db.search import message_search
         data = await asyncio.to_thread(
@@ -436,8 +448,7 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if conv is None:
             raise not_found("Conversa não encontrada.")
-        vis = visible_inboxes(request)
-        if vis is not None and conv.get("inbox_id") not in vis:
+        if not conversation_access_scope(request).allows(conv, "write"):
             raise not_found("Conversa não encontrada.")
         msg_ids = await asyncio.to_thread(
             conversation_repo.mark_conversation_read, conv_id)

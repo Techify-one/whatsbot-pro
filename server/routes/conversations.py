@@ -23,7 +23,9 @@ from server.avatars import avatar_version
 from channels import audio_transcode, media_limits, video_transcode
 from db import filters as conv_filters
 from db.filters.translate import FilterContext
-from server.authz import permission_denied, has_permission, current_user, visible_inbox_ids
+from server.authz import (permission_denied, has_permission, current_user,
+                          visible_inbox_ids, conversation_access_scope,
+                          can_assign_team, can_assign_user_to_conversation)
 from server.helpers import _ok, _err
 from server.pagination import CAP_MSGS, PAGE_MSGS, clamp_limit, clamp_offset
 
@@ -125,7 +127,7 @@ async def _guard_conv(request: Request, conv_id: int):
     conv = await asyncio.to_thread(conversation_repo.get, conv_id)
     if not conv:
         return None, _err("Conversa não encontrada.", status=404)
-    if _inbox_hidden(request, conv.get("inbox_id")):
+    if not conversation_access_scope(request).allows(conv, "write"):
         return None, _err("Conversa não encontrada.", status=404)
     return conv, None
 
@@ -170,6 +172,7 @@ def register_routes(app, deps):
         cids = _parse_contact_ids(contact_ids)
         limit = max(1, min(limit, 500 if cids is not None else 200))
         _u = current_user(request)
+        access_scope = conversation_access_scope(request)
         rows = await asyncio.to_thread(
             conversation_repo.list_conversations,
             status=status, inbox_id=inbox_id, assignee_user_id=assignee_user_id,
@@ -177,7 +180,7 @@ def register_routes(app, deps):
             inbox_ids=visible_inbox_ids(request),
             current_user_id=(_u.get("id") if _u else None),
             contact_ids=cids,
-            limit=limit, offset=offset)
+            limit=limit, offset=offset, access_scope=access_scope)
         # avatar_v por row (plano 50 F8): o sidebar conversa-first monta a foto sem um
         # fetch de contatos à parte. has_more = veio a página cheia (há próxima).
         for r in rows:
@@ -226,13 +229,14 @@ def register_routes(app, deps):
         if err:
             return err
         _u = current_user(request)
+        access_scope = conversation_access_scope(request)
         # Over-fetch por 1 p/ saber se há próxima página (scroll infinito), sem 2ª query
         # nem COUNT — mesmo padrão do endpoint de mensagens. Dropa a linha extra.
         rows = await asyncio.to_thread(
             conversation_repo.list_filtered, where,
             inbox_ids=visible_inbox_ids(request),
             current_user_id=(_u.get("id") if _u else None),
-            limit=spec.limit + 1, offset=spec.offset)
+            limit=spec.limit + 1, offset=spec.offset, access_scope=access_scope)
         has_more = len(rows) > spec.limit
         if has_more:
             rows = rows[:spec.limit]
@@ -262,10 +266,12 @@ def register_routes(app, deps):
         if err:
             return err
         _u = current_user(request)
+        access_scope = conversation_access_scope(request)
         counts = await asyncio.to_thread(
             conversation_repo.count_tab_counts, where,
             inbox_ids=visible_inbox_ids(request),
-            current_user_id=(_u.get("id") if _u else None))
+            current_user_id=(_u.get("id") if _u else None),
+            access_scope=access_scope)
         return _ok(counts)
 
     @app.get("/api/atendimentos/assignable-agents")
@@ -279,7 +285,10 @@ def register_routes(app, deps):
             return denied
         users = await asyncio.to_thread(user_repo.list_all)
         agents = await asyncio.to_thread(agent_repo.list_all)
-        teams = await asyncio.to_thread(team_repo.list_all)
+        teams = await asyncio.to_thread(team_repo.list_all, include_inactive=False)
+        scope = conversation_access_scope(request)
+        can_assign_any = has_permission(request, "conversation.team.assign_any")
+        can_assign_own = has_permission(request, "conversation.team.assign")
         human_list = [
             {"id": u["id"], "name": u.get("name") or u.get("email"),
              "email": u.get("email"), "is_admin": bool(u.get("is_admin"))}
@@ -289,7 +298,12 @@ def register_routes(app, deps):
             {"agent_key": a["agent_key"], "display_name": a.get("display_name") or a["agent_key"]}
             for a in agents if a.get("enabled")
         ]
-        team_list = [{"id": t["id"], "name": t["name"]} for t in teams]
+        team_list = [{
+            "id": t["id"], "name": t["name"], "access_mode": t["access_mode"],
+            "readable": (scope.read_any_team or t["id"] in scope.team_ids
+                         or t["access_mode"] != "private"),
+            "assignable": bool(can_assign_any or (can_assign_own and t["id"] in scope.team_ids)),
+        } for t in teams]
         return _ok({"users": human_list, "ai_agents": ai_list, "teams": team_list})
 
     @app.get("/api/mentions/unread-count")
@@ -317,7 +331,7 @@ def register_routes(app, deps):
             (_u.get("id") if _u else None))
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        if _inbox_hidden(request, conv.get("inbox_id")):
+        if not conversation_access_scope(request).allows(conv, "direct"):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})
 
@@ -367,7 +381,7 @@ def register_routes(app, deps):
         if after_id is not None or around_id is not None or at_ts is not None:
             mark_read = False
         page_limit = clamp_limit(limit, PAGE_MSGS, CAP_MSGS)
-        vis = visible_inbox_ids(request)
+        scope = conversation_access_scope(request)
         can_read_contact = has_permission(request, "contact.read")
         _u = current_user(request)
         _uid = _u.get("id") if _u else None
@@ -379,7 +393,7 @@ def register_routes(app, deps):
             if conv is None:
                 return _EMPTY
             # Inbox membership scoping: hide (as 404) before any mark-read side effect.
-            if vis is not None and conv.get("inbox_id") not in vis:
+            if not scope.allows(conv, "direct"):
                 return _EMPTY
             phone = conv.get("contact_phone") or ""
             if can_read_contact:
@@ -556,6 +570,11 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
+        if not await asyncio.to_thread(
+                can_assign_user_to_conversation, _conv, assignee):
+            return _err(
+                "O atendente precisa pertencer ao time privado ou o time deve "
+                "permitir visibilidade ao responsável.", status=409)
         actor_id, actor_name = _actor(request)
         # The service applies ``filter.conversation.before_assign`` (None aborts),
         # writes the assignee, and emits conversation.assigned (set) OR
@@ -570,20 +589,44 @@ def register_routes(app, deps):
 
     @app.post("/api/atendimentos/{conv_id}/assign-team")
     async def assign_team(conv_id: int, body: dict, request: Request):
-        """Set/clear the TEAM of a conversation (plano 153) — reuses
-        conversation.assign (D6), the same permission "Atribuir atendente" uses.
-        Independent of the human assignee (D1): never goes through _transfer."""
-        denied = permission_denied(request, "conversation.assign")
-        if denied:
-            return denied
+        """Set/clear only the team link; routing remains a separate operation."""
+        if (not has_permission(request, "conversation.team.assign")
+                and not has_permission(request, "conversation.team.assign_any")):
+            return _err("Permissão negada.", status=403)
         team_id = body.get("team_id")
+        if team_id not in (None, ""):
+            try:
+                team_id = int(team_id)
+            except (TypeError, ValueError):
+                return _err("Time inválido.", status=400)
+            target = await asyncio.to_thread(team_repo.get, team_id)
+            if not target or not target.get("is_active"):
+                return _err("Time não encontrado.", status=404)
+        else:
+            team_id = None
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
+        if not await asyncio.to_thread(
+                can_assign_team, request, _conv.get("team_id"), team_id):
+            return _err("Você não pode mover esta conversa entre esses times.", status=403)
+        if team_id is not None:
+            target = await asyncio.to_thread(team_repo.get, team_id)
+            assignee = _conv.get("assignee_user_id")
+            if target.get("enforce_team_access") and assignee is not None:
+                target_view = {**_conv, "team_id": team_id}
+                if not await asyncio.to_thread(
+                        can_assign_user_to_conversation, target_view, assignee):
+                    return _err(
+                        "O responsável atual não pode acessar o time privado. "
+                        "Remova ou altere o responsável antes de mover.", status=409)
         _aid, actor_name = _actor(request)
         conv = await conv_svc.assign_team(deps, _conv, team_id, actor_name=actor_name)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
+        for changed_team_id in {_conv.get("team_id"), team_id} - {None}:
+            await deps.ws_manager.broadcast(
+                "conversation_access_changed", {"team_id": changed_team_id})
         return _ok({"conversation": conv})
 
     @app.post("/api/atendimentos/{conv_id}/assign-me")
@@ -597,6 +640,9 @@ def register_routes(app, deps):
         _conv, err = await _guard_conv(request, conv_id)
         if err:
             return err
+        if not await asyncio.to_thread(
+                can_assign_user_to_conversation, _conv, user["id"]):
+            return _err("Você não pode assumir uma conversa deste time privado.", status=409)
         _aid, actor_name = _actor(request)
         conv = await conv_svc.assign_me(deps, _conv, user["id"], actor_name=actor_name)
         if not conv:
@@ -711,7 +757,7 @@ def register_routes(app, deps):
         if denied:
             return denied
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
-        if not conv or _inbox_hidden(request, conv.get("inbox_id")):
+        if not conv or not conversation_access_scope(request).allows(conv, "write"):
             return _err("Conversa não encontrada.", status=404)
         msg_ids = await asyncio.to_thread(
             conversation_repo.mark_conversation_read, conv_id)
@@ -739,7 +785,7 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        if _inbox_hidden(request, conv.get("inbox_id")):
+        if not conversation_access_scope(request).allows(conv, "write"):
             return _err("Conversa não encontrada.", status=404)
         try:
             deps.agent_handler.drop_cached_contact(conv.get("contact_phone"))
@@ -794,7 +840,7 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get, conv_id)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        if _inbox_hidden(request, conv.get("inbox_id")):
+        if not conversation_access_scope(request).allows(conv, "write"):
             return _err("Conversa não encontrada.", status=404)
         attrs = body.get("custom_attributes")
         changed: dict = {}
@@ -859,6 +905,8 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
+        if not conversation_access_scope(request).allows(conv, "direct"):
+            return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
         can_create = has_permission(request, "template.create")
         can_delete = has_permission(request, "template.delete")
@@ -905,7 +953,7 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
-        if _inbox_hidden(request, conv.get("inbox_id")):
+        if not conversation_access_scope(request).allows(conv, "write"):
             return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
         phone = conv.get("contact_phone") or ""
@@ -961,6 +1009,8 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
+        if not conversation_access_scope(request).allows(conv, "write"):
+            return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
         if not outbound.supports(channel_id, "templates"):
             return _err("Este canal não suporta templates.", status=400)
@@ -1011,6 +1061,8 @@ def register_routes(app, deps):
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
             return _err("Conversa não encontrada.", status=404)
+        if not conversation_access_scope(request).allows(conv, "write"):
+            return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
         if not outbound.supports(channel_id, "templates"):
             return _err("Este canal não suporta templates.", status=400)
@@ -1040,6 +1092,8 @@ def register_routes(app, deps):
             return _err("name é obrigatório.", status=400)
         conv = await asyncio.to_thread(conversation_repo.get_with_channel, conv_id)
         if not conv:
+            return _err("Conversa não encontrada.", status=404)
+        if not conversation_access_scope(request).allows(conv, "write"):
             return _err("Conversa não encontrada.", status=404)
         channel_id = conv.get("channel_id") or "default"
         if not outbound.supports(channel_id, "templates"):
@@ -1077,7 +1131,7 @@ def register_routes(app, deps):
             conv = await asyncio.to_thread(conversation_repo.get, int(conversation_id))
             if not conv or conv.get("contact_id") != contact["id"]:
                 conv = None
-            if conv and _inbox_hidden(request, conv.get("inbox_id")):
+            if conv and not conversation_access_scope(request).allows(conv, "direct"):
                 return _err("Conversa não encontrada.", status=404)
             return _ok({"conversation": conv})
         # Escopa por canal quando informado (multicanal); senão, legado por-phone.
@@ -1107,6 +1161,6 @@ def register_routes(app, deps):
             if not conv:
                 conv = await asyncio.to_thread(
                     conversation_repo.get_latest_for_contact, contact["id"])
-        if conv and _inbox_hidden(request, conv.get("inbox_id")):
+        if conv and not conversation_access_scope(request).allows(conv, "direct"):
             return _err("Conversa não encontrada.", status=404)
         return _ok({"conversation": conv})

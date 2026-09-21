@@ -9,6 +9,7 @@
 
 import { h } from 'preact';
 import htm from 'htm';
+import { CORE_GROUP_ORDER } from './permissionGroupOrder.js';
 
 const html = htm.bind(h);
 
@@ -16,17 +17,6 @@ const html = htm.bind(h);
 const INERT_PERMISSIONS = {
   'conversation.read_all': 'requer membership de inbox — sem efeito por enquanto',
 };
-
-// Ordem canônica dos subcabeçalhos core (espelha CORE_GROUP_ORDER no backend).
-const CORE_GROUP_ORDER = [
-  'Atendimentos e conversas',
-  'Contatos e etiquetas',
-  'Canais e inboxes',
-  'IA e agente',
-  'Configurações e sistema',
-  'Usuários e auditoria',
-  'Outros',
-];
 
 function tierOf(p) {
   return p.tier || (p.plugin_id ? 'plugin' : 'core');

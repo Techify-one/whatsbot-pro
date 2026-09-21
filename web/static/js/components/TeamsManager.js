@@ -4,7 +4,7 @@
 //     vários times ao mesmo tempo, requisito #3),
 //   • delete a team (a FK em atendimentos.team_id é ON DELETE SET NULL — apagar
 //     um time só limpa a etiqueta das conversas, nunca quebra uma, D4).
-// Gated by users.manage (D5) — same permission as "Usuários"/"Grupos de permissão".
+// Gated by the dedicated `team.manage` permission.
 
 import { h } from 'preact';
 import { useEffect, useState, useRef } from 'preact/hooks';

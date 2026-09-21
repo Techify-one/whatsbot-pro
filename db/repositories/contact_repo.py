@@ -136,11 +136,13 @@ def mark_as_read(contact_id: int) -> list[str]:
     return unread_repo.mark_as_read(contact_id)
 
 
-def unread_conversation_count(inbox_ids: list[int] | None = None) -> int:
+def unread_conversation_count(inbox_ids: list[int] | None = None, *,
+                              access_scope=None) -> int:
     """Number of non-archived conversations that have unread messages — used for the
     browser-tab badge (e.g. "(3) WhatsBot"). Counts a conversation once regardless of
     how many messages are unread, mirroring the sidebar badge visibility."""
-    return unread_repo.unread_conversation_count(inbox_ids)
+    return unread_repo.unread_conversation_count(
+        inbox_ids, access_scope=access_scope)
 
 
 def set_mention(contact_id: int) -> None:
@@ -157,22 +159,22 @@ def mark_as_unread(contact_id: int) -> None:
     return unread_repo.mark_as_unread(contact_id)
 
 
-def mark_all_as_unread() -> int:
+def mark_all_as_unread(*, access_scope=None) -> int:
     """Mark every conversation as unread (green badge).
 
     Only rows currently at 0 are touched, so existing higher counts are kept.
     Returns the number of conversations newly marked.
     """
-    return unread_repo.mark_all_as_unread()
+    return unread_repo.mark_all_as_unread(access_scope=access_scope)
 
 
-def mark_all_as_read() -> int:
+def mark_all_as_read(*, access_scope=None) -> int:
     """Reset unread counts for every conversation (clear all in-app badges).
 
     App-only: clears the tracked unread msg_ids too, but does not send WhatsApp
     read receipts. Returns the number of conversations that had unread badges.
     """
-    return unread_repo.mark_all_as_read()
+    return unread_repo.mark_all_as_read(access_scope=access_scope)
 
 
 def mark_user_messages_as_read(contact_id: int) -> list[str]:
@@ -221,7 +223,7 @@ def contact_hidden_by_inbox_scope(contact_id: int,
     return contact_query.contact_hidden_by_inbox_scope(contact_id, inbox_ids)
 
 
-def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
+def list_for_export(inbox_ids: list[int] | None = None, *, access_scope=None) -> list[dict]:
     """Return non-group contacts with full info + tags, for CSV export.
 
     ``inbox_ids`` scopes by inbox membership (plano inboxes/canais §4.7), mirroring
@@ -229,13 +231,15 @@ def list_for_export(inbox_ids: list[int] | None = None) -> list[dict]:
     with a conversation in one of those inboxes. Includes both archived and active
     contacts (an export should be complete). Groups are skipped — they can't be
     re-imported by phone."""
-    return contact_query.list_for_export(inbox_ids)
+    return contact_query.list_for_export(inbox_ids, access_scope=access_scope)
 
 
-def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500):
+def iter_for_export(inbox_ids: list[int] | None = None, *, chunk: int = 500,
+                    access_scope=None):
     """Gerador chunked de contatos p/ export CSV streaming (plano 50 F11). Sem N+1
     (tags em lote por chunk) e memória constante. Ver ``contact_query.iter_for_export``."""
-    return contact_query.iter_for_export(inbox_ids, chunk=chunk)
+    return contact_query.iter_for_export(
+        inbox_ids, chunk=chunk, access_scope=access_scope)
 
 
 def _shape_contact_row(row, tags_list: list) -> dict:
@@ -312,7 +316,8 @@ def _matched_by_contact_fields(c: dict, folded_q: str) -> bool:
             or any(folded_q in contact_search.fold(t) for t in c.get("tags", [])))
 
 
-def _decorate_content_matches(conn, results: list, q: str, include_messages: bool) -> None:
+def _decorate_content_matches(conn, results: list, q: str, include_messages: bool,
+                              access_scope=None) -> None:
     """Attach ``match_snippet``/``match_msg_id`` to the page rows that matched only
     by message content (plano 62 F5 — in place of the old 5000-message scan).
 
@@ -329,7 +334,8 @@ def _decorate_content_matches(conn, results: list, q: str, include_messages: boo
     if not pending:
         return
     rows = conn.execute(
-        contact_search.build_content_matches_query(q, [c["id"] for c in pending])
+        contact_search.build_content_matches_query(
+            q, [c["id"] for c in pending], access_scope=access_scope)
     ).mappings().all()
     by_contact = {r["contact_id"]: r for r in rows}
     for c in pending:
@@ -344,7 +350,8 @@ def _decorate_content_matches(conn, results: list, q: str, include_messages: boo
 
 def list_contacts(q: str = "", archived: bool = False,
                   inbox_ids: list[int] | None = None, *,
-                  include_messages: bool = True, filter_where=None) -> list[dict]:
+                  include_messages: bool = True, filter_where=None,
+                  access_scope=None) -> list[dict]:
     """List contacts with last message preview, tags, and unread counts.
 
     ``inbox_ids`` scopes by inbox membership (plano inboxes/canais §4.7): ``None``
@@ -363,14 +370,16 @@ def list_contacts(q: str = "", archived: bool = False,
     ``build_contact_where``) — ``None`` = sem filtro (retrocompatível)."""
     return list_contacts_page(q, archived, inbox_ids, limit=None, offset=0,
                               include_messages=include_messages,
-                              filter_where=filter_where)["items"]
+                              filter_where=filter_where,
+                              access_scope=access_scope)["items"]
 
 
 def list_contacts_page(q: str = "", archived: bool = False,
                        inbox_ids: list[int] | None = None, *,
                        limit: int | None = None, offset: int = 0,
                        sort: str = "recency",
-                       include_messages: bool = True, filter_where=None) -> dict:
+                       include_messages: bool = True, filter_where=None,
+                       access_scope=None) -> dict:
     """Página de contatos (plano 50 F5) → ``{items, total, has_more}``.
 
     ``limit=None`` ⇒ tudo (``total=len``, ``has_more=False``). ``limit`` set ⇒
@@ -391,11 +400,13 @@ def list_contacts_page(q: str = "", archived: bool = False,
     if inbox_ids is not None and not inbox_ids:
         return {"items": [], "total": 0, "has_more": False}  # sem inbox → nada
 
-    q_clause = contact_search.build_q_clause(q, include_messages=include_messages)
+    q_clause = contact_search.build_q_clause(
+        q, include_messages=include_messages, access_scope=access_scope)
 
     with get_engine().connect() as conn:
         stmt = contact_search.build_list_contacts_query(
-            archived=archived, inbox_ids=inbox_ids, sort=sort)
+            archived=archived, inbox_ids=inbox_ids, sort=sort,
+            access_scope=access_scope)
         if q_clause is not None:
             stmt = stmt.where(q_clause)
         if filter_where is not None:
@@ -407,11 +418,12 @@ def list_contacts_page(q: str = "", archived: bool = False,
         tags_map = contact_query.tags_by_contact(conn, [r["id"] for r in rows])
         results = [_shape_contact_row(r, tags_map.get(r["id"], [])) for r in rows]
         if q_clause is not None:
-            _decorate_content_matches(conn, results, q, include_messages)
+            _decorate_content_matches(
+                conn, results, q, include_messages, access_scope=access_scope)
         if limit is None:
             return {"items": results, "total": len(results), "has_more": False}
         count_stmt = contact_search.build_count_contacts_query(
-            archived=archived, inbox_ids=inbox_ids)
+            archived=archived, inbox_ids=inbox_ids, access_scope=access_scope)
         if q_clause is not None:
             count_stmt = count_stmt.where(q_clause)
         if filter_where is not None:

@@ -8,9 +8,13 @@ who lacks the permission, which is exactly the RBAC behavior we want.
 
 from __future__ import annotations
 
-from fastapi import Request
+from dataclasses import dataclass
 
-from db.repositories import rbac_repo, inbox_member_repo
+from fastapi import Request
+from sqlalchemy import and_, false as sa_false, or_, true as sa_true
+
+from db.repositories import rbac_repo, inbox_member_repo, team_member_repo, team_repo
+from db.tables import conversations
 from plugins.events import apply_filter, apply_filter_sync
 from server.helpers import _err
 
@@ -100,6 +104,178 @@ def can_access_inbox(request: Request, inbox_id: int | None) -> bool:
     (nega por segurança). Espelha o ``_inbox_hidden`` da leitura."""
     vis = visible_inbox_ids(request)
     return vis is None or (inbox_id is not None and inbox_id in vis)
+
+
+@dataclass(frozen=True)
+class ConversationAccessScope:
+    """One request's conversation visibility policy.
+
+    The same immutable inputs drive SQL collection filters and object guards,
+    preventing list/detail/write from drifting apart.  Team privacy never widens
+    inbox access.  ``list_hidden`` affects collections only; ``private`` also
+    protects direct reads, writes, realtime and media.
+    """
+
+    user_id: int | None
+    inbox_ids: list[int] | None
+    team_ids: frozenset[int]
+    read_any_team: bool
+    teams_by_id: dict[int, dict]
+
+    @property
+    def is_unrestricted(self) -> bool:
+        """True when neither inbox nor team policy narrows this actor."""
+        return self.inbox_ids is None and self.read_any_team
+
+    @classmethod
+    def for_request(cls, request: Request) -> "ConversationAccessScope":
+        cached = getattr(request.state, "conversation_access_scope", None)
+        if cached is not None:
+            return cached
+        user = current_user(request)
+        user_id = user.get("id") if user else None
+        # Open/legacy installs keep their historical unrestricted behavior.
+        read_any = user_id is None or rbac_repo.user_has_permission(
+            user_id, "conversation.team.read_any")
+        team_ids = (frozenset() if user_id is None else
+                    frozenset(team_member_repo.team_ids_for_user(user_id)))
+        team_rows = team_repo.list_all(include_inactive=True)
+        scope = cls(
+            user_id=user_id,
+            inbox_ids=visible_inbox_ids(request),
+            team_ids=team_ids,
+            read_any_team=read_any,
+            teams_by_id={int(team["id"]): team for team in team_rows},
+        )
+        request.state.conversation_access_scope = scope
+        return scope
+
+    @classmethod
+    def for_user(cls, user_id: int | None) -> "ConversationAccessScope":
+        """Build the same policy outside HTTP (notably WebSocket fan-out)."""
+        if user_id is None:
+            inbox_ids = None
+            read_any = True
+            team_ids = frozenset()
+        else:
+            inbox_ids = (None if rbac_repo.user_has_permission(
+                user_id, "conversation.read_all") else
+                inbox_member_repo.inbox_ids_for_user(user_id))
+            read_any = rbac_repo.user_has_permission(
+                user_id, "conversation.team.read_any")
+            team_ids = frozenset(team_member_repo.team_ids_for_user(user_id))
+        team_rows = team_repo.list_all(include_inactive=True)
+        return cls(
+            user_id=user_id, inbox_ids=inbox_ids, team_ids=team_ids,
+            read_any_team=read_any,
+            teams_by_id={int(team["id"]): team for team in team_rows},
+        )
+
+    def _team_exception_clause(self, restricted_ids: list[int]):
+        if not restricted_ids:
+            return sa_true()
+        allowed_ids = sorted(self.team_ids)
+        visible_assignee_ids = [
+            team_id for team_id in restricted_ids
+            if bool(self.teams_by_id[team_id].get("visible_to_assignee"))
+        ]
+        clauses = [
+            conversations.c.team_id.is_(None),
+            conversations.c.team_id.notin_(restricted_ids),
+        ]
+        if allowed_ids:
+            clauses.append(conversations.c.team_id.in_(allowed_ids))
+        if self.user_id is not None and visible_assignee_ids:
+            clauses.append(and_(
+                conversations.c.team_id.in_(visible_assignee_ids),
+                conversations.c.assignee_user_id == self.user_id,
+            ))
+        return or_(*clauses)
+
+    def collection_clause(self, surface: str = "list"):
+        clauses = []
+        if self.inbox_ids is not None:
+            clauses.append(
+                conversations.c.inbox_id.in_(self.inbox_ids)
+                if self.inbox_ids else sa_false())
+        if not self.read_any_team:
+            if surface == "list":
+                restricted_ids = [
+                    team_id for team_id, team in self.teams_by_id.items()
+                    if bool(team.get("restrict_visibility"))
+                ]
+            else:
+                restricted_ids = [
+                    team_id for team_id, team in self.teams_by_id.items()
+                    if bool(team.get("enforce_team_access"))
+                ]
+            clauses.append(self._team_exception_clause(restricted_ids))
+        return and_(*clauses) if clauses else sa_true()
+
+    def allows(self, conversation: dict | None, surface: str = "direct") -> bool:
+        if not conversation:
+            return False
+        inbox_id = conversation.get("inbox_id")
+        if self.inbox_ids is not None and inbox_id not in self.inbox_ids:
+            return False
+        if self.read_any_team:
+            return True
+        team_id = conversation.get("team_id")
+        if team_id is None:
+            return True
+        team = self.teams_by_id.get(int(team_id))
+        if not team:
+            return False
+        restricted = (bool(team.get("restrict_visibility")) if surface == "list"
+                      else bool(team.get("enforce_team_access")))
+        if not restricted:
+            return True
+        if int(team_id) in self.team_ids:
+            return True
+        return bool(
+            team.get("visible_to_assignee")
+            and self.user_id is not None
+            and conversation.get("assignee_user_id") == self.user_id
+        )
+
+
+def conversation_access_scope(request: Request) -> ConversationAccessScope:
+    return ConversationAccessScope.for_request(request)
+
+
+def can_assign_team(request: Request, current_team_id: int | None,
+                    target_team_id: int | None) -> bool:
+    """Whether the actor may move between the origin and destination teams."""
+    user = current_user(request)
+    if user is None:
+        return True
+    user_id = int(user["id"])
+    if rbac_repo.user_has_permission(user_id, "conversation.team.assign_any"):
+        return True
+    if not rbac_repo.user_has_permission(user_id, "conversation.team.assign"):
+        return False
+    memberships = set(team_member_repo.team_ids_for_user(user_id))
+    return all(team_id is None or team_id in memberships
+               for team_id in (current_team_id, target_team_id))
+
+
+def can_assign_user_to_conversation(conversation: dict, assignee_user_id) -> bool:
+    """Keep private conversations from receiving an assignee who cannot open them."""
+    if assignee_user_id in (None, ""):
+        return True
+    team_id = conversation.get("team_id")
+    if team_id is None:
+        return True
+    team = team_repo.get(int(team_id))
+    if not team or not team.get("enforce_team_access"):
+        return True
+    if team.get("visible_to_assignee"):
+        return True
+    try:
+        assignee_id = int(assignee_user_id)
+    except (TypeError, ValueError):
+        return False
+    return assignee_id in set(team_member_repo.member_ids(int(team_id)))
 
 
 def permission_denied(request: Request, permission_key: str):

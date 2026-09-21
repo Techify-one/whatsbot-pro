@@ -567,21 +567,74 @@ def create_app(
         "application/pdf",
     }
 
-    @app.get("/statics/outbox/{name}")
+    @app.get("/api/messages/{message_id}/media")
+    async def serve_message_media(message_id: int, request: Request):
+        """Serve message media only after conversation authorization."""
+        from db.repositories import conversation_repo, message_repo
+        from server.authz import conversation_access_scope, permission_denied
+
+        denied = permission_denied(request, "conversation.read")
+        if denied:
+            return denied
+
+        message = await asyncio.to_thread(message_repo.get_by_db_id, message_id)
+        if not message or not message.get("media_path") or not message.get("conversation_id"):
+            return Response(status_code=404)
+        conversation = await asyncio.to_thread(
+            conversation_repo.get, message["conversation_id"])
+        scope = await asyncio.to_thread(conversation_access_scope, request)
+        if not scope.allows(conversation, "direct"):
+            return Response(status_code=404)
+
+        raw_path = str(message["media_path"]).lstrip("/")
+        if not raw_path.startswith("statics/"):
+            return Response(status_code=404)
+        media_file = (settings.data_dir / raw_path).resolve()
+        statics_root = statics_dir.resolve()
+        try:
+            media_file.relative_to(statics_root)
+        except ValueError:
+            return Response(status_code=404)
+        if not media_file.is_file():
+            return Response(status_code=404)
+        mime = mimetypes.guess_type(media_file.name)[0] or "application/octet-stream"
+        headers = {"Cache-Control": "private, no-store"}
+        if mime not in _INLINE_SAFE_MIMES:
+            headers["Content-Disposition"] = (
+                f'attachment; filename="{media_file.name.replace(chr(34), "")}"')
+            mime = "application/octet-stream"
+        return FileResponse(str(media_file), media_type=mime, headers=headers)
+
+    @app.get("/statics/outbox/{name:path}")
     async def serve_outbox_media(name: str):
+        # Meta providers fetch a just-uploaded file by public URL during the
+        # outbound request, before the message row is persisted. Preserve that
+        # narrow compatibility window; once any message owns the path, reads
+        # must go through the authorized endpoint above.
+        from db.repositories import message_repo
+        from domain.media_access import public_outbox_granted
+
         if "/" in name or "\\" in name or ".." in name:
             return Response(status_code=404)
         media_file = statics_outbox_dir / name
         if not media_file.is_file():
             return Response(status_code=404)
+        referenced = await asyncio.to_thread(
+            message_repo.media_path_is_referenced, f"statics/outbox/{name}")
+        if referenced and not public_outbox_granted(f"statics/outbox/{name}"):
+            return Response(status_code=404)
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
         if mime in _INLINE_SAFE_MIMES:
             return FileResponse(str(media_file), media_type=mime)
         return FileResponse(
-            str(media_file),
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+            str(media_file), media_type="application/octet-stream",
+            headers={"Content-Disposition":
+                     f'attachment; filename="{name.replace(chr(34), "")}"'},
         )
+
+    @app.get("/statics/media/{name:path}")
+    async def block_public_inbound_media(name: str):
+        return Response(status_code=404)
 
     # Mount statics/ for GOWA media files (auto-downloaded images, audio, etc.)
     app.mount("/statics", StaticFiles(directory=str(statics_dir)), name="statics")

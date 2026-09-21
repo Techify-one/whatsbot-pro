@@ -18,6 +18,7 @@ from __future__ import annotations
 from sqlalchemy import (
     JSON,
     Column,
+    CheckConstraint,
     Float,
     ForeignKey,
     Index,
@@ -546,7 +547,14 @@ teams = Table(
     Column("updated_at", Float, nullable=False),
     Column("restrict_visibility", Integer, nullable=False, server_default="0"),  # 1 = esconde da listagem pra quem está na caixa mas não é do time — plano 154
     Column("visible_to_assignee", Integer, nullable=False, server_default="0"),  # 1 = quem está atribuído à conversa a vê mesmo fora do time (só com restrict_visibility=1) — plano 155
+    Column("enforce_team_access", Integer, nullable=False, server_default="0"),  # 1 = também bloqueia acesso direto/escrita/mídia/WS
+    Column("is_active", Integer, nullable=False, server_default="1"),
+    CheckConstraint(
+        "enforce_team_access = 0 OR restrict_visibility = 1",
+        name="ck_teams_private_requires_restricted",
+    ),
 )
+Index("uq_teams_name_normalized", func.lower(func.btrim(teams.c.name)), unique=True)
 
 team_members = Table(
     "team_members",

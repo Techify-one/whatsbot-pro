@@ -137,6 +137,9 @@ def conversation_dto(row: dict) -> dict:
         "is_pinned": bool(row.get("is_pinned")),
         "assignee_user_id": row.get("assignee_user_id"),
         "team_id": row.get("team_id"),
+        "team_name": row.get("team_name"),
+        "team_is_active": (bool(row.get("team_is_active"))
+                           if row.get("team_id") is not None else None),
         "active_agent_key": row.get("active_agent_key"),
         "ai_active": bool(row.get("ai_active", 1)),
         "labels": row.get("labels") or [],
@@ -150,8 +153,9 @@ def conversation_dto(row: dict) -> dict:
 def message_dto(row: dict) -> dict:
     if not row:
         return {}
+    message_id = row.get("id") if row.get("id") is not None else row.get("_id")
     return {
-        "id": row.get("id"),
+        "id": message_id,
         "conversation_id": row.get("conversation_id"),
         "role": row.get("role"),
         "content": row.get("content"),
@@ -159,7 +163,8 @@ def message_dto(row: dict) -> dict:
         "status": row.get("status"),
         "msg_id": row.get("msg_id"),
         "media_type": row.get("media_type"),
-        "media_path": row.get("media_path"),
+        "media_path": (f"/api/messages/{message_id}/media"
+                       if row.get("media_path") and message_id is not None else None),
         "media_caption": row.get("media_caption"),
         "reply_to_msg_id": row.get("reply_to_msg_id"),
         "reactions": row.get("reactions"),

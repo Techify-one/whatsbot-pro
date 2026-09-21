@@ -70,7 +70,8 @@ def mark_as_read(contact_id: int) -> list[str]:
     return msg_ids
 
 
-def unread_conversation_count(inbox_ids: list[int] | None = None) -> int:
+def unread_conversation_count(inbox_ids: list[int] | None = None, *,
+                              access_scope=None) -> int:
     """Number of non-archived conversations that have unread messages — used for the
     browser-tab badge (e.g. "(3) WhatsBot"). Counts a conversation once regardless of
     how many messages are unread, mirroring the sidebar badge visibility.
@@ -78,10 +79,14 @@ def unread_conversation_count(inbox_ids: list[int] | None = None) -> int:
     Contact-centric (denormalized counters) — the single source of truth. The
     conversation-centric join variant was removed (dead, and incompatible with the
     phantom-msg_id increment in the legacy suite)."""
-    if inbox_ids == []:
+    scoped = access_scope is not None and not access_scope.is_unrestricted
+    if not scoped and access_scope is None and inbox_ids == []:
         return 0
     stmt = select(func.count(func.distinct(contacts.c.id))).select_from(contacts)
-    if inbox_ids is not None:
+    if scoped:
+        stmt = stmt.join(conversations, conversations.c.contact_id == contacts.c.id)
+        stmt = stmt.where(access_scope.collection_clause("list"))
+    elif access_scope is None and inbox_ids is not None:
         stmt = stmt.join(conversations, conversations.c.contact_id == contacts.c.id)
         stmt = stmt.where(conversations.c.inbox_id.in_(inbox_ids))
     stmt = stmt.where(
@@ -117,15 +122,23 @@ def mark_as_unread(contact_id: int) -> None:
         ))
 
 
-def mark_all_as_unread() -> int:
+def mark_all_as_unread(*, access_scope=None) -> int:
     """Mark every conversation as unread (green badge).
 
     Only rows currently at 0 are touched, so existing higher counts are kept.
     Returns the number of conversations newly marked.
     """
+    contact_scope = None
+    if access_scope is not None and not access_scope.is_unrestricted:
+        contact_scope = contacts.c.id.in_(
+            select(conversations.c.contact_id).where(
+                access_scope.collection_clause("write")))
+    where = contacts.c.unread_count < 1
+    if contact_scope is not None:
+        where = where & contact_scope
     with get_engine().begin() as conn:
         result = conn.execute(
-            sa_update(contacts).where(contacts.c.unread_count < 1).values(
+            sa_update(contacts).where(where).values(
                 unread_count=1,
                 updated_at=time.time(),
             )
@@ -133,18 +146,30 @@ def mark_all_as_unread() -> int:
     return result.rowcount or 0
 
 
-def mark_all_as_read() -> int:
+def mark_all_as_read(*, access_scope=None) -> int:
     """Reset unread counts for every conversation (clear all in-app badges).
 
     App-only: clears the tracked unread msg_ids too, but does not send WhatsApp
     read receipts. Returns the number of conversations that had unread badges.
     """
+    contact_scope = None
+    if access_scope is not None and not access_scope.is_unrestricted:
+        contact_scope = contacts.c.id.in_(
+            select(conversations.c.contact_id).where(
+                access_scope.collection_clause("write")))
     with get_engine().begin() as conn:
-        conn.execute(sa_delete(unread_msg_ids))
+        unread_delete = sa_delete(unread_msg_ids)
+        if contact_scope is not None:
+            unread_delete = unread_delete.where(
+                unread_msg_ids.c.contact_id.in_(select(contacts.c.id).where(contact_scope)))
+        conn.execute(unread_delete)
+        where = ((contacts.c.unread_count > 0) | (contacts.c.unread_ai_count > 0)
+                 | (contacts.c.has_unread_mention > 0))
+        if contact_scope is not None:
+            where = where & contact_scope
         result = conn.execute(
             sa_update(contacts)
-            .where((contacts.c.unread_count > 0) | (contacts.c.unread_ai_count > 0)
-                   | (contacts.c.has_unread_mention > 0))
+            .where(where)
             .values(unread_count=0, unread_ai_count=0, has_unread_mention=0, updated_at=time.time())
         )
     return result.rowcount or 0

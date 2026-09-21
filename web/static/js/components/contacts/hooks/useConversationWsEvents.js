@@ -193,6 +193,21 @@ export function useConversationWsEvents(opts) {
   // P19: latest conversation-scope custom-attribute write, forwarded to the open
   // ConversationInfoPanel for live refresh (mirrors contact_info_updated → panel).
   const onConversationChanged = useCallback((name, data) => {
+    if (name === 'conversation_access_changed') {
+      const teamId = data && data.team_id;
+      if (teamId == null) return;
+      const selectedRow = contactsRef.current.find(
+        c => c.conversation_id === selectedConvIdRef.current);
+      setContacts(prev => prev.filter(c => c.team_id !== teamId));
+      if (selectedRow && selectedRow.team_id === teamId) {
+        setSelected(null);
+        setSelectedConvId(null);
+        setContactData(null);
+        history.pushState(null, '', '/');
+      }
+      scheduleListRefetch();
+      return;
+    }
     // plano 28: the AUTHORITATIVE list-row event. Carries the whole enriched row;
     // we upsert it by conversation_id (insert brand-new, or scoped-merge the
     // message/preview/unread of an existing row) — no refetch, no stale-read race.

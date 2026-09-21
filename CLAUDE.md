@@ -2,6 +2,11 @@
 
 Bot de WhatsApp com IA para uso em servidor/cloud (Coolify/Docker) — **decisão de distribuição (plano 29 P1)**: o produto é server/cloud-first; o empacotamento EXE Windows ficou suspenso quando o banco virou Postgres-only (não há PG em máquina de usuário final). Os launchers dev de Windows/macOS continuam funcionando apontando para um Postgres remoto.
 
+## Entregáveis
+
+Nunca publique Artifacts (link `claude.ai/code/artifact/...`), nem em pesquisa/análise —
+só se eu pedir explicitamente. Regra completa em `~/.claude/CLAUDE.md`.
+
 ## Índice de documentação — leia ANTES de mexer
 
 Este arquivo carrega a **regra**; o **porquê** (histórico, medições, o que enganava) mora nos guias abaixo. Todo ⚠️/🚫 daqui tem o caso completo no guia da área — **abra o guia antes de "consertar" o que um aviso manda não mexer**.
@@ -247,7 +252,7 @@ O loop de raciocínio + tool calling roda no **AGNO** ([agent/agno_engine.py](ag
 
 ⚠️ **Time (`atendimentos.team_id`, plano 153) é campo INDEPENDENTE do `assignee_user_id`** — `conversation_service.assign_team` nunca passa pelo cotovelo `_transfer` (que existe só porque assignee/agente-de-IA/gate-da-IA SÃO mutuamente exclusivos); é escrita isolada, como `set_agent`.
 
-⚠️ **`teams.restrict_visibility` (plano 154) só afeta a LISTAGEM** — esconde a conversa da sidebar/`/filter`/`/count` para quem está na caixa mas não é do time; abrir por ID/link continua 200 SEMPRE (D3, sem exceção nenhuma), `_inbox_hidden`/`_guard_conv` intactos. **`teams.visible_to_assignee` (plano 155) é um 2º flag ANINHADO** — com os dois ligados, quem é `assignee_user_id` de UMA conversa daquele time volta a vê-la na listagem mesmo fora do time (exceção por pessoa/conversa, não reabre o time inteiro); sozinho (sem `restrict_visibility`) não faz nada. `conversation.read_all`/admin sempre veem tudo.
+⚠️ **Acesso de time tem TRÊS modos (plano 166/01)**: `open`; `list_hidden` (`restrict_visibility=1`, compatível com o plano 154: restringe só coleções); e `private` (`enforce_team_access=1`, implica `restrict_visibility` e também protege link/detalhe, escrita, v1, busca, WS e mídia com 404). A inbox continua soberana. **`visible_to_assignee` é exceção individual** para o responsável daquela conversa. `conversation.read_all` amplia inboxes, mas **não** ignora time; o bypass explícito é `conversation.team.read_any` (admin o recebe pelo wildcard). A policy única é `ConversationAccessScope` em [server/authz.py](server/authz.py).
 
 **Filtro de histórico por regex** (plano 43): lista-negra GLOBAL em `ai_history_exclude_patterns` (default `[]`), cada linha testada como `f"{role}\t{content}"` com `re.search`. [agent/history_filter.py](agent/history_filter.py) é **fail-open** em todo nível. `message_repo.get_context(..., exclude=...)` faz over-fetch (cap 200) — cortar linhas **não encolhe** a janela abaixo de `max_context_messages`.
 
@@ -278,13 +283,13 @@ Info é salva automaticamente via tool calling do LLM e injetada no system promp
 - **Player de áudio** (plano 138): a barra é um **scrubber por Pointer Events** (`pointerdown/move/up` + `setPointerCapture`), com a aritmética no módulo puro [audioScrub.js](web/static/js/services/audioScrub.js) (`node --test`). Nasceu com só um `onClick` numa faixa de **4px** e por isso **nunca** teve arraste: no gesto o `click` cai no ancestral comum, que não tem handler. ⚠️ **`touch-action:none` é obrigatório** (o móvel lê o arraste como rolagem e rouba o gesto) e **não pode existir `onClick` de seek** junto com o `pointerdown` — buscaria duas vezes. ⚠️ **`scrubRatio` compara com `null`, nunca por truthiness** (arrastar ao início é `0`, falsy) e durante o arraste o `timeupdate` **não** manda na posição exibida.
 - **Rótulo do remetente** (plano 143): quem decide é `isOperatorMessage` ([messageView.js](web/static/js/services/messageView.js)), **nunca** `status === 'operator'` — a falha de envio sobrescreve `operator`→`failed` e fazia toda mensagem manual falhada assinar "IA". ⚠️ O predicado exige a marca de autoria (`sent_by_name`/`sent_by_user_id`): sem ela a resposta da IA que falha passaria a assinar "Manual".
 - **Quem falou no grupo** (autor da bolha): não há coluna de remetente — o autor viaja como o prefixo `"[Fulano]: "` dentro do próprio `content`, carimbado no inbound e extraído por `stripGroupPrefix`. ⚠️ **Ele tem de ser o PRIMEIRO elemento do `content`**: a imagem era a única mídia sem placeholder (foto sem legenda ⇒ `content=''` ⇒ a bolha assinava com o **nome do grupo**) e a única com junção prefix-first na descrição da IA (o autor ia para a 2ª linha e a bolha assinava **"Descrição da imagem"**). Quem lê o `content` cru desconta o carimbo antes de decidir o que é legenda.
+- **Contador da janela do cliente** (plano 159): chip ao lado do seletor Responder/Mensagem Privada com o tempo restante, do módulo puro [sessionWindow.js](web/static/js/services/sessionWindow.js) sobre `last_inbound_ts` + `session_window_hours` **efetivo** (`OutboundRouter.window_hours(by_human=True)` — a MESMA conta do `session_open`). ⚠️ O tamanho vem do servidor, nunca de "24h" no cliente (Meta com `human_agent_tag` = 7 dias), e `shapeConvData` é **whitelist**: campo não listado lá some sem erro.
+- **Atalhos conversa ⇄ protocolo** (plano 159): slot `conversation.header.primary` (NA BARRA, ao lado do Resolver — o `conversation.header.actions` é dentro do ⋮) + ícone no card do Kanban. ⚠️ Ctrl+clique exige `<a href>` com o alvo **já resolvido**: `window.open` depois de `await` é recusado em silêncio.
 - **Digitação entre atendentes**: a rota de presença reemite `operator_typing` no WS (heartbeat de 10s, auto-limpeza em 15s no cliente), para dois atendentes não responderem por cima um do outro.
 
 ## Fotos de perfil (avatars)
 
 [server/avatars.py](server/avatars.py) cacheia as fotos de perfil em disco em `statics/avatars/<phone>.jpg` (servidas pelo mount estático). Como o WhatsApp não emite evento de "foto mudou", a atualização é por re-fetch do GOWA (ao abrir a conversa e numa varredura periódica de fundo — `AVATAR_REFRESH_INTERVAL = 1800s` em [server/background.py](server/background.py)), sobrescrevendo o arquivo só quando os bytes diferem. O frontend faz cache-bust pelo mtime (`avatar_v`); uma mudança dispara o WS `avatar_updated` `{phone, v}` pra atualizar ao vivo sem reload.
-- **Contador da janela do cliente** (plano 159): chip ao lado do seletor Responder/Mensagem Privada com o tempo restante, do módulo puro [sessionWindow.js](web/static/js/services/sessionWindow.js) sobre `last_inbound_ts` + `session_window_hours` **efetivo** (`OutboundRouter.window_hours(by_human=True)` — a MESMA conta do `session_open`). ⚠️ O tamanho vem do servidor, nunca de "24h" no cliente (Meta com `human_agent_tag` = 7 dias), e `shapeConvData` é **whitelist**: campo não listado lá some sem erro.
-- **Atalhos conversa ⇄ protocolo** (plano 159): slot `conversation.header.primary` (NA BARRA, ao lado do Resolver — o `conversation.header.actions` é dentro do ⋮) + ícone no card do Kanban. ⚠️ Ctrl+clique exige `<a href>` com o alvo **já resolvido**: `window.open` depois de `await` é recusado em silêncio.
 
 ## @menções em grupos
 

@@ -185,3 +185,14 @@ O webhook detecta os tipos abaixo e os converte em `parsed_msg` (`media_type` + 
 🚫 **Registrar um media type NOVO não é possível hoje.** O antigo `filter.media.unknown` foi retirado de `KNOWN_FILTERS` no plano 100 porque não tinha call site; quem ainda o registra recebe WARNING em vez de falhar em silêncio. O dispatch de inbound continua fechado (12 `kind` literais, sem `else` e sem log de "kind não reconhecido"), então o provider deve converter o payload para um kind suportado dentro do próprio `parse_inbound`.
 
 Regra de versão do catálogo — caso particular da regra geral em "Versionamento da API de plugins": remover/renomear um filtro **com produtor vivo** exige MAJOR em `WHATSBOT_API_VERSION` (que hoje derrubaria os 36 manifests do parque de uma vez). Retirar um nome apenas documentado, sem `apply_filter` no core suportado, é PATCH — nenhum comportamento executável deixa de existir —, mas exige varredura, entrada em [docs/PLUGIN_API_CHANGELOG.md](../docs/PLUGIN_API_CHANGELOG.md) e teste de WARNING como o caso acima. **Acrescentar** nome é MINOR, no MESMO commit do call site — travado por `test_bus_catalogue_matches_producers`, que compara o catálogo com os produtores reais nas duas direções.
+
+### Audiência de conversa no WebSocket (plano 166/01)
+
+O bus interno continua entregando eventos aos subscribers do processo; ele não é
+uma fronteira de autorização para plugins. Já a projeção WebSocket do core guarda
+o `user_id` de cada socket e aplica `ConversationAccessScope` no momento de cada
+evento sensível. Payload sem `conversation_id` precisa ser resolvível por mensagem
+ou por contato+canal; se a conversa não puder ser provada, o fan-out falha fechado
+em vez de virar broadcast global. Mudanças administrativas de acesso usam o evento
+global, sem conteúdo, `conversation_access_changed` para obrigar o cliente a
+descartar estado e consultar novamente.

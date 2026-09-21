@@ -28,12 +28,21 @@ export function TeamPickerList({
   const [search, setSearch] = useState('');
 
   const q = search.trim().toLowerCase();
-  const filtered = teams.filter(t => !q || (t.name || '').toLowerCase().includes(q));
+  // O catálogo também traz times apenas legíveis para preservar o nome do time
+  // atual. Eles não podem virar destino de uma atribuição sem a capability.
+  const filtered = teams.filter(t =>
+    (t.assignable !== false || t.id === currentTeamId)
+    && (!q || (t.name || '').toLowerCase().includes(q)));
+  const currentTeam = teams.find(t => t.id === currentTeamId);
+  const canClear = currentTeamId != null && (!currentTeam || currentTeam.assignable !== false);
 
   const rowCls = (active) =>
     `w-full text-left px-3 py-1.5 text-[13px] hover:bg-wa-hover transition-colors flex items-center gap-2 ${active ? 'text-wa-teal font-medium' : 'text-wa-text'}`;
 
-  const pick = (teamId) => { if (!busy && onPick) onPick(teamId); };
+  const pick = (teamId) => {
+    const target = teamId == null ? currentTeam : teams.find(t => t.id === teamId);
+    if (!busy && (!target || target.assignable !== false) && onPick) onPick(teamId);
+  };
 
   return html`
     <div>
@@ -47,13 +56,16 @@ export function TeamPickerList({
           class="wa-field w-full text-[13px] rounded-md px-2 py-1.5 border border-wa-border outline-none"
         />
       </div>
-      ${currentTeamId != null ? html`
+      ${canClear ? html`
         <button onClick=${() => pick(null)} class="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-wa-hover transition-colors flex items-center gap-2">
           <span class="w-[15px] shrink-0"></span> Nenhum time
         </button>
       ` : null}
       ${filtered.length > 0 ? filtered.map(t => html`
-        <button key=${'t' + t.id} onClick=${() => pick(t.id)} class=${rowCls(currentTeamId === t.id)}>
+        <button key=${'t' + t.id} onClick=${() => pick(t.id)}
+          disabled=${busy || t.assignable === false}
+          title=${t.assignable === false ? 'Você não tem permissão para mover esta conversa deste time.' : ''}
+          class="${rowCls(currentTeamId === t.id)} disabled:opacity-50 disabled:cursor-not-allowed">
           <span class="text-wa-secondary"><${TeamIcon} /></span>
           <span class="truncate">${t.name}</span>
         </button>
