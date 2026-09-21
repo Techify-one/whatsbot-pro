@@ -26,6 +26,7 @@ plugin bus / caches via lazy imports to avoid an import cycle.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -36,7 +37,7 @@ from sqlalchemy.exc import IntegrityError
 
 from channels import dedup
 from db.repositories import (channel_repo, channel_credential_repo, inbox_repo,
-                             inbox_member_repo, user_repo)
+                             inbox_member_repo, user_repo, team_repo)
 from plugins.events import emit_with_filter
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,63 @@ def assignable_ai_agents() -> list[dict]:
     except Exception:
         logger.exception("[channels] falha ao listar agentes de IA atribuíveis")
         return []
+
+
+def assignable_teams() -> list[dict]:
+    """Active teams available as a channel's default destination."""
+    try:
+        return [
+            {"id": team["id"], "name": team["name"],
+             "routing_mode": team.get("routing_mode") or "manual"}
+            for team in team_repo.list_all(include_inactive=False)
+        ]
+    except Exception:
+        logger.exception("[channels] falha ao listar times atribuíveis")
+        return []
+
+
+_DEFAULT_DESTINATION_KEYS = (
+    "default_assignee_user_id",
+    "default_assignee_agent_key",
+    "default_assignee_team_id",
+)
+
+
+def normalize_default_destination(config):
+    """Make the channel's human/AI/team destination mutually exclusive.
+
+    The API accepts the full channel config as well as a partial ``ai`` object.
+    When malformed input contains more than one destination, the historical
+    precedence (human, then AI, then team) keeps old hand-edited configurations
+    from unexpectedly enabling automation.
+    """
+    if not isinstance(config, dict):
+        return config
+    normalized = copy.deepcopy(config)
+    ai = normalized.get("ai")
+    if not isinstance(ai, dict):
+        return normalized
+
+    def _present(key: str) -> bool:
+        value = ai.get(key)
+        return value is not None and value != "" and value is not False
+
+    winner = next((key for key in _DEFAULT_DESTINATION_KEYS if _present(key)), None)
+    for key in _DEFAULT_DESTINATION_KEYS:
+        if key != winner:
+            ai.pop(key, None)
+    if winner == "default_assignee_team_id":
+        raw = ai[winner]
+        if isinstance(raw, bool):
+            raise ValueError("Time padrão inválido.")
+        try:
+            team_id = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Time padrão inválido.") from exc
+        if team_id <= 0:
+            raise ValueError("Time padrão inválido.")
+        ai[winner] = team_id
+    return normalized
 
 
 # ── Provider instantiation / live registration (R15 via registry.instantiate) ───
@@ -674,8 +732,9 @@ async def get_members(deps, row: dict) -> dict:
     # plano 152: o mesmo payload alimenta o "atendente padrão para novas conversas"
     # do form de edição, que aceita humano OU agente de IA.
     ai_agents = await asyncio.to_thread(assignable_ai_agents)
+    teams = await asyncio.to_thread(assignable_teams)
     return {"inbox_id": inbox["id"], "member_ids": members, "users": users,
-            "ai_agents": ai_agents}
+            "ai_agents": ai_agents, "teams": teams}
 
 
 async def set_members(deps, row: dict, user_ids: list[int]) -> dict:
@@ -718,6 +777,7 @@ async def create(deps, *, cid: str, provider: str, display_name: str,
     BEFORE persisting anything. GOWA has no create-time identity → dedups later via
     the sweep."""
     identity = _guard_duplicate(deps, provider, submitted_creds, exclude_channel_id=None)
+    config = normalize_default_destination(config)
     row = await asyncio.to_thread(
         channel_repo.create, id=cid, provider=provider,
         display_name=display_name or cid,
@@ -781,7 +841,7 @@ async def update(deps, row: dict, body: dict) -> dict:
     if "enabled" in body:
         fields["enabled"] = 1 if body["enabled"] else 0
     if "config" in body:
-        cfg = body["config"]
+        cfg = normalize_default_destination(body["config"])
         fields["config"] = json.dumps(cfg) if isinstance(cfg, (dict, list)) else cfg
     if fields:
         row = await asyncio.to_thread(channel_repo.update, channel_id, **fields)

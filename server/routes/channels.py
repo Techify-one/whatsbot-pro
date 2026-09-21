@@ -275,7 +275,8 @@ def register_routes(app, deps):
             return denied
         users = await asyncio.to_thread(svc.assignable_users)
         ai_agents = await asyncio.to_thread(svc.assignable_ai_agents)
-        return _ok({"users": users, "ai_agents": ai_agents})
+        teams = await asyncio.to_thread(svc.assignable_teams)
+        return _ok({"users": users, "ai_agents": ai_agents, "teams": teams})
 
     @app.get("/api/channels/providers")
     async def list_providers(request: Request):
@@ -376,6 +377,8 @@ def register_routes(app, deps):
                 gowa_device_id=gowa_device_id)
         except svc.DuplicateChannelError as e:
             return _err(str(e), 409)
+        except ValueError as e:
+            return _err(str(e), 400)
         return _ok(data)
 
     @app.put("/api/channels/{channel_id}")
@@ -397,6 +400,8 @@ def register_routes(app, deps):
             return _ok(await svc.update(deps, row, body))
         except svc.DuplicateChannelError as e:
             return _err(str(e), 409)
+        except ValueError as e:
+            return _err(str(e), 400)
 
     @app.get("/api/channels/{channel_id}/members")
     async def get_channel_members(channel_id: str, request: Request):

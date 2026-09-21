@@ -281,6 +281,70 @@ class ContactMemory:
             return None
         return key
 
+    def _resolve_default_team_id(self) -> tuple[bool, int | None]:
+        """Return ``(configured, team_id)`` for the channel team destination.
+
+        ``configured`` remains true for malformed/stale values. That distinction
+        is safety-critical: an invalid configured team falls to the unassigned,
+        AI-off queue instead of silently applying another channel default.
+        """
+        from channels import ai_settings
+
+        overrides = ai_settings.overrides(self.channel_id)
+        if "default_assignee_team_id" not in overrides:
+            return False, None
+        raw = overrides.get("default_assignee_team_id")
+        if raw in (None, "") or isinstance(raw, bool):
+            return True, None
+        try:
+            team_id = int(raw)
+        except (TypeError, ValueError):
+            return True, None
+        return True, team_id if team_id > 0 else None
+
+    def _conversation_owner_is_live(self, conv: dict | None) -> bool:
+        """Whether a closed conversation still has a usable explicit owner."""
+        if not conv:
+            return False
+        assignee = conv.get("assignee_user_id")
+        if assignee is not None:
+            try:
+                from db.repositories import user_repo
+                return bool(user_repo.is_active(int(assignee)))
+            except Exception:
+                logger.exception("Falha ao validar dono humano da conversa %s",
+                                 conv.get("id"))
+                return False
+        agent_key = conv.get("active_agent_key")
+        if agent_key and conv.get("ai_active"):
+            try:
+                from db.repositories import agent_repo
+                return bool(agent_repo.is_enabled(str(agent_key)))
+            except Exception:
+                logger.exception("Falha ao validar dono IA da conversa %s",
+                                 conv.get("id"))
+        return False
+
+    def _route_lifecycle_team(self, conv: dict, team_id: int | None) -> dict:
+        """Apply automatic team routing without operator events/notices."""
+        if team_id is not None:
+            try:
+                from app.services.team_routing_service import route_to_team_sync
+                route_to_team_sync(conv["id"], team_id)
+                return conversation_repo.get(conv["id"]) or conv
+            except Exception:
+                logger.exception(
+                    "Falha ao rotear automaticamente conversa %s para time %s; "
+                    "mantendo fila segura", conv.get("id"), team_id)
+        try:
+            return conversation_repo.assign_agent(
+                conv["id"], assignee_user_id=None,
+                active_agent_key=None, ai_active=0) or conv
+        except Exception:
+            logger.exception("Falha ao materializar fila segura na conversa %s",
+                             conv.get("id"))
+            return conv
+
     def _resolve_contact_type(self) -> str:
         """Tipo do contato declarado pelo provider do canal (plano tipos-de-contato).
 
@@ -431,11 +495,40 @@ class ContactMemory:
                 agent_seed = self._resolve_default_agent_key()
                 if agent_seed:
                     seed = 1
+            team_configured, default_team_id = self._resolve_default_team_id()
+            existing = conversation_repo.get_latest_for_contact_inbox(
+                self.id, self.inbox_id)
+            route_team_id: int | None = None
+            route_to_safe_queue = False
+            if not create_closed:
+                if existing is None:
+                    # Keep the historical precedence for malformed configs that
+                    # contain more than one default: human, AI, then team.
+                    if assignee_seed is None and agent_seed is None and team_configured:
+                        route_team_id = default_team_id
+                        route_to_safe_queue = True
+                elif reopen_closed and existing.get("status") == "closed":
+                    if not self._conversation_owner_is_live(existing):
+                        if existing.get("team_id") is not None:
+                            route_team_id = int(existing["team_id"])
+                            route_to_safe_queue = True
+                        elif assignee_seed is None and agent_seed is None and team_configured:
+                            route_team_id = default_team_id
+                            route_to_safe_queue = True
+            if route_to_safe_queue:
+                # Routing owns every ownership field. Suppress the repo's legacy
+                # channel defaults so an inactive team/invalid target cannot fall
+                # through to a human or AI after the canonical safe fallback.
+                seed = 0
+                assignee_seed = None
+                agent_seed = None
             conv, transition = conversation_repo.resolve_for_contact_ex(
                 self.id, self._source_id(), reopen_if_closed=reopen_closed,
                 inbox_id=self.inbox_id, origin=origin, create_closed=create_closed,
                 ai_active_seed=seed, assignee_user_id_seed=assignee_seed,
                 active_agent_key_seed=agent_seed)
+            if transition in {"created", "reopened"} and route_to_safe_queue:
+                conv = self._route_lifecycle_team(conv, route_team_id)
             return conv, conv["id"], transition
         except Exception:
             logger.exception("Falha ao resolver conversa para %s", self.phone)
