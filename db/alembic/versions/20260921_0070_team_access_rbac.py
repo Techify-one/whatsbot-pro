@@ -1,4 +1,4 @@
-"""Team access modes, lifecycle and RBAC permissions.
+"""Team access modes, routing state and RBAC permissions.
 
 Existing restricted teams remain ``list_hidden``: ``enforce_team_access`` is
 backfilled to zero.  ``private`` is therefore opt-in and never introduced by
@@ -12,6 +12,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 revision: str = "0070_team_access_rbac"
@@ -44,12 +45,58 @@ def upgrade() -> None:
         "enforce_team_access", sa.Integer(), nullable=False, server_default="0"))
     op.add_column("teams", sa.Column(
         "is_active", sa.Integer(), nullable=False, server_default="1"))
+    op.add_column("teams", sa.Column(
+        "routing_mode", sa.Text(), nullable=False, server_default="manual"))
+    op.add_column("teams", sa.Column("default_user_id", sa.Integer(), nullable=True))
+    op.add_column("teams", sa.Column("default_agent_key", sa.Text(), nullable=True))
+    op.add_column("teams", sa.Column(
+        "ai_assignable", sa.Integer(), nullable=False, server_default="0"))
+    op.create_foreign_key(
+        "fk_teams_default_user_id_users", "teams", "users",
+        ["default_user_id"], ["id"], ondelete="SET NULL")
+    op.create_foreign_key(
+        "fk_teams_default_agent_key_ai_agents", "teams", "ai_agents",
+        ["default_agent_key"], ["agent_key"], ondelete="SET NULL")
     op.create_check_constraint(
         "ck_teams_private_requires_restricted", "teams",
         "enforce_team_access = 0 OR restrict_visibility = 1")
+    op.create_check_constraint(
+        "ck_teams_routing_mode", "teams",
+        "routing_mode IN ('manual', 'round_robin', 'fixed_user', 'fixed_ai')")
+    op.create_check_constraint(
+        "ck_teams_routing_user_target", "teams",
+        "default_user_id IS NULL OR routing_mode = 'fixed_user'")
+    op.create_check_constraint(
+        "ck_teams_routing_agent_target", "teams",
+        "default_agent_key IS NULL OR routing_mode = 'fixed_ai'")
+    op.create_check_constraint(
+        "ck_teams_ai_assignable_bool", "teams", "ai_assignable IN (0, 1)")
     op.create_index(
         "uq_teams_name_normalized", "teams", [sa.text("lower(btrim(name))")],
         unique=True)
+
+    op.create_table(
+        "team_routing_state",
+        sa.Column("team_id", sa.Integer(), nullable=False),
+        sa.Column("inbox_id", sa.Integer(), nullable=False),
+        sa.Column("last_user_id", sa.Integer(), nullable=True),
+        sa.Column("updated_at", sa.Float(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["team_id"], ["teams.id"], name="fk_team_routing_state_team",
+            ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["inbox_id"], ["inboxes.id"], name="fk_team_routing_state_inbox",
+            ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["last_user_id"], ["users.id"],
+            name="fk_team_routing_state_last_user", ondelete="SET NULL"),
+        sa.PrimaryKeyConstraint("team_id", "inbox_id"),
+    )
+    op.create_index(
+        "idx_team_routing_state_last_user", "team_routing_state", ["last_user_id"])
+
+    op.add_column(
+        "ai_agents", sa.Column("routing_team_ids", JSONB(), nullable=True))
 
     existing = {r[0] for r in conn.execute(sa.text("SELECT key FROM permissions"))}
     rows = [{"key": key, "description": description}
@@ -93,7 +140,22 @@ def downgrade() -> None:
             conn.execute(sa.text(
                 "DELETE FROM permissions WHERE id = :permission_id"),
                 {"permission_id": permission_id})
+    op.drop_column("ai_agents", "routing_team_ids")
+    op.drop_index("idx_team_routing_state_last_user", table_name="team_routing_state")
+    op.drop_table("team_routing_state")
     op.drop_index("uq_teams_name_normalized", table_name="teams")
+    op.drop_constraint("ck_teams_ai_assignable_bool", "teams", type_="check")
+    op.drop_constraint("ck_teams_routing_agent_target", "teams", type_="check")
+    op.drop_constraint("ck_teams_routing_user_target", "teams", type_="check")
+    op.drop_constraint("ck_teams_routing_mode", "teams", type_="check")
     op.drop_constraint("ck_teams_private_requires_restricted", "teams", type_="check")
+    op.drop_constraint(
+        "fk_teams_default_agent_key_ai_agents", "teams", type_="foreignkey")
+    op.drop_constraint(
+        "fk_teams_default_user_id_users", "teams", type_="foreignkey")
+    op.drop_column("teams", "ai_assignable")
+    op.drop_column("teams", "default_agent_key")
+    op.drop_column("teams", "default_user_id")
+    op.drop_column("teams", "routing_mode")
     op.drop_column("teams", "is_active")
     op.drop_column("teams", "enforce_team_access")

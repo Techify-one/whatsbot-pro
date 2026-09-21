@@ -11,6 +11,9 @@ from sqlalchemy import func, insert, select
 from db.engine import get_engine
 from db.tables import conversations, team_members, teams, users
 
+ROUTING_MODES = frozenset({"manual", "round_robin", "fixed_user", "fixed_ai"})
+_UNSET = object()
+
 
 class TeamNameConflict(ValueError):
     pass
@@ -32,7 +35,28 @@ def _serialize(row) -> dict | None:
         result["access_mode"] = "list_hidden"
     else:
         result["access_mode"] = "open"
+    result["ai_assignable"] = bool(result.get("ai_assignable", 0))
     return result
+
+
+def _routing_values(*, routing_mode: str,
+                    default_user_id: int | None,
+                    default_agent_key: str | None) -> dict:
+    """Normalize routing config while keeping deleted targets fallback-safe."""
+    mode = str(routing_mode or "").strip()
+    if mode not in ROUTING_MODES:
+        raise ValueError(f"Modo de distribuição inválido: {routing_mode!r}.")
+    if mode != "fixed_user" and default_user_id is not None:
+        raise ValueError("default_user_id só pode ser usado em fixed_user.")
+    if mode != "fixed_ai" and default_agent_key:
+        raise ValueError("default_agent_key só pode ser usado em fixed_ai.")
+    return {
+        "routing_mode": mode,
+        "default_user_id": (int(default_user_id)
+                            if default_user_id is not None else None),
+        "default_agent_key": (str(default_agent_key).strip()
+                              if default_agent_key else None),
+    }
 
 
 def _member_ids(conn, team_id: int) -> list[int]:
@@ -90,10 +114,17 @@ def get(team_id: int) -> dict | None:
 
 def create(name: str, description: str = "", restrict_visibility: bool = False,
           visible_to_assignee: bool = False, enforce_team_access: bool = False,
-          member_user_ids: list[int] | None = None) -> dict:
+          member_user_ids: list[int] | None = None,
+          routing_mode: str = "manual",
+          default_user_id: int | None = None,
+          default_agent_key: str | None = None,
+          ai_assignable: bool = False) -> dict:
     if enforce_team_access:
         restrict_visibility = True
     now = time.time()
+    routing = _routing_values(
+        routing_mode=routing_mode, default_user_id=default_user_id,
+        default_agent_key=default_agent_key)
     with get_engine().begin() as conn:
         _ensure_unique_name(conn, name)
         result = conn.execute(insert(teams).values(
@@ -102,6 +133,8 @@ def create(name: str, description: str = "", restrict_visibility: bool = False,
             visible_to_assignee=1 if visible_to_assignee else 0,
             enforce_team_access=1 if enforce_team_access else 0,
             is_active=1,
+            ai_assignable=1 if ai_assignable else 0,
+            **routing,
             created_at=now, updated_at=now))
         team_id = result.inserted_primary_key[0]
         members = _replace_members(conn, team_id, member_user_ids or [])
@@ -120,7 +153,11 @@ def update(team_id: int, *, name: str | None = None,
           enforce_team_access: bool | None = None,
           is_active: bool | None = None,
           member_user_ids: list[int] | None = None,
-          confirm_access_expansion: bool = False) -> dict | None:
+          confirm_access_expansion: bool = False,
+          routing_mode: str | None = None,
+          default_user_id=_UNSET,
+          default_agent_key=_UNSET,
+          ai_assignable: bool | None = None) -> dict | None:
     with get_engine().begin() as conn:
         current = conn.execute(
             select(teams).where(teams.c.id == team_id).with_for_update()
@@ -151,6 +188,26 @@ def update(team_id: int, *, name: str | None = None,
             values["enforce_team_access"] = 1 if enforce_team_access else 0
         if is_active is not None:
             values["is_active"] = 1 if is_active else 0
+        final_mode = routing_mode or current["routing_mode"]
+        final_user = (current["default_user_id"]
+                      if default_user_id is _UNSET else default_user_id)
+        final_agent = (current["default_agent_key"]
+                       if default_agent_key is _UNSET else default_agent_key)
+        # A troca de modo limpa automaticamente um target que deixou de ser
+        # aplicável. Isso evita uma violação de CHECK no caminho comum e mantém
+        # targets removidos por FK como NULL/fallback seguro.
+        if final_mode != "fixed_user" and default_user_id is _UNSET:
+            final_user = None
+        if final_mode != "fixed_ai" and default_agent_key is _UNSET:
+            final_agent = None
+        routing = _routing_values(
+            routing_mode=final_mode, default_user_id=final_user,
+            default_agent_key=final_agent)
+        if (routing_mode is not None or default_user_id is not _UNSET
+                or default_agent_key is not _UNSET):
+            values.update(routing)
+        if ai_assignable is not None:
+            values["ai_assignable"] = 1 if ai_assignable else 0
         members = (_replace_members(conn, team_id, member_user_ids)
                    if member_user_ids is not None else _member_ids(conn, team_id))
         final_active = (bool(is_active) if is_active is not None

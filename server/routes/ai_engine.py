@@ -44,11 +44,13 @@ def _coerce_agent_json_fields(row: dict) -> dict:
     hc = coerce_json(row.get("hooks_config"), {})
     tn = coerce_json(row.get("tool_names"), None)
     rt = coerce_json(row.get("routing_targets"), None)
+    rti = coerce_json(row.get("routing_team_ids"), None)
     return {
         "model_config": mc if isinstance(mc, dict) else {},
         "hooks_config": hc if isinstance(hc, dict) else {},
         "tool_names": tn if isinstance(tn, list) else None,
         "routing_targets": rt if isinstance(rt, list) else None,
+        "routing_team_ids": rti if isinstance(rti, list) else None,
     }
 
 
@@ -113,6 +115,16 @@ def register_routes(app, deps):
         routing_targets = body.get("routing_targets")
         if routing_targets is not None and not isinstance(routing_targets, list):
             return _err("routing_targets deve ser uma lista ou null.")
+        routing_team_ids = body.get(
+            "routing_team_ids", (existing or {}).get("routing_team_ids"))
+        if routing_team_ids is not None and not isinstance(routing_team_ids, list):
+            return _err("routing_team_ids deve ser uma lista ou null.")
+        if routing_team_ids is not None:
+            try:
+                routing_team_ids = list(dict.fromkeys(
+                    int(team_id) for team_id in routing_team_ids))
+            except (TypeError, ValueError):
+                return _err("routing_team_ids deve conter somente ids inteiros.")
         hooks_config = body.get("hooks_config", {})
         if hooks_config is not None and not isinstance(hooks_config, dict):
             return _err("hooks_config deve ser um objeto.")
@@ -168,6 +180,7 @@ def register_routes(app, deps):
             is_router=bool(body.get("is_router", False)),
             is_default=bool(body.get("is_default", False)),
             routing_targets=routing_targets,
+            routing_team_ids=routing_team_ids,
             hooks_config=hooks_config or {},
             change_note=body.get("change_note"),
             version_mode=version_mode,
@@ -204,6 +217,7 @@ def register_routes(app, deps):
             is_router=bool(existing.get("is_router", False)),
             is_default=bool(existing.get("is_default", False)),
             routing_targets=clean["routing_targets"],
+            routing_team_ids=clean["routing_team_ids"],
             hooks_config=clean["hooks_config"],
             change_note=body.get("change_note"),
         )

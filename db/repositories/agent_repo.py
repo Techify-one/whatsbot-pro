@@ -2,7 +2,7 @@
 
 One row per agent; in the single-agent MVP there is exactly one (``default``).
 The JSON columns (``model_config``/``tool_names``/``routing_targets``/
-``hooks_config``) are **native JSONB** (plano 34 F5): the repo hands the DB a
+``routing_team_ids``/``hooks_config``) are **native JSONB** (plano 34 F5): the repo hands the DB a
 native ``dict``/``list`` and SQLAlchemy serializes it exactly once — no manual
 ``json.dumps`` — which structurally rules out the double-encoding that broke
 agent resolution. Reads still pass through ``coerce_json`` defensively (a no-op
@@ -31,8 +31,9 @@ DEFAULT_AGENT_KEY = "default"
 _SNAPSHOT_COLS = (
     "agent_key", "display_name", "prompt", "prompt_key", "model_config",
     "tool_names", "enabled", "description", "is_router", "is_default",
-    "routing_targets", "hooks_config", "version", "updated_at",
+    "routing_targets", "routing_team_ids", "hooks_config", "version", "updated_at",
 )
+_UNSET = object()
 
 
 def _decode_json(value, fallback):
@@ -61,6 +62,7 @@ def _row_to_dict(row) -> dict:
     d["model_config"] = coerce_json(d.get("model_config"), {})
     d["tool_names"] = coerce_json(d.get("tool_names"), None)
     d["routing_targets"] = coerce_json(d.get("routing_targets"), None)
+    d["routing_team_ids"] = coerce_json(d.get("routing_team_ids"), None)
     d["hooks_config"] = coerce_json(d.get("hooks_config"), {})
     d["enabled"] = bool(d.get("enabled", 1))
     d["is_router"] = bool(d.get("is_router", 0))
@@ -150,6 +152,7 @@ def ensure(
     model_config: dict | None = None,
     tool_names: list[str] | None = None,
     enabled: bool = True,
+    routing_team_ids: list[int] | None = None,
 ) -> None:
     """Insert the agent only if it does not exist yet (no version bump).
 
@@ -164,6 +167,7 @@ def ensure(
         "model_config": _native_json_field(model_config, {}),
         "tool_names": _native_json_field(tool_names, None),
         "enabled": 1 if enabled else 0,
+        "routing_team_ids": _native_json_field(routing_team_ids, None),
         "version": 1,
         "updated_at": now,
     }
@@ -187,6 +191,7 @@ def save(
     hooks_config: dict | None = None,
     change_note: str | None = None,
     version_mode: str = "new",
+    routing_team_ids=_UNSET,
 ) -> dict:
     """Upsert an agent, bump version and snapshot to history. Returns the row.
 
@@ -205,6 +210,12 @@ def save(
     """
     now = time.time()
     existing = get(agent_key)
+    normalized_team_ids = (
+        existing.get("routing_team_ids") if existing is not None
+        and routing_team_ids is _UNSET
+        else _native_json_field(
+            None if routing_team_ids is _UNSET else routing_team_ids, None)
+    )
     if existing is not None and (
         (display_name or "") == (existing.get("display_name") or "")
         and (prompt or "") == (existing.get("prompt") or "")
@@ -216,6 +227,7 @@ def save(
         and bool(is_router) == bool(existing.get("is_router", False))
         and bool(is_default) == bool(existing.get("is_default", False))
         and routing_targets == existing.get("routing_targets")
+        and normalized_team_ids == existing.get("routing_team_ids")
         and (hooks_config or {}) == (existing.get("hooks_config") or {})
     ):
         return existing
@@ -232,6 +244,9 @@ def save(
         "is_router": 1 if is_router else 0,
         "is_default": 1 if is_default else 0,
         "routing_targets": _native_json_field(routing_targets, None),
+        # P8: NULL and [] are both fail-closed allowlists for transfer_to_team.
+        # Preserve the exact representation for history/round-trip.
+        "routing_team_ids": normalized_team_ids,
         "hooks_config": _native_json_field(hooks_config, {}),
         "version": version,
         "updated_at": now,
@@ -249,7 +264,8 @@ def save(
             ai_agents, values, conflict_cols=["agent_key"],
             update_cols=["display_name", "prompt", "prompt_key", "model_config",
                          "tool_names", "enabled", "description", "is_router",
-                         "is_default", "routing_targets", "hooks_config", "version",
+                         "is_default", "routing_targets", "routing_team_ids",
+                         "hooks_config", "version",
                          "updated_at"],
         ))
         conn.execute(ai_agents_history.insert().values(
@@ -414,6 +430,7 @@ def rollback(agent_key: str, version: int, preserve_prompt: bool = False,
             description=current.get("description", "") or "",
             is_router=bool(current.get("is_router", False)),
             routing_targets=current.get("routing_targets"),
+            routing_team_ids=current.get("routing_team_ids"),
             hooks_config=current.get("hooks_config") or {},
         )
     return save(
@@ -428,6 +445,7 @@ def rollback(agent_key: str, version: int, preserve_prompt: bool = False,
         is_router=bool(snap.get("is_router", 0)),
         is_default=bool(snap.get("is_default", 0)),
         routing_targets=_decode_json(snap.get("routing_targets"), None),
+        routing_team_ids=_decode_json(snap.get("routing_team_ids"), None),
         hooks_config=_decode_json(snap.get("hooks_config"), {}),
     )
 

@@ -11,6 +11,8 @@
   ``run_turn()`` (history → agent-spec resolve via ``filter.agent.resolve`` →
   AGNO run → usage off ``RunMetrics`` → within-turn routing → save). The
   ``AgentHandler`` facade delegates ``aprocess_message`` here.
+* :mod:`app.services.team_routing_service` — sync/async entrypoints over the
+  atomic team-routing write (events/notices remain in the caller).
 
 (A antiga ``improvement_service`` — análise de "Gerar melhoria" — virou o plugin
 ``melhorias`` (``storages/plugins/melhorias/generation.py``); o core não a expõe mais.)

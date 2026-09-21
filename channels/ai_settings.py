@@ -55,6 +55,10 @@ PER_CHANNEL_AI_KEYS = (
     # se ambas vierem preenchidas por uma edição à mão, o HUMANO vence (é o
     # comportamento legado — nunca ligar a IA por acidente).
     "default_assignee_agent_key",
+    # plano 166/02 P5: terceiro tipo do destino unificado. R1 materializa o
+    # contrato no mesmo mapa per-channel; nascimento/reabertura passam a consumi-lo
+    # somente em R4. As três chaves são mutuamente exclusivas na escrita da API/UI.
+    "default_assignee_team_id",
 )
 
 _CACHE: dict[str, tuple[dict, float]] = {}

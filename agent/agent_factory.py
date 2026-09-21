@@ -199,6 +199,7 @@ def migrate_legacy_config_to_default_agent() -> None:
                 description=agent.get("description", ""),
                 is_router=bool(agent.get("is_router", False)),
                 routing_targets=agent.get("routing_targets"),
+                routing_team_ids=agent.get("routing_team_ids"),
                 hooks_config=agent.get("hooks_config") or {},
             )
             logger.info("Legacy config (system_prompt/model) migrated → default agent")

@@ -549,9 +549,35 @@ teams = Table(
     Column("visible_to_assignee", Integer, nullable=False, server_default="0"),  # 1 = quem está atribuído à conversa a vê mesmo fora do time (só com restrict_visibility=1) — plano 155
     Column("enforce_team_access", Integer, nullable=False, server_default="0"),  # 1 = também bloqueia acesso direto/escrita/mídia/WS
     Column("is_active", Integer, nullable=False, server_default="1"),
+    # plano 166/02: configuração da distribuição. ``assign_team`` continua
+    # sendo apenas o vínculo compatível; somente ``route_to_team`` consome estes
+    # campos. Targets são nullable de propósito: remoção por FK SET NULL degrada
+    # para a fila segura, em vez de bloquear a exclusão ou causar erro no routing.
+    Column("routing_mode", Text, nullable=False, server_default="manual"),
+    Column("default_user_id", Integer,
+           ForeignKey("users.id", ondelete="SET NULL")),
+    Column("default_agent_key", Text,
+           ForeignKey("ai_agents.agent_key", ondelete="SET NULL")),
+    Column("ai_assignable", Integer, nullable=False, server_default="0"),
     CheckConstraint(
         "enforce_team_access = 0 OR restrict_visibility = 1",
         name="ck_teams_private_requires_restricted",
+    ),
+    CheckConstraint(
+        "routing_mode IN ('manual', 'round_robin', 'fixed_user', 'fixed_ai')",
+        name="ck_teams_routing_mode",
+    ),
+    CheckConstraint(
+        "default_user_id IS NULL OR routing_mode = 'fixed_user'",
+        name="ck_teams_routing_user_target",
+    ),
+    CheckConstraint(
+        "default_agent_key IS NULL OR routing_mode = 'fixed_ai'",
+        name="ck_teams_routing_agent_target",
+    ),
+    CheckConstraint(
+        "ai_assignable IN (0, 1)",
+        name="ck_teams_ai_assignable_bool",
     ),
 )
 Index("uq_teams_name_normalized", func.lower(func.btrim(teams.c.name)), unique=True)
@@ -565,6 +591,24 @@ team_members = Table(
     PrimaryKeyConstraint("team_id", "user_id"),
 )
 Index("idx_team_members_user", team_members.c.user_id)
+
+# Cursor durável do round-robin, isolado por time + inbox. O lock desta row
+# serializa distribuições concorrentes entre workers/processos; ``last_user_id``
+# é apagado quando o usuário some e a rodada seguinte reinicia no primeiro
+# elegível. A ordem canônica de locks é team -> state -> conversation.
+team_routing_state = Table(
+    "team_routing_state",
+    metadata,
+    Column("team_id", Integer,
+           ForeignKey("teams.id", ondelete="CASCADE"), nullable=False),
+    Column("inbox_id", Integer,
+           ForeignKey("inboxes.id", ondelete="CASCADE"), nullable=False),
+    Column("last_user_id", Integer,
+           ForeignKey("users.id", ondelete="SET NULL")),
+    Column("updated_at", Float, nullable=False),
+    PrimaryKeyConstraint("team_id", "inbox_id"),
+)
+Index("idx_team_routing_state_last_user", team_routing_state.c.last_user_id)
 
 atendimentos = Table(
     "atendimentos",                                             # RENOMEADA de "conversations" (nomenclatura Atendimento)
@@ -809,6 +853,9 @@ ai_agents = Table(
     # plano 36: agente padrão para novas conversas (semântica radio, espelha is_router).
     Column("is_default", Integer, nullable=False, server_default="0"),
     Column("routing_targets", _json_type()),                  # JSON array de agent_keys — JSONB (F5)
+    # Times que a builtin perigosa ``transfer_to_team`` pode alcançar. NULL e []
+    # significam a mesma allowlist vazia (fail-closed; nunca "todos").
+    Column("routing_team_ids", _json_type()),
     Column("hooks_config", _json_type(), nullable=False, server_default="{}"),  # hooks declarativos — JSONB (F5)
     Column("version", Integer, nullable=False, server_default="1"),
     Column("updated_at", Float, nullable=False),
