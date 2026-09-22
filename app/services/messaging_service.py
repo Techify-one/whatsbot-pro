@@ -61,16 +61,25 @@ logger = logging.getLogger(__name__)
 
 # ── error bubble (R3 — reused from B2) ────────────────────────────────────────
 
-async def error_bubble(ws_manager, phone: str, content: str) -> None:
+async def error_bubble(ws_manager, phone: str, content: str, *,
+                       channel_id: str | None = None,
+                       conversation_id: int | None = None) -> None:
     """Broadcast a ``role:'error'`` message card for a failed send (R3 / B2).
 
     Single place that builds the error-bubble WS payload the panel renders as a
     centered error card. Shape is intentionally fixed (``phone`` + a ``message``
     with ``role``/``content``/``ts``). ``contacts._emit_send_error`` delegates here.
+
+    ``channel_id``/``conversation_id`` are optional (plano 168 E5): a send that
+    failed before anything was saved has no conversation row yet, only the
+    channel it was aimed at. Either one lets the WS router avoid the DROP-MULTI
+    fallback (a contact with more than one open conversation) instead of
+    guessing from ``phone`` alone.
     """
     await ws_manager.broadcast("new_message", {
-        "phone": phone,
-        "message": {"role": "error", "content": content, "ts": time.time()},
+        "phone": phone, "channel_id": channel_id,
+        "message": {"role": "error", "content": content, "ts": time.time(),
+                   "conversation_id": conversation_id},
     })
 
 
@@ -520,8 +529,11 @@ class MessagingService:
 
     # ── error bubble ──────────────────────────────────────────────────────────
 
-    async def error_bubble(self, phone: str, content: str) -> None:
-        await error_bubble(self.ws_manager, phone, content)
+    async def error_bubble(self, phone: str, content: str, *,
+                           channel_id: str | None = None,
+                           conversation_id: int | None = None) -> None:
+        await error_bubble(self.ws_manager, phone, content,
+                           channel_id=channel_id, conversation_id=conversation_id)
 
     # ── Operator media send (R14 — unifies image/audio/document) ──────────────
 
@@ -585,12 +597,14 @@ class MessagingService:
                 msg_id = res.external_msg_id or ""
         except GOWASendError as e:
             logger.error("[Send] Failed to send %s to %s: %s", kind, phone, e)
-            await self.error_bubble(phone, f"Falha ao enviar {error_label}: {e}")
+            await self.error_bubble(
+                phone, f"Falha ao enviar {error_label}: {e}", channel_id=channel_id)
             return {"ok": False, "error": str(e), "kind": "send"}
         except Exception as e:
             logger.error("[Send] Failed to send %s to %s: %s", kind, phone, e)
             await self.error_bubble(
-                phone, f"Erro inesperado ao enviar {error_label}: {e}")
+                phone, f"Erro inesperado ao enviar {error_label}: {e}",
+                channel_id=channel_id)
             return {"ok": False, "error": str(e), "kind": "unexpected"}
 
         # msg_id is the channel external id (None for sandbox). Mark it processed so
@@ -621,6 +635,7 @@ class MessagingService:
                             media_path=rel_path, status="operator", msg_id=msg_id,
                             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
                             reopen=(False if not _allow_reopen else None))
+        msg_data["conversation_id"] = (_saved or {}).get("conversation_id")
 
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": channel_id, "message": msg_data})
@@ -1039,7 +1054,10 @@ class MessagingService:
                     "message": f"Erro ao salvar mensagem: {e}", "status": 500}
 
         if send_failed:
-            await self.error_bubble(phone, f"Falha ao enviar mensagem: {error_msg}")
+            await self.error_bubble(
+                phone, f"Falha ao enviar mensagem: {error_msg}",
+                channel_id=resolved_channel,
+                conversation_id=(msg_data or {}).get("conversation_id"))
             return {"ok": False, "reason": "send_failed",
                     "message": f"Falha ao enviar mensagem: {error_msg}", "status": 500}
 
@@ -1192,7 +1210,7 @@ class MessagingService:
                 }, status="error")
                 await asyncio.to_thread(outbound.send_presence, channel_id, phone, "paused")
                 await ws_manager.broadcast("new_message", {
-                    "phone": phone,
+                    "phone": phone, "channel_id": channel_id,
                     "message": {"role": "error", "content": f"Falha ao enviar: {err}", "ts": time.time()},
                 })
                 # Preserve/persist any earlier parts that did reach the wire. The
@@ -1390,7 +1408,8 @@ class MessagingService:
                 legacy_enabled=settings.get("transfer_alert_enabled", True),
                 legacy_duration=settings.get("transfer_alert_duration", 5))
             await ws_manager.broadcast("human_transfer_alert", {
-                "phone": phone, "enabled": ta_enabled, "duration": ta_duration})
+                "phone": phone, "channel_id": channel_id,
+                "enabled": ta_enabled, "duration": ta_duration})
             await ws_manager.broadcast("contact_ai_toggled", {
                 "phone": phone,
                 "ai_enabled": False,
@@ -1452,7 +1471,7 @@ class MessagingService:
                 outbound.send_text, channel_id, phone, chat_message)
             if send_result.ok:
                 sent_msg_id = send_result.external_msg_id or ""
-                await asyncio.to_thread(
+                saved = await asyncio.to_thread(
                     contact.add_message, "assistant", chat_message,
                     msg_id=sent_msg_id, status="operator")
                 await ws_manager.broadcast("new_message", {
@@ -1464,6 +1483,7 @@ class MessagingService:
                         "ts": time.time(),
                         "status": "operator",
                         "msg_id": sent_msg_id,
+                        "conversation_id": (saved or {}).get("conversation_id"),
                     },
                 })
                 return
@@ -1750,7 +1770,9 @@ class MessagingService:
                 if msg_ids:
                     for mid in msg_ids:
                         await asyncio.to_thread(outbound.mark_read, channel_id, phone, mid)
-                    await ws_manager.broadcast("messages_read", {"phone": phone, "only_user": True})
+                    await ws_manager.broadcast(
+                        "messages_read",
+                        {"phone": phone, "channel_id": channel_id, "only_user": True})
 
             # ── Text batch ──────────────────────────────────
             if text_parts:
@@ -1816,10 +1838,13 @@ class MessagingService:
                             and self._abort_epoch(channel_id, phone) == abort_epoch):
                         if not agent_handler.api_key:
                             notice = "[WhatsBot] API key não configurada."
-                            contact.add_message("system_notice", notice)
+                            _notice_saved = contact.add_message("system_notice", notice)
                             await ws_manager.broadcast("new_message", {
-                                "phone": phone,
-                                "message": {"role": "system_notice", "content": notice, "ts": time.time()},
+                                "phone": phone, "channel_id": channel_id,
+                                "message": {
+                                    "role": "system_notice", "content": notice, "ts": time.time(),
+                                    "conversation_id": (_notice_saved or {}).get("conversation_id"),
+                                },
                             })
                         else:
                             try:
@@ -1835,10 +1860,14 @@ class MessagingService:
                                     await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id, agent_key=result.agent_key)
                                 if result.reply:
                                     if result.reply.startswith("[WhatsBot]"):
-                                        contact.add_message("system_notice", result.reply)
+                                        _notice_saved = contact.add_message("system_notice", result.reply)
                                         await ws_manager.broadcast("new_message", {
-                                            "phone": phone,
-                                            "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
+                                            "phone": phone, "channel_id": channel_id,
+                                            "message": {
+                                                "role": "system_notice", "content": result.reply,
+                                                "ts": time.time(),
+                                                "conversation_id": (_notice_saved or {}).get("conversation_id"),
+                                            },
                                         })
                                     else:
                                         sent = await self._send_with_typing_guard(
@@ -2042,10 +2071,13 @@ class MessagingService:
 
                 if not agent_handler.api_key:
                     notice = "[WhatsBot] API key não configurada."
-                    contact.add_message("system_notice", notice)
+                    _notice_saved = contact.add_message("system_notice", notice)
                     await ws_manager.broadcast("new_message", {
-                        "phone": phone,
-                        "message": {"role": "system_notice", "content": notice, "ts": time.time()},
+                        "phone": phone, "channel_id": channel_id,
+                        "message": {
+                            "role": "system_notice", "content": notice, "ts": time.time(),
+                            "conversation_id": (_notice_saved or {}).get("conversation_id"),
+                        },
                     })
                     continue
 
@@ -2076,10 +2108,14 @@ class MessagingService:
                         await self.broadcast_tool_calls(phone, result.tool_calls, result.contact_info, channel_id=channel_id, agent_key=result.agent_key)
                     if result.reply:
                         if result.reply.startswith("[WhatsBot]"):
-                            contact.add_message("system_notice", result.reply)
+                            _notice_saved = contact.add_message("system_notice", result.reply)
                             await ws_manager.broadcast("new_message", {
-                                "phone": phone,
-                                "message": {"role": "system_notice", "content": result.reply, "ts": time.time()},
+                                "phone": phone, "channel_id": channel_id,
+                                "message": {
+                                    "role": "system_notice", "content": result.reply,
+                                    "ts": time.time(),
+                                    "conversation_id": (_notice_saved or {}).get("conversation_id"),
+                                },
                             })
                         else:
                             sent = await self._send_with_typing_guard(
@@ -2145,7 +2181,8 @@ class MessagingService:
                     phone,
                     "⚠️ Não foi possível registrar a mensagem recebida deste "
                     "contato. Ela pode não aparecer no histórico — confira o "
-                    "WhatsApp antes de responder.")
+                    "WhatsApp antes de responder.",
+                    channel_id=channel_id)
             except Exception:
                 logger.exception(
                     "[Batch] Falha ao emitir a bolha de erro de inbound para %s",

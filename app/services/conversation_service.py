@@ -128,6 +128,7 @@ async def _maybe_agent_transfer_alert(deps, conv: dict, assignee_user_id,
         if not enabled:
             return
         await deps.ws_manager.broadcast("agent_transfer_alert", {
+            "conversation_id": conv["id"],
             "assignee_user_id": assignee_user_id,
             "enabled": True,
             "duration": duration,

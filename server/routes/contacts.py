@@ -73,7 +73,9 @@ def _contact_filter_where(request: Request):
     return build_contact_where(spec, ctx)
 
 
-async def _emit_send_error(ws_manager, phone: str, content: str) -> None:
+async def _emit_send_error(ws_manager, phone: str, content: str, *,
+                           channel_id: str | None = None,
+                           conversation_id: int | None = None) -> None:
     """Broadcast a ``role:'error'`` message card for a failed send (R3 / B2).
 
     Single place that builds the error-bubble WS payload the panel renders as a
@@ -81,9 +83,13 @@ async def _emit_send_error(ws_manager, phone: str, content: str) -> None:
     ``app.services.messaging_service.error_bubble`` (one source for both the
     operator send routes and the outbound pipeline); this wrapper keeps the
     existing call sites (send text / retry / private-AI) unchanged.
+
+    ``channel_id``/``conversation_id`` (plano 168 E5) let the WS router deliver
+    to a contact with more than one open conversation without guessing.
     """
     from app.services.messaging_service import error_bubble
-    await error_bubble(ws_manager, phone, content)
+    await error_bubble(ws_manager, phone, content,
+                       channel_id=channel_id, conversation_id=conversation_id)
 
 
 def _is_sandbox_contact(phone: str) -> bool:
@@ -1073,7 +1079,10 @@ def register_routes(app, deps):
                 channel_id = _channel_for(phone, body.get("conversation_id"))
                 await asyncio.to_thread(outbound.revoke, channel_id, phone, msg_id)
             await asyncio.to_thread(message_repo.mark_revoked, msg_id, "all")
-            await ws_manager.broadcast("message_revoked", {"phone": phone, "msg_id": msg_id})
+            await ws_manager.broadcast("message_revoked", {
+                "phone": phone, "msg_id": msg_id,
+                "conversation_id": target_msg.get("conversation_id"),
+            })
             await emit_with_filter("message.revoked", {
                 "id": msg_id, "phone": phone,
                 "revoked_message_id": msg_id, "revoked_from_me": True,
@@ -1271,7 +1280,8 @@ def register_routes(app, deps):
                 logger.exception("[PrivateAI] aprocess_message failed for %s: %s", phone, e)
                 await atrack_step("error", {"error": str(e), "phase": "aprocess_message"},
                                   status="error")
-                await _emit_send_error(ws_manager, phone, f"Erro ao processar IA: {e}")
+                await _emit_send_error(ws_manager, phone, f"Erro ao processar IA: {e}",
+                                       channel_id=run_channel)
                 return
 
             if result.tool_calls:
@@ -1419,7 +1429,9 @@ def register_routes(app, deps):
 
                 if send_failed:
                     await _emit_send_error(
-                        ws_manager, phone, f"Falha ao enviar resposta da IA: {send_error}")
+                        ws_manager, phone, f"Falha ao enviar resposta da IA: {send_error}",
+                        channel_id=run_channel,
+                        conversation_id=(msg_data or {}).get("conversation_id"))
                     return
                 await ws_manager.broadcast("new_message", {
                     "phone": phone, "channel_id": channel_id, "message": msg_data,
@@ -1743,7 +1755,8 @@ def register_routes(app, deps):
             else:
                 await _emit_send_error(
                     ws_manager, phone,
-                    "Não foi possível transcrever o áudio para a IA processar.")
+                    "Não foi possível transcrever o áudio para a IA processar.",
+                    channel_id=resolved_channel, conversation_id=conversation_id or None)
 
         logger.info("[Private] Saved private audio for %s (ai_read=%s, ai_reply=%s, "
                     "card=%s)", phone, ai_read_b, ai_reply_b, bool(card_text))
@@ -1938,11 +1951,15 @@ def register_routes(app, deps):
             msg_id = await asyncio.to_thread(_route_send_text, channel_id, wire_phone, message)
         except GOWASendError as e:
             logger.error("[Retry] Failed to resend to %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Falha ao reenviar mensagem: {e}")
+            await _emit_send_error(
+                ws_manager, phone, f"Falha ao reenviar mensagem: {e}",
+                channel_id=channel_id, conversation_id=body.get("conversation_id"))
             return _err(f"Falha ao reenviar: {e}", status=500)
         except Exception as e:
             logger.error("[Retry] Failed to resend to %s: %s", phone, e)
-            await _emit_send_error(ws_manager, phone, f"Erro inesperado ao reenviar: {e}")
+            await _emit_send_error(
+                ws_manager, phone, f"Erro inesperado ao reenviar: {e}",
+                channel_id=channel_id, conversation_id=body.get("conversation_id"))
             return _err(f"Erro ao reenviar: {e}", status=500)
 
         # msg_id is the channel's external id (string)

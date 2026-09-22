@@ -236,3 +236,91 @@ def test_conversation_upsert_does_not_leak_to_non_member(_audience):
         assert denied.sent == []
 
     _scenario(scenario())
+
+
+# ── Fase 2: produtores levam channel_id/conversation_id (DROP-MULTI) ───────
+
+def test_channel_id_disambiguates_a_contact_with_two_open_conversations():
+    """E3/E4/E5/E6 etc.: um contato com conversas abertas em DOIS canais só era
+    roteável (pré-F2) quando tinha exatamente UMA — com duas, o resolvedor por
+    ``phone`` sozinho desistia (DROP-MULTI). Os produtores agora mandam
+    ``channel_id`` junto do ``phone``, o que o resolvedor já sabia usar
+    (``get_latest_for_contact_inbox``) — este teste prova que a combinação
+    entrega para o inbox CERTO e não para o outro."""
+    from db.repositories import inbox_member_repo
+    from server.state import ConnectionManager
+
+    inbox_a = _mk_inbox("plan168_f2_multi_ch_a")
+    inbox_b = _mk_inbox("plan168_f2_multi_ch_b")
+    member_a = _mk_user(
+        "plan168_f2_member_a@test.com", custom_perms=["conversation.read"])
+    member_b = _mk_user(
+        "plan168_f2_member_b@test.com", custom_perms=["conversation.read"])
+    inbox_member_repo.set_members(inbox_a, [member_a["id"]])
+    inbox_member_repo.set_members(inbox_b, [member_b["id"]])
+
+    phone = "5511970400010"
+    _conv_a, _ = _open_conv_in_inbox(phone, inbox_a)
+    _conv_b, _ = _open_conv_in_inbox(phone, inbox_b)
+
+    async def scenario():
+        manager = ConnectionManager()
+        socket_a = FakeSocket()
+        socket_b = FakeSocket()
+        await manager.connect(socket_a, member_a["id"])
+        await manager.connect(socket_b, member_b["id"])
+
+        await manager.broadcast(
+            "messages_read", {"phone": phone, "channel_id": "plan168_f2_multi_ch_b",
+                              "only_user": True})
+        assert [item["event"] for item in socket_b.sent] == ["messages_read"], (
+            "sem channel_id no payload, dois abertos = DROP; com ele, deve "
+            "chegar ao membro do canal certo")
+        assert socket_a.sent == [], "não pode vazar para o membro do OUTRO canal"
+
+    _scenario(scenario())
+
+
+def test_resolver_ignores_msg_id_collision_across_channels():
+    """I6/R2: ``msg_id`` só é único DENTRO de um canal (provedores como Telegram
+    emitem inteiros pequenos). Duas mensagens de CANAIS diferentes com o MESMO
+    ``msg_id`` não podem fazer um ``message_status`` vazar para a audiência do
+    canal errado quando o payload também informa ``channel_id``."""
+    from db.repositories import inbox_member_repo, message_repo
+    from server.state import ConnectionManager
+
+    inbox_a = _mk_inbox("plan168_f2_collide_ch_a")
+    inbox_b = _mk_inbox("plan168_f2_collide_ch_b")
+    member_a = _mk_user(
+        "plan168_f2_collide_member_a@test.com", custom_perms=["conversation.read"])
+    member_b = _mk_user(
+        "plan168_f2_collide_member_b@test.com", custom_perms=["conversation.read"])
+    inbox_member_repo.set_members(inbox_a, [member_a["id"]])
+    inbox_member_repo.set_members(inbox_b, [member_b["id"]])
+
+    conv_a, contact_a = _open_conv_in_inbox("5511970400011", inbox_a)
+    conv_b, contact_b = _open_conv_in_inbox("5511970400012", inbox_b)
+    shared_msg_id = "42"
+    message_repo.add(contact_a, "assistant", "oi de A", msg_id=shared_msg_id,
+                     conversation_id=conv_a, status="sent")
+    message_repo.add(contact_b, "assistant", "oi de B", msg_id=shared_msg_id,
+                     conversation_id=conv_b, status="sent")
+
+    async def scenario():
+        manager = ConnectionManager()
+        socket_a = FakeSocket()
+        socket_b = FakeSocket()
+        await manager.connect(socket_a, member_a["id"])
+        await manager.connect(socket_b, member_b["id"])
+
+        await manager.broadcast("message_status", {
+            "msg_id": shared_msg_id, "channel_id": "plan168_f2_collide_ch_b",
+            "phone": "5511970400012", "status": "read",
+        })
+        assert [item["event"] for item in socket_b.sent] == ["message_status"]
+        assert socket_a.sent == [], (
+            "o msg_id colidido pertence à conversa de A — sem o filtro por "
+            "canal (I6) o resolvedor acharia a linha de A primeiro (get_by_msg_id "
+            "sem escopo) e vazaria para o membro errado")
+
+    _scenario(scenario())

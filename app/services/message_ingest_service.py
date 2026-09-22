@@ -305,7 +305,8 @@ class MessageIngestService:
             reply_to_msg_id=reply_to, status="operator",
             ts=(event.ts or None))  # plano 129 M7 — ts real do provedor (echo)
         broadcast_msg: dict = {"role": "assistant", "content": text, "ts": time.time(),
-                               "msg_id": msg_id, "status": "operator"}
+                               "msg_id": msg_id, "status": "operator",
+                               "conversation_id": (_saved or {}).get("conversation_id")}
         if reply_to:
             broadcast_msg["reply_to_msg_id"] = reply_to
         if media_type:

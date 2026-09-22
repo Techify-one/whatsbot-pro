@@ -174,6 +174,19 @@ class ConnectionManager:
                 msg_id = data["msg_ids"][0]
             if msg_id:
                 row = await asyncio.to_thread(message_repo.get_by_msg_id, msg_id)
+                # Plano 168 I6 / R2: ``msg_id`` is only unique WITHIN a channel (a
+                # small provider-issued int, e.g. Telegram, can collide across
+                # channels). When the payload also names the channel, require the
+                # match to actually belong to it — otherwise a status/reaction/
+                # revoke lands on the wrong conversation's audience.
+                channel_id = data.get("channel_id")
+                if row and row.get("conversation_id") and channel_id:
+                    conv = await asyncio.to_thread(
+                        conversation_repo.get, row["conversation_id"])
+                    inbox = await asyncio.to_thread(
+                        inbox_repo.get_by_channel, str(channel_id))
+                    if not conv or not inbox or conv.get("inbox_id") != inbox.get("id"):
+                        row = None
         if row and row.get("conversation_id"):
             return int(row["conversation_id"])
         phone = data.get("phone")

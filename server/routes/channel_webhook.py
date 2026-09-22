@@ -304,7 +304,8 @@ def register_routes(app, deps):
                             message_repo.set_reaction, reacted_id, emoji, reactor)
                         if reactions is not None and ws_manager is not None:
                             await ws_manager.broadcast("message_reaction", {
-                                "phone": ev.chat_id, "msg_id": reacted_id, "reactions": reactions})
+                                "phone": ev.chat_id, "channel_id": ev.channel_id,
+                                "msg_id": reacted_id, "reactions": reactions})
                     await emit_with_filter("message.reaction", {
                         "id": ev.external_msg_id, "phone": ev.chat_id,
                         "from": ev.sender_id, "reaction": emoji,
@@ -326,7 +327,8 @@ def register_routes(app, deps):
                             message_repo.update_status_by_msg_id, mid, status)
                         if updated and ws_manager is not None:
                             await ws_manager.broadcast("message_status", {
-                                "phone": ev.chat_id, "msg_ids": updated, "status": status})
+                                "phone": ev.chat_id, "channel_id": ev.channel_id,
+                                "msg_ids": updated, "status": status})
                         # Unread tracking parity with the legacy GOWA handler: a
                         # "read" ack on an INCOMING message we hadn't read yet
                         # clears its unread state (marks the contact read +
@@ -338,7 +340,8 @@ def register_routes(app, deps):
                             if cleared and ws_manager is not None:
                                 for phone_key in cleared:
                                     await ws_manager.broadcast(
-                                        "messages_read", {"phone": phone_key})
+                                        "messages_read",
+                                        {"phone": phone_key, "channel_id": ev.channel_id})
                     elif status == "failed" and mid:
                         # The provider accepted the send and only later told us it
                         # was not delivered (plano 75 F5) — until now this whole
@@ -463,7 +466,8 @@ def register_routes(app, deps):
                         matched = await asyncio.to_thread(message_repo.mark_revoked, revoked_id, "all")
                         if matched and ws_manager is not None:
                             await ws_manager.broadcast("message_revoked", {
-                                "phone": ev.chat_id, "msg_id": revoked_id})
+                                "phone": ev.chat_id, "channel_id": ev.channel_id,
+                                "msg_id": revoked_id})
                     await emit_with_filter("message.revoked", {
                         "id": ev.external_msg_id, "phone": ev.chat_id, "from": ev.sender_id,
                         "revoked_message_id": revoked_id,
@@ -477,7 +481,8 @@ def register_routes(app, deps):
                         matched = await asyncio.to_thread(message_repo.mark_revoked, deleted_id, "me")
                         if matched and ws_manager is not None:
                             await ws_manager.broadcast("message_deleted", {
-                                "phone": ev.chat_id, "msg_id": deleted_id})
+                                "phone": ev.chat_id, "channel_id": ev.channel_id,
+                                "msg_id": deleted_id})
                     await emit_with_filter("message.deleted", {
                         "deleted_message_id": deleted_id, "phone": ev.chat_id, "from": ev.sender_id,
                         "original_content": extras.get("original_content", ""),
