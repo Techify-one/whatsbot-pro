@@ -56,19 +56,23 @@ logger = logging.getLogger(__name__)
 
 # ``python:3.x-slim`` (our Docker base) ships no ``/etc/mime.types`` — only
 # ``mimetypes``'s small builtin table, which doesn't know these extensions our
-# own providers write to ``statics/`` (GOWA: ``.jfif`` photos, ``.oga`` voice
-# notes; generic: ``.ogg``/``.m4a``). ``guess_type`` then falls back to
+# own providers and plugins write to ``statics/`` (GOWA: ``.jfif`` photos;
+# áudio: ``.ogg``/``.oga``/``.opus``/``.m4a``/``.aac``/``.amr``).
+# ``guess_type`` then falls back to
 # ``application/octet-stream``, and the StaticFiles mount below serves that as
-# the response's Content-Type — the browser still *renders* an <img> (decoders
-# sniff the bytes) but a top-level navigation (the panel's "open in new tab" on
-# click) downloads it instead of opening it. Registering here runs once at
+# the response's Content-Type — browsers may download the mídia instead of
+# opening it or offering playback. Registering here runs once at
 # import time, before ``create_app``/uvicorn ever handle a request, and fixes
 # every file already on disk (the type is computed per-request from the
 # extension, never stored) — no migration, no touching ``statics/``.
 mimetypes.add_type("image/jpeg", ".jfif")
 mimetypes.add_type("audio/ogg", ".ogg")
 mimetypes.add_type("audio/ogg", ".oga")
+mimetypes.add_type("audio/ogg", ".opus")
+mimetypes.add_type("audio/mpeg", ".mp3")
 mimetypes.add_type("audio/mp4", ".m4a")
+mimetypes.add_type("audio/aac", ".aac")
+mimetypes.add_type("audio/amr", ".amr")
 
 
 # A plugin exposes PUBLIC (auth-exempt) endpoints under ``/api/plugins/<id>/

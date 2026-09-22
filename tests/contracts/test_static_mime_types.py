@@ -1,6 +1,7 @@
 """Prod's ``python:3.x-slim`` image ships no ``/etc/mime.types`` — only the
 small builtin table in ``mimetypes``, which doesn't know ``.jfif`` (GOWA's
-JPEG extension) or ``.ogg``/``.oga`` (voice notes). ``server.app`` registers
+JPEG extension) or every audio extension used by channels/plugins.
+``server.app`` registers
 the missing types at import time (module-level ``mimetypes.add_type``) so
 ``/statics`` — served straight from ``StaticFiles``, which derives
 Content-Type from the extension — never answers ``application/octet-stream``
@@ -31,3 +32,10 @@ def test_ogg_audio_extensions_are_registered():
 
 def test_m4a_audio_extension_is_registered():
     assert mimetypes.guess_type("note.m4a")[0] == "audio/mp4"
+
+
+def test_support_catalog_audio_extensions_are_registered():
+    assert mimetypes.guess_type("material.mp3")[0] == "audio/mpeg"
+    assert mimetypes.guess_type("material.aac")[0] == "audio/aac"
+    assert mimetypes.guess_type("material.amr")[0] == "audio/amr"
+    assert mimetypes.guess_type("material.opus")[0] == "audio/ogg"
