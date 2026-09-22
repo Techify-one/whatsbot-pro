@@ -24,7 +24,7 @@ from server.audit_context import ActorCtx, set_current_actor, reset_current_acto
 from server.client_ip import audit_ip
 from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import (audit_purge_loop, empty_conversation_sweep_loop,
-                               webhook_delivery_loop)
+                               loop_delay_monitor_loop, webhook_delivery_loop)
 from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, teams as teams_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes, api_keys as api_keys_routes, webhooks_out as webhooks_out_routes
 from server.routes import v1 as v1_routes
 from db.repositories import tool_override_repo
@@ -441,6 +441,11 @@ def create_app(
         # do caminho da request. Concern do core, sempre registrado.
         supervisor.register(TaskSpec(
             "webhook_delivery", lambda: webhook_delivery_loop(deps),
+            policy=RestartPolicy.PERMANENT))
+        # plano 169 B1a: proof + permanent alarm for event-loop starvation (sync DB
+        # calls blocking the loop). Core concern, always registered.
+        supervisor.register(TaskSpec(
+            "loop_delay_monitor", lambda: loop_delay_monitor_loop(deps),
             policy=RestartPolicy.PERMANENT))
         state.task_supervisor = supervisor
         # Shared subprocess service for plugins (plano 09 Fase 5). GOWA keeps its
