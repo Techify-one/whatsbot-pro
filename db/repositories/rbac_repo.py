@@ -52,6 +52,28 @@ def get_role_permissions(role_key: str) -> set[str]:
     return {r[0] for r in rows}
 
 
+def permissions_for_roles(role_keys) -> set[str]:
+    """Union of permissions granted by already-known role KEYS, one round trip.
+
+    Sibling of :func:`user_permissions`'s role-union branch (plano 169 B2) —
+    takes the role keys the caller already has (e.g. ``user_repo._with_roles``'s
+    ``user["roles"]``) instead of re-querying ``user_roles`` for a user id. Used
+    by the per-request permission cache so a role-based user costs exactly one
+    query instead of ``user_permissions``'s two (role lookup + permission join).
+    """
+    keys = list({k for k in role_keys if k})
+    if not keys:
+        return set()
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(permissions.c.key)
+            .join(role_permissions, role_permissions.c.permission_id == permissions.c.id)
+            .join(roles, roles.c.id == role_permissions.c.role_id)
+            .where(roles.c.key.in_(keys))
+        )
+    return {r[0] for r in rows}
+
+
 def user_permissions(user_id: int) -> set[str]:
     """Resolve the effective permission set for a user.
 

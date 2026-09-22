@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from server.auth import rbac_enforced, resolve_request_token
 from server.api_keys import KEY_HEADER as API_KEY_HEADER, resolve_api_key
+from server import authz
 from server.helpers import _get_web_dir
 from server.audit_listener import register_audit_listener
 from server.webhook_dispatcher import register_webhook_listener
@@ -775,6 +776,19 @@ def create_app(
                     request.state.user = key_user
                     request.state.api_key = key_row
                     kind = "user"   # crachá válido ⇒ identidade de usuário
+
+            # Plano 169 B2: o conjunto de permissões do usuário resolvido acima,
+            # calculado UMA VEZ aqui — nunca de novo por checagem de rota. Sem
+            # isso, cada `plugin_permission`/`core_permission`/`require_permission`
+            # da requisição (podem ser várias) pagava sua PRÓPRIA consulta
+            # síncrona (`rbac_repo.user_has_permission`) direto no thread do loop.
+            # `authz._rbac_allows`/`visible_inbox_ids`/`ConversationAccessScope.
+            # for_request` leem daqui quando presente; sem identidade não há o
+            # que cachear (`_rbac_allows` libera antes mesmo de olhar isto).
+            request.state.effective_permissions = None
+            if request.state.user is not None:
+                request.state.effective_permissions = await asyncio.to_thread(
+                    authz.effective_permissions, request.state.user)
 
             if enforce and kind != "user":  # only a USER session/API key passes
                 return JSONResponse(
