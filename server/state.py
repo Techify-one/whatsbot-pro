@@ -9,6 +9,8 @@ from collections import deque
 
 from fastapi import WebSocket
 
+logger = logging.getLogger(__name__)
+
 
 # ── In-memory log capture ────────────────────────────────────────────────
 
@@ -42,6 +44,26 @@ class MemoryLogHandler(logging.Handler):
         self.records.clear()
 
 
+def _as_conversation_id(value) -> int | None:
+    """Coerce a WS payload value to a conversation id, or ``None`` (plano 168 I2).
+
+    Accepts ``int`` and digit-only ``str`` (``"123"``) — anything else (a uuid
+    hex string like the ``melhorias`` plugin's chat ids, ``None``, a ``bool``)
+    is NOT a conversation id. ``bool`` is excluded explicitly because
+    ``isinstance(True, int)`` is ``True`` in Python. The caller decides what a
+    ``None`` result means: resolve-or-discard for a conversation event, plain
+    global fan-out for anything else (a non-numeric id on a non-conversation
+    event is not this router's business).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
 # ── WebSocket Connection Manager ─────────────────────────────────────────
 
 class ConnectionManager:
@@ -63,9 +85,21 @@ class ConnectionManager:
         "conversation_labels_changed", "agent_transfer_alert", "human_transfer_alert",
     }
 
+    # Plano 168 I1 — chave que carrega o id de conversa POR EVENTO, checada
+    # ANTES da leitura genérica de ``conversation_id``. Mapa explícito e
+    # fechado: nunca ler ``id`` de forma genérica — outros eventos do bus usam
+    # essa mesma chave para outra coisa (``plugin_melhorias_changed {"id": sid}``,
+    # ``agendamento_retorno_changed``, o ``message.reaction`` do bus).
+    UPSERT_ID_KEYS = {"conversation_upsert": "id"}
+
+    # Log de descarte com limite de taxa (I4): 1 linha/60s por nome de evento —
+    # presença/recibo são alto volume.
+    _DISCARD_LOG_INTERVAL = 60.0
+
     def __init__(self):
         self.active: list[WebSocket] = []
         self._user_ids: dict[WebSocket, int | None] = {}
+        self._discard_log_ts: dict[str, float] = {}
 
     async def connect(self, websocket: WebSocket, user_id: int | None = None):
         await websocket.accept()
@@ -78,20 +112,52 @@ class ConnectionManager:
         self._user_ids.pop(websocket, None)
 
     async def broadcast(self, event: str, data: dict):
-        conversation_id = data.get("conversation_id") if isinstance(data, dict) else None
-        if conversation_id is None and isinstance(data, dict):
-            nested = data.get("message")
-            if isinstance(nested, dict):
-                conversation_id = nested.get("conversation_id")
+        """Route ``event`` to its conversation's authorized audience, or fan it
+        out globally when it carries no conversation id at all.
+
+        Never raises (plano 168 F1 / D4): a webhook that ``await``s this call
+        must not lose the inbound message it is about to enqueue just because a
+        resolver hit a bad id or the DB blipped (R1). Every discard is logged,
+        rate-limited, instead of failing silently forever.
+        """
+        try:
+            return await self._route_broadcast(event, data)
+        except Exception:
+            logger.exception("ws: broadcast de %s falhou", event)
+            return None
+
+    async def _route_broadcast(self, event: str, data: dict):
+        conversation_id = None
+        if isinstance(data, dict):
+            id_key = self.UPSERT_ID_KEYS.get(event)
+            if id_key is not None:
+                conversation_id = _as_conversation_id(data.get(id_key))
+            if conversation_id is None:
+                conversation_id = _as_conversation_id(data.get("conversation_id"))
+            if conversation_id is None:
+                nested = data.get("message")
+                if isinstance(nested, dict):
+                    conversation_id = _as_conversation_id(nested.get("conversation_id"))
         if conversation_id is None and event in self.CONVERSATION_EVENTS:
             conversation_id = await self._resolve_conversation_id(data)
         if conversation_id is not None:
-            return await self.broadcast_conversation(event, data, int(conversation_id))
+            return await self.broadcast_conversation(event, data, conversation_id)
         if event in self.CONVERSATION_EVENTS:
             # Fail closed: a conversation payload without provable ownership is
             # never fanned out globally.
+            self._log_discarded(event, data)
             return
         return await self._broadcast_targets(event, data, list(self.active))
+
+    def _log_discarded(self, event: str, data) -> None:
+        now = time.time()
+        last = self._discard_log_ts.get(event, 0.0)
+        if now - last < self._DISCARD_LOG_INTERVAL:
+            return
+        self._discard_log_ts[event] = now
+        keys = sorted(data.keys()) if isinstance(data, dict) else type(data).__name__
+        logger.warning(
+            "ws: %s descartado — sem conversa resolvível (chaves=%s)", event, keys)
 
     async def _resolve_conversation_id(self, data: dict) -> int | None:
         from db.repositories import contact_repo, conversation_repo, inbox_repo, message_repo
