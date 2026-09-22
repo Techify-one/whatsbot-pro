@@ -186,13 +186,35 @@ O webhook detecta os tipos abaixo e os converte em `parsed_msg` (`media_type` + 
 
 Regra de versão do catálogo — caso particular da regra geral em "Versionamento da API de plugins": remover/renomear um filtro **com produtor vivo** exige MAJOR em `WHATSBOT_API_VERSION` (que hoje derrubaria os 36 manifests do parque de uma vez). Retirar um nome apenas documentado, sem `apply_filter` no core suportado, é PATCH — nenhum comportamento executável deixa de existir —, mas exige varredura, entrada em [docs/PLUGIN_API_CHANGELOG.md](../docs/PLUGIN_API_CHANGELOG.md) e teste de WARNING como o caso acima. **Acrescentar** nome é MINOR, no MESMO commit do call site — travado por `test_bus_catalogue_matches_producers`, que compara o catálogo com os produtores reais nas duas direções.
 
-### Audiência de conversa no WebSocket (plano 166/01)
+### Audiência de conversa no WebSocket (plano 166/01 · 168)
 
 O bus interno continua entregando eventos aos subscribers do processo; ele não é
 uma fronteira de autorização para plugins. Já a projeção WebSocket do core guarda
 o `user_id` de cada socket e aplica `ConversationAccessScope` no momento de cada
-evento sensível. Payload sem `conversation_id` precisa ser resolvível por mensagem
-ou por contato+canal; se a conversa não puder ser provada, o fan-out falha fechado
-em vez de virar broadcast global. Mudanças administrativas de acesso usam o evento
-global, sem conteúdo, `conversation_access_changed` para obrigar o cliente a
-descartar estado e consultar novamente.
+evento sensível — em LOTE (uma leitura de permissões/inbox/time por evento, não
+uma por socket conectado; `ConversationAccessScope.for_users`, plano 168 F3),
+nunca cacheada entre eventos.
+
+`ConnectionManager.broadcast` (`server/state.py`) roteia cada evento em
+`CONVERSATION_EVENTS` por esta ordem, e o primeiro id coercível (`int` ou string
+só-dígitos) vence: (1) mapa fechado por NOME de evento — hoje só
+`conversation_upsert` → chave `id` (a linha inteira da lista de atendimentos, sem
+`conversation_id` próprio; **nunca leia `id` genericamente para outro evento** —
+`plugin_melhorias_changed`/`agendamento_retorno_changed` usam essa mesma chave
+para outra coisa); (2) `data["conversation_id"]`; (3)
+`data["message"]["conversation_id"]`; (4) resolvedor por `db_id`/`msg_id`
+(restrito ao `channel_id` do payload quando presente — um `msg_id` só é único
+DENTRO de um canal, ex. Telegram) ou por `phone`+`channel_id`/`phone` sozinho
+(só resolve se o contato tiver exatamente UMA conversa aberta).
+
+⚠️ **Todo evento de `CONVERSATION_EVENTS` sem id provável é DESCARTADO — nunca
+vira fan-out global** (log `ws: <evento> descartado`, 1 linha/60s por nome de
+evento). Um plugin que emite um evento próprio nessa lista (não há hoje, mas se
+vier a haver) precisa mandar `conversation_id` no payload — sem ele, ninguém
+recebe. Evento **fora** de `CONVERSATION_EVENTS` cujo `conversation_id` não é
+coercível (ex. um uuid hex, como o chat do plugin `melhorias`) não é
+"conversa" para este roteador: cai no fan-out global normal, como qualquer
+outro evento sem essa chave — `broadcast` nunca levanta por isso. Mudanças
+administrativas de acesso usam o evento global, sem conteúdo,
+`conversation_access_changed` para obrigar o cliente a descartar estado e
+consultar novamente.

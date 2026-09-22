@@ -278,6 +278,17 @@ de membro/modo/time emite `conversation_access_changed`: o cliente remove de
 imediato as linhas daquele time, fecha o fio selecionado se necessário e refaz a
 consulta ao servidor. Isso evita manter conteúdo revogado até um F5.
 
+⚠️ **Entre `4245ac5` (2026-09-21) e o plano 168 (2026-09-22) essa audiência
+"correta" era, na prática, "ninguém"**: o roteador do WS passou a EXIGIR um
+`conversation_id` provado para todo evento de conversa e a descartar em
+silêncio o que não conseguia provar — e o `conversation_upsert` (quem reordena
+e insere linha na sidebar, plano 28) usa a chave `id`, não `conversation_id`,
+então nunca mais chegou a navegador nenhum. Sintoma em produção: a conversa só
+subia na lista com F5, ou quando outro gatilho forçava um refetch (fim do
+ciclo da IA) — por isso piorava com a IA da conversa desligada (nenhum
+gatilho). O contrato real do roteamento (o que roteia, o que é descartado, o
+log de descarte) está em [docs/PLUGIN_BUS.md](PLUGIN_BUS.md#audiência-de-conversa-no-websocket-plano-16601--168).
+
 Mídia deixou de usar diretamente `media_path`: [MediaContent.js](../web/static/js/components/contacts/MediaContent.js)
 busca `/api/messages/{id}/media` com o Bearer atual, cria uma Blob URL e a revoga
 no cleanup. A URL pública anterior responde 404 quando o arquivo já pertence a

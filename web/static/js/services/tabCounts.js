@@ -23,9 +23,11 @@ export const EMPTY_COUNTS = Object.freeze({ all: 0, mine: 0, unassigned: 0, ment
 export const DEFAULT_DEBOUNCE_MS = 300;
 // Teto de frequência do refetch disparado por "a lista mudou" (plano 130 · D3/P1).
 // O total muda devagar (conversa abre/resolve), mas o gatilho é altíssimo: o
-// `conversation_upsert` sai a cada mensagem visível da INSTÂNCIA inteira (o /ws não
-// tem escopo por canal — plano 90). Mudança de FILTRO não passa por aqui: ela é
-// imediata (o usuário está esperando).
+// `conversation_upsert` sai a cada mensagem visível de QUALQUER conversa da
+// audiência deste usuário (plano 168 — o /ws roteia por conversa, mas quem é
+// membro de várias inboxes/admin ainda recebe um upsert por mensagem em cada
+// uma). Mudança de FILTRO não passa por aqui: ela é imediata (o usuário está
+// esperando).
 export const DEFAULT_MIN_INTERVAL_MS = 4000;
 
 /**

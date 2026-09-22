@@ -310,6 +310,7 @@ As rotas vivem em `server/routes/`; o índice completo (≈50 endpoints) e o cat
 - Endpoints de plugin ficam sob `/api/plugins/<id>/...`; o prefixo `/public/` é isento de autenticação.
 - 🚫 Nenhuma tela (core ou plugin) abre `new WebSocket('/ws')` na mão — o transporte é o barramento único e autenticado (`subscribe` do [wsBus.js](web/static/js/services/wsBus.js)). Ver [docs/PLUGINS.md](docs/PLUGINS.md).
 - `POST /api/admin/repair-sequences` re-ancora as sequences do Postgres em `MAX(pk)` (recovery pós-import manual).
+- ⚠️ Evento de conversa no `/ws` sem `conversation_id` provado é **DESCARTADO**, nunca vira broadcast global (`conversation_upsert` roteia pela chave `id`) — plano 168, guia completo em [docs/PLUGIN_BUS.md](docs/PLUGIN_BUS.md).
 
 ### Chave por usuário (`X-Api-Key`), fachada `/api/v1` e webhooks de saída
 

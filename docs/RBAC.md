@@ -32,3 +32,14 @@ Um time privado ativo precisa ter ao menos um membro ativo; desativar ou excluir
 último é bloqueado. Sem a exceção do responsável, o time não pode manter conversa
 atribuída a usuário externo. Desativação preserva vínculo e policy; hard delete é
 bloqueado enquanto houver conversa vinculada.
+
+## Realtime (WebSocket)
+
+`ConversationAccessScope.for_user` (HTTP) e `.for_users` (WS, plano 168 F3 —
+mesma policy, em LOTE para todos os sockets conectados de uma vez, não um a um)
+avaliam a MESMA regra acima; nunca divergem por caminho. Sem cache entre
+eventos (regra do topo deste doc): revogar acesso vale no próximo evento, não
+só no próximo login. Usuário desativado (`is_active=0`) recebe escopo que nega
+toda conversa mesmo com socket já aberto — a desativação não fecha a conexão
+por si só. Contrato completo do roteamento/descarte por evento:
+[docs/PLUGIN_BUS.md](PLUGIN_BUS.md#audiência-de-conversa-no-websocket-plano-16601--168).
