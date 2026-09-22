@@ -24,6 +24,7 @@ events — the handler owns those, since it also owns the surrounding
 try/except and usage snapshot.
 """
 
+import json
 import os
 import re
 import time
@@ -43,6 +44,7 @@ from agent.handoff import (
     clear_team_handoff_outcome,
     consume_team_handoff_outcome,
 )
+from agent.script_guard import foreign_sample, has_foreign_script
 from plugins.events import (
     apply_filter,
     apply_filter_sync,
@@ -567,6 +569,57 @@ def _build_followup_agent(handler, system_prompt, model_config):
 
 
 # --------------------------------------------------------------------------- #
+# Script guard (plano 167): the model occasionally swaps ONE word for a
+# non-Latin-script equivalent while the rest of the sentence stays correct
+# Portuguese (e.g. "...com o combo այսօր?" — Armenian for "today"). There is
+# no language instruction anywhere in the prompt or code; this is a model
+# slip, not a business-rule bug. See docs/IA.md "Motor de agente (AGNO)".
+# --------------------------------------------------------------------------- #
+def _guard_text(reply: str) -> str:
+    """Return the text the script guard should actually scan.
+
+    With split_messages ON the reply is a JSON array of strings, and a
+    non-Latin letter inside one element can hide behind a ``\\uXXXX`` escape
+    that only decoding the array reveals (a raw scan of the un-decoded text
+    sees only ASCII). Mirrors the code-fence-stripping in
+    ``server.helpers.parse_split_reply`` so both sides agree on what "the
+    text" is. Never raises — any failure falls back to the raw reply.
+    """
+    text = (reply or "").strip()
+    try:
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1]).strip()
+        if text.startswith("["):
+            parts = json.loads(text)
+            if isinstance(parts, list) and all(isinstance(p, str) for p in parts):
+                return "\n".join(parts)
+    except Exception:
+        pass
+    return text
+
+
+def _script_retry_input(output, bad: str) -> list[Message]:
+    """Conversation + a corrective instruction to rewrite the reply in Latin script.
+
+    Built on ``_followup_input`` (the same history-replay the forced
+    follow-up uses) plus one trailing ``user`` message naming the offending
+    sample. Explicitly asks to preserve content, emoji AND the output format
+    (the split_messages JSON array, when that's what the original reply was)
+    — this retry runs tools-less, so it only gets one shot at rewriting.
+    """
+    convo = _followup_input(output)
+    instruction = (
+        "Sua última resposta usou por engano um alfabeto diferente do "
+        f"português em alguma palavra (exemplo: \"{bad}\"). Reescreva a MESMA "
+        "resposta inteira, com o MESMO conteúdo, o MESMO formato (se era uma "
+        "lista/array, continue sendo) e os mesmos emojis — só troque as "
+        "palavras que não estão em português por escrita latina normal."
+    )
+    return convo + [Message(role="user", content=instruction)]
+
+
+# --------------------------------------------------------------------------- #
 # Public entry points
 # --------------------------------------------------------------------------- #
 async def run_async(handler, contact, sender, messages, active_tools,
@@ -590,6 +643,7 @@ async def run_async(handler, contact, sender, messages, active_tools,
     mark_execution_has_ai()  # this turn actually invoked the model (Nexus filter)
     _capture_llm_context(system_prompt, convo, model_id)
     run_output = await runner.arun(input=convo)
+    last_output = run_output  # plano 167 I6: source for a script-retry, see below
 
     reply = _extract_reply(run_output)
     usage = _extract_usage(run_output)
@@ -612,8 +666,42 @@ async def run_async(handler, contact, sender, messages, active_tools,
             if fu_reply:
                 reply = fu_reply
                 usage = _merge_usage(usage, fu_usage)
+                last_output = fu_output
         except Exception:
             logger.exception("Forced follow-up after tool call failed for %s", sender)
+
+    # plano 167: the model occasionally swaps ONE word for a non-Latin-script
+    # equivalent while the rest of the sentence stays correct Portuguese. The
+    # guard is an ALLOWLIST of letter script (never emoji/language — see
+    # agent/script_guard.py) so it never fights the agent's own emoji
+    # instructions. One tools-less retry; if it's still dirty, keep the
+    # original and log — silence is worse than an imperfect reply.
+    if reply and has_foreign_script(_guard_text(reply)):
+        bad = foreign_sample(_guard_text(reply))
+        logger.warning(
+            "Non-Latin script in reply from %s for %s (sample=%r) — retrying once",
+            model_id, sender, bad)
+        try:
+            track_step("llm_request", {"model": model_id, "engine": "agno",
+                                       "type": "script_retry", "sample": bad})
+            rg_agent = _build_followup_agent(handler, system_prompt, model_config)
+            rg_output = await rg_agent.arun(input=_script_retry_input(last_output, bad))
+            rg_reply = _extract_reply(rg_output)
+            rg_usage = _extract_usage(rg_output)
+            clean = bool(rg_reply) and not has_foreign_script(_guard_text(rg_reply))
+            track_step("llm_response", {"model": model_id, "engine": "agno",
+                                        "type": "script_retry", "clean": clean})
+            if rg_reply:
+                usage = _merge_usage(usage, rg_usage)
+            if clean:
+                reply = rg_reply
+            else:
+                logger.error(
+                    "Script retry still non-Latin for %s (sample=%r) — "
+                    "keeping original reply", sender, bad)
+        except Exception:
+            logger.exception("Script-guard retry failed for %s", sender)
+
     track_step("llm_response", {
         "model": model_id, "engine": "agno",
         "prompt_tokens": (usage or {}).get("prompt_tokens", 0),
@@ -651,6 +739,7 @@ def run_sync(handler, contact, sender, messages, active_tools,
     mark_execution_has_ai()  # this turn actually invoked the model (Nexus filter)
     _capture_llm_context(system_prompt, convo, model_id)
     run_output = runner.run(input=convo)
+    last_output = run_output  # plano 167 I6: source for a script-retry, see below
 
     reply = _extract_reply(run_output)
     usage = _extract_usage(run_output)
@@ -669,8 +758,38 @@ def run_sync(handler, contact, sender, messages, active_tools,
             if fu_reply:
                 reply = fu_reply
                 usage = _merge_usage(usage, fu_usage)
+                last_output = fu_output
         except Exception:
             logger.exception("Forced follow-up after tool call failed for %s", sender)
+
+    # See run_async: same script guard, sync path (no production caller
+    # today, kept for parity with run_async — plano 167).
+    if reply and has_foreign_script(_guard_text(reply)):
+        bad = foreign_sample(_guard_text(reply))
+        logger.warning(
+            "Non-Latin script in reply from %s for %s (sample=%r) — retrying once",
+            model_id, sender, bad)
+        try:
+            track_step("llm_request", {"model": model_id, "engine": "agno",
+                                       "type": "script_retry", "sample": bad})
+            rg_agent = _build_followup_agent(handler, system_prompt, model_config)
+            rg_output = rg_agent.run(input=_script_retry_input(last_output, bad))
+            rg_reply = _extract_reply(rg_output)
+            rg_usage = _extract_usage(rg_output)
+            clean = bool(rg_reply) and not has_foreign_script(_guard_text(rg_reply))
+            track_step("llm_response", {"model": model_id, "engine": "agno",
+                                        "type": "script_retry", "clean": clean})
+            if rg_reply:
+                usage = _merge_usage(usage, rg_usage)
+            if clean:
+                reply = rg_reply
+            else:
+                logger.error(
+                    "Script retry still non-Latin for %s (sample=%r) — "
+                    "keeping original reply", sender, bad)
+        except Exception:
+            logger.exception("Script-guard retry failed for %s", sender)
+
     track_step("llm_response", {
         "model": model_id, "engine": "agno",
         "prompt_tokens": (usage or {}).get("prompt_tokens", 0),

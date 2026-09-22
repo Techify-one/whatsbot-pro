@@ -252,6 +252,8 @@ O loop de raciocínio + tool calling roda no **AGNO** ([agent/agno_engine.py](ag
 
 ⚠️ **Time (`atendimentos.team_id`, plano 153) é campo INDEPENDENTE do `assignee_user_id`** — `conversation_service.assign_team` nunca passa pelo cotovelo `_transfer` (que existe só porque assignee/agente-de-IA/gate-da-IA SÃO mutuamente exclusivos); é escrita isolada, como `set_agent`.
 
+⚠️ **Trava de escrita (plano 167)**: o guard reprova LETRA não-latina, nunca emoji nem inglês — endurecê-lo entra em laço com prompts que mandam usar emoji; uma re-geração sem tools e, se falhar, envia a original. [docs/IA.md](docs/IA.md)
+
 ⚠️ **Acesso de time tem TRÊS modos (plano 166/01)**: `open`; `list_hidden` (`restrict_visibility=1`, compatível com o plano 154: restringe só coleções); e `private` (`enforce_team_access=1`, implica `restrict_visibility` e também protege link/detalhe, escrita, v1, busca, WS e mídia com 404). A inbox continua soberana. **`visible_to_assignee` é exceção individual** para o responsável daquela conversa. `conversation.read_all` amplia inboxes, mas **não** ignora time; o bypass explícito é `conversation.team.read_any` (admin o recebe pelo wildcard). A policy única é `ConversationAccessScope` em [server/authz.py](server/authz.py).
 
 **Filtro de histórico por regex** (plano 43): lista-negra GLOBAL em `ai_history_exclude_patterns` (default `[]`), cada linha testada como `f"{role}\t{content}"` com `re.search`. [agent/history_filter.py](agent/history_filter.py) é **fail-open** em todo nível. `message_repo.get_context(..., exclude=...)` faz over-fetch (cap 200) — cortar linhas **não encolhe** a janela abaixo de `max_context_messages`.
