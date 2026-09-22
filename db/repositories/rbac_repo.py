@@ -89,6 +89,64 @@ def user_has_permission(user_id: int, permission_key: str) -> bool:
     return "*" in perms or permission_key in perms
 
 
+def user_permissions_many(user_ids) -> dict[int, set[str]]:
+    """Batch sibling of :func:`user_permissions` (plano 168 F3 / I7).
+
+    Same precedence per user (custom > admin > role union) as the single-user
+    version, but at CONSTANT query cost regardless of how many ids are in
+    ``user_ids`` — 4 queries total instead of 2-3 PER user. Feeds
+    ``ConversationAccessScope.for_users``, the WS fan-out's batched audience
+    check (a broadcast used to pay ``user_permissions`` once per CONNECTED
+    SOCKET, serially).
+    """
+    ids = list({int(u) for u in user_ids if u is not None})
+    if not ids:
+        return {}
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(users.c.id, users.c.custom_permissions)
+            .where(users.c.id.in_(ids))
+        ).all()
+        result: dict[int, set[str]] = {uid: set() for uid, _ in rows}
+        custom_ids = [uid for uid, is_custom in rows if is_custom]
+        role_ids = [uid for uid, is_custom in rows if not is_custom]
+
+        if custom_ids:
+            for uid, key in conn.execute(
+                select(user_permissions_t.c.user_id, permissions.c.key)
+                .join(permissions, permissions.c.id == user_permissions_t.c.permission_id)
+                .where(user_permissions_t.c.user_id.in_(custom_ids))
+            ):
+                result[uid].add(key)
+
+        if role_ids:
+            role_keys_by_user: dict[int, set[str]] = {uid: set() for uid in role_ids}
+            for uid, role_key in conn.execute(
+                select(user_roles.c.user_id, roles.c.key)
+                .join(roles, roles.c.id == user_roles.c.role_id)
+                .where(user_roles.c.user_id.in_(role_ids))
+            ):
+                role_keys_by_user.setdefault(uid, set()).add(role_key)
+
+            admin_ids = [uid for uid, keys in role_keys_by_user.items() if "admin" in keys]
+            non_admin_ids = [uid for uid in role_ids if uid not in admin_ids]
+
+            if admin_ids:
+                all_keys = {p[0] for p in conn.execute(select(permissions.c.key))} | {"*"}
+                for uid in admin_ids:
+                    result[uid] = all_keys
+
+            if non_admin_ids:
+                for uid, pkey in conn.execute(
+                    select(user_roles.c.user_id, permissions.c.key)
+                    .join(role_permissions, role_permissions.c.role_id == user_roles.c.role_id)
+                    .join(permissions, permissions.c.id == role_permissions.c.permission_id)
+                    .where(user_roles.c.user_id.in_(non_admin_ids))
+                ):
+                    result[uid].add(pkey)
+    return result
+
+
 def sync_core_permissions() -> int:
     """Reconcile the ``permissions`` table with the static core catalog (idempotent).
 

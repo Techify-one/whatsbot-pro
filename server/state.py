@@ -44,6 +44,19 @@ class MemoryLogHandler(logging.Handler):
         self.records.clear()
 
 
+def _audience_snapshot(conversation_id: int, user_ids: set):
+    """Sync helper run in ONE ``to_thread`` (plano 168 I8): the conversation row
+    plus every requested user's :class:`~server.authz.ConversationAccessScope`,
+    batched. Runs off the event loop, same as the per-socket calls it replaces.
+    """
+    from db.repositories import conversation_repo
+    from server.authz import ConversationAccessScope
+
+    conversation = conversation_repo.get(conversation_id)
+    scopes = ConversationAccessScope.for_users(user_ids)
+    return conversation, scopes
+
+
 def _as_conversation_id(value) -> int | None:
     """Coerce a WS payload value to a conversation id, or ``None`` (plano 168 I2).
 
@@ -210,26 +223,27 @@ class ConnectionManager:
 
     async def broadcast_conversation(self, event: str, data: dict,
                                      conversation_id: int):
-        """Send conversation data only to its current authorized audience."""
-        from db.repositories import conversation_repo
-        from server.authz import ConversationAccessScope
+        """Send conversation data only to its current authorized audience.
 
-        conversation = await asyncio.to_thread(conversation_repo.get, conversation_id)
+        Plano 168 F3: ONE ``to_thread`` for the whole audience (the conversation
+        row + every connected user's access scope, batched), not one per socket.
+        A busy instance with N connected agents used to pay ~14 round trips per
+        socket, in series, inside every single conversation event.
+        """
+        sockets = list(self.active)
+        user_ids = {self._user_ids.get(ws) for ws in sockets}
+        conversation, scopes = await asyncio.to_thread(
+            _audience_snapshot, conversation_id, user_ids)
         # Deletion events are projected after the row is gone, but their payload
         # still carries the authorization-relevant snapshot.
         if not conversation:
             conversation = data if isinstance(data, dict) else None
         if not conversation or conversation.get("inbox_id") is None:
             return
-        scopes: dict[int | None, ConversationAccessScope] = {}
-        targets = []
-        for websocket in list(self.active):
-            user_id = self._user_ids.get(websocket)
-            if user_id not in scopes:
-                scopes[user_id] = await asyncio.to_thread(
-                    ConversationAccessScope.for_user, user_id)
-            if scopes[user_id].allows(conversation, "direct"):
-                targets.append(websocket)
+        targets = [
+            ws for ws in sockets
+            if scopes[self._user_ids.get(ws)].allows(conversation, "direct")
+        ]
         return await self._broadcast_targets(event, data, targets)
 
     async def _broadcast_targets(self, event: str, data: dict,

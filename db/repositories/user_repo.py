@@ -49,6 +49,20 @@ def is_active(user_id: int) -> bool:
     return bool(val)
 
 
+def is_active_many(user_ids) -> dict[int, bool]:
+    """Batch sibling of :func:`is_active` (plano 168 I7/I9) — one round trip for
+    N ids, feeding ``ConversationAccessScope.for_users``. A missing id is simply
+    absent from the result (caller treats "not found" the same as "inactive")."""
+    ids = list({int(u) for u in user_ids if u is not None})
+    if not ids:
+        return {}
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(users.c.id, users.c.is_active).where(users.c.id.in_(ids))
+        ).all()
+    return {uid: bool(active) for uid, active in rows}
+
+
 def get_by_email(email: str) -> dict | None:
     with get_engine().connect() as conn:
         row = conn.execute(

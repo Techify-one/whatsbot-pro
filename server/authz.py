@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from fastapi import Request
 from sqlalchemy import and_, false as sa_false, or_, true as sa_true
 
-from db.repositories import rbac_repo, inbox_member_repo, team_member_repo, team_repo
+from db.repositories import rbac_repo, inbox_member_repo, team_member_repo, team_repo, user_repo
 from db.tables import conversations
 from plugins.events import apply_filter, apply_filter_sync
 from server.helpers import _err
@@ -170,6 +170,53 @@ class ConversationAccessScope:
             read_any_team=read_any,
             teams_by_id={int(team["id"]): team for team in team_rows},
         )
+
+    @classmethod
+    def for_users(cls, user_ids) -> dict[int | None, "ConversationAccessScope"]:
+        """Batch sibling of :func:`for_user` (plano 168 F3) — the WS fan-out used
+        to call ``for_user`` once per CONNECTED SOCKET, serially (~14 round trips
+        each); this builds the SAME per-user policy in a small, constant number
+        of batched reads regardless of how many ids are in ``user_ids``.
+
+        ``None`` (no identity — legacy/open) maps to the unrestricted scope, same
+        as ``for_user(None)``. A deactivated user (``is_active=0``, I9) gets a
+        scope that denies every conversation instead of its real membership —
+        deactivation doesn't close an already-open socket, so it must not keep
+        receiving live conversation data through it.
+        """
+        wanted = set(user_ids)
+        team_rows = team_repo.list_all(include_inactive=True)
+        teams_by_id = {int(team["id"]): team for team in team_rows}
+        out: dict[int | None, "ConversationAccessScope"] = {}
+        if None in wanted:
+            out[None] = cls(user_id=None, inbox_ids=None, team_ids=frozenset(),
+                            read_any_team=True, teams_by_id=teams_by_id)
+
+        ids = {uid for uid in wanted if uid is not None}
+        if not ids:
+            return out
+
+        active_by_id = user_repo.is_active_many(ids)
+        perms_by_id = rbac_repo.user_permissions_many(ids)
+        inbox_by_id = inbox_member_repo.inbox_ids_for_users(ids)
+        team_by_id = team_member_repo.team_ids_for_users(ids)
+
+        for uid in ids:
+            if not active_by_id.get(uid, False):
+                out[uid] = cls(user_id=uid, inbox_ids=[], team_ids=frozenset(),
+                               read_any_team=False, teams_by_id=teams_by_id)
+                continue
+            perms = perms_by_id.get(uid, set())
+            has_read_all = "*" in perms or "conversation.read_all" in perms
+            has_read_any_team = "*" in perms or "conversation.team.read_any" in perms
+            out[uid] = cls(
+                user_id=uid,
+                inbox_ids=(None if has_read_all else inbox_by_id.get(uid, [])),
+                team_ids=frozenset(team_by_id.get(uid, [])),
+                read_any_team=has_read_any_team,
+                teams_by_id=teams_by_id,
+            )
+        return out
 
     def _team_exception_clause(self, restricted_ids: list[int]):
         if not restricted_ids:

@@ -37,6 +37,25 @@ def inbox_ids_for_user(user_id: int) -> list[int]:
     return [r[0] for r in rows]
 
 
+def inbox_ids_for_users(user_ids) -> dict[int, list[int]]:
+    """Batch sibling of :func:`inbox_ids_for_user` (plano 168 F3 / I7) — one
+    round trip for N ids, scoped with ``IN (...)`` (unlike :func:`inbox_ids_by_user`,
+    which reads every membership row in the table). A requested id with no
+    membership is absent from the result (caller treats it as ``[]``)."""
+    ids = list({int(u) for u in user_ids if u is not None})
+    if not ids:
+        return {}
+    out: dict[int, list[int]] = {}
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            select(inbox_members.c.user_id, inbox_members.c.inbox_id)
+            .where(inbox_members.c.user_id.in_(ids))
+        ).all()
+    for uid, iid in rows:
+        out.setdefault(uid, []).append(iid)
+    return out
+
+
 def set_members(inbox_id: int, user_ids: list[int]) -> list[int]:
     """Replace the inbox's member set. Only existing, active users are kept."""
     now = time.time()
