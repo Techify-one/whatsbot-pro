@@ -259,7 +259,12 @@ export function ConversationInfoPanel({ phone, conversationId = null, onClose, o
                 ${canResolve ? html`
                   <button disabled=${busy} onClick=${toggleStatus}
                     class="px-3 py-1.5 rounded-md text-[13px] border border-wa-border text-wa-text hover:bg-wa-hover transition-colors disabled:opacity-50 whitespace-nowrap">
-                    ${isOpen ? 'Resolver' : 'Reabrir'}
+                    ${busy ? html`
+                      <span class="inline-flex items-center gap-1.5">
+                        <span class="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"></span>
+                        ${isOpen ? 'Resolvendo…' : 'Reabrindo…'}
+                      </span>
+                    ` : (isOpen ? 'Resolver' : 'Reabrir')}
                   </button>
                 ` : null}
               </div>

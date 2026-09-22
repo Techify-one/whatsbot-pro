@@ -614,6 +614,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           isPinned=${ctxMenu.isPinned}
           conv=${ctxConv.conv}
           convLoading=${ctxConv.loading}
+          convResolving=${ctxConv.resolving}
           convError=${ctxConv.error}
           users=${users}
           agentsUsers=${agentsUsers}

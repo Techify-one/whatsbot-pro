@@ -196,7 +196,12 @@ export function ConversationHeaderActions({ phone, conversationId = null, sandbo
           class=${btn}
           title=${isOpen ? 'Encerrar conversa' : 'Reabrir conversa'}
         >
-          ${isOpen ? 'Resolver' : 'Reabrir'}
+          ${busy ? html`
+            <span class="inline-flex items-center gap-1.5">
+              <span class="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"></span>
+              ${isOpen ? 'Resolvendo…' : 'Reabrindo…'}
+            </span>
+          ` : (isOpen ? 'Resolver' : 'Reabrir')}
         </button>
       ` : html`
         <span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${isOpen ? 'bg-wa-teal/15 text-wa-teal' : 'bg-wa-hover text-wa-secondary'}">
