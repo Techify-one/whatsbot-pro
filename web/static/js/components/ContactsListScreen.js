@@ -18,6 +18,7 @@ import { DefaultAvatar, GroupAvatar, SearchIcon, PlusIcon } from './contacts/ico
 import { avatarUrl } from './contacts/utils.js';
 import { ContactInfoPanel } from './contacts/ContactInfoPanel.js';
 import { ContactFilterDialog } from './contacts/ContactFilterDialog.js';
+import { NewConversationModal } from './contacts/NewConversationModal.js';
 import { useContactSubtitle } from './contacts/hooks/useContactSubtitle.js';
 import { useDeepLink } from '../hooks/useDeepLink.js';
 import { useUrlState } from '../hooks/useUrlState.js';
@@ -25,8 +26,9 @@ import { readParams, writeParams, str, int, json } from '../services/urlState.js
 import {
   getContacts, getContact, getTags, deleteContact, checkPhone,
   updateContactInfo, getContactConversation, exportContacts, importContacts,
-  getCustomAttributes,
+  getCustomAttributes, getChannelSessionState, lookupContactByPhone,
 } from '../services/api.js';
+import { isModifiedClick } from '../services/spaLink.js';
 import { matchesAdvFilters } from '../services/conversationRows.js';
 import {
   buildContactFilterParams, isContactFilterServerExpressible,
@@ -89,13 +91,44 @@ function navigate(path) {
 }
 
 // ── Modal "Novo contato" ─────────────────────────────────────────────────
-function NewContactModal({ onClose, onCreated }) {
-  const [phone, setPhone] = useState('');
-  const [name, setName] = useState('');
+// `initialPhone`/`initialName`: abertura pré-preenchida (ex.: clique no nome de
+// um participante dentro de uma conversa de grupo — ver MessageBubble.js) —
+// mesmo padrão do `initialPhone` do NewConversationModal. A checagem de "já
+// existe" dispara no mount porque já depende de `phone`.
+function NewContactModal({ initialPhone = '', initialName = '', onClose, onCreated, onViewExisting }) {
+  const [phone, setPhone] = useState(initialPhone);
+  const [name, setName] = useState(initialName);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // Contato já cadastrado com o número digitado — bloqueia "Criar contato" e
+  // oferece "Ver detalhes" em vez de deixar o operador duplicar/confundir.
+  const [existingContact, setExistingContact] = useState(null);
+  const [checkingExisting, setCheckingExisting] = useState(false);
+  const existingCheckSeq = useRef(0);
+
+  useEffect(() => {
+    setExistingContact(null);
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length < 10) { setCheckingExisting(false); return undefined; }
+    const seq = ++existingCheckSeq.current;
+    setCheckingExisting(true);
+    const t = setTimeout(async () => {
+      try {
+        const res = await lookupContactByPhone(digits);
+        if (seq !== existingCheckSeq.current) return;  // resposta obsoleta
+        setExistingContact((res && res.ok && res.data && res.data.exists) ? res.data.contact : null);
+      } catch {
+        // Falha na checagem não bloqueia a criação — o check-phone no submit
+        // continua sendo a garantia final (get_or_create é idempotente).
+      } finally {
+        if (seq === existingCheckSeq.current) setCheckingExisting(false);
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [phone]);
 
   async function handleCreate() {
+    if (existingContact) return;  // botão já desabilitado; guarda o Enter dos campos
     const digits = phone.replace(/\D/g, '');
     if (digits.length < 10) { setError('Informe DDD + número (mín. 10 dígitos).'); return; }
     setSaving(true);
@@ -156,6 +189,26 @@ function NewContactModal({ onClose, onCreated }) {
               class="wa-field w-full text-[15px] rounded-[8px] px-3 py-2 border border-wa-border outline-none focus:border-wa-iconActive transition-colors"
             />
           </div>
+          ${checkingExisting ? html`
+            <div class="text-[12px] text-wa-secondary animate-pulse-slow">Verificando se este número já é um contato...</div>
+          ` : existingContact ? html`
+            <div class="text-[13px] text-amber-700 bg-amber-50 border border-amber-200 rounded-[8px] px-3 py-2">
+              Este contato já existe.
+              <!-- O painel do modal faz stopPropagation, então o clique NUNCA chega
+                   ao interceptor de links do shell (App.js) — sem o preventDefault
+                   daqui o navegador seguia o href e recarregava a página inteira.
+                   Clique modificado (Ctrl/⌘/Shift/meio) fica com o navegador. -->
+              <a
+                href="/contacts/${existingContact.id}"
+                onClick=${(e) => {
+                  if (isModifiedClick(e)) return;
+                  e.preventDefault();
+                  if (onViewExisting) onViewExisting(existingContact);
+                }}
+                class="text-wa-teal font-medium no-underline hover:underline"
+              >Ver detalhes</a>
+            </div>
+          ` : null}
           ${error ? html`
             <div class="text-[13px] text-red-600 bg-red-50 border border-red-200 rounded-[8px] px-3 py-2">${error}</div>
           ` : null}
@@ -164,7 +217,7 @@ function NewContactModal({ onClose, onCreated }) {
           <button onClick=${onClose} class="px-4 py-[8px] rounded-lg text-[14px] text-wa-secondary hover:bg-wa-hover transition-colors">Cancelar</button>
           <button
             onClick=${handleCreate}
-            disabled=${saving}
+            disabled=${saving || !!existingContact}
             class="bg-wa-teal text-white text-[14px] font-medium px-4 py-[8px] rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
           >${saving ? 'Criando...' : 'Criar contato'}</button>
         </div>
@@ -240,7 +293,7 @@ function ContactDetailOverlay({ contact, globalTags, onGlobalTagsChange, onClose
 // plugin pode reescrevê-lo pelo seam genérico `filter.contact.headerSubtitle`
 // (o widget de site mapeia o token opaco `wsess_…` → um código curto WEB-XXXXXX).
 // Só exibição — o telefone segue sendo a identidade de roteamento.
-function ContactRow({ c, onOpenDetail, onStartConversation }) {
+function ContactRow({ c, globalTags, onOpenDetail, onStartConversation }) {
   const resolved = useContactSubtitle(c.phone, { channelId: c.channel_id, contact: c });
   // `resolved !== c.phone` ⇒ um plugin sobrescreveu (mostra o código curto);
   // senão, só formata como telefone quando o tipo do contato carrega um telefone
@@ -250,6 +303,7 @@ function ContactRow({ c, onOpenDetail, onStartConversation }) {
     ? resolved
     : (contactTypeIsPhone(c.contact_type) ? formatPhoneDisplay(c.phone) : c.phone);
   const badge = contactTypeBadge(c.contact_type);
+  const tags = Array.isArray(c.tags) ? c.tags : [];
   return html`
     <div
       class="flex items-center gap-4 bg-wa-bg border border-wa-border rounded-2xl px-5 py-4 shadow-sm hover:shadow transition-shadow"
@@ -263,8 +317,8 @@ function ContactRow({ c, onOpenDetail, onStartConversation }) {
 
       <!-- Nome + contato + Ver detalhes -->
       <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-2 min-w-0">
-          <div class="text-[16px] font-semibold text-wa-text truncate">
+        <div class="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0">
+          <div class="text-[16px] font-semibold text-wa-text truncate max-w-full min-w-0">
             ${c.name || phoneLabel || 'Sem nome'}
           </div>
           <span
@@ -272,6 +326,17 @@ function ContactRow({ c, onOpenDetail, onStartConversation }) {
             style=${badge.style}
             title="Tipo do contato (canal de origem)"
           >${badge.label}</span>
+          <!-- Tags do contato, na frente do selo do canal. Mesmo chip colorido da
+               sidebar; sem a tag em globalTags (ainda carregando/removida) cai no cinza. -->
+          ${tags.map((tagName) => {
+            const color = (globalTags && globalTags[tagName] && globalTags[tagName].color) || '#6b7280';
+            return html`<span
+              key=${tagName}
+              class="shrink-0 max-w-full truncate text-[10px] font-semibold rounded px-[6px] py-[1px] leading-[15px] whitespace-nowrap"
+              style="background: ${color}20; color: ${color}; border: 1px solid ${color}40;"
+              title=${`Tag: ${tagName}`}
+            >${tagName}</span>`;
+          })}
         </div>
         <div class="flex items-center flex-wrap gap-x-2 gap-y-[2px] text-[13px] mt-[2px]">
           <span class="text-wa-secondary truncate max-w-full">
@@ -334,6 +399,24 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   const [reloadTick, setReloadTick] = useState(0);  // plano 50: força refetch (delete/import)
   const [detail, setDetail] = useState(null); // contato aberto no painel
   const [showCreate, setShowCreate] = useState(false);
+  // Pré-preenchimento do modal "Novo contato" — clique no nome de um participante
+  // dentro de uma conversa de grupo (MessageBubble.js) chega aqui por
+  // `?createPhone=&createName=` na URL, um par ONE-SHOT (fora de CONTACTS_URL_SCHEMA,
+  // que é estado persistente de busca/página). Lido e removido da URL uma única vez
+  // no mount — não é re-lido em popstate, então voltar/avançar não reabre o modal.
+  const [createPrefill, setCreatePrefill] = useState(null); // {phone, name} | null
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const createPhone = params.get('createPhone');
+    if (!createPhone) return;
+    setCreatePrefill({ phone: createPhone, name: params.get('createName') || '' });
+    setShowCreate(true);
+    params.delete('createPhone');
+    params.delete('createName');
+    const qs = params.toString();
+    history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+    // eslint-disable-next-line
+  }, []);
   const [globalTags, setGlobalTags] = useState({});
   const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState(null); // {kind:'ok'|'err', text}
@@ -345,6 +428,8 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   const [showFilters, setShowFilters] = useState(false); // dropdown do construtor
   const [contactAttrDefs, setContactAttrDefs] = useState([]); // atributos de contato (dinâmicos)
   const filterRef = useRef(null);
+  // Recarga da lista adiada para o fechamento do painel — ver `closeDetail`.
+  const pendingListReloadRef = useRef(false);
 
   // Deep-link do estado da lista → URL (Plano 24). Busca + filtro avançado na
   // query legível; hidrata no mount/back-forward, reflete ao mudar (replaceState).
@@ -556,6 +641,16 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   function closeDetail() {
     setDetail(null);
     push(null);
+    // Recarga da lista adiada de `onCreated` (ver abaixo): disparar reload() em
+    // paralelo com openDetail() corria contra o refetch da lista — quando este
+    // terminava DEPOIS de abrir o painel, o toggle loading→false da lista
+    // reacionava o efeito de deep-link (useDeepLink.js), que resolvia a seleção
+    // pela URL original (a lista) e fechava o painel recém-aberto. Só é seguro
+    // recarregar aqui, quando não há mais painel para atropelar.
+    if (pendingListReloadRef.current) {
+      pendingListReloadRef.current = false;
+      reload();
+    }
   }
 
   // plano 69 F6: quando o filtro é server-expressável, o servidor já cortou a lista +
@@ -587,8 +682,14 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
     setPageInput(String(target + 1));
   }, [pageInput, page, totalPages]);
 
+  // Contato sem atendimento ainda: abre o modal "Nova conversa" pré-preenchido,
+  // pro operador escolher o canal (e escrever a 1ª mensagem) — ver `startConversation`.
+  const [newConvoContact, setNewConvoContact] = useState(null);
+
   // Abre o chat do contato no hub. Resolve o atendimento ativo (se houver) e navega
-  // por /conversations/{id}; sem atendimento ainda, cai na raiz do hub.
+  // por /conversations/{id}; sem atendimento ainda, abre o modal "Nova conversa"
+  // (o operador escolhe por qual canal iniciar) em vez de cair na raiz do hub sem
+  // nenhum contexto do contato.
   async function startConversation(contact) {
     closeDetail();
     try {
@@ -596,6 +697,23 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
       const conv = res && res.ok ? res.data.conversation : null;
       if (conv && conv.id != null) { navigate(`/conversations/${conv.id}`); return; }
     } catch { /* fallthrough */ }
+    // Grupo sem atendimento ainda: o modal "Nova conversa" assume um destinatário
+    // individual (canal + telefone), não um JID de grupo — sem esse caso, cai
+    // como antes.
+    if (contact.is_group) { navigate('/'); return; }
+    setNewConvoContact(contact);
+  }
+
+  // 1ª mensagem enviada pelo modal "Nova conversa": resolve o atendimento recém-criado
+  // NAQUELE canal (mesma consulta do useChannelPicker.openInChannel) e navega pra ela.
+  async function handleNewConvoSent(phone, channelId) {
+    setNewConvoContact(null);
+    let convId = null;
+    try {
+      const ss = await getChannelSessionState(channelId, phone);
+      if (ss && ss.ok && ss.data && ss.data.conversation_id) convId = ss.data.conversation_id;
+    } catch { /* fallthrough */ }
+    if (convId != null) { navigate(`/conversations/${convId}`); return; }
     navigate('/');
   }
 
@@ -697,7 +815,7 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
           ` : null}
         </div>
         <button
-          onClick=${() => setShowCreate(true)}
+          onClick=${() => { setCreatePrefill(null); setShowCreate(true); }}
           class="flex items-center gap-2 bg-wa-teal text-white text-[14px] font-medium px-4 h-[42px] rounded-lg hover:opacity-90 transition-opacity shrink-0"
         >
           <${PlusIcon} />
@@ -740,6 +858,7 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
             <${ContactRow}
               key=${c.id}
               c=${c}
+              globalTags=${globalTags}
               onOpenDetail=${openDetail}
               onStartConversation=${startConversation}
             />
@@ -814,15 +933,40 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
 
       ${showCreate ? html`
         <${NewContactModal}
-          onClose=${() => setShowCreate(false)}
+          initialPhone=${createPrefill ? createPrefill.phone : ''}
+          initialName=${createPrefill ? createPrefill.name : ''}
+          onClose=${() => { setShowCreate(false); setCreatePrefill(null); }}
           onCreated=${async (phone) => {
             setShowCreate(false);
-            reload();
+            setCreatePrefill(null);
             // plano 62 F3: abre o detalhe buscando SÓ o contato criado
-            // (GET /api/contacts/{phone}) em vez de re-baixar a lista completa.
+            // (GET /api/contacts/{phone}) em vez de re-baixar a lista completa. A
+            // lista só recarrega quando o painel fechar (`closeDetail`) — disparar
+            // reload() aqui, em paralelo, corria contra a abertura do painel.
             const res = await getContact(phone, false, null, { limit: 1 });
-            if (res && res.ok && res.data && res.data.id != null) openDetail(res.data);
+            if (res && res.ok && res.data && res.data.id != null) {
+              pendingListReloadRef.current = true;
+              openDetail(res.data);
+            } else {
+              // Não deu pra abrir o detalhe — ao menos garante que o contato criado
+              // apareça na lista.
+              reload();
+            }
           }}
+          onViewExisting=${(c) => {
+            setShowCreate(false);
+            setCreatePrefill(null);
+            openDetail(c);
+          }}
+        />
+      ` : null}
+
+      ${newConvoContact ? html`
+        <${NewConversationModal}
+          contacts=${[newConvoContact]}
+          initialPhone=${newConvoContact.phone}
+          onClose=${() => setNewConvoContact(null)}
+          onSent=${handleNewConvoSent}
         />
       ` : null}
 

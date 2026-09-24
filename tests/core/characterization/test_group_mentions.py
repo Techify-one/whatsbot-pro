@@ -388,7 +388,7 @@ def test_resolution_pushname_layer():
         group_mentions._client = _StoreClient([])           # empty device store
         group_mentions._pushname_cache.clear()
         group_mentions._pushname_attempted.clear()
-        group_mentions._store_cache = None
+        group_mentions._store_cache = {}
         # Record a pushName for a phone (digits-keyed).
         group_mentions.record_pushname(["5577777777777@s.whatsapp.net"], "Pedro")
         name = group_mentions._resolve_name("5577777777777", "")
@@ -402,7 +402,7 @@ def test_resolution_pushname_by_lid():
         group_mentions._client = _StoreClient([])
         group_mentions._pushname_cache.clear()
         group_mentions._pushname_attempted.clear()
-        group_mentions._store_cache = None
+        group_mentions._store_cache = {}
         group_mentions.record_pushname(["288887776665554@lid"], "Lucia")
         # phone unknown (""), lid known → resolves via the lid pushName key.
         name = group_mentions._resolve_name("", "288887776665554")
@@ -419,7 +419,7 @@ def test_resolution_device_store_layer():
         ])
         group_mentions._pushname_cache.clear()
         group_mentions._pushname_attempted.clear()
-        group_mentions._store_cache = None
+        group_mentions._store_cache = {}
         named = group_mentions._resolve_name("5588888888888", "")
         blank = group_mentions._resolve_name("5599999999999", "")
         golden_assert("gm_resolution_device_store",
@@ -435,7 +435,7 @@ def test_resolution_pushname_beats_store():
         ])
         group_mentions._pushname_cache.clear()
         group_mentions._pushname_attempted.clear()
-        group_mentions._store_cache = None
+        group_mentions._store_cache = {}
         group_mentions.record_pushname(["5566666666666@s.whatsapp.net"], "NomePush")
         name = group_mentions._resolve_name("5566666666666", "")
         golden_assert("gm_resolution_pushname_beats_store",
@@ -449,7 +449,7 @@ def test_resolution_none_known_returns_empty():
         group_mentions._client = _StoreClient([])
         group_mentions._pushname_cache.clear()
         group_mentions._pushname_attempted.clear()
-        group_mentions._store_cache = None
+        group_mentions._store_cache = {}
         name = group_mentions._resolve_name("5500000001111", "")
         golden_assert("gm_resolution_none", normalize({"resolved": name}))
 
@@ -471,7 +471,7 @@ def test_resolution_saved_contact_layer(_engine_ready):
         ])
         group_mentions._pushname_cache.clear()
         group_mentions._pushname_attempted.clear()
-        group_mentions._store_cache = None
+        group_mentions._store_cache = {}
         group_mentions.record_pushname([f"{phone}@s.whatsapp.net"], "NomePush")
         name = group_mentions._resolve_name(phone, "")
         golden_assert("gm_resolution_saved_contact", normalize({"resolved": name}))

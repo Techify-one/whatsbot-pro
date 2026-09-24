@@ -36,6 +36,18 @@ def resolve_contact_type(channel_id: str | None) -> str:
     except Exception:
         logger.exception("Falha ao resolver canal %s para contact_type", channel_id)
         provider = None
+    return resolve_contact_type_for_provider(provider)
+
+
+def resolve_contact_type_for_provider(provider: str | None) -> str:
+    """Tipo de contato declarado pela CLASSE do provider, sem passar por canal.
+
+    Para quando o call site já sabe POR QUAL PROVIDER o contato foi verificado,
+    e não por qual canal — ex.: ``check-phone`` sem ``channel_id`` verifica via o
+    ``gowa_client`` fixo (não um canal escolhido), então o tipo tem de ser o do
+    provider ``"gowa"`` mesmo, nunca o do canal "primário" de ``resolve_contact_type``
+    (que pode ser outro provider e destiparia um contato comprovadamente WhatsApp).
+    """
     if not provider:
         return DEFAULT_CONTACT_TYPE
     try:
@@ -45,5 +57,5 @@ def resolve_contact_type(channel_id: str | None) -> str:
         if cls is not None:
             return cls.contact_type() or DEFAULT_CONTACT_TYPE
     except Exception:
-        logger.exception("Falha ao resolver contact_type do canal %s", cid)
+        logger.exception("Falha ao resolver contact_type do provider %s", provider)
     return DEFAULT_CONTACT_TYPE

@@ -383,8 +383,14 @@ export async function toggleContactAI(phone, enabled, opts = {}) {
   return request('POST', `/api/contacts/${encodeURIComponent(phone)}/toggle-ai`, body);
 }
 
-export async function getGroupMembers(groupJid, force = false) {
-  const qs = force ? '?force=true' : '';
+// `channelId` (plano multi-canal): resolve o roster pelo canal DA CONVERSA —
+// sem ele, o backend cai no cliente GOWA padrão do app, que num install com
+// mais de um número conectado pode não ser o dono do grupo (roster vazio).
+export async function getGroupMembers(groupJid, force = false, channelId = null) {
+  const params = [];
+  if (force) params.push('force=true');
+  if (channelId) params.push(`channel_id=${encodeURIComponent(channelId)}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
   return request('GET', `/api/contacts/${encodeURIComponent(groupJid)}/members${qs}`);
 }
 
@@ -470,6 +476,13 @@ export async function checkPhone(phone, create = true, channelId = null) {
   const body = { phone, create };
   if (channelId) body.channel_id = channelId;
   return request('POST', '/api/contacts/check-phone', body);
+}
+
+// Existência de um contato pelo telefone, SEM criar nem validar no WhatsApp (ao
+// contrário de checkPhone/getContact, que materializam o contato). Usado pelo
+// modal "Novo contato" pra bloquear a criação com um número já cadastrado.
+export async function lookupContactByPhone(phone) {
+  return request('GET', `/api/contacts/lookup?phone=${encodeURIComponent(phone)}`);
 }
 
 // ── Tags ─────────────────────────────────────────────────────────────

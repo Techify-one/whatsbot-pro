@@ -40,8 +40,9 @@ _CACHE_TTL = 300.0
 
 # Device contact store (GOWA /user/my/contacts): digits -> saved name. Fetched
 # in one bulk call and cached, so a participant saved in the phone's address book
-# is named even if they never messaged in the group.
-_store_cache: tuple[float, dict[str, str]] | None = None
+# is named even if they never messaged in the group. Keyed by client identity —
+# see _store_map().
+_store_cache: dict[int, tuple[float, dict[str, str]]] = {}
 _STORE_TTL = 300.0
 
 # digits (phone or lid) -> pushName captured from incoming group messages
@@ -64,11 +65,16 @@ _NUM_RE = re.compile(r"@(\d{5,})")
 
 
 def init(client) -> None:
-    """Wire the GOWA client and discard device-scoped caches on replacement."""
-    global _client, _store_cache, _bot_phone, _bot_name
+    """Wire the DEFAULT GOWA client and discard device-scoped caches on replacement.
+
+    ``client`` is the fallback used by every call that doesn't pass its own
+    ``client=`` (plano multi-canal) — i.e. every caller that predates
+    per-channel resolution keeps working exactly as before, against this one.
+    """
+    global _client, _bot_phone, _bot_name
     if client is not _client:
         _members_cache.clear()
-        _store_cache = None
+        _store_cache.clear()
         _pushname_cache.clear()
         _pushname_attempted.clear()
         _bot_phone = ""
@@ -78,9 +84,8 @@ def init(client) -> None:
 
 def clear_cache() -> None:
     """Drop the members cache (call when bot name/phone or contacts change)."""
-    global _store_cache
     _members_cache.clear()
-    _store_cache = None
+    _store_cache.clear()
 
 
 def invalidate(group_jid: str) -> None:
@@ -109,35 +114,45 @@ def _digits(value: str) -> str:
     return "".join(ch for ch in head if ch.isdigit())
 
 
-def _store_map() -> dict[str, str]:
-    """Cached digits->name map from the device's WhatsApp contact store."""
-    global _store_cache
-    if _client is None:
+def _store_map(client=None) -> dict[str, str]:
+    """Cached digits->name map from the device's WhatsApp contact store.
+
+    Keyed by client identity (``id(eff)``), not a single global slot — a
+    multi-channel install has ONE address book PER GOWA NUMBER, and a shared
+    cache would leak channel A's contacts into channel B's name resolution.
+    """
+    eff = client if client is not None else _client
+    if eff is None:
         return {}
+    key = id(eff)
     now = time.time()
-    if _store_cache and (now - _store_cache[0]) < _STORE_TTL:
-        return _store_cache[1]
+    cached = _store_cache.get(key)
+    if cached and (now - cached[0]) < _STORE_TTL:
+        return cached[1]
     mapping: dict[str, str] = {}
     try:
-        for it in _client.get_wa_contacts():
+        for it in eff.get_wa_contacts():
             d = _digits(it.get("jid", "") or "")
             nm = (it.get("name") or "").strip()
             if d and nm:
                 mapping[d] = nm
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("[mentions] contact store fetch failed: %s", e)
-        return _store_cache[1] if _store_cache else {}
-    _store_cache = (now, mapping)
+        return cached[1] if cached else {}
+    _store_cache[key] = (now, mapping)
     return mapping
 
 
-def _resolve_name(phone: str, lid: str = "") -> str:
+def _resolve_name(phone: str, lid: str = "", client=None) -> str:
     """Best known name for a participant: saved contact > captured pushName >
     device address book (FullName). Empty if none is known (caller falls back
-    to the number or a /user/info lookup)."""
+    to the number or a /user/info lookup).
+
+    ``client``: o GOWAClient do CANAL da conversa (plano multi-canal) — sem
+    ele, cai no cliente global ``_client`` (comportamento de sempre)."""
     return (_saved_name(phone)
             or _pushname_cache.get(phone) or _pushname_cache.get(lid)
-            or _store_map().get(phone) or _store_map().get(lid)
+            or _store_map(client).get(phone) or _store_map(client).get(lid)
             or "")
 
 
@@ -173,13 +188,15 @@ def record_pushname(keys: list[str], name: str) -> None:
         _members_cache.clear()
 
 
-def _fetch_pushname(jid: str) -> str:
+def _fetch_pushname(jid: str, client=None) -> str:
     """Best-effort WhatsApp push name ("default name") for a JID via /user/info.
 
     Caches hits in _pushname_cache and records misses in _pushname_attempted so
-    each participant is queried at most once. Blocking (HTTP).
+    each participant is queried at most once. Blocking (HTTP). ``client``: ver
+    ``_resolve_name``.
     """
-    if _client is None or not jid:
+    eff = client if client is not None else _client
+    if eff is None or not jid:
         return ""
     d = _digits(jid)
     if not d:
@@ -190,7 +207,7 @@ def _fetch_pushname(jid: str) -> str:
         return ""
     _pushname_attempted.add(d)
     try:
-        info = _client._get_user_info(jid if "@" in jid else f"{d}@s.whatsapp.net")
+        info = eff._get_user_info(jid if "@" in jid else f"{d}@s.whatsapp.net")
     except Exception as e:  # pragma: no cover - defensive
         logger.debug("[mentions] user info lookup failed for %s: %s", d, e)
         return ""
@@ -200,18 +217,19 @@ def _fetch_pushname(jid: str) -> str:
     return name
 
 
-def _resolve_missing_names(members: list[dict]) -> None:
+def _resolve_missing_names(members: list[dict], client=None) -> None:
     """Fill in push names for nameless members (mutates in place, bounded).
 
     A just-joined member has no saved contact and no captured pushName yet, so
     without this they'd render as a bare phone number in the @mention menu.
+    ``client``: ver ``_resolve_name``.
     """
     budget = _NAME_FETCH_CAP
     for m in members:
         if m["name"] or budget <= 0:
             continue
         # Cheap sources first (saved contact / pushName cache / device store).
-        name = _resolve_name(m["phone"], m["lid"])
+        name = _resolve_name(m["phone"], m["lid"], client)
         if name:
             m["name"] = name
             continue
@@ -220,7 +238,7 @@ def _resolve_missing_names(members: list[dict]) -> None:
             continue
         # Last resort: /user/info (only business accounts return a name here).
         jid = f"{m['phone']}@s.whatsapp.net" if m["phone"] else f"{m['lid']}@lid"
-        name = _fetch_pushname(jid)
+        name = _fetch_pushname(jid, client)
         budget -= 1
         if name:
             m["name"] = name
@@ -259,26 +277,37 @@ def describe_change(change_type: str, jids: list[str]) -> str:
 
 
 def get_members(group_jid: str, force: bool = False,
-                resolve_names: bool = False) -> list[dict]:
+                resolve_names: bool = False, *, client=None) -> list[dict]:
     """Return normalized participants: [{phone, lid, name, is_admin}].
 
     Blocking (HTTP + DB) — callers in async context should use asyncio.to_thread.
     Cached per group for _CACHE_TTL seconds. ``resolve_names`` additionally hits
     GOWA's /user/info to fill push names for members with no saved contact — used
     by the @mention autocomplete, NOT by the hot message-send path (kept cheap).
+
+    ``client`` (plano multi-canal): o GOWAClient do CANAL dono do grupo. Um
+    install com mais de um número GOWA conectado tem um ``_client`` GLOBAL
+    (o wired em ``init()`` no boot, "o padrão") que não é necessariamente o
+    número que está de fato NAQUELE grupo — perguntar ao cliente errado dá
+    ``get_group_info`` vazio/401 em silêncio (capturado abaixo) e o roster
+    volta `[]`, sem erro nenhum pro chamador perceber. Passe o cliente do
+    canal da conversa sempre que ele for conhecido; omitido, cai no global
+    (mesmo comportamento de sempre — retrocompatível para quem ainda não
+    tem o ``channel_id`` à mão).
     """
-    if not group_jid or _client is None:
+    eff = client if client is not None else _client
+    if not group_jid or eff is None:
         return []
     now = time.time()
     cached = _members_cache.get(group_jid)
     if cached and not force and (now - cached[0]) < _CACHE_TTL:
         if resolve_names:
-            _resolve_missing_names(cached[1])
+            _resolve_missing_names(cached[1], client)
         return cached[1]
 
     info = None
     try:
-        info = _client.get_group_info(group_jid)
+        info = eff.get_group_info(group_jid)
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("[mentions] get_group_info failed for %s: %s", group_jid, e)
     if not info or not isinstance(info, dict):
@@ -288,7 +317,7 @@ def get_members(group_jid: str, force: bool = False,
     for p in info.get("Participants", []) or []:
         phone = _digits(p.get("PhoneNumber", "") or "")
         lid = _digits(p.get("LID", "") or p.get("JID", "") or "")
-        name = _resolve_name(phone, lid)
+        name = _resolve_name(phone, lid, client)
         # The bot is a participant too; resolve its mention via the configured
         # panel name (GOWA gives no DisplayName, and the bot has no saved contact).
         if not name and _bot_name and _bot_phone and phone == _bot_phone:
@@ -300,7 +329,7 @@ def get_members(group_jid: str, force: bool = False,
             "is_admin": bool(p.get("IsAdmin") or p.get("IsSuperAdmin")),
         })
     if resolve_names:
-        _resolve_missing_names(members)
+        _resolve_missing_names(members, client)
     _members_cache[group_jid] = (now, members)
     return members
 

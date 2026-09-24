@@ -380,6 +380,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     phone, sandbox, contact, groupParticipantsChanged, mode: composer.mode,
     input: composer.input, setInput: composer.setInput, inputRef: composer.inputRef,
     mentionsUnsupported: media.pendingQueue.length > 0 && composer.mode !== 'private',
+    channelId,
   });
   autocompleteRef.current = autocomplete;
 
@@ -1033,6 +1034,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
                 canJumpOutsideWindow=${!!onJumpToMessage}
                 openMsgMenu=${openMsgMenu} myReaction=${myReaction} handleRetry=${canReply ? composerUi.handleRetry : null}
                 showAgentName=${showAgentName}
+                groupMembers=${autocomplete.members}
                 selectionMode=${actions.selectionMode}
                 selected=${actions.selectionMode && actions.selection.has(selectionKey(m))}
                 onToggleSelect=${actions.toggleSelect} />`];

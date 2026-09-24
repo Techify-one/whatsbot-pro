@@ -72,9 +72,17 @@ def build_system_prompt(handler, contact, base_prompt: str | None = None,
         # provider (Telegram/Cloud) não dispara o get_group_info do GOWA com um id que
         # o GOWA não resolve; sem capability → lista de membros vazia (fallback atual).
         members = []
-        if _channel_supports_groups(getattr(contact, "channel_id", None)):
+        channel_id = getattr(contact, "channel_id", None)
+        if _channel_supports_groups(channel_id):
             try:
-                members = group_mentions.get_members(contact.phone)
+                # plano multi-canal: resolve pelo GOWAClient do CANAL da
+                # conversa — sem isso, um install com mais de um número GOWA
+                # conectado pode perguntar ao número errado e a IA perde a
+                # lista de participantes em silêncio (ver group_mentions.get_members).
+                _registry, outbound, _ingest = get_channel_runtime()
+                gowa_client = (outbound.gowa_client_for(channel_id)
+                              if outbound is not None and channel_id else None)
+                members = group_mentions.get_members(contact.phone, client=gowa_client)
             except Exception:
                 members = []
         named = [m["name"] for m in members if m.get("name")]

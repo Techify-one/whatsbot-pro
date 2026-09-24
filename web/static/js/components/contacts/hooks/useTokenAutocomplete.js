@@ -30,10 +30,12 @@ import {
  * @param {(v:string)=>void} opts.setInput
  * @param {{ current: HTMLTextAreaElement|null }} opts.inputRef
  * @param {boolean} [opts.mentionsUnsupported] - o destino atual do texto não aceita menção.
+ * @param {string|null} [opts.channelId] - canal da conversa (plano multi-canal):
+ *   resolve o roster pelo GOWAClient DAQUELE canal, não pelo padrão do app.
  */
 export function useTokenAutocomplete({
   phone, sandbox, contact, groupParticipantsChanged, input, setInput, inputRef,
-  mode = 'reply', mentionsUnsupported = false,
+  mode = 'reply', mentionsUnsupported = false, channelId = null,
 }) {
   // Group @mention autocomplete: list of participants + open menu state.
   const [members, setMembers] = useState([]);
@@ -59,11 +61,11 @@ export function useTokenAutocomplete({
     setMentionMenu(null);
     if (!phone || sandbox || !(contact && contact.is_group)) return;
     let cancelled = false;
-    getGroupMembers(phone)
+    getGroupMembers(phone, false, channelId)
       .then(res => { if (!cancelled && res && res.ok) setMembers(res.data.members || []); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [phone, contact && contact.is_group]);
+  }, [phone, contact && contact.is_group, channelId]);
 
   // Fetch internal agents (painel) for private-note @mention autocomplete. Cheap,
   // loaded once when the private composer is first used.
@@ -96,11 +98,11 @@ export function useTokenAutocomplete({
       return;
     }
     let cancelled = false;
-    getGroupMembers(phone, true)
+    getGroupMembers(phone, true, channelId)
       .then(res => { if (!cancelled && res && res.ok) setMembers(res.data.members || []); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [groupParticipantsChanged]);
+  }, [groupParticipantsChanged, channelId]);
 
   // ── Quick replies (plano 04): load the global list once, refresh on change ──
   useEffect(() => {

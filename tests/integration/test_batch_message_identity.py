@@ -344,7 +344,7 @@ def test_quoted_target_that_never_existed_still_falls_back(build_app):
     """GUARD: citação a um ``msg_id`` que NUNCA existiu continua sem ``quoted``.
 
     É o fallback "Mensagem original indisponível" do painel
-    ([MessageBubble.js:111](../../web/static/js/components/contacts/MessageBubble.js#L111)).
+    ([MessageBubble.js:141](../../web/static/js/components/contacts/MessageBubble.js#L141)).
     A correção do plano 146 não pode fazê-lo desaparecer: mensagem citada de antes
     da instalação, apagada, ou de outra conversa continua sem origem — e o painel
     tem de dizer isso, não inventar."""
