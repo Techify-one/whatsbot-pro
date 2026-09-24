@@ -239,6 +239,24 @@ test('clauseMatches: starter (quem iniciou a conversa via origin)', () => {
   assert.equal(clauseMatches({ origin: 'outbound' }, { dim: 'starter', op: 'ne', value: 'customer' }, NOW), true);
 });
 
+test('clauseMatches: chat_type (grupo x individual via is_group)', () => {
+  const grupo = { is_group: 1 };
+  const privado = { is_group: 0 };
+  // "apenas grupos" = Igual a Grupo
+  assert.equal(clauseMatches(grupo, { dim: 'chat_type', op: 'eq', value: 'group' }, NOW), true);
+  assert.equal(clauseMatches(privado, { dim: 'chat_type', op: 'eq', value: 'group' }, NOW), false);
+  // "exceto grupos" = Diferente de Grupo (== Igual a Individual)
+  assert.equal(clauseMatches(grupo, { dim: 'chat_type', op: 'ne', value: 'group' }, NOW), false);
+  assert.equal(clauseMatches(privado, { dim: 'chat_type', op: 'ne', value: 'group' }, NOW), true);
+  assert.equal(clauseMatches(grupo, { dim: 'chat_type', op: 'eq', value: 'individual' }, NOW), false);
+  assert.equal(clauseMatches(privado, { dim: 'chat_type', op: 'eq', value: 'individual' }, NOW), true);
+  // is_group ausente/booleano (linha por WS) → individual / grupo
+  assert.equal(clauseMatches({}, { dim: 'chat_type', op: 'eq', value: 'individual' }, NOW), true);
+  assert.equal(clauseMatches({ is_group: true }, { dim: 'chat_type', op: 'eq', value: 'group' }, NOW), true);
+  // cláusula sem valor não restringe
+  assert.equal(clauseMatches(grupo, { dim: 'chat_type', op: 'eq', value: '' }, NOW), true);
+});
+
 test('clauseMatches: tag eq/ne', () => {
   assert.equal(clauseMatches({ tags: ['vip'] }, { dim: 'tag', op: 'eq', value: 'vip' }, NOW), true);
   assert.equal(clauseMatches({ tags: ['vip'] }, { dim: 'tag', op: 'ne', value: 'vip' }, NOW), false);

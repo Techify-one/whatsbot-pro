@@ -562,6 +562,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
               isGroup=${contactData && contactData.is_group}
               groupName=${contactData && contactData.group_name}
               avatarV=${contactData && contactData.avatar_v}
+              channelId=${selectedChannelId}
               onClose=${() => setOpenPanel(null)}
               onDeleteContact=${() => { handleDelete(selected); setOpenPanel(null); }}
               onSave=${(updatedInfo, updatedTags) => {
@@ -614,6 +615,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
           isPinned=${ctxMenu.isPinned}
           conv=${ctxConv.conv}
           convLoading=${ctxConv.loading}
+          convResolving=${ctxConv.resolving}
           convError=${ctxConv.error}
           users=${users}
           agentsUsers=${agentsUsers}

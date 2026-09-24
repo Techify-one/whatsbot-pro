@@ -25,6 +25,7 @@ import { splitSort, combineSort } from '../../services/conversationRows.js';
 const html = htm.bind(h);
 
 const STATUS_LABELS = { open: 'Abertas', closed: 'Resolvidas', all: 'Todas' };
+const CHAT_TYPE_LABELS = { group: 'Grupo', individual: 'Individual' };
 const STATUS_OPTIONS = [
   { value: 'open', label: 'Abertas' },
   { value: 'closed', label: 'Resolvidas' },
@@ -48,7 +49,7 @@ const TIME_SORT_CHOICES = [
 // Each active filter dimension renders as its own chip with an individual ✕, so the
 // operator can drop one filter without reopening a dropdown/modal. Labels reuse the
 // same friendly names the advanced dialog shows (status/channel/agent/tag/activity).
-const DIM_LABELS = { status: 'Status', channel: 'Canal', agent: 'Agente', team: 'Time', tag: 'Etiqueta do contato', conv_label: 'Etiqueta da conversa', activity: 'Atividade' };
+const DIM_LABELS = { status: 'Status', channel: 'Canal', chat_type: 'Tipo de conversa', agent: 'Agente', team: 'Time', tag: 'Etiqueta do contato', conv_label: 'Etiqueta da conversa', activity: 'Atividade' };
 
 function _channelLabel(channels, value) {
   const ch = (channels || []).find(c => String(c.id) === String(value));
@@ -97,6 +98,7 @@ function advClauseLabel(cl, channels, agentsUsers, agentsAi, teams, attrDefs) {
     if (cl.dim === 'channel') return _channelLabel(channels, v);
     if (cl.dim === 'agent') return _agentLabel(agentsUsers, agentsAi, v);
     if (cl.dim === 'team') return _teamLabel(teams, v);
+    if (cl.dim === 'chat_type') return CHAT_TYPE_LABELS[v] || v;
     return v;   // tag / atributo personalizado
   };
   const list = Array.isArray(cl.value) ? cl.value : [cl.value];

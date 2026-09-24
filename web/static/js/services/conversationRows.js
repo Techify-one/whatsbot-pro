@@ -225,6 +225,13 @@ export function clauseMatches(c, cl, now) {
     const hit = value === 'on' ? isOn : !isOn;
     return op === 'ne' ? !hit : hit;
   }
+  if (dim === 'chat_type') {
+    // Grupo x individual (`contacts.is_group`). value ∈ 'group'|'individual'; individual
+    // = "não é grupo" (mesma regra do servidor em db/filters/translate.py).
+    const isGroup = !!c.is_group;
+    const hit = value === 'group' ? isGroup : !isGroup;
+    return op === 'ne' ? !hit : hit;
+  }
   if (dim === 'starter') {
     // Quem iniciou a conversa (plano 28: coluna `origin`). value ∈ 'customer'|'operator'.
     // 'inbound' = cliente mandou a 1ª mensagem; outbound/manual/imported/NULL = atendente.

@@ -23,7 +23,7 @@ const FLYOUT_WIDTH = 264;
 // a linha da sidebar É um atendimento, e rotular a partir dela precisa afetar só
 // aquele atendimento. As tags de contato continuam sendo editadas exclusivamente
 // no painel "Dados do contato".
-export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, convLabels, labelRegistry, isArchived, isUnread, isPinned, conv, convLoading, convError, users, agentsUsers, agentsAi, teams = [], teamCapabilities = null, currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onAssignTeam, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onLabelsUpdate, onArchive, onPin, onDeleteConversation, onCreateLabel, onClose }) {
+export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, convLabels, labelRegistry, isArchived, isUnread, isPinned, conv, convLoading, convResolving = false, convError, users, agentsUsers, agentsAi, teams = [], teamCapabilities = null, currentUserId, currentUser = null, onAssignConversation, onAssignAgent, onAssignTeam, onResolveConversation, onToggleAI, onEditContact, onMarkUnread, onMarkRead, onLabelsUpdate, onArchive, onPin, onDeleteConversation, onCreateLabel, onClose }) {
   // P48 (hide, don't disable): each affordance is gated by the permission that
   // its backend call actually enforces. `can` is permissive with no user
   // identity (open/legacy install) — see hasPermission.
@@ -380,11 +380,14 @@ export function ContextMenu({ x, y, phone, conversationId = null, aiEnabled, con
       <!-- Conversation: resolve / reopen -->
       ${can('conversation.resolve') ? html`
       <button
-        disabled=${!canAct}
+        disabled=${!canAct || convResolving}
         onClick=${() => { if (canAct && onResolveConversation) onResolveConversation(conv.id, isOpen ? 'closed' : 'open'); }}
         class="w-full text-left px-4 py-[10px] text-[14.5px] text-wa-text hover:bg-wa-hover transition-colors flex items-center gap-3 disabled:opacity-50 border-t border-wa-border"
       >
-        ${isOpen === false ? html`
+        ${convResolving ? html`
+          <span class="w-[18px] h-[18px] shrink-0 border-2 border-current border-t-transparent rounded-full animate-spin"></span>
+          ${isOpen === false ? 'Reabrindo…' : 'Resolvendo…'}
+        ` : isOpen === false ? html`
           <svg viewBox="0 0 24 24" width="18" height="18" fill="#00a884"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>
           Reabrir conversa
         ` : html`

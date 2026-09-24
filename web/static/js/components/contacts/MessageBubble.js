@@ -23,6 +23,11 @@ export function MessageBubble({
   isGroup, sandbox, displayName, fmt,
   findQuoted, quotedInfo, focusMessage, openMsgMenu, myReaction, handleRetry,
   showAgentName = true,
+  // Roster do grupo ({phone, lid, name, is_admin}[], já buscado pelo
+  // useTokenAutocomplete pro @menção) — usado só pra resolver o nome do
+  // remetente extraído do content pro telefone dele, e tornar o rótulo
+  // clicável (ver `senderMember` abaixo).
+  groupMembers = [],
   // plano 99 F0e·4: o container sabe pedir ao servidor a janela ANCORADA numa
   // mensagem, então a citação cujo alvo caiu fora da página carregada deixou de
   // ser um beco sem saída e volta a ser clicável.
@@ -67,6 +72,15 @@ export function MessageBubble({
     : (isUser ? (groupSender || displayName) : (isOperator ? (m.sent_by_name || 'Manual') : aiLabel));
   const sColor = senderColor(isUser, isOperator);
 
+  // Nome do remetente → telefone, casando com o roster do grupo (match por nome
+  // exato — o mesmo nome que o inbound carimbou no content). Sem match (roster
+  // ainda não chegou, nome mudou desde a mensagem, ou participante só-LID sem
+  // telefone visível) o rótulo fica como antes, sem virar link. Desligado em
+  // seleção em lote: um clique ali não pode navegar para fora da conversa.
+  const senderMember = (groupSender && !selectionMode)
+    ? groupMembers.find((mm) => mm && mm.name === groupSender && mm.phone)
+    : null;
+
   return html`
     <div key=${m._localId || i} data-mid=${m._id}
       onClick=${(selectionMode && onToggleSelect) ? (() => onToggleSelect(m)) : null}
@@ -92,7 +106,16 @@ export function MessageBubble({
             <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
           </svg>
         </button>`}
-        <span class="block text-[11px] font-semibold leading-[13px] mb-[2px] truncate" style="color: ${sColor};">${senderLabel}</span>
+        ${senderMember ? html`
+          <a
+            href="/contacts?createPhone=${encodeURIComponent(senderMember.phone)}&createName=${encodeURIComponent(groupSender)}"
+            title="Ver ou criar o contato de ${groupSender}"
+            class="block text-[11px] font-semibold leading-[13px] mb-[2px] truncate no-underline hover:underline cursor-pointer"
+            style="color: ${sColor};"
+          >${senderLabel}</a>
+        ` : html`
+          <span class="block text-[11px] font-semibold leading-[13px] mb-[2px] truncate" style="color: ${sColor};">${senderLabel}</span>
+        `}
         ${(!m.revoked && m.reply_to_msg_id) ? (() => {
           const qmsg = findQuoted(m.reply_to_msg_id, m);
           const q = quotedInfo(qmsg);

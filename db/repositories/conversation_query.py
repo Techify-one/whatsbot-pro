@@ -8,7 +8,7 @@ that compose these — public API unchanged, same rows/shapes as before.
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, select
 
 from sqlalchemy import exists, literal
 
@@ -72,7 +72,13 @@ def enriched_columns(include_private_note: bool = False,
         user_mention_subq = literal(False).label("has_user_mention")
     return [
         conversations,
-        contacts.c.name.label("contact_name"),
+        # Grupo: o nome vive em ``group_name`` (``contacts.name`` fica vazio), então a
+        # sidebar caía no JID. Mesma regra de ``contact_repo._shape_contact_row``.
+        case(
+            (and_(contacts.c.is_group == 1, contacts.c.group_name != ""),
+             contacts.c.group_name),
+            else_=contacts.c.name,
+        ).label("contact_name"),
         contacts.c.phone.label("contact_phone"),
         contacts.c.is_group.label("contact_is_group"),
         # Tipo do contato (plano tipos-de-contato): carregado no row enriquecido para

@@ -3,12 +3,14 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { updateContactInfo, updateContactTags, createTag, getCustomAttributes } from '../../services/api.js';
 import { hasPermission } from '../../utils/permissions.js';
-import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon } from './icons.js';
+import { CloseIcon, DefaultAvatar, GroupAvatar, TrashIcon, PlusIcon, MembersIcon, ChevronRightIcon } from './icons.js';
 import { avatarUrl } from './utils.js';
 import { CustomAttributeField } from './CustomAttributeField.js';
 import { contactTypeBadge } from '../../services/contactTypes.js';
 import { useContactSubtitle } from './hooks/useContactSubtitle.js';
+import { contactNameField, infoPayloadFor } from './contactNameField.js';
 import { useProviderCatalog } from '../../hooks/useProviderCatalog.js';
+import { GroupMembersModal } from './GroupMembersModal.js';
 
 const html = htm.bind(h);
 
@@ -22,7 +24,7 @@ const TAG_COLORS = [
 // custom attributes, observations. Conversation status/assignment/labels/
 // attributes live in ConversationInfoPanel.
 
-export function ContactInfoPanel({ phone, currentUser = null, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, onClose, onSave, onDeleteContact = null }) {
+export function ContactInfoPanel({ phone, currentUser = null, info, contactTags, globalTags, onGlobalTagsChange, isGroup, groupName, avatarV, channelId = null, onClose, onSave, onDeleteContact = null }) {
   useProviderCatalog();  // re-render quando o catálogo de providers carregar (tipo de contato)
   // P48: editing controls are gated by contact.write; the destructive delete by
   // contact.delete. Permissive with no user identity (open install, no admin yet).
@@ -31,6 +33,10 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
   // Only Nome stays a fixed field — Email/Profissão/Empresa/Endereço are now
   // custom attributes (seeded defaults), rendered in the attributes section below.
   const [form, setForm] = useState({ name: '', observations: [] });
+  // Nome: grupo vem preenchido com o nome do WhatsApp e travado; pessoa segue editável.
+  const nameField = contactNameField({
+    isGroup, groupName, infoName: info && info.name, canWrite,
+  });
   // Subtitle under the name: raw phone, unless a plugin rewrites it via
   // `filter.contact.headerSubtitle` (website widget → short visitor code).
   const subtitle = useContactSubtitle(phone, { info });
@@ -40,6 +46,8 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
   const [newObs, setNewObs] = useState('');
   // Inline 2-click confirmation for the destructive "Apagar contato" action (plano 16).
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Popup "Ver membros" (só grupo) — lista o roster e leva ao "Novo contato".
+  const [showMembers, setShowMembers] = useState(false);
 
   // Custom attributes (plano 05): definitions (admin-managed) + per-contact values.
   const [customDefs, setCustomDefs] = useState([]);
@@ -57,17 +65,17 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
   useEffect(() => {
     if (info) {
       setForm({
-        name: (info.name || '').replace(/^~/, ''),
+        name: nameField.value,
         observations: [...(info.observations || [])],
       });
       setCustomValues({ ...(info.custom_attributes || {}) });
     }
     setTags([...(contactTags || [])]);
-  }, [phone, info, contactTags]);
+  }, [phone, info, contactTags, nameField.value]);
 
   // Reset the delete confirmation when switching contacts (don't carry a primed
   // "Confirmar?" over to the wrong contact).
-  useEffect(() => { setConfirmDelete(false); }, [phone]);
+  useEffect(() => { setConfirmDelete(false); setShowMembers(false); }, [phone]);
 
   // Load custom attribute definitions once; reload when the admin screen edits them.
   useEffect(() => {
@@ -196,7 +204,7 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
       }
 
       const [infoRes, tagsRes] = await Promise.all([
-        updateContactInfo(phone, { ...form, observations, custom_attributes: buildCustomAttrsPayload() }),
+        updateContactInfo(phone, infoPayloadFor(isGroup, { ...form, observations, custom_attributes: buildCustomAttrsPayload() })),
         updateContactTags(phone, finalTags),
       ]);
 
@@ -224,7 +232,7 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
   }
 
   const fields = [
-    { key: 'name', label: 'Nome', placeholder: 'Nome do contato' },
+    { key: 'name', label: 'Nome', value: nameField.value, placeholder: nameField.placeholder, locked: nameField.locked, hint: nameField.hint },
   ];
 
   // The panel closes only via the X button or by switching conversations
@@ -268,6 +276,19 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
             })()}
           </div>
 
+          <!-- Ver membros (só grupo): abre o popup com o roster do grupo. -->
+          ${isGroup ? html`
+            <button
+              type="button"
+              onClick=${() => setShowMembers(true)}
+              class="w-full flex items-center gap-4 px-6 py-3 bg-wa-panel border-y border-wa-border text-left hover:bg-wa-hover transition-colors"
+            >
+              <span class="text-wa-iconActive shrink-0"><${MembersIcon} /></span>
+              <span class="flex-1 text-wa-text text-[15px]">Ver membros</span>
+              <span class="text-wa-secondary shrink-0"><${ChevronRightIcon} /></span>
+            </button>
+          ` : null}
+
           <!-- Fields -->
           <div class="bg-wa-bg px-6 py-4 space-y-4">
             ${fields.map(f => html`
@@ -276,13 +297,16 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
                 <div class="flex items-center gap-2">
                   <input
                     type="text"
-                    value=${form[f.key]}
-                    onInput=${(e) => setField(f.key, e.target.value)}
+                    value=${f.locked ? f.value : form[f.key]}
+                    onInput=${(e) => { if (!f.locked) setField(f.key, e.target.value); }}
                     placeholder=${f.placeholder}
-                    readonly=${!canWrite}
-                    class="flex-1 bg-wa-panel text-wa-text text-[15px] rounded-[8px] px-3 py-2 border border-wa-border outline-none placeholder-wa-secondary focus:border-wa-iconActive transition-colors ${!canWrite ? 'opacity-70' : ''}"
+                    readonly=${f.locked}
+                    aria-readonly=${f.locked}
+                    title=${f.hint || undefined}
+                    class="flex-1 bg-wa-panel text-wa-text text-[15px] rounded-[8px] px-3 py-2 border border-wa-border outline-none placeholder-wa-secondary transition-colors ${f.locked ? 'opacity-70 cursor-not-allowed' : 'focus:border-wa-iconActive'}"
                   />
                 </div>
+                ${f.hint ? html`<div class="text-wa-secondary text-[12px] mt-1">${f.hint}</div>` : null}
               </div>
             `)}
 
@@ -512,6 +536,14 @@ export function ContactInfoPanel({ phone, currentUser = null, info, contactTags,
           ` : null}
         </div>
       </div>
+      ${isGroup && showMembers ? html`
+        <${GroupMembersModal}
+          groupJid=${phone}
+          groupName=${groupName || ''}
+          channelId=${channelId}
+          onClose=${() => setShowMembers(false)}
+        />
+      ` : null}
     </div>
   `;
 }

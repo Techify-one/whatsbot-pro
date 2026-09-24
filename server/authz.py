@@ -23,11 +23,66 @@ def current_user(request: Request) -> dict | None:
     return getattr(request.state, "user", None)
 
 
-def _rbac_allows(user: dict | None, permission_key: str) -> bool:
+def effective_permissions(user: dict | None) -> frozenset[str] | None:
+    """The user's full permission set, computed ONCE per request (plano 169 B2).
+
+    ``None`` for no identity — nothing to cache, ``_rbac_allows`` short-circuits
+    True before ever consulting this. Otherwise mirrors ``rbac_repo.user_permissions``'s
+    precedence (custom > admin > role union) but reuses what
+    ``user_repo._with_roles`` already loaded onto ``user`` instead of re-querying:
+
+    - admin ⇒ ``{"*"}`` alone. Behaviorally identical to enumerating every key,
+      since every caller only ever asks "is '*' in the set or is KEY in it" —
+      never iterates the set — so skipping the "every permission key" query
+      changes no decision.
+    - custom ⇒ the explicit per-user grants ``_with_roles`` already fetched
+      (``user["permissions"]``) — zero extra queries.
+    - plain role(s) ⇒ one query unioning the ALREADY-KNOWN role keys
+      (``user["roles"]``), via :func:`rbac_repo.permissions_for_roles` — not
+      ``rbac_repo.user_permissions``, which would redundantly re-fetch the same
+      role keys ``_with_roles`` already has.
+
+    Requires the ``_with_roles`` shape (``roles``/``custom_permissions``/
+    ``permissions``/``is_admin`` keys) — the shape both ``resolve_request_token``
+    and ``resolve_api_key`` already return via ``user_repo.get``.
+    """
+    if user is None:
+        return None
+    if user.get("is_admin"):
+        return frozenset({"*"})
+    if user.get("custom_permissions"):
+        return frozenset(user.get("permissions") or ())
+    return frozenset(rbac_repo.permissions_for_roles(user.get("roles") or ()))
+
+
+def _cached_permissions(request: Request) -> frozenset[str] | None:
+    """``request.state.effective_permissions`` when the auth middleware set it,
+    else ``None`` — the signal for callers to fall back to a live query (no
+    middleware ran: WebSocket, background jobs, tests that build their own
+    Request).
+
+    Type-checked, not just presence-checked: a bare ``MagicMock`` request (some
+    tests reach ``acheck`` directly with one) auto-vivifies ANY attribute
+    access as another truthy Mock, which would otherwise be mistaken for a real
+    cached set."""
+    value = getattr(request.state, "effective_permissions", None)
+    return value if isinstance(value, frozenset) else None
+
+
+def _has(user_id: int, permission_key: str, cached: frozenset[str] | None) -> bool:
+    """Single-key membership check — the per-request cache when available
+    (``"*"`` or the exact key), else the live query it replaces."""
+    if cached is not None:
+        return "*" in cached or permission_key in cached
+    return rbac_repo.user_has_permission(user_id, permission_key)
+
+
+def _rbac_allows(user: dict | None, permission_key: str,
+                  cached: frozenset[str] | None = None) -> bool:
     """RBAC-only decision. ``True`` for legacy/open (no user identity)."""
     if user is None:
         return True
-    return rbac_repo.user_has_permission(user["id"], permission_key)
+    return _has(user["id"], permission_key, cached)
 
 
 def check(request: Request, permission_key: str) -> bool:
@@ -40,7 +95,7 @@ def check(request: Request, permission_key: str) -> bool:
     on the event-loop thread the filter is inert (see :func:`apply_filter_sync`);
     use :func:`acheck` from async dependencies to make the seam live."""
     user = current_user(request)
-    allow = _rbac_allows(user, permission_key)
+    allow = _rbac_allows(user, permission_key, _cached_permissions(request))
     value = apply_filter_sync(
         "filter.authz.decision",
         {"user": user, "permission_key": permission_key, "allow": allow},
@@ -57,7 +112,7 @@ async def acheck(request: Request, permission_key: str) -> bool:
     Used by the ``plugin_permission`` FastAPI dependency, which runs on the event
     loop where the sync filter is skipped — here the seam is genuinely live."""
     user = current_user(request)
-    allow = _rbac_allows(user, permission_key)
+    allow = _rbac_allows(user, permission_key, _cached_permissions(request))
     value = await apply_filter(
         "filter.authz.decision",
         {"user": user, "permission_key": permission_key, "allow": allow},
@@ -89,7 +144,7 @@ def visible_inbox_ids(request: Request) -> list[int] | None:
     user = current_user(request)
     if user is None:
         return None  # legacy/open — no scoping
-    if rbac_repo.user_has_permission(user["id"], "conversation.read_all"):
+    if _has(user["id"], "conversation.read_all", _cached_permissions(request)):
         return None  # admin (short-circuit) or explicit read_all ⇒ sees all
     return inbox_member_repo.inbox_ids_for_user(user["id"])
 
@@ -135,8 +190,8 @@ class ConversationAccessScope:
         user = current_user(request)
         user_id = user.get("id") if user else None
         # Open/legacy installs keep their historical unrestricted behavior.
-        read_any = user_id is None or rbac_repo.user_has_permission(
-            user_id, "conversation.team.read_any")
+        read_any = user_id is None or _has(
+            user_id, "conversation.team.read_any", _cached_permissions(request))
         team_ids = (frozenset() if user_id is None else
                     frozenset(team_member_repo.team_ids_for_user(user_id)))
         team_rows = team_repo.list_all(include_inactive=True)

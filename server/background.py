@@ -25,6 +25,10 @@ EMPTY_CONV_TTL_MINUTES_DEFAULT = 30
 # duplicates connected post-QR (plano 32 F4).
 CHANNEL_IDENTITY_SWEEP_INTERVAL = 15  # seconds
 
+# Loop-delay monitor tick and warn threshold (plano 169 B1a).
+LOOP_DELAY_CHECK_INTERVAL = 0.5  # seconds
+LOOP_DELAY_WARN_THRESHOLD = 1.0  # seconds of extra delay beyond the requested sleep
+
 logger = logging.getLogger(__name__)
 
 
@@ -264,6 +268,26 @@ async def avatar_fetch_task(deps):
         while slept < AVATAR_REFRESH_INTERVAL and not state.stop_event.is_set():
             await asyncio.sleep(3)
             slept += 3
+
+
+async def loop_delay_monitor_loop(deps):
+    """Detect event-loop starvation (plano 169 B1a).
+
+    Sleeps ``LOOP_DELAY_CHECK_INTERVAL`` and logs a WARNING when it wakes up later
+    than that — direct proof that something else (sync DB calls, CPU-bound work)
+    held the loop busy while this task waited its turn, instead of inferring it
+    from downstream symptoms like a slow pop-up.
+    """
+    state = deps.state
+    while not state.stop_event.is_set():
+        started = time.monotonic()
+        await asyncio.sleep(LOOP_DELAY_CHECK_INTERVAL)
+        elapsed = time.monotonic() - started
+        delay = elapsed - LOOP_DELAY_CHECK_INTERVAL
+        if delay > LOOP_DELAY_WARN_THRESHOLD:
+            logger.warning(
+                "[LoopDelay] event loop atrasou %.2fs (tick de %.1fs levou %.2fs)",
+                delay, LOOP_DELAY_CHECK_INTERVAL, elapsed)
 
 
 async def audit_purge_loop(deps):

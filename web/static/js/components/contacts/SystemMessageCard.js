@@ -3,6 +3,7 @@ import htm from 'htm';
 import { formatBubbleTime } from './utils.js';
 import { isSystemCardRole, isCollapsibleCard, collapsedPreview, SYSTEM_CARD_VARIANTS } from '../../services/messageView.js';
 import { parseCta } from '../../services/systemCta.js';
+import { parseMemberLinks } from '../../services/systemMemberLinks.js';
 import { MediaContent } from './MediaContent.js';
 
 const html = htm.bind(h);
@@ -117,6 +118,11 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
   }
 
   if (role === 'system_notice') {
+    // Avisos de grupo (entrou/saiu/…) trazem o participante como token
+    // ``[[member:tel|nome]]``: vira link para "Novo contato" (que por sua vez bloqueia
+    // a criação e oferece "Ver detalhes" se o número já é contato). Sem token — texto
+    // de sempre — sai um único <span>, idêntico ao render anterior.
+    const parts = parseMemberLinks(m.content);
     // COLOR FIX: was inline #1b2e4e / #93c5fd / #1e40af → semantic wa-*.
     return html`
       <div class="flex justify-center mt-[4px]">
@@ -125,7 +131,11 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
             <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
             Mensagem do Sistema
           </span>
-          <span dangerouslySetInnerHTML=${{ __html: fmt(m.content)}}></span>
+          ${parts.map((p) => (p.type === 'member' ? html`
+            <a href=${p.href}
+               title=${p.name ? `Criar ou ver o contato de ${p.name}` : 'Criar ou ver este contato'}
+               class="text-wa-teal font-medium no-underline hover:underline cursor-pointer">${p.label}</a>
+          ` : html`<span dangerouslySetInnerHTML=${{ __html: fmt(p.text)}}></span>`))}
           <span class="float-right ml-[8px] mt-[2px] text-[10px] leading-[14px] whitespace-nowrap opacity-60">
             ${formatBubbleTime(m.ts)}
           </span>

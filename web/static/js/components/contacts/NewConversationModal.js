@@ -62,9 +62,12 @@ function channelLabel(ch) {
 // 1ª mensagem. Ao enviar, o atendimento novo já aparece na sidebar (onSent dispara o
 // refresh + abre a thread). Roteia pelo `channel_id` escolhido (o atendimento ainda
 // não existe, então o backend a cria nesse canal).
-export function NewConversationModal({ contacts = [], onClose, onSent }) {
+export function NewConversationModal({ contacts = [], initialPhone = '', onClose, onSent }) {
   useProviderCatalog();  // re-render quando o catálogo de providers carregar
-  const [phoneInput, setPhoneInput] = useState('');
+  // `initialPhone`: abertura a partir de um contato já conhecido (ex.: "Iniciar
+  // conversa" na tela de Contatos) — pré-preenche "Para" e a verificação de
+  // WhatsApp já dispara no mount (mesmo efeito que reage a `phoneInput`).
+  const [phoneInput, setPhoneInput] = useState(initialPhone);
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState(null);  // {phone, registered, name} | null
   const [checkError, setCheckError] = useState(null);

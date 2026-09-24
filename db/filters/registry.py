@@ -29,7 +29,7 @@ CATTR_KEY_RE = r"^[a-z][a-z0-9_]{0,63}$"
 @dataclass(frozen=True)
 class Dim:
     key: str
-    kind: str                       # enum|bool|int|text|reltime|assignee|labels|conv_labels|q|channel|contact_type|agent|ai|starter|activity|has_mention|contact_cattr
+    kind: str                       # enum|bool|int|text|reltime|assignee|labels|conv_labels|q|channel|contact_type|chat_type|agent|ai|starter|activity|has_mention|contact_cattr
     ops: frozenset
     label: str = ""
     enum: frozenset = field(default_factory=frozenset)
@@ -58,6 +58,10 @@ DIMENSIONS: dict[str, Dim] = {
     "channel": Dim("channel", "channel", frozenset({"equal_to", "not_equal_to", "in"}), "Canal"),
     "contact_type": Dim("contact_type", "contact_type",
                         frozenset({"equal_to", "not_equal_to", "in"}), "Tipo de contato"),
+    # Grupo x individual (`contacts.is_group`). `individual` = "não é grupo", então
+    # "exceto grupos" funciona tanto como `chat_type != group` quanto `== individual`.
+    "chat_type": Dim("chat_type", "chat_type", frozenset({"equal_to", "not_equal_to"}),
+                     "Tipo de conversa", frozenset({"group", "individual"})),
     "agent": Dim("agent", "agent", frozenset({"equal_to", "not_equal_to", "in"}), "Agente"),
     "ai": Dim("ai", "ai", frozenset({"equal_to", "not_equal_to"}), "IA"),
     "starter": Dim("starter", "starter", frozenset({"equal_to", "not_equal_to"}), "Iniciador"),

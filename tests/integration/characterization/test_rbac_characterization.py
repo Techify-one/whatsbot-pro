@@ -32,6 +32,7 @@ app/source from this file.
 from __future__ import annotations
 
 import pytest
+from fastapi import Request
 
 from server.helpers import _err
 
@@ -83,6 +84,44 @@ def make_custom_user():
     for user_id in reversed(created_ids):
         session_repo.delete_for_user(user_id)
         assert user_repo.delete(user_id), f"could not remove RBAC test user {user_id}"
+
+
+@pytest.fixture
+def make_role_user():
+    """Create a plain ROLE-based (non-custom, non-admin) user via an ad-hoc role.
+
+    Plano 169 B2 fixture: `make_custom_user` above only ever creates
+    ``custom_permissions=1`` users, so the "role comum" cell (a user whose
+    permissions come from a role's ``role_permissions`` union) has no coverage
+    of its own before this file. Each call mints a disposable role so tests
+    don't share/contend on grants."""
+    import uuid as _uuid
+
+    from db.repositories import rbac_repo, session_repo, user_repo
+    from server.auth import hash_password_argon2
+
+    created_users: list[int] = []
+    created_roles: list[int] = []
+
+    def _make(email: str, permission_keys: list[str]) -> int:
+        role_key = f"charz_role_{_uuid.uuid4().hex[:12]}"
+        role = rbac_repo.create_role(role_key, "Charz role (RBAC test)", permission_keys)
+        created_roles.append(role["id"])
+        user = user_repo.create(
+            email=email, name=email.split("@")[0],
+            password_hash=hash_password_argon2("supersecret"),
+            role_keys=[role_key], custom=False,
+        )
+        created_users.append(user["id"])
+        return user["id"]
+
+    yield _make
+
+    for user_id in reversed(created_users):
+        session_repo.delete_for_user(user_id)
+        assert user_repo.delete(user_id), f"could not remove RBAC test user {user_id}"
+    for role_id in reversed(created_roles):
+        rbac_repo.delete_role(role_id)
 
 
 def _auth_headers(client, email: str) -> dict:
@@ -240,3 +279,128 @@ def test_authz_seam_can_downgrade_allow_to_deny(make_custom_user):
                 t for t in bucket if t[1] != "_charz_authz_seam"]
         bus.set_runtime(prev_loop, prev_handler)
         loop.close()
+
+
+# ── plano 169 B2 — cells `effective_permissions` will add a NEW derivation
+# path for (role union, admin short-circuit) or a NEW identity-resolution
+# branch for (API key). Custom user + no-identity are already covered above;
+# these lock the CURRENT (pre-B2) behavior for the remaining three so a
+# regression in the new code shows up here, not in production. ───────────────
+
+def test_role_based_user_lacking_permission_returns_exact_403(build_app, make_role_user):
+    """'role comum': permissions come from role_permissions, not an explicit
+    per-user grant — the branch `rbac_repo.user_permissions` takes today when
+    `custom_permissions=0` and the role isn't ``admin``."""
+    built = build_app(["gowa"])
+    make_role_user("rbac_role_lacks@test.com", ["contact.read"])
+    headers = _auth_headers(built.client, "rbac_role_lacks@test.com")
+
+    resp = _call(built.client, "get", "/api/ai/agents", None, headers)
+    _assert_denied_envelope(resp)
+
+
+def test_role_based_user_having_permission_passes_gate(build_app, make_role_user):
+    built = build_app(["gowa"])
+    make_role_user("rbac_role_has@test.com", ["agent.config.manage"])
+    headers = _auth_headers(built.client, "rbac_role_has@test.com")
+
+    resp = _call(built.client, "get", "/api/ai/agents", None, headers)
+    assert resp.status_code != 403, (
+        f"role-based user holding agent.config.manage must pass the gate; got {resp.text}")
+
+
+def test_admin_role_passes_every_gate(build_app):
+    """Admin is a short-circuit (ALL permissions, ``role_permissions`` not even
+    seeded for it) — a distinct branch from both custom and plain-role users."""
+    from db.repositories import session_repo, user_repo
+    from server.auth import hash_password_argon2
+
+    built = build_app(["gowa"])
+    user = user_repo.create(
+        email="rbac_admin@test.com", name="admin",
+        password_hash=hash_password_argon2("supersecret"), role_keys=["admin"])
+    try:
+        headers = _auth_headers(built.client, "rbac_admin@test.com")
+        resp = _call(built.client, "get", "/api/ai/agents", None, headers)
+        assert resp.status_code != 403, f"admin must pass every gate; got {resp.text}"
+    finally:
+        session_repo.delete_for_user(user["id"])
+        assert user_repo.delete(user["id"])
+
+
+def test_api_key_identity_gates_the_same_as_a_session(build_app, make_custom_user):
+    """The key is a badge that resolves to the SAME ``request.state.user`` a
+    session does (server/api_keys.py docstring) — the gate must decide off the
+    SAME permission set, whichever identity-resolution branch set it."""
+    from db.repositories import api_key_repo
+    from server import api_keys as keylib
+
+    built = build_app(["gowa"])
+    uid = make_custom_user("rbac_apikey@test.com", ["agent.config.manage"])
+    raw, prefix, key_hash = keylib.generate_key()
+    api_key_repo.create(user_id=uid, label="rbac-characterization",
+                        key_hash=key_hash, prefix=prefix, last4=keylib.last4(raw))
+
+    granted = built.client.get("/api/ai/agents", headers={"X-Api-Key": raw})
+    assert granted.status_code != 403, f"key must carry the owner's grant; got {granted.text}"
+
+    lacking = built.client.post(
+        "/api/admin/repair-sequences", headers={"X-Api-Key": raw}, json={})
+    _assert_denied_envelope(lacking)
+
+
+def test_two_permission_checks_in_one_request_query_the_catalog_once(
+        build_app, make_custom_user):
+    """Plano 169 B2 item 6: a request that (a) is gated by a permission
+    dependency AND (b) makes a SECOND, independent authz decision from within
+    the route body — exactly what ``visible_inbox_ids``/``ConversationAccessScope.
+    for_request`` do on top of a route's own gate in real conversation routes —
+    pays exactly ONE permission-catalog query for the whole request, not one per
+    check. Before B2 this was two: ``acheck`` (the dependency) and ``check``
+    (the body) each ran their own ``rbac_repo.user_has_permission``.
+
+    Mounted as a throwaway route on the built app so the proof doesn't depend on
+    a production route happening to shape this way — no production file is
+    touched here."""
+    from fastapi import APIRouter, Depends
+    from sqlalchemy import event
+
+    from db.engine import get_engine
+    from server import authz
+    from server.deps import require_permission
+
+    router = APIRouter()
+
+    @router.get("/api/_charz_multi_check",
+               dependencies=[Depends(require_permission("channel.manage"))])
+    async def _multi_check(request: Request):
+        second = authz.check(request, "conversation.read_all")
+        return {"ok": True, "data": {"second": second}}
+
+    built = build_app(["gowa"])
+    built.app.include_router(router)
+    email = "rbac_multi_check@test.com"
+    make_custom_user(email, ["channel.manage", "conversation.read_all"])
+    headers = _auth_headers(built.client, email)
+
+    queries: list[str] = []
+
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        queries.append(statement)
+
+    engine = get_engine()
+    event.listen(engine, "before_cursor_execute", _count)
+    try:
+        resp = built.client.get("/api/_charz_multi_check", headers=headers)
+    finally:
+        event.remove(engine, "before_cursor_execute", _count)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["second"] is True
+
+    permission_queries = [
+        q for q in queries if "user_permissions" in q or "role_permissions" in q]
+    assert len(permission_queries) == 1, (
+        "expected exactly 1 permission-catalog query (the middleware's own, "
+        f"reused by both checks); got {len(permission_queries)}:\n" +
+        "\n---\n".join(permission_queries))

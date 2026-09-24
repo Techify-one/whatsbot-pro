@@ -1,6 +1,7 @@
 // Chatwoot-style "Filtrar atendimentos" builder (plano 10 FF6+). Opened from the funnel
 // icon in the inbox toolbar. Each row is a clause: [dimensão] [operador] [valor] [🗑].
-// Dimensions: Status (Aberta/Fechada/Todas), Canais, Agente (atendente humano +
+// Dimensions: Status (Aberta/Fechada/Todas), Canais, Tipo de conversa (Grupo /
+// Individual), Agente (atendente humano +
 // IA), Time (plano 153 — independente do Agente), Etiqueta, Última atividade —
 // MAIS os atributos personalizados (dinâmicos), de contato e de atendimento,
 // que aparecem conforme cadastrados (plano 05).
@@ -32,6 +33,7 @@ const CORE_DIMENSIONS = [
   { key: 'status',       label: 'Status',           ops: ['eq', 'ne'],                valueType: 'status' },
   { key: 'channel',      label: 'Canais',           ops: ['eq', 'ne'],                valueType: 'channel' },
   { key: 'contact_type', label: 'Tipo de contato',  ops: ['eq', 'ne'],                valueType: 'contact_type' },
+  { key: 'chat_type',  label: 'Tipo de conversa',    ops: ['eq', 'ne'],                valueType: 'chat_type' },
   { key: 'agent',      label: 'Agente',              ops: ['eq', 'ne'],                valueType: 'agent' },
   { key: 'team',       label: 'Time',                ops: ['eq', 'ne'],                valueType: 'team' },
   { key: 'tag',        label: 'Etiqueta do contato', ops: ['eq', 'ne'],                valueType: 'tag' },
@@ -220,6 +222,15 @@ function ValueInput({ clause, dimDesc, channels, agentsUsers, agentsAi, teams, t
   if (t === 'conv_label') {
     const options = (convLabelNames || []).map(n => ({ value: n, label: n }));
     return html`<${MultiSelect} options=${options} selected=${asList(clause.value)} onChange=${onChange} />`;
+  }
+  if (t === 'chat_type') {
+    // "Igual a Grupo" = só grupos; "Diferente de Grupo" = exceto grupos. Individual =
+    // tudo que não é grupo.
+    return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>
+      <option value="">+ Selecione uma opção...</option>
+      <option value="group">Grupo</option>
+      <option value="individual">Individual</option>
+    </select>`;
   }
   if (t === 'ai_state') {
     return html`<select class=${cls} value=${clause.value} onChange=${(e) => onChange(e.target.value)}>

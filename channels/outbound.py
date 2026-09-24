@@ -44,6 +44,21 @@ class OutboundRouter:
         caps = getattr(inst, "capabilities", None)
         return caps if isinstance(caps, ChannelCapabilities) else _EMPTY_CAPS
 
+    def gowa_client_for(self, channel_id: str):
+        """The raw GOWAClient behind a GOWA channel instance, or ``None``.
+
+        Group-roster resolution (``agent.group_mentions``) is GOWA-specific and
+        needs the client for the group's OWN channel — a multi-GOWA-channel
+        install has a single app-wide DEFAULT client wired at boot, which isn't
+        necessarily the number actually logged into any given group, and asking
+        the wrong one silently returns an empty roster (caught inside
+        ``get_group_info``, never an error the caller sees). Non-GOWA channels
+        (no groups anyway) simply have no ``_client`` attribute and this
+        returns ``None``, same as an unresolved ``channel_id``.
+        """
+        inst = self.get(channel_id)
+        return getattr(inst, "_client", None)
+
     def supports(self, channel_id: str, cap: str) -> bool:
         return bool(getattr(self.capabilities(channel_id), cap, False))
 

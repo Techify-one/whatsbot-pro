@@ -19,7 +19,7 @@ from db.repositories import custom_attribute_repo as ca_repo
 from db.repositories import mention_repo, inbox_member_repo
 from db.repositories.custom_attribute_validate import validate_value
 from db.tables import contacts as contacts_table
-from channels.contact_type import resolve_contact_type
+from channels.contact_type import resolve_contact_type, resolve_contact_type_for_provider
 from channels import audio_transcode, media_limits, video_transcode
 from agent import group_mentions
 from server import system_notices
@@ -495,7 +495,14 @@ def register_routes(app, deps):
         # If registered, pre-create contact with WhatsApp name and AI setting
         if registered and should_create:
             ai_default = settings.get("default_ai_enabled", True)
-            ctype = resolve_contact_type(channel_id)
+            # Sem `channel_id`, a verificação acima passou pelo `gowa_client` fixo
+            # (branch `else` logo acima) — o número é comprovadamente WhatsApp, então
+            # tipa pelo provider "gowa" mesmo, e não pelo canal "primário" de
+            # `resolve_contact_type` (podia ser outro provider, ex. website, e o
+            # contato nascia com um contact_type que contradizia a verificação que
+            # acabou de confirmá-lo no WhatsApp).
+            ctype = (resolve_contact_type(channel_id) if channel_id
+                     else resolve_contact_type_for_provider("gowa"))
             def _save():
                 contact_repo.get_or_create(canonical, default_ai_enabled=ai_default,
                                            contact_type=ctype)
@@ -746,6 +753,25 @@ def register_routes(app, deps):
             "skipped": skipped,
             "errors": errors[:50],  # cap to keep the response small
         })
+
+    @app.get("/api/contacts/lookup")
+    async def lookup_contact(phone: str, request: Request):
+        """Existência de um contato pelo telefone — SEM criar nem validar no WhatsApp.
+
+        Usado pelo modal "Novo contato" pra bloquear a criação e oferecer "Ver
+        detalhes" antes de o operador confirmar. Diferente de ``check-phone`` (que
+        cria com ``create=true``) e de ``GET /{phone}`` (que também materializa o
+        contato se ausente — ver seu docstring), este é o único ponto de leitura
+        que não tem efeito colateral nenhum.
+        """
+        denied = permission_denied(request, "contact.read")
+        if denied:
+            return denied
+        canonical = _normalize_import_phone(phone)
+        if not canonical:
+            return _err("Número inválido. Informe DDD + número.")
+        contact = await asyncio.to_thread(contact_repo.get_by_phone, canonical)
+        return _ok({"exists": contact is not None, "contact": contact})
 
     @app.get("/api/contacts/{phone}")
     async def get_contact(phone: str, request: Request, mark_read: bool = True,
@@ -2259,11 +2285,17 @@ def register_routes(app, deps):
         return _ok({"unread_count": unread_count, "message": "Marcado como não lida."})
 
     @app.get("/api/contacts/{phone}/members")
-    async def get_group_members(phone: str, request: Request, force: bool = False):
+    async def get_group_members(phone: str, request: Request, force: bool = False,
+                                channel_id: str = ""):
         """List group participants with resolved names (for @mention autocomplete).
 
         ``force=true`` bypasses the TTL cache (used after a participant change to
         pick up a just-joined member immediately).
+
+        ``channel_id`` (plano multi-canal): resolve o roster pelo GOWAClient
+        DAQUELE canal — sem ele, ``group_mentions`` cai no cliente padrão do
+        app, que num install com mais de um número GOWA pode não ser o dono do
+        grupo (roster vem vazio em silêncio). Omitido = comportamento legado.
         """
         denied = permission_denied(request, "contact.read")
         if denied:
@@ -2273,8 +2305,9 @@ def register_routes(app, deps):
             return hidden
         if "@g.us" not in phone:
             return _ok({"members": []})
+        gowa_client = outbound.gowa_client_for(channel_id) if channel_id else None
         members = await asyncio.to_thread(
-            group_mentions.get_members, phone, force, True)
+            group_mentions.get_members, phone, force, True, client=gowa_client)
         return _ok({"members": members})
 
     @app.post("/api/contacts/{phone}/toggle-ai")

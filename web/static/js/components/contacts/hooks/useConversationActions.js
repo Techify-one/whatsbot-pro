@@ -63,7 +63,7 @@ export function useConversationActions({
   const [ctxMenu, setCtxMenu] = useState(null);
   // Conversation-level data for the open context menu (assignee/resolve). Resolved
   // lazily on right-click since the sidebar rows are contact-level only.
-  const [ctxConv, setCtxConv] = useState({ loading: false, conv: null });
+  const [ctxConv, setCtxConv] = useState({ loading: false, conv: null, resolving: false });
 
   // Toggle the AI for a single CONVERSATION (plano 17). Turning it OFF also
   // unassigns the conversation (handled server-side) so it drops into the
@@ -245,11 +245,18 @@ export function useConversationActions({
   const handleResolveConversation = useCallback(async (convId, status) => {
     // Funnel through resolveConversation so the beforeResolve filter (plugins) runs
     // here too. Pass an object so the filter gets the conversation id for context.
-    const res = await resolveConversation({ id: convId }, status);
-    if (res && res.ok && res.data && res.data.conversation) {
-      patchCtxConv({ status: res.data.conversation.status });
-    } else {
-      setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atualizar status.' }));
+    // `resolving` (plano 169 B7) is a TOP-LEVEL ctxConv field, not a patchCtxConv
+    // target — it tracks the request in flight, not a property of the conversation.
+    setCtxConv(prev => ({ ...prev, resolving: true }));
+    try {
+      const res = await resolveConversation({ id: convId }, status);
+      if (res && res.ok && res.data && res.data.conversation) {
+        patchCtxConv({ status: res.data.conversation.status });
+      } else {
+        setCtxConv(prev => ({ ...prev, error: (res && res.error) || 'Falha ao atualizar status.' }));
+      }
+    } finally {
+      setCtxConv(prev => ({ ...prev, resolving: false }));
     }
   }, [patchCtxConv]);
 
