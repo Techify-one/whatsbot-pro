@@ -77,6 +77,11 @@ def _write_info(agent_handler, phone: str, body: dict, *,
     # ausente fica intocado enquanto "" é uma limpeza intencional. Diferente do
     # ``update_info`` (merge feito pela IA).
     scalar_fields = {k: body[k] for k in _SCALAR_KEYS if k in body}
+    # Grupo: o nome é o assunto do grupo no WhatsApp (``group_name``, atualizado pelo
+    # inbound) — não é editável. Ignora em silêncio, como as chaves toleradas acima,
+    # porque o painel/cliente da API reenvia o payload inteiro no save.
+    if contact.is_group and "name" in scalar_fields:
+        del scalar_fields["name"]
     if scalar_fields:
         contact.set_info_fields(scalar_fields)
     # Observações: substitui a lista inteira (``update_info`` só acrescenta).

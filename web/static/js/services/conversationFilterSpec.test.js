@@ -111,6 +111,22 @@ test('searching disables the assignment clause (all tabs shown while searching)'
   assert.deepEqual(buildListParams(spec), buildCountParams(spec));
 });
 
+test('chat_type (grupo x individual) maps to a server param and is server-expressible', () => {
+  const only = { statusFilter: 'all', advFilters: [{ dim: 'chat_type', op: 'eq', value: 'group' }] };
+  assert.equal(isServerExpressible(only), true);
+  assert.deepEqual(buildCountParams(only), { archived: 'false', chat_type: ['group'] });
+  // "exceto grupos" — o operador viaja como override, igual às outras dimensões escalares.
+  const except = { statusFilter: 'all', advFilters: [{ dim: 'chat_type', op: 'ne', value: 'group' }] };
+  assert.equal(isServerExpressible(except), true);
+  assert.deepEqual(buildCountParams(except),
+    { archived: 'false', chat_type: 'group', chat_type__op: 'not_equal_to' });
+  // duas cláusulas na mesma dimensão colidem no param → cai para o cliente
+  assert.equal(isServerExpressible({ advFilters: [
+    { dim: 'chat_type', op: 'eq', value: 'group' },
+    { dim: 'chat_type', op: 'ne', value: 'individual' },
+  ] }), false);
+});
+
 // ── plano 69 F6 — filtro de CONTATOS → params do /api/contacts ─────────────
 
 test('buildContactFilterParams: tag/contact_type/cattr map to flat params', () => {

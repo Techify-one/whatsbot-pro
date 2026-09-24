@@ -53,6 +53,12 @@ _pushname_cache: dict[str, str] = {}
 # re-hitting GOWA for participants that simply have no public push name.
 _pushname_attempted: set[str] = set()
 
+# lid digits -> phone digits, learned from every roster we normalize. A ``leave``
+# notice names the participant AFTER apply_participants_change already dropped them
+# from the roster, and a lid-addressed group reports them by lid — this is the only
+# place their phone survives, so the notice can still link to "Novo contato".
+_lid_phone: dict[str, str] = {}
+
 # Max /user/info lookups per get_members(resolve_names=True) call, so opening a
 # large group doesn't block on hundreds of sequential HTTP calls. Remaining
 # nameless members are resolved on subsequent calls / cache refreshes.
@@ -77,6 +83,7 @@ def init(client) -> None:
         _store_cache.clear()
         _pushname_cache.clear()
         _pushname_attempted.clear()
+        _lid_phone.clear()
         _bot_phone = ""
         _bot_name = ""
     _client = client
@@ -249,8 +256,50 @@ def _display_name(jid: str) -> str:
     d = _digits(jid)
     if not d:
         return ""
-    name = _resolve_name(d) or _fetch_pushname(jid)
-    return name or f"+{d}"
+    name = _resolve_name(d)
+    if not name and "@lid" in jid:
+        # A lid-addressed participant may have a saved contact under their REAL
+        # phone, which only a roster can tell us (``_lid_phone``).
+        phone = _lid_phone.get(d, "")
+        if phone:
+            name = _resolve_name(phone, d)
+    return name or _fetch_pushname(jid) or f"+{d}"
+
+
+def _member_phone(jid: str) -> str:
+    """Real phone digits of a participant JID, or '' when there isn't one.
+
+    A ``@lid`` JID carries an opaque id, NOT a phone — it is only trusted once a
+    roster told us the phone behind it (``_lid_phone``). Anything outside E.164
+    length (10-15 digits) is rejected: "Novo contato" would prepend a country code
+    to it and validate a number that doesn't exist.
+    """
+    d = _digits(jid)
+    if not d:
+        return ""
+    phone = _lid_phone.get(d, "") if "@lid" in (jid or "") else d
+    return phone if 10 <= len(phone) <= 15 else ""
+
+
+def _member_mark(jid: str) -> str:
+    """One participant as it appears inside a roster notice.
+
+    ``[[member:<phone>|<name>]]`` when the phone is known — the panel turns it into
+    a link to "Novo contato" (web/static/js/services/systemMemberLinks.js parses the
+    SAME token; keep both in sync). Plain name otherwise. ``[``/``]`` are stripped
+    from the name so it can never close the token early.
+    """
+    name = _display_name(jid)
+    if not name:
+        return ""
+    phone = _member_phone(jid)
+    if not phone:
+        return name
+    if name == f"+{_digits(jid)}":
+        # Nameless: _display_name fell back to the JID digits, which for a lid JID is
+        # the opaque id — show the phone the roster resolved instead.
+        name = f"+{phone}"
+    return f"[[member:{phone}|{name.replace('[', '').replace(']', '')}]]"
 
 
 def describe_change(change_type: str, jids: list[str]) -> str:
@@ -258,9 +307,13 @@ def describe_change(change_type: str, jids: list[str]) -> str:
 
     e.g. 'João entrou no grupo' / 'Maria saiu do grupo'. Returns '' for changes
     we don't surface or when no participant could be named.
+
+    Each participant whose phone is known is emitted as a ``[[member:<phone>|<name>]]``
+    token (see ``_member_mark``) — the notice is panel-only (``system_notice``), so
+    the token never reaches WhatsApp, the LLM context, the preview or the search.
     """
     change = (change_type or "").lower()
-    names = [n for n in (_display_name(j) for j in (jids or [])) if n]
+    names = [n for n in (_member_mark(j) for j in (jids or [])) if n]
     if not names:
         return ""
     who = ", ".join(names)
@@ -317,6 +370,8 @@ def get_members(group_jid: str, force: bool = False,
     for p in info.get("Participants", []) or []:
         phone = _digits(p.get("PhoneNumber", "") or "")
         lid = _digits(p.get("LID", "") or p.get("JID", "") or "")
+        if phone and lid and phone != lid:
+            _lid_phone[lid] = phone
         name = _resolve_name(phone, lid, client)
         # The bot is a participant too; resolve its mention via the configured
         # panel name (GOWA gives no DisplayName, and the bot has no saved contact).

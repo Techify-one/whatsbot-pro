@@ -137,6 +137,8 @@ def _build_clause(clause, ctx: FilterContext):
                               [str(v) for v in values])
     if kind == "contact_type":
         return _scalar_clause(contacts.c.contact_type, op, [str(v) for v in values])
+    if kind == "chat_type":
+        return _chat_type_clause(op, values)
     if kind == "agent":
         return _agent_clause(op, values)
     if kind == "ai":
@@ -250,6 +252,16 @@ def _team_clause(op: str, values: list):
     if op == "in":
         return col.in_(resolved)
     raise FilterError(f"Operador {op!r} não permitido para team.")  # pragma: no cover
+
+
+def _chat_type_clause(op: str, values: list):
+    """Grupo x individual sobre ``contacts.is_group`` (NOT NULL, então o ``not_`` é seguro)."""
+    value = str(values[0]).lower() if values else ""
+    if value not in ("group", "individual"):
+        raise FilterError(f"Valor inválido para 'chat_type': {value!r}.")
+    is_group = contacts.c.is_group == 1
+    hit = is_group if value == "group" else not_(is_group)
+    return not_(hit) if op == "not_equal_to" else hit
 
 
 def _agent_clause(op: str, values: list):

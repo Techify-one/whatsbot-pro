@@ -49,6 +49,60 @@ Dois furos, os dois exclusivos de **imagem**, corrigidos juntos:
 
 Cobertura: [tests/contracts/test_group_sender_label.py](../tests/contracts/test_group_sender_label.py) (parser, composição e preview) + `messageView.test.js` (`node --test`).
 
+## Aviso "X entrou/saiu do grupo": o nome é um link para "Novo contato"
+
+O aviso de mudança de roster (`entrou`/`saiu`/`agora é administrador`) é um `system_notice` gravado pelo ramo `group_participants` de [channel_webhook.py](../server/routes/channel_webhook.py) com o texto de `group_mentions.describe_change`. Era **texto puro** — sem o telefone do participante não havia como agir sobre ele. Agora cada participante **cujo telefone é conhecido** viaja como o token `[[member:<telefone>|<nome>]]` dentro do próprio `content` (mesmo padrão do `[[cta:…]]` do card "Sistema" e do carimbo `"[Fulano]: "` do autor de grupo — não há coluna para isso).
+
+- **Painel**: `SystemMessageCard` chama `parseMemberLinks` ([systemMemberLinks.js](../web/static/js/services/systemMemberLinks.js), puro, `node --test`) e desenha o token como `<a href="/contacts?createPhone=…&createName=…">` — o **mesmo destino** do rótulo do remetente numa bolha de grupo. Quem decide o que acontece a seguir é o modal "Novo contato" de [ContactsListScreen.js](../web/static/js/components/ContactsListScreen.js): número já salvo ⇒ "Este contato já existe. **Ver detalhes**" e **Criar contato desabilitado**; número novo ⇒ formulário pré-preenchido. O interceptor de links do shell faz a navegação SPA e deixa o Ctrl/⌘+clique abrir nova guia.
+- **Sem nome** (só o número): o rótulo é `+<telefone>` e o campo Nome do modal **não** é pré-preenchido com isso.
+- **Excluído de tudo que lê `content`**: `system_notice` já sai do contexto da IA (`message_repo.get_context`), do preview da lista (`LIST_PANEL_ONLY_ROLES`) e da busca (`SEARCH_EXCLUDED_ROLES`) — o token nunca chega ao WhatsApp nem ao LLM.
+- ⚠️ **LID NÃO é telefone.** Um JID `@lid` (grupo com endereçamento por LID) carrega um id opaco; linkar isso criaria/consultaria um "contato" de número inexistente (o "Novo contato" ainda prefixaria o DDI 55). `_member_phone` só devolve telefone **real**: JID normal com 10–15 dígitos, ou o que um roster já mapeou (`_lid_phone`, aprendido em `get_members`). O mapa existe porque o `leave` é descrito **depois** de `apply_participants_change` ter tirado o membro do roster. Sem telefone conhecido o participante fica **texto puro**, como já ocorre no rótulo do remetente.
+- ⚠️ **Token e parser andam juntos**: `_member_mark` (Python) e `MEMBER_RE` (JS) descrevem o mesmo formato — mexer em um exige o outro. O nome perde `[`/`]` para nunca fechar o token antes da hora.
+- **Só vale daqui pra frente**: avisos já gravados são texto puro e ficam como estão (o telefone não foi guardado).
+
+Cobertura: [tests/core/test_group_roster_notice.py](../tests/core/test_group_roster_notice.py) + `systemMemberLinks.test.js` (`node --test`).
+
+## "Ver membros": popup do roster do grupo
+
+O painel **Dados do contato** de um **grupo** tem uma linha "Ver membros" na faixa entre o cabeçalho (foto/nome/selo) e o campo Nome ([ContactInfoPanel.js](../web/static/js/components/contacts/ContactInfoPanel.js)). Ela abre o [GroupMembersModal.js](../web/static/js/components/contacts/GroupMembersModal.js): lista do roster (nome, telefone, selo **Admin**), busca por nome/número (sempre visível quando há membros; o resultado leva ao MESMO destino do clique na lista) e "Atualizar" (`force=true`). **Clicar num membro leva a `/contacts?createPhone=…&createName=…`** — o modal "Novo contato" pré-preenchido, o MESMO destino do rótulo do remetente e do aviso "entrou/saiu" (`memberHref` em [systemMemberLinks.js](../web/static/js/services/systemMemberLinks.js)); número já salvo ⇒ "Este contato já existe. **Ver detalhes**".
+
+- **Fonte**: `GET /api/contacts/<grupo>/members?channel_id=` (`getGroupMembers`) — o mesmo endpoint e o mesmo cache de 300s do autocomplete de @menção. A decisão de exibição (filtro, ordem, quem é link) é o módulo puro [groupMembers.js](../web/static/js/services/groupMembers.js) (`memberEntries`, `node --test`): com nome A→Z, depois só-telefone, depois anônimos; `~Fulano` (marca de pushName) perde o `~`, também no nome pré-preenchido.
+- ⚠️ **Membro só-LID aparece, mas NÃO é link.** `phone` vazio = grupo endereçando por LID, que é id opaco e não telefone; linkar criaria um contato de número inexistente. A régua é a do backend (`_member_phone`): 10–15 dígitos.
+- ⚠️ **O modal navega POR CONTA PRÓPRIA (`goTo`), não delega ao interceptor de links do shell.** O painel também abre dentro do overlay da tela de Contatos ([ContactsListScreen.js](../web/static/js/components/ContactsListScreen.js)), cujo wrapper faz `stopPropagation`: o clique nunca chegaria ao `document` e o navegador recarregaria a página inteira. O `<a href>` continua lá só para Ctrl/⌘+clique abrir nova guia (`isModifiedClick`).
+- ⚠️ **`ContactsListScreen` lê `createPhone` no mount E em `popstate`** (cada leitura remove o par da URL, então voltar/avançar nunca reabre o modal). Só no mount, o "Ver membros" aberto a partir da própria tela de Contatos empurrava a URL e **nada acontecia**. O `NewContactModal` tem `key` pelo telefone: ele guarda `initialPhone` em `useState`, e sem a `key` um 2º pré-preenchimento seria ignorado.
+- ⚠️ **Esc: o popup dá `preventDefault`.** O Esc do hub ([Contacts.js](../web/static/js/components/contacts/Contacts.js)) só fecha o painel lateral se a tecla não foi consumida; sem isso o re-render (microtask) já removeu o overlay `.fixed.inset-0` quando o handler do hub roda, e um Esc fechava o popup **e** o painel.
+- **Canal**: o hub passa `channelId` (o canal da conversa) e o roster sai do GOWAClient DAQUELE canal. A tela de Contatos não tem canal (contato é entidade global; canal só existe na conversa) ⇒ cliente padrão do app — num install com vários números GOWA o roster pode vir vazio, e o popup diz isso em vez de mostrar lista em branco (o backend devolve `[]` também em falha).
+
+Cobertura: `groupMembers.test.js` (`node --test`). Verificado de ponta a ponta numa instância isolada com o roster simulado (não há GOWA nela): popup, busca, Esc, backdrop, clique → "Novo contato" a partir do hub e da tela de Contatos, modo escuro.
+
+## Nome de grupo: vem do WhatsApp e é travado
+
+O nome de um grupo é o assunto que o provider reportou (`contacts.group_name`, refrescado pelo inbound); `contacts.name` **fica vazio** num grupo (4/4 no banco de dev). Três consequências:
+
+- **Painel "Dados do contato"**: o campo Nome de um grupo vem preenchido com `group_name` e `readonly` — a decisão é o módulo puro [contactNameField.js](../web/static/js/components/contacts/contactNameField.js) (`node --test`), e o save **não envia** `name` de grupo (`infoPayloadFor`).
+- ⚠️ **O travamento real é no backend**: `contact_service._write_info` ignora `name` quando `contact.is_group` — em silêncio, porque o painel e a `/api/v1` reenviam o payload inteiro e um 400 derrubaria o save do resto (tags/observações/atributos). É o mesmo serviço da fachada v1, então ela herda a regra.
+- ⚠️ **`contact_name` do row enriquecido é ciente de grupo** ([conversation_query.py](../db/repositories/conversation_query.py)): `group_name` quando `is_group` e não-vazio, senão `contacts.name`. Antes a query só trazia `contacts.name` e a sidebar conversa-cêntrica caía no **JID** (`c.group_name || c.name || c.phone` — o row nunca tinha `group_name`). É a mesma regra de `_shape_contact_row`; **não** acrescente `group_name` ao row/`convRowToSidebarRow` — são dois mapeadores com teste de paridade.
+
+Cobertura: [tests/integration/test_group_contact_name.py](../tests/integration/test_group_contact_name.py) + `contactNameField.test.js`.
+
+## Marcador de grupo na lista de conversas
+
+A linha da sidebar mostra um ícone de três pessoas (`GroupChip`, em [ContactList.js](../web/static/js/components/contacts/ContactList.js)) **colado ao selo do canal**, na linha 1 — só quando `c.is_group`, só ícone (o nome do grupo já está na linha de baixo), com `title`/`aria-label` "Grupo".
+
+- ⚠️ **O glifo NÃO pode ser o de duas pessoas**: o `TeamChip` da mesma linha já o usa, e os dois passariam a ser lidos como a mesma coisa. Travado por `ContactList.group.test.js` (`node --test`).
+- O fundo é `bg-wa-secondary/15` (com alfa), **não** `bg-wa-hover` — a linha em hover/selecionada usa `wa-hover`/`wa-selected` e a pílula sumiria.
+- O cabeçalho do chat aberto já diz "Grupo" em texto ([ContactDetail.js](../web/static/js/components/contacts/ContactDetail.js)); o marcador é só da lista.
+
+## Filtro "Tipo de conversa": só grupos / exceto grupos
+
+No painel **Filtrar conversas** a dimensão **Tipo de conversa** (`chat_type`) tem valor `Grupo` ou `Individual` e operadores Igual a / Diferente — "só grupos" é *Igual a Grupo*, "exceto grupos" é *Diferente de Grupo* (equivale a *Igual a Individual*). Lê `contacts.is_group` (`NOT NULL`, então o `not_` do SQL não perde linha por `NULL`).
+
+- ⚠️ **`Individual` significa "não é grupo"**, não "é pessoa": canal/broadcast também caem nele. Os dois lados usam a MESMA regra — `_chat_type_clause` em [db/filters/translate.py](../db/filters/translate.py) e o ramo `chat_type` de `clauseMatches` ([conversationRows.js](../web/static/js/services/conversationRows.js)); mexer em um sem o outro faz lista e contagem divergirem.
+- **Uma dimensão nova de conversa mora em 4 lugares**: `registry.py` + `translate.py` (SQL, que serve a lista, a contagem das abas e a `/api/v1`), `clauseMatches` (fallback no cliente), `conversationFilterSpec.js` (`addClause` **e** `clauseParamKey` — esquecer o segundo deixa o filtro "não expressável" e a contagem cai para as linhas carregadas) e o `CORE_DIMENSIONS` do diálogo. Os chips da barra ([ConversationFilterBar.js](../web/static/js/components/contacts/ConversationFilterBar.js)) só ganham rótulo legível se a dimensão entrar em `DIM_LABELS`.
+- O valor é ESCALAR (um select), então nunca vira o operador `in` — que a dimensão não aceita.
+
+Cobertura: [tests/integration/test_chat_type_filter.py](../tests/integration/test_chat_type_filter.py) + `conversationRows.test.js` / `conversationFilterSpec.test.js` (`node --test`).
+
 ## O batch mescla para a IA, não para o histórico (plano 146)
 
 Quando o cliente manda várias mensagens em poucos segundos, o orquestrador espera

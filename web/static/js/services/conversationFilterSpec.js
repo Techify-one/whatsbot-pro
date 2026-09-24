@@ -88,7 +88,7 @@ function addClause(params, cl) {
     if (value === 'all') return true;
     return addScalarClause(params, 'status', op, value);
   }
-  if (dim === 'channel' || dim === 'contact_type' || dim === 'agent'
+  if (dim === 'channel' || dim === 'contact_type' || dim === 'chat_type' || dim === 'agent'
       || dim === 'ai' || dim === 'starter' || dim === 'team') {
     return addScalarClause(params, dim, op, value);
   }
@@ -104,7 +104,7 @@ function clauseParamKey(cl) {
   if (dim === 'tag') return 'labels';
   if (dim === 'conv_label') return 'conv_labels';
   if (dim === 'status') return value === 'all' ? null : 'status';
-  if (dim === 'channel' || dim === 'contact_type' || dim === 'agent'
+  if (dim === 'channel' || dim === 'contact_type' || dim === 'chat_type' || dim === 'agent'
       || dim === 'ai' || dim === 'starter' || dim === 'activity' || dim === 'team') return dim;
   const m = String(dim).match(/^cattr:(contact|conversation):([a-z][a-z0-9_]{0,63})$/);
   if (m) return m[1] === 'conversation' ? `cattr:${m[2]}` : `cattr:contact:${m[2]}`;

@@ -61,6 +61,24 @@ function TeamChip({ team }) {
   `;
 }
 
+// Marcador de GRUPO na linha 1 da conversa, colado ao selo do canal. Só ícone (o
+// nome do grupo já está na linha de baixo). Glifo de três pessoas de propósito: o
+// TeamChip usa o de duas — sem a distinção os dois se confundiriam. Fundo com alfa
+// (e não bg-wa-hover) para continuar visível na linha em hover/selecionada.
+function GroupChip() {
+  return html`
+    <span
+      class="inline-flex items-center rounded px-[4px] py-[1px] shrink-0 bg-wa-secondary/15 text-wa-secondary"
+      title="Grupo"
+      aria-label="Grupo"
+    >
+      <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
+        <path d="M12 12.75c1.63 0 3.07.39 4.24.9 1.08.48 1.76 1.56 1.76 2.73V18H6v-1.61c0-1.18.68-2.26 1.76-2.73 1.17-.52 2.61-.91 4.24-.91zM4 13c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm1.13 1.1c-.37-.06-.74-.1-1.13-.1-.99 0-1.93.21-2.78.58C.48 14.9 0 15.62 0 16.43V18h4.5v-1.61c0-.83.23-1.61.63-2.29zM20 13c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm4 3.43c0-.81-.48-1.53-1.22-1.85-.85-.37-1.79-.58-2.78-.58-.39 0-.76.04-1.13.1.4.68.63 1.46.63 2.29V18H24v-1.57zM12 6c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3z"/>
+      </svg>
+    </span>
+  `;
+}
+
 // Kebab (3-dots) menu icon, shared by the header menus. Defined as components
 // (functions returning a vnode) so they can be used as <${KebabIcon} />.
 const KebabIcon = () => html`
@@ -747,7 +765,10 @@ export function ContactList({ contacts, loading, search, onSearchChange, selecte
                          segue valendo só no cabeçalho do chat. Cada chip devolve null quando
                          não há dado (linha sem canal / sem atendente). -->
                     <div class="flex items-center justify-between gap-[6px] min-w-0 mb-[1px]">
-                      <${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} margin=${false} />
+                      <span class="flex items-center gap-[4px] shrink-0">
+                        <${ChannelChip} provider=${c.channel_provider} name=${c.channel_name} margin=${false} />
+                        ${c.is_group ? html`<${GroupChip} />` : null}
+                      </span>
                       ${assignee ? html`<span class="ml-auto min-w-0 max-w-[45%]"><${AssigneeChip} assignee=${assignee} /></span>` : null}
                     </div>
                     <div class="flex justify-between items-center gap-[6px] min-w-0">

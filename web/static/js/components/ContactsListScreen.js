@@ -402,19 +402,27 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
   // Pré-preenchimento do modal "Novo contato" — clique no nome de um participante
   // dentro de uma conversa de grupo (MessageBubble.js) chega aqui por
   // `?createPhone=&createName=` na URL, um par ONE-SHOT (fora de CONTACTS_URL_SCHEMA,
-  // que é estado persistente de busca/página). Lido e removido da URL uma única vez
-  // no mount — não é re-lido em popstate, então voltar/avançar não reabre o modal.
+  // que é estado persistente de busca/página). Lido no mount E a cada popstate — o
+  // segundo cobre quem já está nesta tela (o "Ver membros" de um grupo aberto daqui,
+  // que empurra `/contacts?createPhone=…` sem remontar a tela). Cada leitura REMOVE
+  // o par da URL (replaceState), então a entrada do histórico fica limpa e
+  // voltar/avançar nunca reabre o modal.
   const [createPrefill, setCreatePrefill] = useState(null); // {phone, name} | null
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const createPhone = params.get('createPhone');
-    if (!createPhone) return;
-    setCreatePrefill({ phone: createPhone, name: params.get('createName') || '' });
-    setShowCreate(true);
-    params.delete('createPhone');
-    params.delete('createName');
-    const qs = params.toString();
-    history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+    function consumeCreateParams() {
+      const params = new URLSearchParams(window.location.search);
+      const createPhone = params.get('createPhone');
+      if (!createPhone) return;
+      setCreatePrefill({ phone: createPhone, name: params.get('createName') || '' });
+      setShowCreate(true);
+      params.delete('createPhone');
+      params.delete('createName');
+      const qs = params.toString();
+      history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+    }
+    consumeCreateParams();
+    window.addEventListener('popstate', consumeCreateParams);
+    return () => window.removeEventListener('popstate', consumeCreateParams);
     // eslint-disable-next-line
   }, []);
   const [globalTags, setGlobalTags] = useState({});
@@ -933,6 +941,7 @@ export default function ContactsListScreen({ initialEntity = null, currentUser =
 
       ${showCreate ? html`
         <${NewContactModal}
+          key=${createPrefill ? createPrefill.phone : 'new'}
           initialPhone=${createPrefill ? createPrefill.phone : ''}
           initialName=${createPrefill ? createPrefill.name : ''}
           onClose=${() => { setShowCreate(false); setCreatePrefill(null); }}
