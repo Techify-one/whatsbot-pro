@@ -636,6 +636,10 @@ class MessagingService:
                             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
                             reopen=(False if not _allow_reopen else None))
         msg_data["conversation_id"] = (_saved or {}).get("conversation_id")
+        # plano 172: sem _id o painel não consegue buscar a mídia de uma cópia
+        # que a reconciliação otimista não conseguiu casar com a bolha local
+        # (heurística de 30s — docs/UI_CONVERSA.md) — nasce "Mídia indisponível" pra sempre.
+        msg_data["_id"] = (_saved or {}).get("id")
 
         await ws_manager.broadcast("new_message", {
             "phone": phone, "channel_id": channel_id, "message": msg_data})
