@@ -17,6 +17,7 @@ import logging
 from channels.base import AccountIdentity, Channel, ChannelCapabilities, SendResult
 from channels.br_phone import br_phone_variants
 from channels.events import InboundEvent
+from channels.jid import classify_jid, is_allowed
 from gowa.client import GOWASendError, extract_msg_id
 
 logger = logging.getLogger(__name__)
@@ -417,16 +418,45 @@ class GOWAChannel(Channel):
         return self._client.check_phone(phone)
 
     # ── Inbound ──────────────────────────────────────────────────────
+    def should_drop_inbound(self, raw: dict) -> str | None:
+        """Discard a chat whose JID-type isn't in ``config.allowed_jid_types``
+        (plano 173) — pure, memory-only (``jid_allowed.peek``), never raises.
+
+        A cold/expired cache (``peek`` → ``None``) or anything unexpected fails
+        OPEN: ``parse_inbound`` below (via ``parse_gowa_inbound``) is the safety
+        net that still discards before touching the GOWA client.
+        """
+        try:
+            from channels import jid_allowed
+            from gowa.inbound import chat_jid_for_event
+
+            allowed = jid_allowed.peek(self.channel_id)
+            if allowed is None:
+                return None
+            raw = raw if isinstance(raw, dict) else {}
+            event = raw.get("event", "")
+            data = raw.get("payload", raw.get("data", raw))
+            jid = chat_jid_for_event(event, data if isinstance(data, dict) else {})
+            if not is_allowed(classify_jid(jid), allowed):
+                return "jid_type_not_allowed"
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
         """Translate a raw GOWA webhook body into InboundEvents (plano 13 Fase 0).
 
         Delegates to ``gowa.inbound.parse_gowa_inbound`` (the extracted pure-ish
-        parser), passing this channel's client + the configured group_reply_mode.
-        Bot identity defaults to what ``group_mentions`` holds (set by the status
-        poll). Blocking client/DB lookups happen inside — callers run it via
-        ``asyncio.to_thread``.
+        parser), passing this channel's client + the configured group_reply_mode
+        + the channel's ``allowed_jid_types`` (plano 173 — read-through cache,
+        may hit the DB on a miss; safe here, this whole method already runs in a
+        thread). Bot identity defaults to what ``group_mentions`` holds (set by
+        the status poll). Blocking client/DB lookups happen inside — callers run
+        it via ``asyncio.to_thread``.
         """
         from gowa.inbound import parse_gowa_inbound
+        from channels import jid_allowed
+        allowed = jid_allowed.get_sync(self.channel_id)
         group_mode = "mention_only"
         try:
             from db.repositories import config_repo
@@ -434,7 +464,8 @@ class GOWAChannel(Channel):
         except Exception:  # noqa: BLE001
             pass
         return parse_gowa_inbound(raw, channel_id=self.channel_id,
-                                  client=self._client, group_mode=group_mode)
+                                  client=self._client, group_mode=group_mode,
+                                  allowed_jid_types=allowed)
 
 
 def build_gowa_channel(channel_id: str, row: dict | None, *,

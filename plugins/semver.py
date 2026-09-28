@@ -94,7 +94,13 @@ logger = logging.getLogger(__name__)
 # ``conversation_assigned`` (reuso, sem nome novo no transporte). Plugin que
 # precise do seam declara ``">=1.9,<2.0"``; quem só quer degradar continua em
 # ``">=1.0,<2.0"``.
-WHATSBOT_API_VERSION = "1.9.0"
+# 1.10.0: ADITIVA — método novo ``Channel.should_drop_inbound(raw) -> str | None``
+# (plano 173: descarte de evento de JID não permitido na ENTRADA do webhook,
+# antes do ``channel_repo.get``/assinatura/``filter.webhook.payload``). Default
+# ``None`` (nunca descarta) preserva todo provider existente; GOWA é o único
+# que o sobrescreve hoje. Plugin que precise do seam declara ``">=1.10,<2.0"``;
+# quem só quer degradar continua em ``">=1.0,<2.0"``.
+WHATSBOT_API_VERSION = "1.10.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

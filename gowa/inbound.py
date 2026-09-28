@@ -30,11 +30,52 @@ import uuid
 from datetime import datetime, timezone
 
 from channels.events import InboundEvent
-from channels.jid import phone_from_ack_payload
+from channels.jid import classify_jid, is_allowed, phone_from_ack_payload
 from agent import group_mentions
 
 logger = logging.getLogger(__name__)
 
+
+# ── JID do chat, por tipo de evento (plano 173) ─────────────────────────────
+def chat_jid_for_event(event: str, data: dict) -> str:
+    """Best-effort raw chat JID (COM o sufixo ``@...``) para classificação.
+
+    Espelha, campo a campo e na MESMA ordem, a extração de ``chat_id`` de cada
+    ramo abaixo — mas devolve o valor cru (o ramo em si passa por
+    ``_phone_from_jid``/``phone_from_ack_payload``, que descartam o sufixo, o
+    único jeito de ``classify_jid`` saber o tipo). Reaproveitado pelo seam
+    ``GOWAChannel.should_drop_inbound`` (mesma regra nos dois lugares).
+
+    Evento não reconhecido aqui (``newsletter.*``, ``call.offer``, …) devolve
+    ``""`` → :func:`channels.jid.classify_jid` classifica como ``UNKNOWN``, que
+    :func:`channels.jid.is_allowed` nunca barra — equivalente a não filtrar.
+    """
+    if not isinstance(data, dict):
+        return ""
+    if event in ("message.reaction", "message.edited", "message.revoked",
+                 "message.deleted"):
+        return data.get("chat_id", "") or data.get("from", "")
+    if event == "group.participants":
+        return data.get("chat_id", "")
+    if event == "group.joined":
+        return data.get("chat_id", "") or data.get("group_jid", "")
+    if event == "chat_presence":
+        return data.get("from", "")
+    if event == "message.ack":
+        # Mesma ordem/preferência de ``phone_from_ack_payload``, sem descartar
+        # o sufixo: prefere o primeiro campo com ``@``, senão o 1º não-vazio.
+        first_nonempty = ""
+        for field in ("chat_id", "from", "jid", "phone"):
+            val = data.get(field, "") or ""
+            if val and "@" in val:
+                return val
+            if val and not first_nonempty:
+                first_nonempty = val
+        return first_nonempty
+    if event in ("message", "message:received", ""):
+        return (data.get("chat_jid", "") or data.get("chat_id", "")
+                or data.get("from", "") or data.get("jid", ""))
+    return ""
 
 
 # ── Timestamp do provedor (plano 141) ─────────────────────────────────────
@@ -518,17 +559,31 @@ def _strip_bot_mention(text: str, bot_phone: str, bot_name: str) -> str:
 # ── Main entry point ──────────────────────────────────────────────────────
 def parse_gowa_inbound(body: dict, *, channel_id: str = "default", client=None,
                        bot_phone: str = "", bot_name: str = "",
-                       group_mode: str = "mention_only") -> list[InboundEvent]:
+                       group_mode: str = "mention_only",
+                       allowed_jid_types: list[str] | None = None,
+                       ) -> list[InboundEvent]:
     """Translate a raw GOWA webhook ``body`` into ``InboundEvent`` objects.
 
     Mirrors the legacy ``webhook()`` handler's branching but produces events
     instead of acting. Blocking client/DB calls (group name/archive/filename and
     @mention lookups) run here — call via ``asyncio.to_thread``.
+
+    ``allowed_jid_types`` (plano 173): quando informado (não ``None``), TODO
+    evento (mensagem, eco, recibo, reação, edição, revogação, exclusão,
+    presença, mudança de participantes) do chat com tipo de JID não permitido
+    é descartado (``[]``) ANTES de qualquer chamada ao cliente GOWA — rede de
+    segurança para quando o cache do canal (``channels.jid_allowed``) está
+    frio e a rota não conseguiu descartar antes. ``None`` (default) preserva o
+    comportamento antigo (chamadores/testes que não passam o parâmetro).
     """
     if not isinstance(body, dict):
         return []
     event = body.get("event", "")
     data = body.get("payload", body.get("data", body))
+    if allowed_jid_types is not None:
+        jid = chat_jid_for_event(event, data if isinstance(data, dict) else {})
+        if not is_allowed(classify_jid(jid), allowed_jid_types):
+            return []
     bot_phone, bot_name = _bot_identity(bot_phone, bot_name)
 
     def _ev(**kw) -> InboundEvent:

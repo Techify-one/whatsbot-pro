@@ -29,6 +29,7 @@ from dataclasses import dataclass
 
 from channels.events import InboundEvent
 from channels import jid as jid_classifier
+from channels import jid_allowed
 from db.repositories import channel_repo, contact_repo, conversation_repo
 from plugins.events import apply_filter, emit_with_filter
 from app.services.realtime_broadcast import build_inbound_saved_message
@@ -81,9 +82,6 @@ async def apply_message_filter(filter_name: str, msg: dict, extras: dict):
 _GOWA_CHANNEL_ID = "default"
 _ALLOWED_JID_CACHE: dict = {"types": None, "ts": 0.0}
 _ALLOWED_JID_TTL = 30.0
-# Per-channel allowed-JID cache for the generic live path (a 2nd GOWA number
-# resolves to its own channel — plano 11). Keyed by channel_id; same TTL.
-_ALLOWED_JID_BY_CHANNEL: dict = {}
 
 
 def _read_gowa_allowed_jid_types() -> list[str]:
@@ -108,7 +106,7 @@ def reset_allowed_jid_cache() -> None:
     """Invalidate the cached allowed-JID-types (call after a channel config edit)."""
     _ALLOWED_JID_CACHE["types"] = None
     _ALLOWED_JID_CACHE["ts"] = 0.0
-    _ALLOWED_JID_BY_CHANNEL.clear()
+    jid_allowed.reset()
 
 
 async def _gowa_allowed_jid_types() -> list[str]:
@@ -122,30 +120,11 @@ async def _gowa_allowed_jid_types() -> list[str]:
     return types
 
 
-def _read_channel_allowed_jid_types(channel_id: str) -> list[str]:
-    """Read a specific channel's ``config.allowed_jid_types`` (live-path twin of
-    :func:`_read_gowa_allowed_jid_types`, which is hardcoded to ``default``)."""
-    try:
-        row = channel_repo.get(channel_id)
-        cfg = row.get("config") if row else None
-        if isinstance(cfg, str) and cfg:
-            cfg = json.loads(cfg)
-        if isinstance(cfg, dict) and "allowed_jid_types" in cfg:
-            return jid_classifier.normalize_allowed_types(cfg.get("allowed_jid_types"))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[Webhook] allowed_jid_types read failed for %s: %s",
-                       channel_id, e)
-    return list(jid_classifier.DEFAULT_ALLOWED_JID_TYPES)
-
-
 async def _channel_allowed_jid_types(channel_id: str) -> list[str]:
-    now = time.time()
-    cached = _ALLOWED_JID_BY_CHANNEL.get(channel_id)
-    if cached is not None and (now - cached[1]) < _ALLOWED_JID_TTL:
-        return cached[0]
-    types = await asyncio.to_thread(_read_channel_allowed_jid_types, channel_id)
-    _ALLOWED_JID_BY_CHANNEL[channel_id] = (types, now)
-    return types
+    """Per-channel allowed-JID read-through (plano 173): delegates to the leaf
+    cache in :mod:`channels.jid_allowed`, shared with the webhook route's early
+    ``should_drop_inbound`` seam so both layers agree on the same TTL/value."""
+    return await asyncio.to_thread(jid_allowed.get_sync, channel_id)
 
 
 # ── service context ───────────────────────────────────────────────────────────

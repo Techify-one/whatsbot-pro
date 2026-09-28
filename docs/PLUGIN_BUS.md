@@ -149,6 +149,7 @@ FILTERS = {
 
 - Filter síncrono trava o pipeline — mantenha rápido. Persistência pesada/network vai num event handler.
 - **Para reagir a mensagem JÁ salva**: assine `message.saved`, não `message.received` — o último é emitido ANTES do INSERT no DB e listener que leia do DB pode race.
+- ⚠️ **Canal GOWA sem um tipo de JID em `allowed_jid_types` não gera evento nenhum para aquele chat** (plano 173) — `message.*`, `receipt.changed`, `group.*` e `presence.changed` são descartados na ENTRADA (antes até de `filter.webhook.payload`), não só no ingest. Ver [CANAIS.md](CANAIS.md#filtro-de-tipos-de-jid-canal-gowa).
 - **Pra controlar transcrição** (decisão "transcrever ou não, e como"): use `filter.transcription.should_run` + `filter.transcription.result`, nunca remova o campo `audio`/`image` no `filter.webhook.payload` — fazer isso quebra o player no histórico.
 - NÃO chamar `gowa_client.send_message` dentro de handler de `message.sent` → loop infinito (a send produz outro `message.sent`).
 - Filtre por `media_type` / `source` / `is_group` no INÍCIO do handler. O bus entrega tudo.

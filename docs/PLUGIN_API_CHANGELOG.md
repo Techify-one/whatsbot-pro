@@ -107,6 +107,49 @@ aditiva). Contrato completo em [docs/PLUGINS.md](PLUGINS.md).
 
 ---
 
+## 1.10.0 — 2026-09-28 · `Channel.should_drop_inbound` — descarte de JID não permitido na ENTRADA (plano 173)
+
+**Aditiva em `channels/base.py`, com default que preserva todo provider
+existente.** Um plugin de canal que não sobrescreva o método novo não muda em
+nada.
+
+### O seam
+
+`Channel.should_drop_inbound(self, raw: dict) -> str | None` — chamado em
+`POST /api/webhook/{provider}/{channel_id}` **ANTES** de `channel_repo.get`,
+da verificação de assinatura e de `filter.webhook.payload` (o mais cedo que a
+instância viva do canal é conhecida). Um motivo (string curta) faz o core
+responder `{"status": "ignored", "reason": <motivo>}` sem tocar o banco nem o
+provider; `None` (o default) segue o pipeline normal. Contrato: **puro** (sem
+I/O — nada de socket nem SELECT síncrono ali dentro), **rápido** (roda no loop
+de request) e **nunca levanta** — uma exceção é tratada como `None` pelo core
+(fail-open).
+
+GOWA é o único produtor hoje: descarta um evento cujo tipo de JID não está em
+`config.allowed_jid_types` (CLAUDE.md "Filtro de tipos de JID"), lendo só a
+decisão já cacheada em memória (`channels.jid_allowed.peek`) — nunca o banco.
+Um segundo descarte, dentro de `gowa.inbound.parse_gowa_inbound`, é a rede de
+segurança para quando esse cache está frio: garante zero chamadas ao cliente
+GOWA mesmo aí.
+
+### Mudança de semântica para quem assina o bus
+
+Para um canal GOWA sem `group` (ou outro tipo) em `allowed_jid_types`, os
+eventos daquele chat — `message.*`, `receipt.changed`, `group.*`,
+`presence.changed` — **não chegam mais** a `filter.webhook.payload` nem ao
+bus. Antes chegavam e eram descartados só no `message_ingest_service`
+(depois de já terem pago 2+ chamadas HTTP ao GOWA); um disparo em massa em
+grupos esgotou os descritores de arquivo do processo em produção
+(2026-09-28) exatamente por causa desse custo pago à toa. Nenhum observador
+atual (`janela_72h`, `whatsapp_cloud`) dependia de grupo GOWA.
+
+### Migração
+
+Nenhuma para plugin existente — o método é aditivo e o default nunca descarta.
+Quem sobrescrever o seam declara `">=1.10,<2.0"`.
+
+---
+
 ## 1.9.0 — 2026-09-10 · `conversation.team_assigned` / `.team_unassigned` — Times (plano 153)
 
 **Aditiva no catálogo.** Um plugin que não escute os eventos novos não muda em

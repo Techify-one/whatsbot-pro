@@ -617,6 +617,33 @@ class Channel(ABC):
         """
         return bool(self.verify_inbound_signature(raw_body, headers)), False
 
+    def should_drop_inbound(self, raw: dict) -> str | None:
+        """Whether this raw webhook body should be discarded RIGHT NOW (plano 173).
+
+        The core calls this in ``POST /api/webhook/{provider}/{channel_id}``
+        BEFORE resolving the channel row (``channel_repo.get``), verifying the
+        signature or running ``filter.webhook.payload`` — as early as the
+        instance is known. Returning a short reason string makes the core
+        answer ``{"status": "ignored", "reason": <reason>}`` immediately,
+        without a thread, a socket or a DB read. Returning ``None`` means
+        "no opinion, keep going" — the normal pipeline decides.
+
+        Contract for an override: **pure** (no I/O — anything that needs a
+        socket or a blocking DB read belongs to a background-refreshed cache,
+        never a synchronous lookup here), **fast** (runs in the request loop,
+        not a thread), and **must never raise** — an exception here is caught
+        by the core and treated as ``None`` (fail open). When in doubt (a cold
+        cache, a value it cannot yet resolve), fail open: this hook may only
+        REDUCE work for something the pipeline would have discarded anyway,
+        never risk losing a legitimate message.
+
+        Default: ``None`` (never drops). GOWA overrides it to discard a chat
+        whose JID-type is not in ``config.allowed_jid_types`` (CLAUDE.md
+        "Filtro de tipos de JID") using only the already-cached decision —
+        never itself reading the DB.
+        """
+        return None
+
     @abstractmethod
     def parse_inbound(self, raw: dict) -> list[InboundEvent]:
         """Translate a provider-specific raw payload into InboundEvents."""

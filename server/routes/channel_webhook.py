@@ -40,6 +40,29 @@ logger = logging.getLogger(__name__)
 _RECENT: list[dict] = []
 _RECENT_CAP = 50
 
+# Descarte na ENTRADA (plano 173 · ``Channel.should_drop_inbound``): um resumo
+# periódico por canal em vez de uma linha por evento — um disparo em massa em
+# grupos gerou justamente esse volume no incidente de 2026-09-28 (~1.700-4.800
+# webhooks/5k linhas de log, todos descartados no ingest de qualquer forma).
+_DROPPED_COUNTS: dict[tuple[str, str], int] = {}
+_DROPPED_LAST_SUMMARY: dict[str, float] = {}
+_DROPPED_SUMMARY_INTERVAL = 60.0
+
+
+def _note_dropped_inbound(channel_id: str, reason: str) -> None:
+    """Conta um descarte na entrada e, no máximo a cada 60s por canal, resume."""
+    _DROPPED_COUNTS[(channel_id, reason)] = (
+        _DROPPED_COUNTS.get((channel_id, reason), 0) + 1)
+    now = time.time()
+    if (now - _DROPPED_LAST_SUMMARY.get(channel_id, 0.0)) < _DROPPED_SUMMARY_INTERVAL:
+        return
+    _DROPPED_LAST_SUMMARY[channel_id] = now
+    per_reason = {r: n for (cid, r), n in _DROPPED_COUNTS.items() if cid == channel_id}
+    logger.info("[Webhook] descartados %d evento(s) na entrada do canal %s (%s)",
+                sum(per_reason.values()), channel_id, per_reason)
+    for r in per_reason:
+        _DROPPED_COUNTS.pop((channel_id, r), None)
+
 # Retentativa do casamento de um ``status=failed`` cuja linha ainda não existe
 # (plano 75 F5, corrida com o writer do split de resposta — ver
 # ``_schedule_failed_retry``). Módulo-level de propósito: os testes reduzem o
@@ -690,6 +713,26 @@ def register_routes(app, deps):
                             "(url=%r, session_id=%r, device_id=%r)",
                             resolved, channel_id, sess, djid)
                 channel_id = resolved
+
+        # plano 173: the live instance may already know — from its own cheap,
+        # memory-only cache — that this chat should be discarded (e.g. a GOWA
+        # JID-type not in ``config.allowed_jid_types``). Decide BEFORE the
+        # ``channel_repo.get`` SELECT below: no thread, no socket, no DB. Pure
+        # opportunistic fast path — a cold cache or no live instance just falls
+        # through to the normal pipeline, which still decides correctly.
+        early_inst = registry.get(channel_id) if registry is not None else None
+        if early_inst is not None:
+            try:
+                drop_hook = getattr(early_inst, "should_drop_inbound", None)
+                drop_reason = drop_hook(raw) if callable(drop_hook) else None
+            except Exception:
+                logger.debug("should_drop_inbound falhou em %s/%s — seguindo o "
+                             "fluxo normal (fail-open)", provider, channel_id,
+                             exc_info=True)
+                drop_reason = None
+            if drop_reason:
+                _note_dropped_inbound(channel_id, drop_reason)
+                return _ok({"status": "ignored", "reason": drop_reason})
 
         # Resolve the URL identity BEFORE any plugin observes the body. An unknown
         # channel or a provider/channel mismatch is not an authenticated webhook

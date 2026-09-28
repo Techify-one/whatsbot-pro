@@ -219,6 +219,8 @@ O tipo de um chat é o **sufixo do JID** (depois do `@`), não o número — o p
 
 Canal GOWA novo nasce, portanto, **sem grupo marcado** — mexer no fallback de runtime seria **retroativo** e calaria grupos em canais antigos. A opção fica a um clique no `JidTypePicker` e vale **apenas para canais GOWA**. Incidente e detalhes: [docs/CANAIS.md](docs/CANAIS.md).
 
+⚠️ **O descarte de JID acontece na ENTRADA** (`Channel.should_drop_inbound`, antes de `channel_repo.get`/GOWA), fail-open com cache frio — plano 173, não mover para depois do parse.
+
 ## Canais Meta → [docs/CANAIS_META.md](docs/CANAIS_META.md)
 
 Messenger, Instagram e WhatsApp Cloud. Cada plugin Meta carrega a **própria cópia** da base `MetaGraphChannel` — não há base compartilhada no core (dois canais Meta, duas cópias: preço do zip autossuficiente). ⚠️ Messenger/Instagram caminham `entry[].messaging[]`; o WhatsApp Cloud caminha `entry[].changes[].value` e sobe mídia em `/media`. Não confundir.
