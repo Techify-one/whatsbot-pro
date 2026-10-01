@@ -133,6 +133,49 @@ export function dropSuperseded(messages, supersedes) {
 }
 
 /**
+ * Reconcile a live `new_message` into `base` by its stable `msg_id` (plano 175 I0).
+ *
+ * The inbound path emits TWO copies of the same message: the t=0 one (before the
+ * INSERT — no `_id`) and the authoritative post-save one. The second finds the
+ * first by `msg_id` and updates it IN PLACE instead of appending a duplicate; a
+ * plugin may also have rewritten the text (e.g. a signature), so the server copy's
+ * content wins.
+ *
+ * Returns `{ messages, matched }`. When nothing matches, `messages` is the SAME
+ * `base` reference and `matched` is false — the caller falls through to the
+ * `_id` / optimistic-dup / append branches.
+ *
+ * @param {ChatMessage[]} base
+ * @param {ChatMessage} message
+ * @returns {{ messages: ChatMessage[], matched: boolean }}
+ */
+export function reconcileByMsgId(base, message) {
+  if (!message || !message.msg_id || !Array.isArray(base)) {
+    return { messages: base, matched: false };
+  }
+  const idx = base.findIndex(m => m.msg_id === message.msg_id);
+  if (idx === -1) return { messages: base, matched: false };
+  const updated = [...base];
+  updated[idx] = {
+    ...updated[idx],
+    content: message.content != null ? message.content : updated[idx].content,
+    status: message.status || updated[idx].status,
+    // plano 87: o `new_message` do t=0 (pré-save) não carrega a legenda;
+    // só o autoritativo pós-save carrega. Sem adotá-la aqui, a mídia com
+    // legenda ficava muda AO VIVO e só aparecia depois do F5.
+    ...(message.media_caption ? { media_caption: message.media_caption } : {}),
+    // plano 175: o t=0 nasce SEM `_id` (a linha ainda não existe) e o autoritativo
+    // o traz. `MediaContent` só busca /api/messages/{id}/media com um id — sem
+    // adotá-lo a mídia do cliente ficava em "Mídia indisponível" até o F5. Só
+    // adota quando a bolha não tem (mesmo guard do ramo `dupIdx` do hook); NÃO
+    // adota `media_path` (blob local do operador) nem `ts` (reordenaria a thread).
+    ...(message._id != null && updated[idx]._id == null ? { _id: message._id } : {}),
+    _status: null,
+  };
+  return { messages: updated, matched: true };
+}
+
+/**
  * Merge WS-buffered messages into the freshly-fetched history (plano 57). Used by
  * the detail loader and the background thread reload, both of which drain the
  * pre-fetch/during-fetch buffers into the REST result. Beyond the legacy dedup it

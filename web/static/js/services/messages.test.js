@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   sameMessage, isDuplicateMessage, findDuplicateIndex, optimisticDupIndex,
   mediaPreviewLabel, DEDUP_WINDOW_S,
-  dropSuperseded, mergeBufferedMessages,
+  dropSuperseded, mergeBufferedMessages, reconcileByMsgId,
 } from './messages.js';
 
 test('sameMessage: exact ts + role → dup', () => {
@@ -381,4 +381,86 @@ test('mergeBufferedMessages: batch during load — combined NOT yet in history k
   assert.equal(out[0].msg_id, 'B');
   assert.equal(out[0].content, 'a\nb');   // combined content wins, not the "b" fragment
   assert.equal(out[0]._id, 77);
+});
+
+// ── reconcileByMsgId (plano 175 I0/I1) ──────────────────────────────────────
+// O t=0 do inbound (pré-INSERT) nasce SEM `_id`; o autoritativo pós-save o traz.
+// Sem adotá-lo a bolha de mídia fica em "Mídia indisponível" até o F5, porque o
+// `useAuthorizedMedia` só busca /api/messages/{id}/media com um id.
+
+const T0_AUDIO = {
+  role: 'user', msg_id: 'X', ts: 1700000000.5, content: '',
+  media_type: 'audio', media_path: 'statics/media/a.oga',
+};
+const AUTH_AUDIO = {
+  role: 'user', msg_id: 'X', _id: 4242, ts: 1700000000.0, authoritative: true,
+  content: '[Áudio]: oi', media_caption: 'oi',
+  media_type: 'audio', media_path: 'statics/media/a.oga',
+};
+
+test('reconcileByMsgId: t=0 sem _id + autoritativo com _id → a bolha adota o _id', () => {
+  const { messages, matched } = reconcileByMsgId([T0_AUDIO], AUTH_AUDIO);
+  assert.equal(matched, true);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]._id, 4242);
+});
+
+test('reconcileByMsgId: bolha que JÁ tem _id não é sobrescrita (guard == null)', () => {
+  const base = [{ ...T0_AUDIO, _id: 111 }];
+  const { messages } = reconcileByMsgId(base, AUTH_AUDIO);
+  assert.equal(messages[0]._id, 111);
+});
+
+test('reconcileByMsgId: copia sem _id (t=0 de novo) não apaga o _id já adotado', () => {
+  const base = [{ ...T0_AUDIO, _id: 4242 }];
+  const { messages } = reconcileByMsgId(base, { ...T0_AUDIO });
+  assert.equal(messages[0]._id, 4242);
+});
+
+test('reconcileByMsgId: media_path da bolha NÃO é trocado (blob local do operador)', () => {
+  const base = [{ ...T0_AUDIO, media_path: 'blob:http://x/abc', _isLocalBlob: true }];
+  const { messages } = reconcileByMsgId(base, AUTH_AUDIO);
+  assert.equal(messages[0].media_path, 'blob:http://x/abc');
+  assert.equal(messages[0]._isLocalBlob, true);
+});
+
+test('reconcileByMsgId: ts da bolha NÃO é alterado (reordenaria a thread)', () => {
+  const { messages } = reconcileByMsgId([T0_AUDIO], AUTH_AUDIO);
+  assert.equal(messages[0].ts, T0_AUDIO.ts);
+});
+
+test('reconcileByMsgId: sem correspondência → matched:false e a MESMA lista', () => {
+  const base = [T0_AUDIO];
+  const out = reconcileByMsgId(base, { ...AUTH_AUDIO, msg_id: 'OUTRO' });
+  assert.equal(out.matched, false);
+  assert.equal(out.messages, base);
+});
+
+test('reconcileByMsgId: mensagem sem msg_id nunca casa por aqui', () => {
+  const base = [T0_AUDIO];
+  const out = reconcileByMsgId(base, { role: 'user', content: 'x', _id: 5 });
+  assert.equal(out.matched, false);
+  assert.equal(out.messages, base);
+});
+
+test('reconcileByMsgId: adota content/status/media_caption e zera _status (plano 87)', () => {
+  const base = [{ ...T0_AUDIO, status: 'sending', _status: 'pending' }];
+  const { messages } = reconcileByMsgId(base, { ...AUTH_AUDIO, status: 'delivered' });
+  assert.equal(messages[0].content, '[Áudio]: oi');
+  assert.equal(messages[0].media_caption, 'oi');
+  assert.equal(messages[0].status, 'delivered');
+  assert.equal(messages[0]._status, null);
+});
+
+test('reconcileByMsgId: autoritativo sem legenda não apaga a legenda já adotada', () => {
+  const base = [{ ...T0_AUDIO, media_caption: 'oi' }];
+  const { messages } = reconcileByMsgId(base, { ...AUTH_AUDIO, media_caption: undefined });
+  assert.equal(messages[0].media_caption, 'oi');
+});
+
+test('reconcileByMsgId: não muta a lista nem a bolha de entrada', () => {
+  const base = [T0_AUDIO];
+  const snapshot = JSON.stringify(base);
+  reconcileByMsgId(base, AUTH_AUDIO);
+  assert.equal(JSON.stringify(base), snapshot);
 });

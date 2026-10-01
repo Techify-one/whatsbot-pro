@@ -6,25 +6,34 @@ import { authHeaders, handleUnauthorized } from '../../services/httpClient.js';
 // plano 87: fonte única de "o que o cliente escreveu junto da mídia". Antes cada
 // ramo abaixo adivinhava isso com um `startsWith('[…]')` próprio — e errava nos
 // dois sentidos (escondia a legenda da imagem, mostrava a extração do documento).
-import { mediaCaptionOf } from '../../services/messageView.js';
+import { mediaCaptionOf, mediaFetchPlan, MEDIA_ID_WAIT_MS } from '../../services/messageView.js';
 
 const html = htm.bind(h);
 
 function useAuthorizedMedia(message) {
   const [state, setState] = useState({ url: null, failed: false });
-  const local = Boolean(message && message._isLocalBlob);
   // Core/legacy payloads expose the DB primary key as `_id`; the v1 DTO uses
   // `id`. Both identify the same authorized media endpoint.
   const messageId = message && (message.id ?? message._id);
   const raw = message && message.media_path;
+  // plano 175 I4: "sem id ainda" nao e falha quando a bolha ja tem msg_id — e o
+  // new_message de t=0 do inbound; o _id chega no autoritativo e o efeito re-roda.
+  const plan = mediaFetchPlan(message);
 
   useEffect(() => {
-    if (local) {
+    if (plan === 'local') {
       setState({ url: raw, failed: false });
       return undefined;
     }
-    if (!messageId || !raw) {
-      setState({ url: null, failed: Boolean(raw) });
+    if (plan === 'pending') {
+      // Mesmo visual do "carregando" (url nula, sem falha). Com teto: uma bolha que
+      // nunca receba o _id nao fica em branco para sempre escondendo a falha.
+      setState({ url: null, failed: false });
+      const timer = setTimeout(() => setState({ url: null, failed: true }), MEDIA_ID_WAIT_MS);
+      return () => clearTimeout(timer);
+    }
+    if (plan !== 'fetch') {
+      setState({ url: null, failed: plan === 'failed' });
       return undefined;
     }
     const controller = new AbortController();
@@ -51,7 +60,7 @@ function useAuthorizedMedia(message) {
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [local, messageId, raw]);
+  }, [plan, messageId, raw]);
 
   return state;
 }

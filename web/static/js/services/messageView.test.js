@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   SYSTEM_CARD_VARIANTS, isSystemCardRole, senderColor, quotedMediaText,
   isCollapsibleRole, collapsedPreview, cardStateKey, mediaCaptionOf,
-  isOperatorMessage, isAiContentLabel,
+  isOperatorMessage, isAiContentLabel, mediaFetchPlan, MEDIA_ID_WAIT_MS,
 } from './messageView.js';
 
 test('isSystemCardRole: all panel-only roles recognized', () => {
@@ -307,4 +307,38 @@ test('isAiContentLabel: só os rótulos da IA, nunca um nome de pessoa', () => {
   for (const label of ['Luísa Maira', 'Descrição', '', null, undefined]) {
     assert.equal(isAiContentLabel(label), false, String(label));
   }
+});
+
+// ── mediaFetchPlan (plano 175 · I4) ─────────────────────────────────────────
+// Decide o estado da mídia ANTES da rede: "sem _id ainda" só é falha quando a
+// identidade nunca vai chegar (sem msg_id).
+
+test('mediaFetchPlan: t=0 do inbound (msg_id, sem _id) é pending, NÃO failed', () => {
+  assert.equal(mediaFetchPlan({ media_path: 'statics/media/a.oga', msg_id: 'X' }), 'pending');
+});
+
+test('mediaFetchPlan: com _id (ou id da v1) busca o arquivo', () => {
+  assert.equal(mediaFetchPlan({ media_path: 'p', msg_id: 'X', _id: 7 }), 'fetch');
+  assert.equal(mediaFetchPlan({ media_path: 'p', id: 7 }), 'fetch');
+});
+
+test('mediaFetchPlan: sem NENHUM identificador a identidade não chega → failed', () => {
+  assert.equal(mediaFetchPlan({ media_path: 'p' }), 'failed');
+});
+
+test('mediaFetchPlan: blob local da bolha otimista nunca busca nem falha', () => {
+  assert.equal(mediaFetchPlan({ _isLocalBlob: true, media_path: 'blob:x' }), 'local');
+});
+
+test('mediaFetchPlan: sem media_path não há o que buscar', () => {
+  assert.equal(mediaFetchPlan({ msg_id: 'X', _id: 7 }), 'none');
+  assert.equal(mediaFetchPlan(null), 'none');
+});
+
+test('mediaFetchPlan: _id 0 não é identidade (mesma regra do `!messageId` anterior)', () => {
+  assert.equal(mediaFetchPlan({ media_path: 'p', _id: 0 }), 'failed');
+});
+
+test('MEDIA_ID_WAIT_MS cobre a janela t=0 → autoritativo (~5-6 s) com folga', () => {
+  assert.ok(MEDIA_ID_WAIT_MS >= 15000);
 });

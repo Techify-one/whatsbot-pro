@@ -283,9 +283,12 @@ class MessageIngestService:
             media_type=media_type, media_path=media_path, msg_id=msg_id,
             reply_to_msg_id=reply_to, status="operator",
             ts=(event.ts or None))  # plano 129 M7 — ts real do provedor (echo)
+        # `_id` (plano 175): o eco não tem autoritativo pós-save que o traga depois —
+        # sem ele a bolha de mídia fica em "Mídia indisponível" até o F5.
         broadcast_msg: dict = {"role": "assistant", "content": text, "ts": time.time(),
                                "msg_id": msg_id, "status": "operator",
-                               "conversation_id": (_saved or {}).get("conversation_id")}
+                               "conversation_id": (_saved or {}).get("conversation_id"),
+                               "_id": (_saved or {}).get("id")}
         if reply_to:
             broadcast_msg["reply_to_msg_id"] = reply_to
         if media_type:

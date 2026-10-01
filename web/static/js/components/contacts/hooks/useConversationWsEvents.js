@@ -22,7 +22,7 @@ import { markAsRead } from '../../../services/api.js';
 import { notify } from '../../../services/notify.js';
 import { showBrowserNotification, getNotifPref } from '../../../utils/notifications.js';
 import * as soundEngine from '../../../utils/soundEngine.js';
-import { optimisticDupIndex, dropSuperseded } from '../../../services/messages.js';
+import { optimisticDupIndex, dropSuperseded, reconcileByMsgId } from '../../../services/messages.js';
 import { samePhone } from '../../../utils/phone.js';
 import { applyConversationEvent, eventTargetsRow, isConversationAttributeWrite } from '../../../services/conversationPatch.js';
 import { upsertConversationRow, convRowToSidebarRow, rowMatchesView, specNeedsServer, patchRows } from '../../../services/conversationRows.js';
@@ -824,23 +824,9 @@ export function useConversationWsEvents(opts) {
         // (e.g. appended a signature), so an optimistic/prior copy with the same
         // msg_id won't match by content — adopt the server's text in place
         // instead of appending a duplicate.
-        if (message.msg_id && base) {
-          const byId = base.findIndex(m => m.msg_id === message.msg_id);
-          if (byId !== -1) {
-            const updated = [...base];
-            updated[byId] = {
-              ...updated[byId],
-              content: message.content != null ? message.content : updated[byId].content,
-              status: message.status || updated[byId].status,
-              // plano 87: o `new_message` do t=0 (pré-save) não carrega a legenda;
-              // só o autoritativo pós-save carrega. Sem adotá-la aqui, a mídia com
-              // legenda ficava muda AO VIVO e só aparecia depois do F5.
-              ...(message.media_caption ? { media_caption: message.media_caption } : {}),
-              _status: null,
-            };
-            return { ...prev, messages: updated };
-          }
-        }
+        // A regra mora em `reconcileByMsgId` (services/messages.js, com teste node).
+        const byMsgId = reconcileByMsgId(base, message);
+        if (byMsgId.matched) return { ...prev, messages: byMsgId.messages };
         // Reconcile by DB row id next (plano 53): private-note broadcasts and the
         // POST response both carry `_id`, so a copy of a row already present
         // (e.g. the optimistic bubble reconciled by the POST before the WS copy

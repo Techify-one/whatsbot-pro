@@ -327,6 +327,34 @@ export function mediaCaptionOf(message, displayContent) {
   return body;
 }
 
+/** Teto (ms) da espera por um `_id` antes de a mídia virar "indisponível". A janela
+ *  real entre o t=0 e o autoritativo é ~5-6 s em produção (batch 3 s + 2 s fixos);
+ *  30 s cobre um `message_batch_delay` maior sem esconder uma falha para sempre. */
+export const MEDIA_ID_WAIT_MS = 30000;
+
+/**
+ * Como o painel obtém o arquivo de uma bolha de mídia (plano 175 · I4). Decide o
+ * estado ANTES de qualquer rede, para ser testável com `node --test`:
+ *
+ *   - 'local'   — blob da bolha otimista do operador; usa o `media_path` direto.
+ *   - 'none'    — sem `media_path`; nada a buscar nem a falhar.
+ *   - 'fetch'   — tem `_id`/`id`: busca /api/messages/{id}/media com o Bearer.
+ *   - 'pending' — tem `msg_id` mas ainda não tem `_id`: é o `new_message` de t=0 do
+ *                 inbound (sai ANTES do INSERT), o autoritativo traz o `_id` em
+ *                 segundos e o hook de WS o adota. NÃO é falha.
+ *   - 'failed'  — nenhum identificador: a identidade nunca vai chegar.
+ *
+ * @param {{_isLocalBlob?:boolean, media_path?:string|null, id?:number, _id?:number, msg_id?:string}|null} message
+ * @returns {'local'|'none'|'fetch'|'pending'|'failed'}
+ */
+export function mediaFetchPlan(message) {
+  if (!message) return 'none';
+  if (message._isLocalBlob) return 'local';
+  if (!message.media_path) return 'none';
+  if (message.id ?? message._id) return 'fetch';
+  return message.msg_id ? 'pending' : 'failed';
+}
+
 /**
  * The short text shown for a quoted message inside a reply, per media type.
  * Falls back to the message's own caption/content when present.
