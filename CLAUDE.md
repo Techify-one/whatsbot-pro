@@ -555,7 +555,7 @@ Nada sincroniza estes pontos automaticamente. Um mesmo plugin pode ter conteúdo
 | 3 | `storages/plugins/<id>/` | Cópia **instalada e rodando** (gitignored), tanto em desenvolvimento quanto em produção | `Importar (.zip)` na UI ou bootstrap do GOWA; nunca é fonte de verdade de desenvolvimento |
 | 4 | `plugins/<id>/<id>.zip` no repositório externo | Artefato sem testes entregue ao cliente | gerado deterministicamente a partir de `src/`; instalação por `Importar (.zip)` |
 
-**Cuidado com o termo "Loja de Plugins"**: ele designa EXCLUSIVAMENTE o repositório **community** [Techify-one/whatsbot-plugins](https://github.com/Techify-one/whatsbot-plugins) (publicado em https://whatsbot.techify.one/plugins) — outro repositório, outro produto. **Não** é o repositório de plugins do Pro (#3 acima). Não use "loja" para se referir ao `whatsbot-pro-plugins`.
+**Cuidado com o termo "Loja de Plugins"**: ele designa EXCLUSIVAMENTE o repositório **community** [Techify-one/whatsbot-plugins](https://github.com/Techify-one/whatsbot-plugins) (publicado em https://techify.one/whatsbot/plugins) — outro repositório, outro produto. **Não** é o repositório de plugins do Pro (#3 acima). Não use "loja" para se referir ao `whatsbot-pro-plugins`.
 
 ## Testes → [docs/TESTES.md](docs/TESTES.md)
 
