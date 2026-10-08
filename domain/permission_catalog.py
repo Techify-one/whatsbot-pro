@@ -50,6 +50,7 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     ("agent.prompts.version",  "IA: versionar o prompt (histórico, comparar, restaurar)"),
     ("agent.prompts.delete",   "IA: apagar versões do histórico do prompt"),
     ("agent.tools.manage",     "IA: gerenciar tools (código e overrides)"),
+    ("agent.credentials.manage", "IA: gerenciar credenciais das tools"),
     ("agent.variables.manage", "IA: gerenciar variáveis"),
     ("quickreply.manage",     "Respostas rápidas"),
     ("template.create",       "Criar templates (WhatsApp Cloud)"),
@@ -142,6 +143,7 @@ PERMISSION_GROUPS: dict[str, tuple[str, str]] = {
     "agent.prompts.version": ("core", _G_AI),
     "agent.prompts.delete": ("core", _G_AI),
     "agent.tools.manage": ("core", _G_AI),
+    "agent.credentials.manage": ("core", _G_AI),
     "agent.variables.manage": ("core", _G_AI),
     "sandbox.use": ("core", _G_AI),
     # Configurações e sistema

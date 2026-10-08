@@ -979,6 +979,37 @@ Index("idx_ai_variables_hist",
       ai_variables_history.c.name, ai_variables_history.c.version)
 
 
+# plano 177: cofre de credenciais das tools de IA. SEPARADO de ai_variables de
+# propósito — variável é lida por render_template, devolvida em claro no GET e
+# copiada em ai_variables_history; nenhum desses caminhos pode tocar aqui.
+# ``fields`` = {campo: {"value": str, "secret": bool}}. Sem cifra (D3) e SEM
+# tabela de histórico (D6). ⚠️ O executor agêntico (whatsbot_ro/rw) lê o banco
+# por SQL e o pg_default_acl faz tabela nova nascer legível: a migration 0071
+# faz o REVOKE — não confie só em "a API não devolve o valor".
+ai_credentials = Table(
+    "ai_credentials",
+    metadata,
+    Column("name", Text, primary_key=True),
+    Column("description", Text, nullable=False, server_default=""),
+    Column("fields", _json_type(), nullable=False, server_default="{}"),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Column("updated_by", Integer, nullable=True),
+    Column("updated_by_name", Text, nullable=True),
+)
+
+# Vínculo credencial ↔ tool. ``tool_name`` é texto SEM FK para ai_tools (P4):
+# excluir e recriar uma tool é rotina e não pode levar o vínculo junto.
+ai_credential_tools = Table(
+    "ai_credential_tools",
+    metadata,
+    Column("credential_name", Text,
+           ForeignKey("ai_credentials.name", ondelete="CASCADE"), primary_key=True),
+    Column("tool_name", Text, primary_key=True),
+)
+Index("idx_ai_credential_tools_tool", ai_credential_tools.c.tool_name)
+
+
 # Dedicated, git-like version trail for an agent's INLINE prompt only. Each row is
 # a full snapshot of the prompt text (the git "blob" content model); the diff is
 # computed on demand by ``agent.prompt_diff`` (never stored). ``version`` is an

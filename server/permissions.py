@@ -33,7 +33,7 @@ ROLE_DEFAULTS = {
         # Prompt dividido em edit/version/delete (substitui agent.prompts.manage).
         "agent.config.manage", "agent.create", "agent.duplicate",
         "agent.prompts.edit", "agent.prompts.version", "agent.prompts.delete",
-        "agent.tools.manage", "agent.variables.manage",
+        "agent.tools.manage", "agent.credentials.manage", "agent.variables.manage",
         "quickreply.manage", "template.create", "template.delete", "audit.read",
         # Plano 24 — gestor recebe as 9 novas (database.manage fica admin-only)
         "contact.delete", "conversation.delete", "tag.manage",
