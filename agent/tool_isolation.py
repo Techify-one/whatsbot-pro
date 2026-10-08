@@ -11,6 +11,12 @@ name + source + the live ``ToolContext`` of the current tool call, it:
 3. Parses the JSON envelope from the child's stdout and returns a feedback
    string for the LLM (the same shape ``_dispatch_tool`` expects: ``str | None``).
 
+Credentials (plano 177): the vault values linked to THIS tool travel on the
+child's stdin under ``credentials`` (never in ``context``, never in the env), and
+every secret value is redacted from what comes back — result, error, stderr and
+logs — BEFORE it leaves this module, because the text goes on to the LLM,
+``tool.after`` and ``execution_steps``.
+
 All failure modes (timeout, non-zero exit, malformed envelope, tool exception)
 collapse into a short feedback string so the agent loop keeps working — never a
 host-process crash. Defaults are conservative (10s wall clock, 5s CPU, 512 MiB
@@ -170,6 +176,48 @@ def describe_isolated_tool(name: str, code: str) -> list:
     return schemas
 
 
+REDACTED = "***"
+
+
+def scrub(text: Optional[str], secrets) -> Optional[str]:
+    """Replace every secret value found in ``text`` by ``***`` (plano 177, D13).
+
+    Pure, so it is testable without a subprocess. NO minimum length (a 5-digit
+    credential must work), but an EMPTY value never counts: ``"".replace("", "***")``
+    would sprinkle ``***`` between every character. Longest first, so a value
+    contained in another cannot leave a tail behind.
+
+    ⚠️ Protects against the ACCIDENT (echoing the key, an error message that
+    carries the URL), not against a tool written to exfiltrate: base64, URL-encoding
+    or slicing the value escapes it — the same limit declared for the vault (D9).
+    """
+    if not text or not secrets:
+        return text
+    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
+        text = text.replace(secret, REDACTED)
+    return text
+
+
+def _load_credentials(name: str) -> tuple:
+    """``(credentials, secrets)`` linked to the tool ROW ``name``; fail-closed.
+
+    Read on EVERY call (no cache): unlinking or deleting a credential must take
+    effect on the very next execution. Any failure degrades to "no credentials" —
+    the tool runs without them and fails with a clear message; it never falls back
+    to reading the value from somewhere else. The log carries the error, never a
+    value.
+    """
+    try:
+        from db.repositories import credential_repo
+        return credential_repo.for_tool(name)
+    except Exception as e:  # noqa: BLE001 — vault unreadable ⇒ no credentials
+        logger.warning(
+            "AI tool '%s': could not read credentials (%s: %s); running without them",
+            name, type(e).__name__, e,
+        )
+        return {}, []
+
+
 def run_isolated_tool(
     name: str,
     code: str,
@@ -196,6 +244,10 @@ def run_isolated_tool(
         )
         return f"[tool '{name}' indisponível: execução isolada não suportada neste build]"
 
+    # The key is the ``ai_tools`` ROW name — the one the runner executes — not the
+    # function name of each schema (a module can declare several tools).
+    credentials, secrets = _load_credentials(name)
+
     try:
         request = {
             "name": name,
@@ -203,6 +255,10 @@ def run_isolated_tool(
             "args": _json_safe(args or {}),
             "context": _serialize_context(ctx),
         }
+        if credentials:
+            # Only present when linked, so a tool that uses none sees the exact
+            # same payload as before the vault existed.
+            request["credentials"] = credentials
         stdin_data = json.dumps(request, ensure_ascii=False).encode("utf-8")
     except Exception as e:  # noqa: BLE001 — non-serializable args, etc.
         logger.warning("AI tool '%s': could not serialize request: %s", name, e)
@@ -228,12 +284,19 @@ def run_isolated_tool(
         ),
     )
 
-    return _interpret_result(name, result)
+    return _interpret_result(name, result, secrets)
 
 
-def _interpret_result(name: str, result: OneShotResult) -> Optional[str]:
-    """Turn a :class:`OneShotResult` into an LLM feedback string (or None)."""
-    stderr_text = (result.stderr or b"").decode("utf-8", "replace").strip()
+def _interpret_result(
+    name: str, result: OneShotResult, secrets=(),
+) -> Optional[str]:
+    """Turn a :class:`OneShotResult` into an LLM feedback string (or None).
+
+    ``secrets`` are redacted from everything that leaves here — the returned
+    string AND every log line — so the order matters: scrub first, log after.
+    """
+    stderr_text = scrub(
+        (result.stderr or b"").decode("utf-8", "replace").strip(), secrets)
 
     if result.timed_out:
         logger.warning("AI tool '%s' timed out after %dms and was killed", name, result.duration_ms)
@@ -261,9 +324,10 @@ def _interpret_result(name: str, result: OneShotResult) -> Optional[str]:
         return f"[tool '{name}' retornou saída inválida]"
 
     if envelope.get("ok"):
-        return envelope.get("result")  # str | None — both valid
+        out = envelope.get("result")  # str | None — both valid
+        return scrub(out, secrets) if isinstance(out, str) else out
 
     # Tool raised an exception (handled outcome, exit 0).
-    err = envelope.get("error") or "erro desconhecido"
+    err = scrub(str(envelope.get("error") or "erro desconhecido"), secrets)
     logger.info("AI tool '%s' raised: %s", name, err)
     return f"[tool '{name}' erro: {err}]"

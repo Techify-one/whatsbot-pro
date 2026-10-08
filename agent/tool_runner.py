@@ -28,6 +28,9 @@ INPUT  — a single JSON object on **stdin**:
           "is_group":  false,
           "contact":   { ... },         # name/email/profession/company/address/tags
           "plugin_id": null
+      },
+      "credentials": {                  # plano 177 — SÓ as credenciais liberadas p/ esta tool (execute mode)
+          "<credencial>": { "<campo>": "<valor>" }
       }
     }
 
@@ -70,10 +73,11 @@ from contextlib import redirect_stdout
 class _IsolatedContext:
     """Read-only context shim handed to an isolated tool's ``execute(ctx, args)``."""
 
-    __slots__ = ("phone", "is_group", "contact", "plugin_id", "_data")
+    __slots__ = ("phone", "is_group", "contact", "plugin_id", "_data", "_credentials")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, credentials: dict | None = None):
         self._data = data or {}
+        self._credentials = credentials if isinstance(credentials, dict) else {}
         self.phone = self._data.get("phone", "")
         self.is_group = bool(self._data.get("is_group", False))
         self.contact = self._data.get("contact") or {}
@@ -86,6 +90,20 @@ class _IsolatedContext:
 
     def get(self, key, default=None):
         return self._data.get(key, default)
+
+    def credential(self, name):
+        """Campos de uma credencial LIBERADA para esta tool: ``{campo: valor}``.
+
+        Levanta ``LookupError`` — e não devolve ``None`` — porque um erro de
+        digitação no nome viraria um ``None`` calado (o ``__getattr__`` acima já
+        degrada todo atributo desconhecido). A mensagem é fixa e NÃO distingue
+        "não existe" de "não está liberada para esta tool": quem escreve o código
+        não aprende quais credenciais há no cofre.
+        """
+        fields = self._credentials.get(name) if isinstance(name, str) else None
+        if not isinstance(fields, dict):
+            raise LookupError("credencial não disponível para esta tool")
+        return dict(fields)
 
 
 def _fail(message: str) -> int:
@@ -227,7 +245,7 @@ def main() -> int:
     if not isinstance(args, dict):
         return _fail(f"tool_runner: tool '{name}' args must be a JSON object")
 
-    ctx = _IsolatedContext(request.get("context") or {})
+    ctx = _IsolatedContext(request.get("context") or {}, request.get("credentials"))
     execute = _resolve_executor(module, name)
     if not callable(execute):
         return _fail(f"tool_runner: tool '{name}' does not define a callable execute(ctx, args)")
