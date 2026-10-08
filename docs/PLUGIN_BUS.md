@@ -75,7 +75,7 @@ Toggle do plugin = tudo-ou-nada: enable liga handlers e filters; disable derruba
 | `conversation.labeled` | PUT das etiquetas de UMA conversa (`{conversation_id, contact_id, labels, ts}`) |
 | `conversation_label.created` / `.updated` / `.deleted` | CRUD do registro GLOBAL de etiquetas (`/api/conversation-labels`) |
 | `custom_attribute.created` / `.updated` / `.deleted` | CRUD da definição de atributo customizado (`{definition, ts}`) |
-| `ai.config.changed` | qualquer save/rollback de agente, tool, variável ou prompt no motor de IA (`{kind, key, ts}`) — o cache do `dynamic_registry` já foi invalidado quando o evento sai |
+| `ai.config.changed` | qualquer save/rollback de agente, tool, variável, prompt ou **credencial** (`kind="credential"`, plano 177 — nunca carrega valor) no motor de IA (`{kind, key, ts}`) — o cache do `dynamic_registry` já foi invalidado quando o evento sai |
 | `channel.system_event` | inbound de **SISTEMA** de um canal (plano 82) — o ÚNICO gancho de bus para o que não é mensagem. `{phone, channel_id, system_type, wa_id, body, conversation_id, ts, raw}` |
 | `app.startup` / `app.shutdown` | lifespan do server |
 
