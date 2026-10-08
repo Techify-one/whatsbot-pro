@@ -1096,6 +1096,41 @@ export async function rollbackTool(name, version) {
   return request('POST', `/api/ai/tools/${encodeURIComponent(name)}/rollback/${version}`);
 }
 
+// ── Cofre de credenciais das tools de IA (plano 177) ─────────────────────────
+// A LISTA nunca traz o valor de um campo secreto: vem `{key, secret, has_value}`
+// (e `value` só em campo marcado como não secreto). Para ver um valor salvo há o
+// "olho" (revealCredentialField), um campo por vez e auditado.
+// body do PUT: {description, fields: [{key, secret, value?}]} — `value` ausente
+// = manter o atual; campo ausente da lista = remover (ver credentialFields.js).
+export async function listCredentials() {
+  return request('GET', '/api/ai/credentials');
+}
+
+export async function saveCredential(name, body) {
+  return request('PUT', `/api/ai/credentials/${encodeURIComponent(name)}`, body);
+}
+
+// O "olho": devolve o valor de UM campo salvo, sob demanda (POST, sem cache; só
+// sessão de painel; cada leitura vai para a auditoria como credential.reveal).
+export async function revealCredentialField(name, key) {
+  return request('POST',
+    `/api/ai/credentials/${encodeURIComponent(name)}/fields/${encodeURIComponent(key)}/reveal`);
+}
+
+export async function deleteCredential(name) {
+  return request('DELETE', `/api/ai/credentials/${encodeURIComponent(name)}`);
+}
+
+// Visão da credencial: quais tools a recebem.
+export async function setCredentialTools(name, tools) {
+  return request('PUT', `/api/ai/credentials/${encodeURIComponent(name)}/tools`, { tools });
+}
+
+// Visão da tool: quais credenciais ela recebe (seletor do form da tool).
+export async function setToolCredentials(toolName, credentials) {
+  return request('PUT', `/api/ai/tools/${encodeURIComponent(toolName)}/credentials`, { credentials });
+}
+
 export async function restartAi() {
   return request('POST', '/api/ai/restart');
 }

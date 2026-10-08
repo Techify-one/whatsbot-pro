@@ -32,5 +32,6 @@ export const AI_PERMS = [
   'agent.prompts.version',
   'agent.prompts.delete',
   'agent.tools.manage',
+  'agent.credentials.manage',
   'agent.variables.manage',
 ];

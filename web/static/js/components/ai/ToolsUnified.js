@@ -28,6 +28,8 @@ import { useUrlState } from '../../hooks/useUrlState.js';
 import { readParams, writeParams, bool, str } from '../../services/urlState.js';
 import { EditModal } from '../ToolsManager.js';
 import { ToolForm, HistoryModal, StatusBadge } from './ToolsEditor.js';
+import CredentialsPanel from './CredentialsPanel.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
@@ -62,7 +64,10 @@ function ConfirmModal({ title, message, confirmLabel = 'Confirmar', danger = fal
   `;
 }
 
-export default function ToolsUnified({ initialEntity }) {
+export default function ToolsUnified({ initialEntity, currentUser }) {
+  // plano 177: o cofre só aparece para quem tem a permissão própria (a aba em si
+  // continua exigindo agent.tools.manage).
+  const canCredentials = hasPermission(currentUser, 'agent.credentials.manage');
   const [regTools, setRegTools] = useState([]);   // /api/tools rows
   const [codeTools, setCodeTools] = useState([]); // /api/ai/tools rows (full, incl. code)
   const [loading, setLoading] = useState(true);
@@ -360,6 +365,8 @@ export default function ToolsUnified({ initialEntity }) {
         </div>
       </div>
 
+      ${canCredentials ? html`<${CredentialsPanel} codeTools=${codeTools} />` : null}
+
       <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
         <input
           type="search"
@@ -377,8 +384,8 @@ export default function ToolsUnified({ initialEntity }) {
       ${error ? html`<div class="text-red-600 mb-3 text-sm">${error}</div>` : null}
 
       <div ref=${formRef}>
-        ${creating ? html`<${ToolForm} onSave=${saveCode} onCancel=${() => setCreating(false)} busy=${formBusy} />` : null}
-        ${editingCode ? html`<${ToolForm} editing=${editingCode} onSave=${saveCode} onCancel=${() => setEditingCode(null)} busy=${formBusy} />` : null}
+        ${creating ? html`<${ToolForm} onSave=${saveCode} onCancel=${() => setCreating(false)} busy=${formBusy} canCredentials=${canCredentials} />` : null}
+        ${editingCode ? html`<${ToolForm} editing=${editingCode} onSave=${saveCode} onCancel=${() => setEditingCode(null)} busy=${formBusy} canCredentials=${canCredentials} />` : null}
       </div>
 
       ${loading ? html`<div class="text-wa-secondary">Carregando…</div>` : null}

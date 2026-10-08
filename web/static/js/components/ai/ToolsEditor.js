@@ -5,8 +5,9 @@
 // código). Tools nascem DESABILITADAS por segurança — ligue manualmente.
 
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
+import { listCredentials, setToolCredentials } from '../../services/api.js';
 
 const html = htm.bind(h);
 
@@ -68,7 +69,65 @@ export function HistoryModal({ title, versions, current, busy, onRollback, onClo
   `;
 }
 
-export function ToolForm({ editing, onSave, onCancel, busy }) {
+// plano 177: credenciais que a tool recebe. Só NOMES — o valor nunca chega aqui.
+// Grava o vínculo sozinho (PUT /api/ai/tools/{name}/credentials), sem passar pelo
+// "Salvar" da tool: não agenda restart e vale na próxima execução.
+function ToolCredentials({ toolName, linked, canEdit }) {
+  const [all, setAll] = useState(null);
+  const [selected, setSelected] = useState(() => new Set(linked || []));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!canEdit) return;
+    let alive = true;
+    listCredentials().then((res) => {
+      if (alive) setAll(res && res.ok ? (res.data || []) : []);
+    });
+    return () => { alive = false; };
+  }, [canEdit]);
+
+  async function toggle(name) {
+    const next = new Set(selected);
+    if (next.has(name)) next.delete(name); else next.add(name);
+    setBusy(true); setError('');
+    const res = await setToolCredentials(toolName, [...next]);
+    setBusy(false);
+    if (res && res.ok) setSelected(new Set(res.data.credentials || []));
+    else setError((res && res.error) || 'Falha ao salvar o vínculo.');
+  }
+
+  return html`
+    <div>
+      <label class="block text-[12px] text-wa-secondary mb-1">Credenciais que esta tool usa</label>
+      ${canEdit ? html`
+        <div class="flex flex-wrap gap-2">
+          ${(all || []).map((c) => html`
+            <label key=${c.name} class="flex items-center gap-1.5 text-[12px] text-wa-text border border-wa-border rounded-md px-2 py-1 cursor-pointer hover:bg-wa-hover">
+              <input type="checkbox" checked=${selected.has(c.name)} disabled=${busy}
+                onChange=${() => toggle(c.name)} />
+              <code class="font-mono">${c.name}</code>
+            </label>
+          `)}
+          ${all && all.length === 0 ? html`<span class="text-[12px] text-wa-secondary">Nenhuma credencial cadastrada (crie na seção “Credenciais das tools”).</span>` : null}
+        </div>
+      ` : html`
+        <div class="flex flex-wrap gap-1.5">
+          ${[...selected].length
+            ? [...selected].map((n) => html`<code key=${n} class="text-[12px] px-1.5 py-0.5 rounded bg-wa-hover text-wa-text font-mono">${n}</code>`)
+            : html`<span class="text-[12px] text-wa-secondary">nenhuma</span>`}
+        </div>
+      `}
+      ${error ? html`<div class="text-[12px] text-red-500 mt-1">${error}</div>` : null}
+      <div class="text-[11px] text-wa-secondary mt-1">
+        No código: <code class="font-mono">ctx.credential("nome")</code>. Use uma credencial — não cole a chave no
+        código, que fica versionado no histórico.
+      </div>
+    </div>
+  `;
+}
+
+export function ToolForm({ editing, onSave, onCancel, busy, canCredentials = false }) {
   const [name, setName] = useState(editing ? editing.name : '');
   const [description, setDescription] = useState(editing ? (editing.description || '') : '');
   const [code, setCode] = useState(editing ? (editing.code || '') : '');
@@ -130,6 +189,9 @@ export function ToolForm({ editing, onSave, onCancel, busy }) {
             Enquanto você não salvar, quem roda é o código do disco; depois de salvar, passa
             a rodar este, <b>in-process</b>. Reinstalar o plugin não sobrescreve sua edição.
           </div>` : null}
+        ${editing && editing.kind === 'code' ? html`
+          <${ToolCredentials} key=${editing.name} toolName=${editing.name}
+            linked=${editing.credentials} canEdit=${canCredentials} />` : null}
         <div>
           <label class="block text-[12px] text-wa-secondary mb-1">Código Python</label>
           <textarea class="wa-field w-full px-3 py-2 rounded-md text-[13px] font-mono resize-y" rows="14"
