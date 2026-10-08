@@ -35,6 +35,7 @@ class ResourceType:
     CHANNEL = "channel"
     API_KEY = "api_key"
     WEBHOOK = "webhook"
+    CREDENTIAL = "credential"
 
 
 class AuditAction:
@@ -55,6 +56,16 @@ class AuditAction:
     WEBHOOK_CREATE = "webhook.create"
     WEBHOOK_UPDATE = "webhook.update"
     WEBHOOK_DELETE = "webhook.delete"
+    # Cofre de credenciais das tools de IA (plano 177). O VALOR nunca entra no
+    # payload — só nomes de campo e ``secret_definido``. Gravado direto com
+    # ``audit_listener.record`` (não está em AUDITABLE_EVENTS de propósito).
+    CREDENTIAL_CREATE = "credential.create"
+    CREDENTIAL_UPDATE = "credential.update"
+    CREDENTIAL_DELETE = "credential.delete"
+    CREDENTIAL_LINK = "credential.link"
+    # Alguém clicou no olho e viu o valor de UM campo. Registra credencial + campo,
+    # NUNCA o valor — é o rastro de quem leu o quê, e quando.
+    CREDENTIAL_REVEAL = "credential.reveal"
     ROLE_ASSIGN = "role.assign"
     # Config / IA engine (plano 06)
     CONFIG_UPDATE = "config.update"

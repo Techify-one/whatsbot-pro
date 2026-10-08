@@ -501,6 +501,11 @@ def register_routes(app, deps):
             from agent import ai_plugin_tools
             row["siblings"] = await asyncio.to_thread(
                 ai_plugin_tools.sibling_names, name)
+        # plano 177: só NOMES das credenciais liberadas (jamais valor) — a tela da
+        # tool mostra o seletor, não o segredo. Aditivo.
+        from db.repositories import credential_repo
+        row["credentials"] = await asyncio.to_thread(
+            credential_repo.links_for_tool, name)
         return _ok(row)
 
     @app.put("/api/ai/tools/{name}",
