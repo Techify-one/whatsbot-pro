@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   buildRows, shapeConvData,
   clauseMatches, matchesAdvFilters, matchesTags, matchesStatus, matchesAssignment,
-  isUnassigned, shouldNotifyNewMessage,
+  isUnassigned, shouldNotifyNewMessage, isNotifiableNewMessage,
   isVisibleInSidebar, sortContactsBy, sortContacts, splitSort, combineSort,
   normalizeSpec, specsEqual, isDefaultSpec, DEFAULT_SPEC, DAY_SECONDS,
   convRowToSidebarRow, upsertConversationRow, distinctChannelCount,
@@ -413,6 +413,18 @@ test('shouldNotifyNewMessage: escopo por atribuição', () => {
   // FAIL-OPEN: instalação sem login (uid nulo) notifica mesmo com dono.
   assert.equal(shouldNotifyNewMessage(
     { assignee_user_id: ANNA, active_agent_key: null }, null), true);
+});
+
+// Quem PODE notificar: o cliente, ou um card de sistema que pediu `notify`.
+test('isNotifiableNewMessage: cliente sim, system só com notify, o resto não', () => {
+  assert.equal(isNotifiableNewMessage({ role: 'user' }), true);
+  assert.equal(isNotifiableNewMessage({ role: 'system', notify: true }), true);
+  assert.equal(isNotifiableNewMessage({ role: 'system' }), false);
+  assert.equal(isNotifiableNewMessage({ role: 'system', notify: 'sim' }), false);
+  for (const role of ['assistant', 'private_note', 'system_notice', 'tool_call', 'error']) {
+    assert.equal(isNotifiableNewMessage({ role, notify: true }), false, role);
+  }
+  assert.equal(isNotifiableNewMessage(undefined), false);
 });
 
 // ── sorting ────────────────────────────────────────────────────────

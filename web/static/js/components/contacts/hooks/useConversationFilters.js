@@ -42,7 +42,7 @@ const ACTIVE_FILTER_KEY = 'whatsbot_active_conv_filter';
  * @param {boolean} [opts.showArchived]
  * @param {string} [opts.defaultAssignmentTab] - aba inicial (plano 88 · F3); 'all' preserva callers antigos.
  */
-export function useConversationFilters({ contacts, search = '', selected, selectedConvId, currentUserId, displayedRef, searching = false, showArchived = false, skipStoredPreset = false, serverFilterRef = null, fetchContacts = null, viewSpecRef = null, defaultAssignmentTab = 'all' }) {
+export function useConversationFilters({ contacts, search = '', selected, selectedConvId, currentUserId, displayedRef, searching = false, showArchived = false, skipStoredPreset = false, serverFilterRef = null, fetchContacts = null, viewSpecRef = null, refreshCountsRef = null, defaultAssignmentTab = 'all' }) {
   // Conversation tabs/filters (plano 10 FF2) — applied client-side over `contacts`.
   const [statusFilter, setStatusFilter] = useState('open');   // open|closed|all (default Abertas)
   // plano 88 · F3 — seed do PRIMEIRO frame apenas: a fonte da verdade da aba é o schema
@@ -152,6 +152,14 @@ export function useConversationFilters({ contacts, search = '', selected, select
   const countKey = useMemo(
     () => (serverMode ? countSpecKey(countSpec) : null), [countSpec, serverMode]);
 
+  // Gatilho externo de refetch do contador. O efeito abaixo só re-roda quando a LISTA
+  // muda; um evento que altera o contador sem alterar a lista (ex.: `mention_created` de
+  // uma conversa que não está na aba atual) usa isto p/ forçar a rebusca. Passa pelo
+  // mesmo `planCountFetch` (debounce + teto de frequência). setState é estável, então
+  // escrever a ref em render é idempotente (mesmo padrão do `viewSpecRef`).
+  const [countsNonce, setCountsNonce] = useState(0);
+  if (refreshCountsRef) refreshCountsRef.current = () => setCountsNonce((n) => n + 1);
+
   const countSpecRef = useRef(null);       // spec da contagem em vigor (guard das respostas)
   const countPendingRef = useRef(null);    // início da rajada atual — ÂNCORA do prazo
   const countFetchedAtRef = useRef(null);  // quando a última requisição PARTIU
@@ -209,7 +217,7 @@ export function useConversationFilters({ contacts, search = '', selected, select
       }).catch(() => {});
     }, plan.delayMs);
     return () => clearTimeout(timer);
-  }, [countKey, countSpec, contacts]);
+  }, [countKey, countSpec, contacts, countsNonce]);
 
   // plano 69 F2 — refaz a 1ª página da sidebar quando um FILTRO muda (status/aba/
   // tags/avançado). `serverFilterRef` já foi sincronizado no render acima, então o

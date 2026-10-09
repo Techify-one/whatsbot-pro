@@ -70,6 +70,8 @@ export function useConversationWsEvents(opts) {
     // plano 72 F3/F4 — espelho fresco da VIEW (serverMode + filtros). Ref porque os
     // handlers são useCallback([]) e só leem refs; escrito em render pelo filters hook.
     viewSpecRef,
+    // gatilho p/ rebuscar o contador das abas (lista não mudou, o número sim)
+    refreshCountsRef,
   } = opts;
 
   const [typingState, setTypingState] = useState({});  // { 'channel::phone'|'conv:id': 'text'|'audio' }
@@ -309,6 +311,11 @@ export function useConversationWsEvents(opts) {
           && !openThreadAnchoredRef.current) return;  // já estou nela, na ponta recente
       setContacts(prev => patchRows(prev, c => c.conversation_id === convId,
         { has_user_mention: true }));
+      // O contador da aba Menções (e a própria aba, que só aparece com contador > 0) vem
+      // do servidor e só era rebuscado quando a LISTA mudava. Se a conversa mencionada não
+      // está na aba atual (ex.: estou em "Minhas" e ela está em "Todas"), o patch acima não
+      // muda nada e o contador ficava velho — aba escondida. Força a rebusca.
+      if (refreshCountsRef && refreshCountsRef.current) refreshCountsRef.current();
       // plano 72 F7 — INSERT-GATE das Menções. Na aba Menções (serverMode) a lista vem
       // server-filtrada por has_mention=true; a conversa recém-mencionada e AUSENTE não é
       // inserida pelo prev.map acima (só patcha presentes) e NÃO há conversation_upsert

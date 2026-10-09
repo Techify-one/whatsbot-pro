@@ -61,6 +61,9 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
   // usuário), escrito em render pelo hook de filtros e lido pelos handlers de WS
   // (useCallback([]) que só leem refs) para gatear insert/drop das linhas em serverMode.
   const viewSpecRef = useRef(null);
+  // Gatilho p/ rebuscar o contador das abas (escrito pelo hook de filtros, chamado pelos
+  // handlers de WS quando o contador muda sem a lista mudar — ex.: nova menção).
+  const refreshCountsRef = useRef(null);
 
   // ── Sidebar geometry (self-contained) ──────────────────────────────
   const { sidebarHidden, sidebarWidth, isResizing, isDesktop, startResize } = useSidebarResize();
@@ -223,6 +226,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     // plano 72 F2: o hook escreve a view atual aqui (em render) para os handlers de WS
     // reproduzirem a decisão do servidor no insert/drop das linhas em serverMode.
     viewSpecRef,
+    refreshCountsRef,
   });
   const {
     statusFilter, setStatusFilter,
@@ -306,6 +310,7 @@ export function Contacts({ newMessage, chatPresence, aiTyping, contactInfoUpdate
     currentUserId,
     // plano 72 F3/F4: view atual (serverMode + filtros) p/ gatear insert/drop das linhas.
     viewSpecRef,
+    refreshCountsRef,
   });
 
   // Search box: clear the phone-check error as the operator types (preserves the

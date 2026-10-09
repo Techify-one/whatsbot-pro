@@ -52,6 +52,21 @@ export function aiEffectivelyOn(row, { autoReply = true } = {}) {
 }
 
 /**
+ * Esta mensagem nova PODE notificar (som + pop-up)? Só a do cliente (`user`), ou a de
+ * um card de sistema cujo produtor pediu isso com `notify: true` (ex.: o plugin
+ * duvidas_aula, que quer o aviso se comportando como uma mensagem normal). Nota
+ * privada e os demais papéis do painel nunca notificam por aqui.
+ *
+ * @param {{ role?: string, notify?: boolean }|null|undefined} msg
+ * @returns {boolean}
+ */
+export function isNotifiableNewMessage(msg) {
+  const m = msg || {};
+  if (m.role === 'user') return true;
+  return m.role === 'system' && m.notify === true;
+}
+
+/**
  * Se uma mensagem nova deve NOTIFICAR este atendente (som + pop-up do navegador).
  *
  * Regra: a conversa é minha, OU não tem dono nenhum — nem humano nem IA (a mesma

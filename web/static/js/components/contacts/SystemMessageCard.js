@@ -1,8 +1,10 @@
 import { h } from 'preact';
+import { useState, useRef, useLayoutEffect } from 'preact/hooks';
 import htm from 'htm';
 import { formatBubbleTime } from './utils.js';
 import { isSystemCardRole, isCollapsibleCard, collapsedPreview, SYSTEM_CARD_VARIANTS } from '../../services/messageView.js';
 import { parseCta } from '../../services/systemCta.js';
+import { parseQuote, QUOTE_CLAMP_LINES } from '../../services/systemQuote.js';
 import { parseMemberLinks } from '../../services/systemMemberLinks.js';
 import { MediaContent } from './MediaContent.js';
 
@@ -187,6 +189,10 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
     // COLOR FIX: was bg-gray-100 / border-gray-300 / text-gray-800 / text-gray-600
     // (relied on html.dark overrides) → durable semantic wa-*.
     //
+    // Trecho citado recolhível: o produtor envolve a parte longa (ex.: o comentário de
+    // um aluno) em ``[[quote]]…[[/quote]]``. Só ela recolhe, e só quando passa do limite
+    // (ver systemQuote.js); título, contexto e botão ficam sempre à mostra.
+    //
     // Botão de ação opcional: o produtor da mensagem (core OU plugin) pode anexar
     // um call-to-action codificado no conteúdo como ``[[cta:RÓTULO|URL]]``. O card
     // remove o token do texto e renderiza um botão no lugar de um link inline
@@ -200,7 +206,9 @@ export function SystemMessageCard({ message: m, index: i, fmt, openMsgMenu, show
             <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
             Sistema
           </span>
-          <span dangerouslySetInnerHTML=${{ __html: fmt(cta.text)}}></span>
+          ${parseQuote(cta.text).map((seg, k) => seg.type === 'quote'
+            ? html`<${QuoteBlock} key=${k} text=${seg.text} fmt=${fmt} />`
+            : html`<div key=${k} dangerouslySetInnerHTML=${{ __html: fmt(seg.text)}}></div>`)}
           ${cta.action ? html`
             <div class="mt-[7px]">
               <a href=${cta.action.url} target="_blank" rel="noopener noreferrer"
@@ -281,6 +289,42 @@ function CollapsedCardChip({ message: m, variant, onToggle, showAgentName }) {
       </div>
     </div>
   `;
+}
+
+// Trecho citado de um card `system` (``[[quote]]…[[/quote]]``). Recolhido, mostra as
+// primeiras QUOTE_CLAMP_LINES linhas. O controle "Ver tudo" só existe quando o texto
+// de fato passa disso: é MEDIDO no DOM (largura do card, fonte e quebras de linha
+// mudam o resultado), nunca estimado pelo número de caracteres. Depois de aberto o
+// controle fica, para poder recolher. O estado é local — o card tem `key` pela
+// identidade da mensagem, então não gruda em outra.
+function QuoteBlock({ text, fmt }) {
+  const [open, setOpen] = useState(false);
+  const [overflow, setOverflow] = useState(false);
+  const ref = useRef(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || open) return undefined;
+    const measure = () => setOverflow(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, open]);
+
+  const clamp = !open;
+  return html`
+    <div class="my-[5px] pl-[9px] border-l-2 border-wa-border">
+      <div ref=${ref} class="text-wa-text"
+           style=${clamp ? `display:-webkit-box;-webkit-line-clamp:${QUOTE_CLAMP_LINES};-webkit-box-orient:vertical;overflow:hidden;` : null}
+           dangerouslySetInnerHTML=${{ __html: fmt(text) }}></div>
+      ${(overflow || open) ? html`
+        <button type="button" onClick=${() => setOpen(!open)} aria-expanded=${open ? 'true' : 'false'}
+                class="mt-[3px] text-[12px] font-semibold text-wa-teal hover:underline cursor-pointer">
+          ${open ? 'Recolher ▴' : 'Ver tudo ▾'}
+        </button>` : null}
+    </div>`;
 }
 
 // SVG path for the chip icon, matching the expanded card's inline SVGs.

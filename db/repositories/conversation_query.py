@@ -8,7 +8,9 @@ that compose these — public API unchanged, same rows/shapes as before.
 
 from __future__ import annotations
 
-from sqlalchemy import and_, case, func, select
+import re
+
+from sqlalchemy import and_, case, func, or_, select
 
 from sqlalchemy import exists, literal
 
@@ -16,6 +18,29 @@ from db.repositories._mapping import _PREVIEW_EXCLUDED, coerce_json, media_previ
 from db.tables import (channels, contacts, conversations, inboxes, mentions,
                        messages, teams, unread_msg_ids)
 
+
+# Card de sistema que um PLUGIN quer ver como mensagem de verdade na lista (preview,
+# ordenação e "conversa com conteúdo"): papel `system` + `msg_id` sintético `pn:…` — o
+# mesmo prefixo que o core já usa para nota privada notificada e que nunca vira recibo de
+# leitura. Cards `system` comuns (sem esse msg_id) seguem fora da lista.
+def notified_system_card():
+    return and_(messages.c.role == "system", messages.c.msg_id.like("pn:%"))
+
+def visible_message_clause(excluded=_PREVIEW_EXCLUDED):
+    """Mensagem que conta como "visível" na lista: papel fora de ``excluded`` OU um card
+    de sistema notificado por plugin (:func:`notified_system_card`)."""
+    return or_(messages.c.role.notin_(excluded), notified_system_card())
+
+_QUOTE_RE = re.compile(r"\[\[quote\]\](.*?)\[\[/quote\]\]", re.S)
+_TOKEN_RE = re.compile(r"\[\[[^\]]*\]\]")
+
+def system_card_preview(content) -> str:
+    """Texto curto de um card `system` para a lista: o trecho citado (`[[quote]]`) quando
+    há, senão o conteúdo sem os tokens de botão/citação. Uma linha só."""
+    text = str(content or "")
+    m = _QUOTE_RE.search(text)
+    base = m.group(1) if m else _TOKEN_RE.sub("", text)
+    return " ".join(base.split())
 
 def last_msg_subq(col, excluded=_PREVIEW_EXCLUDED):
     """Correlated scalar subquery: ``col`` of the latest visible msg of the conversation.
@@ -27,7 +52,7 @@ def last_msg_subq(col, excluded=_PREVIEW_EXCLUDED):
     return (
         select(col)
         .where(messages.c.conversation_id == conversations.c.id)
-        .where(messages.c.role.notin_(excluded))
+        .where(visible_message_clause(excluded))
         .order_by(messages.c.ts.desc())
         .limit(1)
         .scalar_subquery()
@@ -136,6 +161,9 @@ def finalize_conv(row) -> dict:
     d["last_message"] = media_preview(d.get("last_msg_content"),
                                       d.get("last_msg_media_type"),
                                       d.get("last_msg_media_caption"))
+    # Card `system` notificado por plugin: o preview é o texto da dúvida, não os tokens
+    if d.get("last_msg_role") == "system":
+        d["last_message"] = system_card_preview(d.get("last_msg_content"))[:80]
     d["last_message_role"] = d.get("last_msg_role") or ""
     d["last_message_ts"] = d.get("last_msg_ts") or 0
     d["last_message_status"] = d.get("last_msg_status") or ""

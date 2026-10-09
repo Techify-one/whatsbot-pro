@@ -23,7 +23,7 @@ import { useWebSocket } from '../../hooks/useWebSocket.js';
 import { useConfig } from '../../hooks/useConfig.js';
 import { entityFromPath } from '../../hooks/useDeepLink.js';
 import { authHeaders, getUnreadCount } from '../../services/api.js';
-import { shouldNotifyNewMessage } from '../../services/conversationRows.js';
+import { shouldNotifyNewMessage, isNotifiableNewMessage } from '../../services/conversationRows.js';
 import { isModifiedClick, spaLinkTarget } from '../../services/spaLink.js';
 import * as soundEngine from '../../utils/soundEngine.js';
 import { getNotifPref, showBrowserNotification } from '../../utils/notifications.js';
@@ -414,7 +414,8 @@ export function App({ onLogout, hasPassword, currentUser }) {
     // MESMA config da conta (já chega ao cliente via GET /api/config):
     //   if (configRef.current?.notify_private_messages && getNotifPref('sound')) playNotificationSound();
     if (m && m.role === 'private_note') return;
-    if (!m || m.role !== 'user') return;
+    // Só mensagem do cliente — ou card de sistema que pediu `notify` (plugin).
+    if (!m || !isNotifiableNewMessage(m)) return;
     // Regra "ignorar abertura" (plugin protocolos): mensagem marcada como silenciosa
     // não gera som nem alerta de nova mensagem (também não conta como não-lida no back).
     if (m.silent) return;
@@ -430,7 +431,7 @@ export function App({ onLogout, hasPassword, currentUser }) {
     soundEngine.playEvent('new_message');
     const away = document.hidden || !document.hasFocus();
     if (getNotifPref('browser') && away) {
-      let preview = (m.content || '').trim();
+      let preview = (m.notify_preview || m.content || '').trim();
       if (!preview) {
         preview = m.media_type ? 'Enviou uma mídia' : 'Nova mensagem';
       }
