@@ -283,7 +283,7 @@ export function PluginsManager({ onPluginsChanged, initialEntity }) {
         </div>
         <div class="flex items-center gap-2">
           <a
-            href="https://whatsbot.techify.one/plugins"
+            href="https://techify.one/whatsbot/plugins"
             target="_blank"
             rel="noopener noreferrer"
             class="px-3 py-1.5 bg-red-600 text-white rounded text-[14px] hover:bg-red-700"

@@ -1061,9 +1061,11 @@ def find_empty_inbound_ghosts(cutoff_ts: float, limit: int = 200) -> list[dict]:
     30 min) is far longer than the batch delay (~3s), so a legitimate brand-new
     conversation is never caught. Returns minimal dicts for delete+broadcast."""
     from db.repositories._mapping import LIST_PANEL_ONLY_ROLES
+    # Um card de sistema notificado por plugin (ex.: aviso de dúvida de aula) conta como
+    # mensagem visível: senão a conversa criada só por ele seria varrida como fantasma.
     no_visible_msg = ~(select(messages.c.id)
                        .where(messages.c.conversation_id == conversations.c.id)
-                       .where(messages.c.role.notin_(LIST_PANEL_ONLY_ROLES))
+                       .where(conversation_query.visible_message_clause(LIST_PANEL_ONLY_ROLES))
                        .exists())
     stmt = (select(conversations.c.id, conversations.c.contact_id,
                    conversations.c.display_id, conversations.c.inbox_id,
