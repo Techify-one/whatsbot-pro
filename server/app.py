@@ -676,7 +676,7 @@ def create_app(
         "/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions",
         "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users",
         "/conversations", "/protocolos", "/attendances", "/audit", "/ai",
-        "/channels", "/api-keys", "/sounds", "/wizard",
+        "/channels", "/api-keys", "/sounds", "/wizard", "/teams",
         # Legacy PT aliases (kept so a hard reload on an old bookmark still serves
         # index.html; the frontend rewrites them to the English path via
         # redirectLegacyPath).

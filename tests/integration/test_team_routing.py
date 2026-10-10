@@ -235,6 +235,10 @@ def test_fixed_ai_validates_agent_and_global_channel_gates(routing_world):
     from db.repositories import channel_repo
     from db.tables import ai_agents, inboxes
 
+    # O teste exercita o gate global, então fixa a própria precondição: outro
+    # teste pode ter deixado auto_reply=False no processo, e a fixture gravaria
+    # esse valor vazado como "original".
+    routing_world.set_auto_reply(True)
     inbox_id = routing_world.inbox(ai_enabled=True)
     agent = routing_world.agent(enabled=True)
     team = routing_world.team(

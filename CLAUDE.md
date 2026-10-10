@@ -475,7 +475,7 @@ O registry tem três semânticas: **slots** (aditivos, ex. `channel.card.rows`),
 
 ### Versionamento da API de plugins (`WHATSBOT_API_VERSION`)
 
-**Versão atual: `1.8.0`** ([plugins/semver.py](plugins/semver.py) — fonte única). Changelog e política completa: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
+**Versão atual: `1.10.0`** ([plugins/semver.py](plugins/semver.py) — fonte única). Changelog e política completa: [docs/PLUGIN_API_CHANGELOG.md](docs/PLUGIN_API_CHANGELOG.md). Guard: [tests/contracts/test_plugin_api_surface.py](tests/contracts/test_plugin_api_surface.py) + `tests/goldens/plugin_api_surface.json`.
 
 | Nível | Gatilho |
 |---|---|
