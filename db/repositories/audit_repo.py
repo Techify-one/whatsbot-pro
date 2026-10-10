@@ -34,6 +34,10 @@ _SECRET_KEYS = frozenset({
     # API da plataforma de cursos. Adicionado no MESMO commit da rota
     # write-only que a grava, para não repetir o incidente do nexus_dsn acima.
     "plataforma_api_key",
+    # ``checkout_api_key`` (plugin pagamentos, plano 174) — chave `ck_live_` do
+    # checkout, que também estorna vendas. Nunca vai ao payload, mas o nome entra
+    # aqui pelo mesmo motivo do nexus_dsn acima.
+    "checkout_api_key",
 })
 _REDACTED = "***"
 
