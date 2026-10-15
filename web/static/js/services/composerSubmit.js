@@ -19,7 +19,7 @@
 // clipe. Todos os outros tipos levam o texto como legenda.
 
 /**
- * @typedef {'noop'|'text'|'media'|'text_then_media'|'template'} SubmitAction
+ * @typedef {'noop'|'text'|'media'|'media_group'|'text_then_media'|'template'} SubmitAction
  * @typedef {{action: SubmitAction, caption: string, reason?: string}} SubmitPlan
  */
 
@@ -31,11 +31,12 @@
  * @param {string} [opts.mode] - 'reply' | 'private'.
  * @param {boolean} [opts.sessionClosed] - janela de 24h fechada (WhatsApp Cloud).
  * @param {boolean} [opts.sending] - lote de mídia em voo.
+ * @param {boolean} [opts.group] - envio agrupado (resultado de `canGroup`).
  * @returns {SubmitPlan}
  */
 export function submitPlan({
   text = '', queueLength = 0, queueIsAudioOnly = false,
-  mode = 'reply', sessionClosed = false, sending = false,
+  mode = 'reply', sessionClosed = false, sending = false, group = false,
 } = {}) {
   const caption = String(text || '').trim();
   const hasQueue = queueLength > 0;
@@ -61,6 +62,11 @@ export function submitPlan({
   if (queueIsAudioOnly && caption) {
     return { action: 'text_then_media', caption, reason: 'audio_no_caption' };
   }
+
+  // Envio agrupado (plano 177): o chamador só passa `group: true` quando `canGroup` já
+  // provou que o canal aceita e que há 2+ arquivos. É automático, sem escolha do
+  // operador. A legenda é o CORPO do e-mail.
+  if (group) return { action: 'media_group', caption };
 
   return { action: 'media', caption };
 }
@@ -95,4 +101,30 @@ export function captionTargetIndex(queue) {
     if (list[i] && list[i].kind !== 'audio') return i;
   }
   return -1;
+}
+
+/**
+ * Esta fila sai agrupada, numa só mensagem? (plano 177)
+ *
+ * Só quando o CANAL declara que entrega N arquivos como UMA mensagem
+ * (`media_group_supported`, capability — nunca o nome do provider), a conversa é real
+ * (sandbox não sai para o provedor), é resposta ao cliente (nota privada não vira
+ * e-mail) e há o que agrupar: com UM arquivo não há grupo, e áudio gravado é nota de
+ * voz e fica de fora — então contam só os itens que não são áudio.
+ *
+ * @param {Object} opts
+ * @param {boolean} [opts.supported] - capability `media_group` do canal.
+ * @param {boolean} [opts.sandbox]
+ * @param {string} [opts.mode] - 'reply' | 'private'.
+ * @param {Array<{kind?: string}>} [opts.queue]
+ */
+export function canGroup({ supported = false, sandbox = false, mode = 'reply', queue = [] } = {}) {
+  if (!supported || sandbox || mode === 'private') return false;
+  return groupableItems(queue).length >= 2;
+}
+
+/** Itens que entram num grupo: tudo menos áudio (nota de voz não é anexo de e-mail). */
+export function groupableItems(queue) {
+  const list = Array.isArray(queue) ? queue : [];
+  return list.filter(item => item && item.kind !== 'audio');
 }

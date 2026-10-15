@@ -519,6 +519,8 @@ def register_routes(app, deps):
             "ai_window_open": outbound.ai_window_open(channel_id, last_inbound_ts),
             "revoke_supported": outbound.supports(channel_id, "revoke"),
             "edit_supported": outbound.supports(channel_id, "edit_message"),
+            # "Agrupar" no compositor (plano 177) — ver server/routes/contacts.py.
+            "media_group_supported": outbound.supports(channel_id, "media_group"),
             # Limites de mídia declarados pelo canal (provider é dono dos números)
             # — o compositor bloqueia anexo fora do padrão antes de enviar.
             "media_limits": media_limits.describe(

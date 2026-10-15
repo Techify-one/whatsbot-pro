@@ -33,7 +33,7 @@ MAX_FILES_PER_DROP = 10
 # tentar "aproveitar" o grupo existente deixaria o caminho descoberto.
 _UPLOAD_PATH_RE = re.compile(
     r"^/api/(?:"
-    r"contacts/[^/]+/(?:send-image|send-audio|send-video|send-document"
+    r"contacts/[^/]+/(?:send-image|send-audio|send-video|send-document|send-media-group"
     r"|private-audio|private-image|private-document)"
     r"|contacts/import"
     r"|sandbox/(?:send-image|send-audio|send-document)"

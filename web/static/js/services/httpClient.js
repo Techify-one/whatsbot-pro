@@ -135,7 +135,16 @@ export async function request(method, path, body, { silent = false, signal = nul
 export async function uploadRequest(path, fields) {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) {
-    if (value instanceof Blob) {
+    if (Array.isArray(value)) {
+      // Campo repetido (vários arquivos sob o mesmo nome — "Agrupar", plano 177).
+      for (const part of value) {
+        if (part instanceof Blob) {
+          form.append(key, part, /** @type {any} */ (part).name || 'file');
+        } else {
+          form.append(key, part == null ? '' : String(part));
+        }
+      }
+    } else if (value instanceof Blob) {
       // File carries its own .name; a bare Blob falls back to 'file'.
       form.append(key, value, /** @type {any} */ (value).name || 'file');
     } else {
