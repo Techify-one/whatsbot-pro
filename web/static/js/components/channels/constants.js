@@ -212,6 +212,73 @@ export function secretInputProps(fieldKey) {
   };
 }
 
+// ── Campo condicional: `show_if` (plano 176) ─────────────────────────────────
+//
+// Um campo do descriptor (credencial OU config) pode declarar
+//   "show_if": {"key": "<chave de outro campo>", "equals": <valor>}
+// e só existe enquanto aquele outro campo tiver esse valor. O provider DECLARA, o core
+// só AVALIA — nenhum `if provider ==`, mesmo molde do `pattern` e do `required`.
+//
+// Contrato (espelhado por app/services/channel_service.field_visible):
+//   * a chave referida é lida DEPOIS de configValues e credValues, nessa ordem (um campo
+//     bool de config é o caso de uso; credencial de texto também funciona);
+//   * `equals` ausente ⇒ o campo aparece quando o outro for "verdadeiro" (bool true);
+//   * comparação por IGUALDADE do valor tipado (true ≠ "true"): o formulário guarda
+//     booleanos de verdade, e o servidor recebe o config em JSON, também tipado;
+//   * `show_if` malformado (sem `key`) ⇒ campo SEMPRE visível (fail-open — um provider
+//     mal declarado não pode esconder um campo obrigatório e travar a criação);
+//   * ciclo (A depende de B, B depende de A) não trava: cada avaliação olha UM nível.
+//
+// ⚠️ Esconder NÃO basta: campo escondido também sai da obrigatoriedade, da validação de
+// formato e do payload (`visibleFields`). Sem isso uma senha digitada e depois ocultada
+// seguiria para o banco, e um campo `required` escondido travaria o botão Criar.
+
+export function fieldVisible(field, configValues, credValues) {
+  const cond = field && field.show_if;
+  if (!cond || typeof cond !== 'object' || !cond.key) return true;
+  const cfg = configValues || {};
+  const cred = credValues || {};
+  const current = cond.key in cfg ? cfg[cond.key] : cred[cond.key];
+  if (!('equals' in cond)) return current === true;
+  return current === cond.equals;
+}
+
+/**
+ * Os campos do descriptor numa lista só, na ordem de exibição. PURA.
+ *
+ * Sem ``form_order`` é a ordem histórica: todos os ``config_fields`` e depois todos os
+ * ``credential_fields`` (providers existentes ficam byte-idênticos). Com
+ * ``form_order: ["chave", ...]`` o provider intercala os dois tipos, p.ex. um checkbox de
+ * config logo acima das credenciais que ele liga/desliga. Chave desconhecida é ignorada e o
+ * que o provider não listou entra no fim, na ordem histórica (nada some por esquecimento).
+ * @returns {{kind: 'config'|'credential', field: Object}[]}
+ */
+export function orderedFields(descriptor) {
+  const cfg = (descriptor && descriptor.config_fields) || [];
+  const cred = (descriptor && descriptor.credential_fields) || [];
+  const all = [
+    ...cfg.map((field) => ({ kind: 'config', field })),
+    ...cred.map((field) => ({ kind: 'credential', field })),
+  ];
+  const order = descriptor && Array.isArray(descriptor.form_order) ? descriptor.form_order : null;
+  if (!order) return all;
+  const byKey = new Map();
+  for (const it of all) if (!byKey.has(it.field.key)) byKey.set(it.field.key, it);
+  const out = [];
+  const used = new Set();
+  for (const key of order) {
+    const it = byKey.get(key);
+    if (it && !used.has(it)) { out.push(it); used.add(it); }
+  }
+  for (const it of all) if (!used.has(it)) out.push(it);
+  return out;
+}
+
+/** Os campos de `fields` que estão visíveis para os valores atuais. PURA. */
+export function visibleFields(fields, configValues, credValues) {
+  return (fields || []).filter((f) => fieldVisible(f, configValues, credValues));
+}
+
 // ── Validação de formato de credencial (plano 104 · F3) ─────────────────────
 //
 // Genérica e dirigida pelo DESCRIPTOR (P1 opção (a)): o provider declara
@@ -244,13 +311,26 @@ export function credentialPatternError(field, rawValue) {
  * Erros de formato dos valores SUBMETIDOS. PURA.
  * @returns {Object} {credentialKey: mensagem} — vazio quando tudo passa.
  */
-export function validateCredentials(descriptor, credValues) {
+export function validateCredentials(descriptor, credValues, configValues) {
   const out = {};
-  for (const field of (descriptor && descriptor.credential_fields) || []) {
+  for (const field of visibleFields(
+    (descriptor && descriptor.credential_fields) || [], configValues, credValues)) {
     const msg = credentialPatternError(field, (credValues || {})[field.key]);
     if (msg) out[field.key] = msg;
   }
   return out;
+}
+
+/**
+ * As credenciais obrigatórias que o operador AINDA NÃO preencheu e que estão visíveis.
+ * Campo `required` escondido por `show_if` não conta. PURA.
+ * @returns {string[]} chaves faltando (vazio = pode criar)
+ */
+export function missingRequired(descriptor, credValues, configValues) {
+  return visibleFields((descriptor && descriptor.credential_fields) || [], configValues, credValues)
+    .filter((f) => f.required)
+    .map((f) => f.key)
+    .filter((k) => !String((credValues || {})[k] == null ? '' : (credValues || {})[k]).trim());
 }
 
 // Random URL-safe token, used for the "sugerir" verify-token button and for
@@ -271,10 +351,31 @@ export function randomToken(len = 32) {
 // Required creds a given channel is MISSING (returns the keys not present in its
 // stored credentials). Capability-driven from the providers fetch (`requiredCreds`
 // = the flat {provider: [key,...]} map). Used by ChannelCard's zombie warning.
-export function missingCredsFor(channel, requiredCreds) {
+//
+// `descriptor` (opcional, plano 176): o campo escondido por `show_if` NÃO está faltando.
+// Um canal de e-mail com o IMAP desligado não tem servidor nem senha IMAP e não pode ser
+// marcado como zumbi por isso. Sem `descriptor` (ou sem `show_if`) nada muda.
+export function missingCredsFor(channel, requiredCreds, descriptor) {
   const cred = (channel && channel.credentials) || {};
   const req = (requiredCreds && requiredCreds[channel && channel.provider]) || [];
-  return req.filter((k) => !cred[k]);
+  const cfg = configWithDefaults(descriptor, parseChannelConfig(channel && channel.config));
+  const fields = new Map(((descriptor && descriptor.credential_fields) || [])
+    .map((f) => [f.key, f]));
+  return req.filter((k) => !cred[k] && fieldVisible(fields.get(k), cfg, cred));
+}
+
+/**
+ * ``config`` completado com o ``default`` de cada ``config_fields`` ausente. PURA.
+ * Espelho de ``channel_service.config_with_defaults``: chave ausente (canal criado antes
+ * de o campo existir, ou cliente de API que a omitiu) vale o padrão do provider, não
+ * "desmarcado" — senão um ``show_if`` esconderia o que devia estar visível.
+ */
+export function configWithDefaults(descriptor, config) {
+  const out = { ...(config || {}) };
+  for (const f of (descriptor && descriptor.config_fields) || []) {
+    if (f && f.key && !(f.key in out) && 'default' in f) out[f.key] = f.default;
+  }
+  return out;
 }
 
 // Initial config-field values for a NEW channel of `descriptor`: multiselect →
@@ -314,7 +415,8 @@ export function buildCreatePayload(f) {
   };
   payload.config = config;
   const credentials = {};
-  for (const field of descriptor.credential_fields || []) {
+  for (const field of visibleFields(descriptor.credential_fields || [],
+    f.configValues, f.credValues)) {
     const raw = f.credValues && f.credValues[field.key];
     const v = raw == null ? '' : String(raw).trim();
     if (v) credentials[field.key] = v;
@@ -338,7 +440,8 @@ export function buildEditPayload(f) {
   const cfg = parseChannelConfig(f.channelConfig);
   payload.config = { ...cfg, ...(f.configValues || {}), ai: f.ai };
   const credentials = {};
-  for (const field of descriptor.credential_fields || []) {
+  for (const field of visibleFields(descriptor.credential_fields || [],
+    f.configValues, f.credValues)) {
     const raw = f.credValues && f.credValues[field.key];
     const v = raw == null ? '' : String(raw).trim();
     if (v && !v.startsWith('••••')) credentials[field.key] = v;

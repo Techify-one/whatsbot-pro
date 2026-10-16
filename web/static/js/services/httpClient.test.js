@@ -50,3 +50,49 @@ test('handleErrorResponse: normaliza {detail} de plugin + fallback "Erro <status
     { status: 404, ok: false, json: async () => { throw new Error('no body'); } }, { silent: true });
   assert.equal(b.error, 'Erro 404');
 });
+
+// Plano 177 — campo repetido no multipart ("Agrupar": vários arquivos sob o mesmo nome).
+import { uploadRequest } from './httpClient.js';
+
+async function captureForm(fields) {
+  // `authHeaders()` lê o token do navegador; o Node não tem `localStorage`.
+  const realFetch = globalThis.fetch;
+  const hadStorage = 'localStorage' in globalThis;
+  const realStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  let body = null;
+  globalThis.fetch = async (_url, opts) => {
+    body = opts.body;
+    return { status: 200, ok: true, json: async () => ({ ok: true }) };
+  };
+  try {
+    await uploadRequest('/x', fields);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (hadStorage) globalThis.localStorage = realStorage; else delete globalThis.localStorage;
+  }
+  return body;
+}
+
+test('uploadRequest: array de arquivos vira o MESMO campo repetido, com nome', async () => {
+  const a = new File(['1'], 'a.png', { type: 'image/png' });
+  const b = new File(['2'], 'b.pdf', { type: 'application/pdf' });
+  const form = await captureForm({ files: [a, b], caption: 'oi' });
+  const files = form.getAll('files');
+  assert.equal(files.length, 2);
+  assert.deepEqual(files.map(f => f.name), ['a.png', 'b.pdf']);
+  assert.equal(form.get('caption'), 'oi');
+});
+
+test('uploadRequest: valor único continua igual (regressão)', async () => {
+  const a = new File(['1'], 'a.png', { type: 'image/png' });
+  const form = await captureForm({ image: a, caption: '', channel_id: null });
+  assert.equal(form.getAll('image').length, 1);
+  assert.equal(form.get('image').name, 'a.png');
+  assert.equal(form.get('channel_id'), '', 'null vira string vazia, como antes');
+});
+
+test('uploadRequest: array vazio não cria campo nenhum', async () => {
+  const form = await captureForm({ files: [] });
+  assert.equal(form.getAll('files').length, 0);
+});

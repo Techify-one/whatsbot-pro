@@ -166,6 +166,18 @@ class OutboundRouter:
         except Exception as e:  # noqa: BLE001
             return SendResult(ok=False, error=str(e))
 
+    def send_media_group(self, channel_id: str, chat_id: str, items: list, *,
+                         caption: str = "") -> SendResult:
+        inst = self.get(channel_id)
+        if inst is None:
+            return SendResult(ok=False, error="channel_not_registered")
+        if not self.supports(channel_id, "media_group"):
+            return SendResult(ok=False, error="media_group_not_supported")
+        try:
+            return inst.send_media_group(chat_id, items, caption=caption)
+        except Exception as e:  # noqa: BLE001
+            return SendResult(ok=False, error=str(e))
+
     def send_template(self, channel_id: str, chat_id: str, template_name: str,
                       *, lang: str = "pt_BR", components=None) -> SendResult:
         inst = self.get(channel_id)

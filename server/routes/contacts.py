@@ -904,6 +904,9 @@ def register_routes(app, deps):
                 # o canal edita. Dirigido por CAPABILITY, nunca por nome de provider.
                 data["revoke_supported"] = outbound.supports(channel, "revoke")
                 data["edit_supported"] = outbound.supports(channel, "edit_message")
+                # Envio agrupado no compositor (plano 177): só onde o canal declara que
+                # entrega N arquivos como UMA mensagem. Por CAPABILITY, nunca por nome.
+                data["media_group_supported"] = outbound.supports(channel, "media_group")
                 # Limites de mídia DECLARADOS pelo canal (o provider é dono dos
                 # números): o compositor bloqueia o anexo fora do padrão com um
                 # popup em vez de deixar o envio falhar no provider.
@@ -2163,6 +2166,58 @@ def register_routes(app, deps):
         # em vez da heurística conteúdo+30s — sem ele o vídeo aparecia duas vezes
         # (a bolha diz "[Vídeo]", a cópia do servidor vem com a legenda vazia).
         return _media_ok(result, "Vídeo enviado.")
+
+    @app.post("/api/contacts/{phone}/send-media-group")
+    async def send_media_group_to_contact(
+        phone: str,
+        request: Request,
+        files: list[UploadFile] = File(...),
+        kinds: str = Form("[]"),
+        caption: str = Form(""),
+        conversation_id: str = Form(""),
+        channel_id: str = Form(""),
+    ):
+        """Send SEVERAL files as ONE message (operator-initiated) — "Agrupar", plano 177.
+
+        Só canal que declara ``ChannelCapabilities.media_group`` aceita (e-mail); nos
+        demais responde 400 e a fila do painel continua um arquivo por mensagem.
+        ``kinds`` é uma lista JSON, paralela a ``files``, com o ``kind`` de CADA arquivo
+        — do CHAMADOR, nunca inferido do MIME (mesma regra das rotas de um arquivo só).
+        """
+        denied = permission_denied(request, "conversation.reply")
+        if denied:
+            return denied
+        try:
+            kind_list = json.loads(kinds or "[]")
+        except ValueError:
+            kind_list = None
+        if (not isinstance(kind_list, list) or len(kind_list) != len(files)
+                or not all(isinstance(k, str) for k in kind_list)):
+            return _err("'kinds' deve ser uma lista com um tipo por arquivo.", status=400)
+        _u = current_user(request)
+
+        async def _guard():
+            return await _inbox_guard_veredict(
+                request, conversation_id=conversation_id, channel_id=channel_id,
+                phone=phone)
+
+        result = await messaging.send_media_group_upload(
+            phone=phone,
+            files=[{"kind": k, "data": await f.read(), "filename": f.filename,
+                    "content_type": f.content_type}
+                   for k, f in zip(kind_list, files)],
+            caption=caption,
+            conversation_id=conversation_id, channel_id=channel_id,
+            sent_by_user_id=(_u.get("id") if _u else None),
+            sent_by_name=(_u.get("name") if _u else None),
+            inbox_guard=_guard)
+        if not result["ok"]:
+            return _media_error(result)
+        logger.info("[Send] Media group (%s files) sent to %s", result.get("count"), phone)
+        return _ok({"message": "Anexos enviados.",
+                    "msg_id": result.get("msg_id"),
+                    "msg_ids": result.get("msg_ids") or [],
+                    "media_path": result.get("media_path")})
 
     @app.post("/api/contacts/{phone}/presence")
     async def send_presence_to_contact(phone: str, body: dict, request: Request):

@@ -668,6 +668,9 @@ export function shapeConvData(d) {
     // "unknown/legacy" → shows).
     revoke_supported: d.revoke_supported,
     edit_supported: d.edit_supported,
+    // "Agrupar" anexos numa só mensagem (plano 177): capability do canal. ⚠️ Whitelist —
+    // sem esta linha o campo some sem erro e o envio nunca agrupa.
+    media_group_supported: !!d.media_group_supported,
     // Limites de mídia declarados pelo canal (tamanho/formato por tipo) — o
     // compositor bloqueia o anexo incompatível antes de enviar.
     media_limits: d.media_limits || null,
