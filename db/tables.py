@@ -592,21 +592,22 @@ team_members = Table(
 )
 Index("idx_team_members_user", team_members.c.user_id)
 
-# Cursor durável do round-robin, isolado por time + inbox. O lock desta row
-# serializa distribuições concorrentes entre workers/processos; ``last_user_id``
-# é apagado quando o usuário some e a rodada seguinte reinicia no primeiro
-# elegível. A ordem canônica de locks é team -> state -> conversation.
+# Cursor durável do round-robin, UM por time (plano 166, rodízio entre o time —
+# não entre inboxes). A elegibilidade continua olhando a inbox da conversa
+# (quem não é da caixa é pulado), mas a rodada é compartilhada: o cursor segue
+# o time por todas as caixas. O lock desta row serializa distribuições
+# concorrentes entre workers/processos; ``last_user_id`` é apagado quando o
+# usuário some e a rodada seguinte reinicia no primeiro elegível. A ordem
+# canônica de locks é team -> state -> conversation.
 team_routing_state = Table(
     "team_routing_state",
     metadata,
     Column("team_id", Integer,
            ForeignKey("teams.id", ondelete="CASCADE"), nullable=False),
-    Column("inbox_id", Integer,
-           ForeignKey("inboxes.id", ondelete="CASCADE"), nullable=False),
     Column("last_user_id", Integer,
            ForeignKey("users.id", ondelete="SET NULL")),
     Column("updated_at", Float, nullable=False),
-    PrimaryKeyConstraint("team_id", "inbox_id"),
+    PrimaryKeyConstraint("team_id"),
 )
 Index("idx_team_routing_state_last_user", team_routing_state.c.last_user_id)
 

@@ -8,10 +8,17 @@ export const ACCESS_MODES = [
 
 export const ROUTING_MODES = [
   { value: 'manual', label: 'Manual', description: 'Vincula o time sem escolher um responsável.' },
-  { value: 'round_robin', label: 'Round-robin', description: 'Alterna entre membros ativos que também pertencem à inbox.' },
+  { value: 'round_robin', label: 'Round-robin', description: 'Alterna entre os membros ativos do time. Quem não pertence à caixa de entrada da conversa é pulado.' },
   { value: 'fixed_user', label: 'Atendente fixo', description: 'Encaminha sempre para o atendente selecionado quando elegível.' },
   { value: 'fixed_ai', label: 'Agente de IA', description: 'Encaminha para o agente de IA selecionado quando habilitado.' },
 ];
+
+// "Atribuição automática do time": o interruptor é o modo manual invertido.
+// Desligado = `manual` (padrão); ligado = uma das estratégias abaixo, com
+// round-robin como padrão ao ligar.
+export const AUTO_ASSIGN_MODES = ROUTING_MODES.filter(option => option.value !== 'manual');
+export const DEFAULT_AUTO_ASSIGN_MODE = 'round_robin';
+export const isAutoAssign = (routingMode) => routingMode !== 'manual';
 
 const ACCESS_VALUES = new Set(ACCESS_MODES.map(option => option.value));
 const ROUTING_VALUES = new Set(ROUTING_MODES.map(option => option.value));
@@ -47,7 +54,7 @@ export function validateTeamForm(form, { users = [], aiAgents = [], originalTeam
   const errors = {};
   if (!(form.name || '').trim()) errors.name = 'Informe um nome para o time.';
   if (!ACCESS_VALUES.has(form.accessMode)) errors.accessMode = 'Selecione um modo de acesso válido.';
-  if (!ROUTING_VALUES.has(form.routingMode)) errors.routingMode = 'Selecione uma distribuição válida.';
+  if (!ROUTING_VALUES.has(form.routingMode)) errors.routingMode = 'Selecione uma atribuição automática válida.';
 
   const selectedUsers = (form.memberIds || []).map(id =>
     users.find(user => sameId(user.id, id))).filter(Boolean);
@@ -115,7 +122,9 @@ export function accessLabel(team) {
 }
 
 export function routingLabel(team) {
-  return ROUTING_MODES.find(option => option.value === team?.routing_mode)?.label || 'Manual';
+  const label = ROUTING_MODES.find(option => option.value === team?.routing_mode)?.label;
+  if (!label || !isAutoAssign(team?.routing_mode)) return 'Atribuição manual';
+  return `Automática · ${label}`;
 }
 
 export function routingTargetLabel(team, users, aiAgents) {

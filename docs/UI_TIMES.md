@@ -9,12 +9,23 @@ no backend; a interface apenas representa capabilities devolvidas pelas APIs.
   time fica logo abaixo; quando só um existe, não se reserva uma linha vazia.
 - Operação em lote: o fluxo futuro usa preflight e resultado tudo-ou-nada. Não
   há chamada de bulk no frontend até os endpoints da fase R3 serem publicados.
-- Administração: a superfície é `/teams`, separada de Usuários e Grupos. O
-  deep-link legado é normalizado somente depois do gate `team.manage`.
+- Administração: Times é a 3ª sub-aba da tela Usuários, ao lado de Grupos de
+  permissão (`/users/teams[/id]`). Cada sub-aba tem a SUA permissão
+  ([usersTabs.js](../web/static/js/services/usersTabs.js)): Usuários e Grupos pedem
+  `users.manage`, Times pede `team.manage`; a tela abre para quem tem qualquer
+  uma e quem só gerencia times vê só a aba Times. O antigo `/teams[/id]` segue
+  como alias e é normalizado para `/users/teams` só depois do gate.
 - Acesso: os rótulos são `Aberto`, `Oculto da lista` e `Privado`. “Restrito” não
   é usado porque não informa se o link direto também está protegido.
-- Distribuição: `Manual`, `Round-robin`, `Atendente fixo` e `Agente de IA` são
-  apenas o vocabulário visual aprovado. Campos e chamadas aguardam R1/R3.
+- Atribuição automática do time: um interruptor. Desligado = `manual` (o
+  padrão: a conversa fica no time, sem responsável). Ligado, escolhe-se a
+  estratégia — `Round-robin` (padrão ao ligar), `Atendente fixo` ou `Agente de
+  IA`. ⚠️ O interruptor é só a leitura de `routing_mode`, sem coluna nova.
+- Round-robin é **entre o time, não entre inboxes**: há UM cursor por time
+  (`team_routing_state` com PK `team_id`), compartilhado por todas as caixas. A
+  inbox da conversa continua só **filtrando a elegibilidade** — membro do time
+  que não pertence à caixa é pulado, para não atribuir uma conversa que ele não
+  consegue abrir.
 
 ## Catálogo normalizado
 
@@ -84,17 +95,17 @@ Contato          👥 Comercial         Contato        👥 Come…
 ```
 
 ```text
-Acesso                              Distribuição
-(•) Aberto                          (•) Manual
-( ) Oculto da lista                 ( ) Round-robin
-( ) Privado                         ( ) Atendente fixo  [destino]
-  [ ] Responsável pode visualizar   ( ) Agente de IA   [destino]
+Acesso                              Atribuição automática do time
+(•) Aberto                          Atribuir conversas automaticamente  [ ○ ]  desligado = manual
+( ) Oculto da lista                 ligado:  Estratégia [ Round-robin ▾ ]
+( ) Privado                                    Round-robin · Atendente fixo [destino]
+  [ ] Responsável pode visualizar              · Agente de IA [destino]
 ```
 
 ## Administração U2
 
 Create e edit usam o mesmo `TeamForm` e enviam uma única intenção com dados,
-membros, acesso e distribuição. A UI espera que o catálogo administrativo
+membros, acesso e atribuição automática. A UI espera que o catálogo administrativo
 `GET /api/teams?include_inactive=true`, gated por `team.manage`, entregue:
 
 ```text
@@ -104,6 +115,14 @@ membros, acesso e distribuição. A UI espera que o catálogo administrativo
   ai_agents: [{ agent_key, display_name, enabled }]
 }
 ```
+
+⚠️ **O layout copia o de Usuários e Grupos de permissão — não volte para duas
+colunas.** O formulário é UMA coluna de campos de largura total (Nome, Descrição,
+Membros, Acesso, Atribuição automática, IA), botões à direita no fim, sem rodapé
+`sticky`; o cabeçalho é a descrição à esquerda + `+ Novo time` à direita e o card
+da lista usa o mesmo esqueleto do `RoleCard` (`p-3`, edição abaixo de um
+`border-t`). A versão anterior (`xl:grid-cols-2`, cada bloco numa caixa) ficava
+visivelmente diferente das duas telas irmãs. Travado em `TeamsManager.test.js`.
 
 Assim, alguém com `team.manage` não precisa receber `users.manage`. O hard delete
 só aparece para time inativo quando `conversation_count === 0`; ausência da

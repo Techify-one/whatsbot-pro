@@ -23,12 +23,12 @@ import QuickReplies from '../QuickReplies.js';
 import CustomAttributesManager from '../CustomAttributesManager.js';
 import RuntimePanel from '../RuntimePanel.js';
 import UsersManager from '../UsersManager.js';
-import TeamsManager from '../TeamsManager.js';
 import AuditLog from '../AuditLog.js';
 import IntegrationsScreen from '../IntegrationsScreen.js';
 import AgentEngine from '../ai/AgentEngine.js';
 import { PageHeader } from './GearMenu.js';
 import { hasPermission } from '../../utils/permissions.js';
+import { canOpenUsersScreen } from '../../services/usersTabs.js';
 
 const html = htm.bind(h);
 
@@ -88,18 +88,13 @@ export function ScreenRouter({
       </div>`;
   }
   if (tab === 'users') {
-    return html`<div class="w-full p-4">
-        <${PageHeader} title="Usuários" onBack=${() => setTab('contacts')} />
-        <${UsersManager} initialEntity=${entFor('users')} />
-      </div>`;
-  }
-  if (tab === 'teams') {
-    if (!hasPermission(currentUser, 'team.manage')) {
-      return html`<${PermissionDenied} label="a administração de times" />`;
+    // Abre para quem tem users.manage OU team.manage; cada sub-aba filtra a sua.
+    if (!canOpenUsersScreen(currentUser)) {
+      return html`<${PermissionDenied} label="a administração de usuários e times" />`;
     }
     return html`<div class="w-full p-4">
-        <${PageHeader} title="Times" onBack=${() => setTab('contacts')} />
-        <${TeamsManager} initialEntity=${entFor('teams')} />
+        <${PageHeader} title="Usuários" onBack=${() => setTab('contacts')} />
+        <${UsersManager} initialEntity=${entFor('users')} currentUser=${currentUser} />
       </div>`;
   }
   if (tab === 'api-keys') {

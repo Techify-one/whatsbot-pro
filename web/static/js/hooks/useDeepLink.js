@@ -8,7 +8,7 @@
 // reabrir a entidade no load/back-forward e empurrar a URL ao selecionar.
 //
 // Modelo de seleção: `{ sub?, id? }`. `sub` é a sub-aba (agents/prompts/… no
-// /ai, roles em /users, o escopo contact/conversation em custom-attributes);
+// /ai, roles e teams em /users, o escopo contact/conversation em custom-attributes);
 // `id` é o identificador natural da entidade (agent_key, plugin id, short_code…).
 import { useRef, useEffect, useCallback } from 'preact/hooks';
 
@@ -49,20 +49,18 @@ const ENTITY_ROUTES = [
     build: ({ id }) => `/channels/${enc(id)}`,
   },
   {
-    tab: 'teams', base: '/teams',
-    parse: (r) => r.length === 1 ? { id: dec(r[0]) } : null,
-    build: ({ id }) => `/teams/${enc(id)}`,
-  },
-  {
     tab: 'users', base: '/users',
-    // /users/{id}  ·  /users/roles  ·  /users/roles/{role_key}
+    // /users/{id}  ·  /users/roles[/{role_key}]  ·  /users/teams[/{team_id}]
     parse: (r) => {
       if (r[0] === 'roles') return { sub: 'roles', id: r[1] != null ? dec(r[1]) : undefined };
+      if (r[0] === 'teams') return { sub: 'teams', id: r[1] != null ? dec(r[1]) : undefined };
       return r.length === 1 ? { id: dec(r[0]) } : null;
     },
     build: ({ sub, id }) => sub === 'roles'
       ? `/users/roles${id != null ? `/${enc(id)}` : ''}`
-      : `/users/${enc(id)}`,
+      : sub === 'teams'
+        ? `/users/teams${id != null ? `/${enc(id)}` : ''}`
+        : `/users/${enc(id)}`,
   },
   {
     tab: 'quick-replies', base: '/quick-replies',
@@ -85,10 +83,12 @@ const entryForTab = (tab) => ENTITY_ROUTES.find((r) => r.tab === tab);
 export function entityFromPath() {
   const segs = window.location.pathname.split('/').filter(Boolean);
   if (!segs.length) return null;
-  // Compatibilidade do deep-link anterior. A tela /teams aplica replaceState
-  // somente depois do gate team.manage do ScreenRouter.
-  if (segs[0] === 'users' && segs[1] === 'teams' && segs.length <= 3) {
-    return { tab: 'teams', id: segs[2] != null ? dec(segs[2]) : undefined, legacy: true };
+  // Times voltou a ser sub-aba de Usuários (/users/teams). O caminho próprio
+  // /teams[/{id}] existiu por um tempo e pode estar em favoritos: resolve para a
+  // mesma sub-aba. Isto roda ANTES do primeiro render (a aba inicial vem daqui),
+  // e o TeamsManager reescreve a URL para /users/teams só depois do gate.
+  if (segs[0] === 'teams' && segs.length <= 2) {
+    return { tab: 'users', sub: 'teams', id: segs[1] != null ? dec(segs[1]) : undefined, legacy: true };
   }
   const entry = ENTITY_ROUTES.find((r) => r.base === `/${segs[0]}`);
   if (!entry) return null;

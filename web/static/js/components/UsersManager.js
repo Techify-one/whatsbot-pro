@@ -9,7 +9,10 @@ import { useEffect, useState, useRef } from 'preact/hooks';
 import htm from 'htm';
 import PermissionPicker from './PermissionPicker.js';
 import RolesManager from './RolesManager.js';
+import TeamsManager from './TeamsManager.js';
 import { useDeepLink, entityPath, basePath } from '../hooks/useDeepLink.js';
+import { hasPermission } from '../utils/permissions.js';
+import { visibleUsersSubtabs, resolveUsersView } from '../services/usersTabs.js';
 import {
   getUsers,
   getRoles,
@@ -222,26 +225,24 @@ function PasswordModal({ user, onSubmit, onCancel, busy }) {
   `;
 }
 
-const SUBTABS = [
-  { id: 'users', label: 'Usuários' },
-  { id: 'roles', label: 'Grupos de permissão' },
-];
-
 function _subtabPath(id) {
   if (id === 'roles') return entityPath('users', { sub: 'roles' });
+  if (id === 'teams') return entityPath('users', { sub: 'teams' });
   return basePath('users');
 }
 
-export default function UsersManager({ initialEntity }) {
-  // Sub-view (Usuários | Papéis) espelha a URL.
-  const [view, setView] = useState(() => (
-    initialEntity && initialEntity.sub === 'roles' ? 'roles'
-    : 'users'));
+export default function UsersManager({ initialEntity, currentUser = null }) {
+  // Cada sub-aba tem a sua permissão (usersTabs.js): quem só tem team.manage vê
+  // só "Times" e nem chega a chamar as APIs de usuários/grupos (users.manage).
+  const subtabs = visibleUsersSubtabs(currentUser);
+  const canManageUsers = hasPermission(currentUser, 'users.manage');
+  // Sub-view (Usuários | Grupos | Times) espelha a URL.
+  const [view, setView] = useState(() => resolveUsersView(initialEntity, currentUser));
   const [users, setUsers] = useState([]);
   const [roleDefs, setRoleDefs] = useState([]);
   const [permCatalog, setPermCatalog] = useState([]);
   const [inboxes, setInboxes] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(canManageUsers);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
@@ -256,6 +257,7 @@ export default function UsersManager({ initialEntity }) {
   }, [editing, creating]);
 
   async function load() {
+    if (!canManageUsers) { setLoading(false); return; }
     setLoading(true);
     setError('');
     const [uRes, rRes] = await Promise.all([getUsers(), getRoles()]);
@@ -273,15 +275,14 @@ export default function UsersManager({ initialEntity }) {
 
   // Sub-view segue a URL (deep-link / back-forward).
   useEffect(() => {
-    setView(initialEntity && initialEntity.sub === 'roles' ? 'roles'
-      : 'users');
+    setView(resolveUsersView(initialEntity, currentUser));
   }, [initialEntity]);
 
-  // Deep-link /users/<id> (sub-view Usuários). RolesManager cuida de
-  // /users/roles/<key>; Times vive em /teams e não passa por esta tela.
+  // Deep-link /users/<id> (sub-view Usuários). RolesManager e TeamsManager cuidam
+  // de /users/roles/<key> e /users/teams/<id>.
   const pushUrl = useDeepLink({
     tab: 'users',
-    resolve: initialEntity && !initialEntity.sub ? { id: initialEntity.id } : null,
+    resolve: canManageUsers && initialEntity && !initialEntity.sub ? { id: initialEntity.id } : null,
     ready: !loading,
     open: (sel) => {
       if (!sel || sel.id == null) { setEditing(null); return; }
@@ -331,7 +332,7 @@ export default function UsersManager({ initialEntity }) {
   return html`
     <div>
       <div class="flex gap-1 border-b border-wa-border mb-4 overflow-x-auto">
-        ${SUBTABS.map(t => html`
+        ${subtabs.map(t => html`
           <!-- Plano 106 · F4 (B6): sub-aba é navegação → <a href>. onClick inalterado. -->
           <a key=${t.id}
             href=${_subtabPath(t.id)}
@@ -350,6 +351,7 @@ export default function UsersManager({ initialEntity }) {
       </div>
 
       ${view === 'roles' ? html`<${RolesManager} initialEntity=${initialEntity} />`
+      : view === 'teams' ? html`<${TeamsManager} initialEntity=${initialEntity} />`
       : html`<div>
       <div class="flex items-center justify-between mb-4">
         <p class="text-[13px] text-wa-secondary">

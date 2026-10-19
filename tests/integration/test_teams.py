@@ -147,6 +147,9 @@ def test_team_crud_exposes_routing_fields_counts_and_editor_catalogs(client):
     assert any(user["id"] == member["id"] for user in data["users"])
     assert all(agent.get("agent_key") for agent in data["ai_agents"])
     assert all(agent_repo.get(agent["agent_key"])["enabled"] for agent in data["ai_agents"])
+    # O editor lê ``enabled`` de cada item; sem o campo todo agente aparecia
+    # "(desabilitado)" e a estratégia "Agente de IA" ficava inutilizável.
+    assert all(agent.get("enabled") is True for agent in data["ai_agents"])
 
     default_agent = agent_repo.get_default()
     response = client.put(f"/api/teams/{team['id']}", json={
