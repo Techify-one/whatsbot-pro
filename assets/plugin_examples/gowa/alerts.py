@@ -38,6 +38,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -319,9 +320,18 @@ async def _tg_delete(token: str, chat_id: str, message_id: int) -> bool:
 
 # ── Formatação das mensagens ─────────────────────────────────────────────────
 
-def _reconnect_url(panel_url: str) -> str:
-    base = panel_url or "http://localhost:8080"
-    return f"{base}/gowa/config"
+def _reconnect_url(panel_url: str, channel_id: str = "") -> str:
+    """Link do alerta: a tela de Canais, já com o canal caído aberto no QR.
+
+    ⚠️ NÃO use ``/gowa/config``: a tela do plugin é ``config: true`` e o painel não
+    a roteia (só o modal "Configurar" em /plugins), então esse path caía na caixa de
+    conversas. ``/channels/<id>?connect=1`` abre o ``QRConnect`` do canal; se o id
+    não resolver (canal arquivado), a tela cai na lista de Canais.
+    """
+    base = (panel_url or "http://localhost:8080").rstrip("/")
+    if not channel_id:
+        return f"{base}/channels"
+    return f"{base}/channels/{quote(str(channel_id), safe='')}?connect=1"
 
 
 def _resolve_tz_name() -> str:
@@ -369,16 +379,14 @@ def _msg_disconnected(down: list[dict], panel_url: str) -> str:
     O singular/plural do título é resolvido pela quantidade.
     """
     plural = "s" if len(down) > 1 else ""
+    # Um link POR caixa: com várias caídas, cada uma abre o QR do seu próprio canal.
     blocks = "\n\n".join(
         f"Caixa de entrada: <b>{ch['name']}</b>\n"
-        f"Número: {ch.get('phone') or '—'}"
+        f"Número: {ch.get('phone') or '—'}\n"
+        f'🔗 <a href="{_reconnect_url(panel_url, ch.get("id", ""))}">Reconectar agora</a>'
         for ch in down
     )
-    return (
-        f"🔴 <b>WhatsApp desconectado{plural}</b>\n\n"
-        f"{blocks}\n\n"
-        f'🔗 <a href="{_reconnect_url(panel_url)}">Reconectar agora</a>'
-    )
+    return f"🔴 <b>WhatsApp desconectado{plural}</b>\n\n{blocks}"
 
 
 def _msg_recovered_all() -> str:
@@ -391,7 +399,22 @@ def _msg_recovered_all() -> str:
 
 # ── Loop principal ───────────────────────────────────────────────────────────
 
+def _update_in_progress() -> bool:
+    """True durante a troca do binário do GOWA e logo depois.
+
+    Reiniciar o GOWA derruba TODOS os números por alguns segundos; sem esta pausa a
+    própria atualização mandaria um falso "WhatsApp desconectado" ao Telegram.
+    Import defensivo e tardio: o motor de alerta não depende do atualizador."""
+    try:
+        from . import updater
+        return bool(updater.alerts_muted())
+    except Exception:  # noqa: BLE001 — sem o módulo (core/teste antigo): não silencia
+        return False
+
+
 async def _tick(deps) -> None:
+    if _update_in_progress():
+        return
     cfg = await asyncio.to_thread(_alert_config)
     if not cfg["token"] or not cfg["chat_id"]:
         return  # bot/destino não configurados (tela Plugins → WhatsApp (GOWA))

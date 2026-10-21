@@ -24,9 +24,82 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
+import threading
+import time
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# ── Ponte atualizador ⇄ processos ────────────────────────────────────────────
+
+class GowaRuntime:
+    """O que o atualizador (``updater.py``, puro) precisa dos processos GOWA.
+
+    Governa TODOS os processos deste plugin — o compartilhado e os dedicados por
+    proxy (plano 52) — porque trocar o binário com um deles ainda rodando o deixaria
+    na versão velha até o próximo boot (e, no Windows, travaria o .exe).
+    """
+
+    def __init__(self, deps, shared_managed):
+        self._deps = deps
+        self._shared = shared_managed
+
+    def _processes(self) -> list:
+        from . import processes
+        procs = [self._shared] if self._shared is not None else []
+        procs += [i["managed"] for i in processes._MANAGED.values() if i.get("managed")]
+        return procs
+
+    def stop(self) -> None:
+        for mp in self._processes():
+            try:
+                mp.stop()
+            except Exception as exc:  # noqa: BLE001 — parar um não impede de parar os outros
+                logger.error("gowa runtime: falha ao parar %s: %s", mp.spec.name, exc)
+            # O watchdog do ManagedProcess só percebe o ``stop`` no próximo ciclo (até
+            # 2s). Religar antes disso deixa DOIS watchdogs no mesmo processo.
+            wd = getattr(mp, "_watchdog", None)
+            if wd is not None and wd.is_alive() and wd is not threading.current_thread():
+                wd.join(timeout=6)
+
+    def start(self) -> None:
+        from . import updater
+        for mp in self._processes():
+            # O argv foi montado com o binário de ``bin/`` (o core não o conhece
+            # gerenciado): reaponta o executável para o resolvido agora.
+            mp.spec.cmd = updater.apply_binary(list(mp.spec.cmd))
+            mp.spec.signature = str(mp.spec.cmd[0]) if mp.spec.cmd else ""
+            mp.start()
+        cb = getattr(getattr(self._deps, "gowa_manager", None), "_on_restart", None)
+        if cb:  # mesmo callback do restart pelo watchdog: zera cliente, QR e identidade
+            try:
+                cb()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("gowa runtime: on_restart falhou: %s", exc)
+
+    def wait_healthy(self, timeout: float) -> bool:
+        client = self._deps.gowa_client
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if client.health_check():
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1)
+        return False
+
+    def running_version(self) -> str:
+        from . import updater
+        return updater.probe_running_version(self._deps.gowa_manager.port)
+
+    def session_root(self) -> Path:
+        # O GOWA não tem flag para o caminho do banco: grava em ``<cwd>/storages``
+        # (e o dedicado, em ``<cwd>/storages/gowa_ch_<id>/storages``). cwd, não o
+        # diretório do binário.
+        return Path.cwd()
 
 
 async def _notify_degraded(deps, message: str) -> None:
@@ -104,6 +177,16 @@ async def setup(ctx) -> None:
         logger.error("gowa: _build_cmd() returned empty argv — sandbox-only mode")
         await _notify_degraded(deps, "GOWA indisponível — modo sandbox disponível")
         return
+    # O core monta o argv com ``bin/gowa`` fixo. Se o atualizador deste plugin
+    # instalou uma versão mais nova em ``storages/bin/``, é ela que sobe. Sem
+    # binário gerenciado devolve o argv intacto (comportamento histórico).
+    from . import updater as gowa_updater
+    cmd = gowa_updater.apply_binary(cmd)
+    # GOWA >= 9.0 baixa e serve um dashboard próprio em ``/`` (do GitHub, em runtime).
+    # O WhatsBot só fala com a API; deixar isso ligado seria um download externo e uma
+    # UI sem autenticação em porta de rede, por nada. ``setdefault``: quem quiser a UI
+    # exporta ``APP_UI_ENABLED=true``. O 8.x ignora a variável.
+    os.environ.setdefault("APP_UI_ENABLED", "false")
     # (signature = argv[0], the resolved binary path — derived inside build_spec)
 
     # Debug-log parity (WHATSBOT_GOWA_DEBUG): reuse the manager's helpers so
@@ -149,6 +232,10 @@ async def setup(ctx) -> None:
     # Redundant backstop: teardown also runs stop_owner('gowa'), but on_unload makes
     # the kill explicit even if ownership bookkeeping ever changes.
     ctx.on_unload(managed.stop)
+    # Entrega ao atualizador o controle dos processos; ao descarregar o plugin ele
+    # volta a "não gerenciado" (as rotas passam a recusar em vez de operar no vazio).
+    gowa_updater.set_runtime(GowaRuntime(deps, managed))
+    ctx.on_unload(lambda: gowa_updater.set_runtime(None))
 
     try:
         ctx.spawn_task("gowa_init", lambda: _post_spawn_init(deps),

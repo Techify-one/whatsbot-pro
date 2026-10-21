@@ -6,12 +6,14 @@
 # /bin/bash of both Linux and macOS.
 #
 # NOTE: windows_start.bat cannot source a shell file. When changing the values
-# below (especially GOWA_VERSION or the reload-dir set), mirror the change in
-# windows_start.bat by hand — search for "scripts/_common.sh" there.
+# below (especially the reload-dir set), mirror the change in windows_start.bat by hand —
+# search for "scripts/_common.sh" there. (The Windows GOWA is the tracked bin/gowa.exe.)
 
-# Version of the GOWA binary that matches the client in gowa/client.py and the
-# Dockerfile (ARG GOWA_VERSION). Overridable via the GOWA_VERSION env var.
-GOWA_VERSION="${GOWA_VERSION:-8.11.0}"
+# Version of the GOWA binary the launchers download. Single source of truth: the tracked
+# GOWA_VERSION file at the repo root (also read by the Dockerfile and by the gowa plugin's
+# updater). Overridable via the GOWA_VERSION env var. Both launchers cd to the repo root
+# before sourcing this file.
+GOWA_VERSION="${GOWA_VERSION:-$(cat ./GOWA_VERSION 2>/dev/null || echo 9.6.0)}"
 
 # Directories uvicorn watches for hot-reload (core + plugins). uvicorn validates
 # each --reload-dir before booting, so storages/plugins must exist (it is created
