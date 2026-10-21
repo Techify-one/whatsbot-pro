@@ -274,7 +274,7 @@ export default function GeneralSettings({ currentUser } = {}) {
                         type="button"
                         aria-pressed=${react.weekdays.includes(d.id)}
                         title=${d.full}
-                        onClick=${() => patchReact({ weekdays: reactivation.toggleWeekday(react.weekdays, d.id) })}
+                        onClick=${() => setReact((r) => ({ ...r, weekdays: reactivation.toggleWeekday(r.weekdays, d.id) }))}
                         class="px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors ${react.weekdays.includes(d.id)
                           ? 'bg-wa-teal text-white border-wa-teal'
                           : 'bg-wa-panel text-wa-secondary border-wa-border hover:bg-wa-hover'}"
