@@ -1,9 +1,9 @@
 // AI Engine — "Configurações" tab. Holds the GLOBAL AI settings ONLY:
-// o interruptor GLOBAL de ligar/desligar a IA (checado ANTES de tudo), a chave de
-// API e o aviso de saldo. TODO o resto (automação por contato, resposta em grupos,
-// transcrição, contexto, agrupamento, mensagens picadas, alerta de transferência)
-// é configurado POR CANAL na tela "Canais" (plano 21). O PROMPT e o MODELO são
-// definidos por agente na aba "Agentes".
+// o interruptor GLOBAL de ligar/desligar a IA (checado ANTES de tudo), as "Automações"
+// (religar a IA automaticamente — plano 178), a chave de API e o aviso de saldo. O
+// comportamento de CADA número (resposta em grupos, transcrição, contexto, agrupamento,
+// mensagens picadas, alerta de transferência) é configurado POR CANAL na tela "Canais"
+// (plano 21). O PROMPT e o MODELO são definidos por agente na aba "Agentes".
 // Self-contained: loads via getConfig() and persists via saveConfig() (partial
 // PUT — only sends the keys it owns, so the Painel keeps owning the rest).
 
@@ -12,10 +12,15 @@ import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { getConfig, saveConfig, testApiKey } from '../../services/api.js';
 import { Slot } from '../../plugins/Slot.js';
+import * as reactivation from '../../services/aiReactivation.js';
+import { hasPermission } from '../../utils/permissions.js';
 
 const html = htm.bind(h);
 
-export default function GeneralSettings() {
+export default function GeneralSettings({ currentUser } = {}) {
+  // plano 178 — o card "Automações" tem permissão PRÓPRIA (não basta o settings.manage
+  // que abre a aba). Sem ela o card continua visível, só que somente leitura.
+  const canReactivation = hasPermission(currentUser, 'agent.reactivation.manage');
   const [config, setConfig] = useState(null);
   // Interruptor GLOBAL da IA (checado antes do toggle por canal e por atendimento).
   const [autoReply, setAutoReply] = useState(true);
@@ -42,6 +47,11 @@ export default function GeneralSettings() {
   const [toolLimitPerTool, setToolLimitPerTool] = useState(0);
   const [toolLimitTotal, setToolLimitTotal] = useState(25);
   const [maxRouteDepth, setMaxRouteDepth] = useState(5);
+  // plano 178 — "Automações": religar a IA automaticamente. O estado é UM objeto
+  // (campos que andam juntos); a lógica de formulário vive no módulo puro
+  // `services/aiReactivation.js`, testável com `node --test`.
+  const [react, setReact] = useState(() => reactivation.fromConfig({}));
+  const patchReact = (patch) => setReact((r) => ({ ...r, ...patch }));
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -59,6 +69,7 @@ export default function GeneralSettings() {
     setToolLimitPerTool(cfg.ai_tool_call_limit_per_tool ?? 0);
     setToolLimitTotal(cfg.ai_tool_call_limit_total ?? 25);
     setMaxRouteDepth(cfg.ai_max_route_depth ?? 5);
+    setReact(reactivation.fromConfig(cfg));
   }
 
   // Inteiro ≥ 0 (0 = desligado). Campo vazio/lixo cai no default declarado —
@@ -125,6 +136,11 @@ export default function GeneralSettings() {
       ai_tool_call_limit_per_tool: intOrDefault(toolLimitPerTool, 0),
       ai_tool_call_limit_total: intOrDefault(toolLimitTotal, 25),
       ai_max_route_depth: Math.max(1, intOrDefault(maxRouteDepth, 5)),
+      // plano 178 — as 8 chaves + o fuso do NAVEGADOR (o "08:00" da agenda é lido
+      // no fuso de quem salvou; o servidor costuma estar em UTC). Sem a permissão o
+      // card é somente leitura e as chaves NÃO vão no corpo: o servidor as descartaria
+      // em silêncio, e mandá-las só esconderia que o salvar não valeu para elas.
+      ...(canReactivation ? reactivation.toPayload(react) : {}),
     };
     // Only include the API key when the user typed a new one.
     if (apiKey.trim()) data.openrouter_api_key = apiKey.trim();
@@ -166,14 +182,16 @@ export default function GeneralSettings() {
     try { new RegExp(t); } catch { invalidPatternLines.push(i + 1); }
   });
 
+  const rule = reactivation.describeRule(react);
+
   return html`
     <div class="flex flex-col gap-4">
       <p class="text-[13px] text-wa-secondary">
-        Configurações globais da IA: o interruptor geral, a chave de API e o aviso de saldo.
-        O comportamento de cada número (responder, grupos, transcrição, contexto, mensagens
-        picadas, alerta de transferência) é configurado <span class="font-medium">por canal</span>
-        na tela <span class="font-medium">Canais</span>. O prompt e o modelo são definidos por
-        agente na aba <span class="font-medium">Agentes</span>.
+        Configurações globais da IA: o interruptor geral, as automações, a chave de API e o
+        aviso de saldo. O comportamento de cada número (responder, grupos, transcrição,
+        contexto, mensagens picadas, alerta de transferência) é configurado
+        <span class="font-medium">por canal</span> na tela <span class="font-medium">Canais</span>.
+        O prompt e o modelo são definidos por agente na aba <span class="font-medium">Agentes</span>.
       </p>
 
       ${error ? html`<div class="text-[13px] text-red-500">${error}</div>` : null}
@@ -197,6 +215,148 @@ export default function GeneralSettings() {
           nenhum canal responde, mesmo que a IA esteja ativada no canal. Ligado, cada canal
           decide se responde pela sua própria configuração.
         </span>
+      </div>
+
+      <!-- plano 178 — Automações: religar a IA automaticamente -->
+      <div id="ai-reactivation" class="flex flex-col gap-3 p-3 bg-wa-panel rounded-lg border border-wa-border scroll-mt-4">
+        <div>
+          <div class="text-[14px] font-semibold text-wa-text">Automações</div>
+          <span class="text-[12px] text-wa-secondary">Rotinas que o sistema faz sozinho nas conversas.</span>
+        </div>
+
+        ${canReactivation ? null : html`
+          <div class="text-[12px] text-wa-secondary p-2 rounded-md bg-wa-bg border border-wa-border">
+            🔒 Você pode ver esta configuração, mas não alterá-la. Peça a quem administra
+            as permissões a opção <span class="font-medium">"IA: configurar o religamento automático da IA"</span>.
+          </div>
+        `}
+
+        <!-- fieldset desabilitado: o navegador desabilita TODOS os controles de dentro
+             (inclusive os botões de dia da semana), sem repetir disabled em cada um. -->
+        <fieldset disabled=${!canReactivation} class="contents">
+        <label class="flex items-center gap-2 text-[14px] font-medium text-wa-text ${canReactivation ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}">
+          <input
+            type="checkbox"
+            checked=${react.enabled}
+            onChange=${(e) => patchReact({ enabled: e.target.checked })}
+            class="w-4 h-4 rounded border-wa-border accent-wa-teal"
+          />
+          Religar a IA automaticamente na conversa
+        </label>
+        <span class="text-[12px] text-wa-secondary -mt-1">
+          Liga de novo a IA nas conversas em que ela parou de responder — por transferência
+          para um atendente, pausa manual ou conversa criada com a IA desligada. Só vale para
+          conversas <span class="font-medium">abertas</span>, e quem religa também tira o
+          responsável humano, como o botão da conversa.
+        </span>
+
+        ${react.enabled ? html`
+          <div class="flex flex-col gap-4 p-3 bg-wa-bg rounded-lg border border-wa-border ${canReactivation ? '' : 'opacity-70'}">
+            <div>
+              <label for="ai-reactivation-unit" class="block text-[12px] font-medium text-wa-text mb-1">Quando religar</label>
+              <select
+                id="ai-reactivation-unit"
+                value=${react.unit}
+                onChange=${(e) => patchReact({ unit: e.target.value })}
+                class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+              >
+                ${reactivation.UNITS.map((u) => html`<option value=${u.id}>${u.label}</option>`)}
+              </select>
+            </div>
+
+            ${rule.scheduled ? html`
+              <div class="flex flex-col gap-3">
+                <div>
+                  <span class="block text-[12px] font-medium text-wa-text mb-1">Dias da semana</span>
+                  <div class="flex flex-wrap gap-2">
+                    ${reactivation.WEEKDAYS.map((d) => html`
+                      <button
+                        type="button"
+                        aria-pressed=${react.weekdays.includes(d.id)}
+                        title=${d.full}
+                        onClick=${() => setReact((r) => ({ ...r, weekdays: reactivation.toggleWeekday(r.weekdays, d.id) }))}
+                        class="px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors ${react.weekdays.includes(d.id)
+                          ? 'bg-wa-teal text-white border-wa-teal'
+                          : 'bg-wa-panel text-wa-secondary border-wa-border hover:bg-wa-hover'}"
+                      >${d.label}</button>
+                    `)}
+                  </div>
+                  ${rule.emptySchedule ? html`
+                    <span class="text-[12px] text-red-500 block mt-1">
+                      Nenhum dia marcado — com isto a IA nunca será religada.
+                    </span>
+                  ` : null}
+                </div>
+                <div>
+                  <label for="ai-reactivation-time" class="block text-[12px] font-medium text-wa-text mb-1">Horário em que a IA volta a ser ligada</label>
+                  <input
+                    id="ai-reactivation-time"
+                    type="time"
+                    value=${react.time}
+                    onInput=${(e) => patchReact({ time: e.target.value })}
+                    class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
+                  />
+                </div>
+                <span class="text-[12px] text-wa-secondary">
+                  Nos dias marcados, neste horário (no fuso do seu navegador), a IA é religada
+                  nas conversas desligadas. Se o servidor estiver fora do ar nesse horário, ainda
+                  religa em até 1 hora depois.
+                </span>
+              </div>
+            ` : html`
+              <div>
+                <label for="ai-reactivation-value" class="block text-[12px] font-medium text-wa-text mb-1">Tempo sem mensagens (${reactivation.VALUE_HINT[react.unit]})</label>
+                <input
+                  id="ai-reactivation-value"
+                  type="number"
+                  min="1"
+                  max=${reactivation.MAX_VALUE}
+                  step="1"
+                  value=${react.value}
+                  onInput=${(e) => patchReact({ value: e.target.value })}
+                  class="wa-field w-32 px-3 py-1.5 rounded-md text-[14px]"
+                />
+                <span class="block text-[12px] text-wa-secondary mt-1">
+                  Conta a partir da última mensagem do cliente ou do atendente — ou de quando a
+                  IA foi desligada, o que for mais recente. As respostas da própria IA e as notas
+                  privadas não contam.
+                </span>
+              </div>
+            `}
+
+            <div>
+              <label for="ai-reactivation-sender" class="block text-[12px] font-medium text-wa-text mb-1">Dono da última mensagem</label>
+              <select
+                id="ai-reactivation-sender"
+                value=${react.lastSender}
+                onChange=${(e) => patchReact({ lastSender: e.target.value })}
+                class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+              >
+                ${reactivation.OWNERS.map((o) => html`<option value=${o.id}>${o.label}</option>`)}
+              </select>
+              <span class="block text-[12px] text-wa-secondary mt-1">Só religa as conversas cuja última mensagem foi enviada por quem você escolher.</span>
+            </div>
+
+            <label class="flex items-start gap-2 text-[14px] font-medium text-wa-text cursor-pointer">
+              <input
+                type="checkbox"
+                checked=${react.includeGroupsArchived}
+                onChange=${(e) => patchReact({ includeGroupsArchived: e.target.checked })}
+                class="w-4 h-4 mt-0.5 rounded border-wa-border accent-wa-teal"
+              />
+              <span class="flex flex-col">
+                Religar IA em grupos e conversas arquivadas
+                <span class="text-[12px] font-normal text-wa-secondary">Desmarcado, grupos e conversas arquivadas ficam como estão. Em grupos, a resposta continua seguindo a opção "Resposta da IA em grupos" configurada no canal.</span>
+              </span>
+            </label>
+          </div>
+
+          <span class="text-[12px] text-wa-secondary">
+            Não religa nos canais com a IA desligada, nem com o interruptor global desligado,
+            nem no número de provisionamento da chave de API.
+          </span>
+        ` : null}
+        </fieldset>
       </div>
 
       <!-- API -->

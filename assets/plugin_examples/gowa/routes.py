@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 from db.repositories import config_repo
 from plugins.context import core_permission
 
+from . import updater
+
 router = APIRouter()
 
 PLUGIN_ID = "gowa"
@@ -241,3 +243,110 @@ async def alert_test(payload: dict = Body(default={})):
     if not data.get("ok"):
         return {"ok": False, "error": data.get("description") or "Erro do Telegram."}
     return {"ok": True}
+
+
+# ── Atualizador do binário do GOWA ───────────────────────────────────────────
+# Trocar o binário REINICIA todos os processos GOWA (todos os números caem por
+# alguns segundos) e executa um arquivo baixado da rede: por isso a permissão é
+# ``plugins.manage`` (gestor/admin), não ``channel.manage``.
+#
+# ⚠️ Os paths ficam sob ``/binary/*`` DE PROPÓSITO. O core já tem
+# ``POST /api/plugins/{plugin_id}/update`` (atualizar o PLUGIN por .zip, campo ``file``)
+# e ele vence qualquer ``/update`` do plugin: a rota até ``existiria`` e responderia 422.
+#
+# A troca leva de dezenas de segundos a minutos (download + health check de até
+# 60s), mais que o timeout de muitos proxies reversos. A rota só DISPARA e responde;
+# a tela acompanha o andamento por polling em ``/binary/status``.
+
+_UPDATE_PERM = core_permission("plugins.manage")
+_update_tasks: set = set()  # referência forte: o loop só guarda weakref das tasks
+
+
+def _no_runtime() -> dict:
+    return {"ok": False, "error": (
+        "O GOWA não está sob o controle deste plugin (plugin desativado, ou binário "
+        "ausente no boot). Reinicie o servidor e tente de novo.")}
+
+
+def _update_audit_view(status: dict) -> dict:
+    return {"versao": status.get("installed_version"), "origem": status.get("source")}
+
+
+@router.get("/binary/status", dependencies=[_UPDATE_PERM])
+async def update_status():
+    """Retrato local (sem rede): o que está instalado/rodando e o andamento da troca."""
+    runtime = updater.get_runtime()
+    data = await asyncio.to_thread(updater.status, runtime)
+    return {"ok": True, "data": data}
+
+
+@router.get("/binary/check", dependencies=[_UPDATE_PERM])
+async def update_check(force: bool = False):
+    """Como ``/binary/status`` + a última release do GitHub (cache de 1h)."""
+    runtime = updater.get_runtime()
+    data = await asyncio.to_thread(updater.check, runtime, force)
+    return {"ok": True, "data": data}
+
+
+async def _run_in_background(coro_factory, action: str, before: dict) -> None:
+    """Roda ``coro_factory()`` (a troca, numa thread) e audita o desfecho.
+
+    ``create_task`` copia o contexto da request, então o ator da trilha é quem
+    clicou — o mesmo motivo de não usar ``threading.Thread`` aqui."""
+    try:
+        result = await asyncio.to_thread(coro_factory)
+    except updater.GowaUpdateBusy as exc:
+        result = {"ok": False, "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — a thread de fundo não pode morrer calada
+        result = {"ok": False, "message": f"Erro inesperado: {exc}"}
+    _audit(action, before=before, after={
+        "ok": bool(result.get("ok")), "versao": result.get("version"),
+        "revertido": bool(result.get("rolled_back")),
+        "mensagem": str(result.get("message") or "")[:300]})
+
+
+@router.post("/binary/update", dependencies=[_UPDATE_PERM])
+async def update_install(payload: dict = Body(default={})):
+    """Dispara a instalação de ``version`` e devolve na hora.
+
+    Fora da faixa homologada responde ``requires_confirmation`` — o cliente reenvia
+    com ``confirm_unsupported: true`` depois de o usuário aceitar.
+    """
+    runtime = updater.get_runtime()
+    if runtime is None:
+        return _no_runtime()
+    version = str(payload.get("version") or "").strip().lstrip("vV")
+    confirmed = bool(payload.get("confirm_unsupported"))
+    problem = updater.preflight(version, confirmed)
+    if problem is not None:
+        return {**problem, "error": problem.get("message")}
+    if updater.is_busy():
+        return {"ok": False, "error": "Já existe uma atualização do GOWA em andamento."}
+
+    before = _update_audit_view(await asyncio.to_thread(updater.status, runtime))
+    before["alvo"] = version
+    task = asyncio.create_task(_run_in_background(
+        lambda: updater.install(version, runtime=runtime, force_unsupported=confirmed),
+        "binario.atualizar", before))
+    _update_tasks.add(task)
+    task.add_done_callback(_update_tasks.discard)
+    return {"ok": True, "data": {"started": True, "version": version}}
+
+
+@router.post("/binary/rollback", dependencies=[_UPDATE_PERM])
+async def update_rollback():
+    """Restaura o binário anterior (e, se houve major, o snapshot da sessão)."""
+    runtime = updater.get_runtime()
+    if runtime is None:
+        return _no_runtime()
+    if not updater.can_rollback():
+        return {"ok": False, "error": "Não há versão anterior do GOWA para restaurar."}
+    if updater.is_busy():
+        return {"ok": False, "error": "Já existe uma atualização do GOWA em andamento."}
+
+    before = _update_audit_view(await asyncio.to_thread(updater.status, runtime))
+    task = asyncio.create_task(_run_in_background(
+        lambda: updater.rollback(runtime=runtime), "binario.reverter", before))
+    _update_tasks.add(task)
+    task.add_done_callback(_update_tasks.discard)
+    return {"ok": True, "data": {"started": True}}

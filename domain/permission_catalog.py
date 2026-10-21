@@ -52,6 +52,10 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     ("agent.tools.manage",     "IA: gerenciar tools (código e overrides)"),
     ("agent.credentials.manage", "IA: gerenciar credenciais das tools"),
     ("agent.variables.manage", "IA: gerenciar variáveis"),
+    # Plano 178 — quem configura o card "Automações" (religar a IA automaticamente).
+    # A regra devolve a IA a conversas de OUTRAS pessoas (e tira o responsável humano),
+    # então tem permissão própria em vez de ir de carona no ``settings.manage``.
+    ("agent.reactivation.manage", "IA: configurar o religamento automático da IA"),
     ("quickreply.manage",     "Respostas rápidas"),
     ("template.create",       "Criar templates (WhatsApp Cloud)"),
     ("template.delete",       "Apagar templates (WhatsApp Cloud)"),
@@ -145,6 +149,7 @@ PERMISSION_GROUPS: dict[str, tuple[str, str]] = {
     "agent.tools.manage": ("core", _G_AI),
     "agent.credentials.manage": ("core", _G_AI),
     "agent.variables.manage": ("core", _G_AI),
+    "agent.reactivation.manage": ("core", _G_AI),
     "sandbox.use": ("core", _G_AI),
     # Configurações e sistema
     "settings.manage": ("core", _G_SETTINGS),

@@ -434,6 +434,13 @@ export async function sendDocument(phone, file, caption = '', conversationId = n
     { document: file, caption, ..._scopeFields(conversationId, channelId) });
 }
 
+// "Agrupar" (plano 177): VÁRIOS arquivos numa só mensagem (e-mail: um e-mail, N anexos,
+// a legenda é o corpo). `kinds` é paralelo a `files` — o tipo é do CHAMADOR, nunca do MIME.
+export async function sendMediaGroup(phone, files, kinds, caption = '', conversationId = null, channelId = null) {
+  return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-media-group`,
+    { files, kinds: JSON.stringify(kinds), caption, ..._scopeFields(conversationId, channelId) });
+}
+
 export async function sendVideo(phone, file, caption = '', conversationId = null, channelId = null) {
   return uploadRequest(`/api/contacts/${encodeURIComponent(phone)}/send-video`,
     { video: file, caption, ..._scopeFields(conversationId, channelId) });

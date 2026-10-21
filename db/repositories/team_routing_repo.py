@@ -1,8 +1,10 @@
 """Canonical transactional write for team routing.
 
 The operation owns team, human/AI assignment, the conversation AI gate and the
-round-robin cursor in one PostgreSQL transaction. Callers authorize the actor
-before entering here; this module contains no HTTP or Request dependency.
+round-robin cursor in one PostgreSQL transaction. The cursor is ONE per team,
+shared by every inbox; the conversation's inbox only filters who is eligible.
+Callers authorize the actor before entering here; this module contains no HTTP
+or Request dependency.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from sqlalchemy import and_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.engine import get_engine
+from db.repositories.conversation_repo import ai_disabled_at_expr
 from db.tables import (
     ai_agents,
     conversations,
@@ -78,10 +81,11 @@ def route_to_team(
 ) -> TeamRoutingResult:
     """Route once, using lock order team -> state -> conversation.
 
-    A preliminary unlocked read obtains the immutable ``inbox_id`` needed for
-    the state key. The conversation itself is then locked before any ownership
-    write. If it vanished or changed inbox, the transaction rolls back, including
-    a state row/cursor already created for this attempt.
+    A preliminary unlocked read obtains the ``inbox_id`` used to filter eligible
+    users (the round-robin cursor itself is per team, not per inbox). The
+    conversation is then locked before any ownership write. If it vanished or
+    changed inbox, the transaction rolls back, including a state row/cursor
+    already created for this attempt.
     """
     conversation_id = int(conversation_id)
     team_id = int(team_id)
@@ -108,25 +112,14 @@ def route_to_team(
         if mode == "round_robin":
             conn.execute(
                 pg_insert(team_routing_state)
-                .values(
-                    team_id=team_id,
-                    inbox_id=inbox_id,
-                    last_user_id=None,
-                    updated_at=now,
-                )
+                .values(team_id=team_id, last_user_id=None, updated_at=now)
                 .on_conflict_do_nothing(
-                    index_elements=[
-                        team_routing_state.c.team_id,
-                        team_routing_state.c.inbox_id,
-                    ]
+                    index_elements=[team_routing_state.c.team_id]
                 )
             )
             state = conn.execute(
                 select(team_routing_state)
-                .where(
-                    team_routing_state.c.team_id == team_id,
-                    team_routing_state.c.inbox_id == inbox_id,
-                )
+                .where(team_routing_state.c.team_id == team_id)
                 .with_for_update()
             ).mappings().one()
 
@@ -172,10 +165,7 @@ def route_to_team(
                 # together with the conversation write.
                 conn.execute(
                     update(team_routing_state)
-                    .where(
-                        team_routing_state.c.team_id == team_id,
-                        team_routing_state.c.inbox_id == inbox_id,
-                    )
+                    .where(team_routing_state.c.team_id == team_id)
                     .values(last_user_id=assignee_user_id, updated_at=now)
                 )
         elif mode == "fixed_user":
@@ -215,6 +205,9 @@ def route_to_team(
             "assignee_user_id": assignee_user_id,
             "active_agent_key": active_agent_key,
             "ai_active": ai_active,
+            # plano 178: este caminho escreve ai_active sem passar por ``_update``,
+            # então carimba pela MESMA regra (1→0 carimba, 0→1 limpa, 0→0 mantém).
+            "ai_disabled_at": ai_disabled_at_expr(ai_active, now),
             "updated_at": now,
         }
         _write_conversation(conn, conversation_id, values)
@@ -236,13 +229,12 @@ def route_to_team(
     )
 
 
-def routing_state(team_id: int, inbox_id: int) -> dict | None:
+def routing_state(team_id: int) -> dict | None:
     """Read-only diagnostic used by tests and future administration surfaces."""
     with get_engine().connect() as conn:
         row = conn.execute(
             select(team_routing_state).where(
-                team_routing_state.c.team_id == int(team_id),
-                team_routing_state.c.inbox_id == int(inbox_id),
+                team_routing_state.c.team_id == int(team_id)
             )
         ).mappings().first()
     return dict(row) if row else None

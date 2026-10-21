@@ -2,8 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  AUTO_ASSIGN_MODES,
+  DEFAULT_AUTO_ASSIGN_MODE,
   filterTeamMembers,
   initialTeamForm,
+  isAutoAssign,
+  routingLabel,
   teamFormPayload,
   validateTeamForm,
 } from './teamAdmin.js';
@@ -79,4 +83,28 @@ test('busca de membros considera nome e email, sem alterar a lista', () => {
   assert.deepEqual(filterTeamMembers(users, 'EXAMPLE.COM').map(user => user.id), [1, 2]);
   assert.deepEqual(filterTeamMembers(users, 'ana').map(user => user.id), [1]);
   assert.equal(users.length, 2);
+});
+
+test('atribuição automática: desligado é manual (padrão), ligado oferece as outras 3 estratégias', () => {
+  assert.equal(initialTeamForm().routingMode, 'manual');
+  assert.equal(isAutoAssign('manual'), false);
+  for (const mode of ['round_robin', 'fixed_user', 'fixed_ai']) assert.equal(isAutoAssign(mode), true);
+  assert.deepEqual(AUTO_ASSIGN_MODES.map(option => option.value), ['round_robin', 'fixed_user', 'fixed_ai']);
+  assert.equal(DEFAULT_AUTO_ASSIGN_MODE, 'round_robin');
+});
+
+test('rótulo do card distingue atribuição manual de automática', () => {
+  assert.equal(routingLabel({ routing_mode: 'manual' }), 'Atribuição manual');
+  assert.equal(routingLabel({}), 'Atribuição manual');
+  assert.equal(routingLabel({ routing_mode: 'round_robin' }), 'Automática · Round-robin');
+  assert.equal(routingLabel({ routing_mode: 'fixed_ai' }), 'Automática · Agente de IA');
+});
+
+test('round-robin não exige destino: só o fixo exige', () => {
+  const form = initialTeamForm();
+  Object.assign(form, { name: 'Vendas', routingMode: 'round_robin' });
+  const errors = validateTeamForm(form, { users, aiAgents });
+  assert.equal(errors.defaultUserId, undefined);
+  assert.equal(errors.defaultAgentKey, undefined);
+  assert.equal(teamFormPayload(form).routing_mode, 'round_robin');
 });

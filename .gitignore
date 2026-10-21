@@ -26,8 +26,10 @@ build/
 # Plugins exportados (.zip distribuído pela Loja, não versionado no core)
 *-plugin.zip
 
-# Linux GOWA binary (baixado/buildado localmente por dev; não trackeado)
+# Linux GOWA binary (baixado/buildado localmente por dev; não trackeado) + carimbo da versão baixada
 bin/gowa
+bin/gowa.new
+bin/.gowa_stamp
 
 # Docker persistent data
 data/

@@ -339,7 +339,7 @@ def _spawn_dedicated(ctx, deps, cid: str, row: dict, proxy: str) -> bool:
         return False
 
     try:
-        cmd = gm._build_cmd(port=port, webhook_url=webhook)
+        cmd = _apply_binary(gm._build_cmd(port=port, webhook_url=webhook))
     except FileNotFoundError as e:
         logger.warning("gowa processes: binary missing (%s); cannot spawn %s", e, cid)
         return False
@@ -455,12 +455,32 @@ def reconcile_once(ctx, deps) -> dict:
     return plan
 
 
+def _apply_binary(cmd: list) -> list:
+    """Aponta o argv para o binário que o atualizador resolveu (``storages/bin``
+    quando há um gerenciado mais novo). Defensivo: sem o módulo, argv intacto."""
+    try:
+        from . import updater
+        return updater.apply_binary(cmd)
+    except Exception:  # noqa: BLE001
+        return cmd
+
+def _update_busy() -> bool:
+    try:
+        from . import updater
+        return updater.is_busy()
+    except Exception:  # noqa: BLE001
+        return False
+
 async def reconcile_loop(ctx, deps) -> None:
     """PERMANENT supervised task (lifecycle.setup). ``reconcile_once`` runs in a
-    worker thread — spawn() can block briefly on the stale-kill path."""
+    worker thread — spawn() can block briefly on the stale-kill path.
+
+    Pausa durante a troca do binário: o atualizador está parando e religando estes
+    mesmos processos, e uma passada aqui os religaria com o executável antigo."""
     while True:
         try:
-            await asyncio.to_thread(reconcile_once, ctx, deps)
+            if not _update_busy():
+                await asyncio.to_thread(reconcile_once, ctx, deps)
         except Exception as e:  # noqa: BLE001 — a bad pass must not kill the loop
             logger.warning("gowa processes: reconcile pass failed: %s", e)
         await asyncio.sleep(RECONCILE_INTERVAL)

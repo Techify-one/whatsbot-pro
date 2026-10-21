@@ -32,7 +32,7 @@ Este arquivo carrega a **regra**; o **porquê** (histórico, medições, o que e
 - **Python 3.11+** — linguagem principal
 - **SQLAlchemy 2.0 Core + Alembic** — camada de dados (Core, sem ORM declarativo)
 - **PostgreSQL** — banco único via `psycopg[binary]` (plano 29 Eixo C — Postgres-only). A env `DATABASE_URL` é obrigatória; sem ela o boot falha com erro acionável. SQLite foi removido
-- **GOWA** (go-whatsapp-web-multidevice v8.11.0) — bridge WhatsApp via REST, roda como subprocess
+- **GOWA** (go-whatsapp-web-multidevice **v9.6.0** embutido — arquivo `GOWA_VERSION`; atualizável pelo painel) — bridge WhatsApp via REST, roda como subprocess
 - **Proxy LLM da Techify** (`https://llm.techify.one/api/v1`) — provider de LLM, API **compatível com OpenRouter/OpenAI**. Substituiu o OpenRouter direto: a chave é provisionada pelo wizard de 1ª execução e o crédito/recarga é gerido pela Techify. O base URL é configurável via env `LLM_API_BASE_URL`. A chave continua sendo persistida na config key `openrouter_api_key` (nome legado mantido por compatibilidade)
 - **AGNO** (`agno` 2.x) — framework de agentes usado como **motor de LLM** do agente. O loop de raciocínio + tool calling roda via `agno.agent.Agent`, apontado ao proxy Techify pelo model `OpenAILike`. Encapsulado em [agent/agno_engine.py](agent/agno_engine.py); o `AgentHandler` delega a ele preservando todos os hooks de plugin (filters/events), usage e execution tracking. Transcrição de áudio/descrição de imagem continuam em chamadas diretas ao cliente OpenAI (não são agênticas)
 - **FastAPI + uvicorn** — backend web (REST API + WebSocket)
@@ -203,6 +203,7 @@ Canais são **plugins de 1ª classe**: cada provider se autodescreve por `provid
 - **Tipo de contato**: `contacts.contact_type` é gravado **só no INSERT**, a partir de `Channel.contact_type()`; contato já existente não é re-tipado.
 - ⚠️ **Campo `type: "secret"` de canal bloqueia o autofill do navegador** (plano 104) com `autocomplete="new-password"` — o `off` é **IGNORADO** pelo Chrome em campo de senha, não "limpe" isso achando que é resquício. Sem ele o gerenciador injeta a senha do painel e o número para.
 - ⚠️ **Proxy de saída** (plano 52) põe o canal num **processo GOWA dedicado** e **exige re-parear por QR** nas duas transições (ligar e desligar). `WHATSAPP_PROXY` vai por **env, nunca argv** (o cmd é visível em `ps`). Recomende IP fixo e dedicado — nunca endpoint rotativo.
+- ⚠️ **Atualizador do binário do GOWA** (plugin `gowa` 1.5.0): rotas em `/binary/*` — **nunca `/update`**, que o core já usa p/ atualizar plugin e vence a do plugin. Sem checksum não instala; major faz snapshot da sessão **inclusive dos dedicados por proxy**. [docs/OPERACAO.md](docs/OPERACAO.md)
 
 ### Filtro de tipos de JID (canal GOWA)
 
@@ -252,6 +253,8 @@ O loop de raciocínio + tool calling roda no **AGNO** ([agent/agno_engine.py](ag
 
 ⚠️ **A IA pode se despedir ao transferir** (plano 122): `transfer_to_human` fecha o gate DENTRO do turno, e o guard descartava a despedida que aquele mesmo turno acabou de escrever — foram **226 transferências mudas** em produção. O perdão é o kwarg `allow_self_handoff`, derivado pelo call site do próprio turno. **A época vem PRIMEIRO e o perdão nunca a alcança** — inverter as duas linhas devolve o bug do plano 96 em silêncio. O card "🤖 A IA assumiu a conversa" fica no predicado **ESTRITO** (não recebe o perdão): turno que terminou em transferência não é takeover.
 
+⚠️ **Religar a IA automaticamente (plano 178) é config GLOBAL e religa por `conversation_service.set_ai(…, 1)`, nunca por escrita própria**; a espera conta de `atendimentos.ai_disabled_at`, e **todo escritor novo de `ai_active` tem de carimbá-lo** via `conversation_repo.ai_disabled_at_expr` (INSERT e roteamento por time não passam por `_update`). Tem permissão própria, `agent.reactivation.manage` — o `settings.manage` **não basta**. [docs/IA.md](docs/IA.md)
+
 ⚠️ **Time (`atendimentos.team_id`, plano 153) é campo INDEPENDENTE do `assignee_user_id`** — `conversation_service.assign_team` nunca passa pelo cotovelo `_transfer` (que existe só porque assignee/agente-de-IA/gate-da-IA SÃO mutuamente exclusivos); é escrita isolada, como `set_agent`.
 
 ⚠️ **Trava de escrita (plano 167)**: o guard reprova LETRA não-latina, nunca emoji nem inglês — endurecê-lo entra em laço com prompts que mandam usar emoji; uma re-geração sem tools e, se falhar, envia a original. [docs/IA.md](docs/IA.md)
@@ -292,6 +295,7 @@ Info é salva automaticamente via tool calling do LLM e injetada no system promp
 - **Aviso "entrou/saiu do grupo"**: o participante viaja como o token `[[member:<tel>|<nome>]]` no `content` do `system_notice` e vira link para "Novo contato" ([systemMemberLinks.js](web/static/js/services/systemMemberLinks.js)). ⚠️ **LID NÃO é telefone** — sem telefone real conhecido o nome fica texto puro; e `_member_mark` (Python) e `MEMBER_RE` (JS) são o mesmo formato. [docs/UI_CONVERSA.md](docs/UI_CONVERSA.md)
 - **Ver membros do grupo**: linha do `ContactInfoPanel` (só grupo) abre o popup [GroupMembersModal.js](web/static/js/components/contacts/GroupMembersModal.js); clicar num membro leva ao "Novo contato" pré-preenchido (`/contacts?createPhone=…`). ⚠️ O modal navega **por conta própria** (o overlay de Contatos faz `stopPropagation`, o interceptor do shell nunca veria o clique), o Esc dele exige `preventDefault` (contrato do Esc do hub) e membro só-LID **não** vira link. [docs/UI_CONVERSA.md](docs/UI_CONVERSA.md)
 - **Contador da janela do cliente** (plano 159): chip ao lado do seletor Responder/Mensagem Privada com o tempo restante, do módulo puro [sessionWindow.js](web/static/js/services/sessionWindow.js) sobre `last_inbound_ts` + `session_window_hours` **efetivo** (`OutboundRouter.window_hours(by_human=True)` — a MESMA conta do `session_open`). ⚠️ O tamanho vem do servidor, nunca de "24h" no cliente (Meta com `human_agent_tag` = 7 dias), e `shapeConvData` é **whitelist**: campo não listado lá some sem erro.
+- **Envio agrupado de anexos** (plano 177): **automático, sem botão** — 2+ arquivos (fora áudio) saem numa só mensagem, **por capability** (`media_group`), nunca por nome de canal; o histórico guarda **uma linha por arquivo** e cada uma precisa de `msg_id` próprio, senão o painel as funde. [docs/UI_CONVERSA.md](docs/UI_CONVERSA.md)
 - **Atalhos conversa ⇄ protocolo** (plano 159): slot `conversation.header.primary` (NA BARRA, ao lado do Resolver — o `conversation.header.actions` é dentro do ⋮) + ícone no card do Kanban. ⚠️ Ctrl+clique exige `<a href>` com o alvo **já resolvido**: `window.open` depois de `await` é recusado em silêncio.
 - ⚠️ **Toda bolha de mídia precisa de `_id` para buscar o arquivo** (planos 172/175): produtor novo de `new_message` com mídia leva `_id` **ou** é seguido de um autoritativo que o `byId` (`reconcileByMsgId`) adota. O t=0 do inbound não tem `_id` **por construção** — não "conserte" no backend. [docs/UI_CONVERSA.md](docs/UI_CONVERSA.md)
 - **Digitação entre atendentes**: a rota de presença reemite `operator_typing` no WS (heartbeat de 10s, auto-limpeza em 15s no cliente), para dois atendentes não responderem por cima um do outro.
@@ -330,9 +334,9 @@ Integração externa entra por `X-Api-Key: wsk_live_<prefix>.<secret>`. **A chav
 - ⚠️ **Mídia na v1 (`POST /api/v1/messages/media[/link]`): o `kind` é do CHAMADOR, NUNCA inferido do MIME** — é o que entrega "imagem como arquivo" (`.png` com `kind=document` sai por `documentMessage`, sem recompressão). Preparo unificado em `MessagingService.send_media_upload` + `_MEDIA_KIND_SPEC` (R-media): as 4 rotas do painel e as 2 da v1 são CHAMADORAS, não cópias — e a rota `/link` busca a URL com guard de SSRF ([app/services/remote_media.py](app/services/remote_media.py)), sem o qual `conversation.reply` viraria scanner da rede interna.
 - ⚠️ **Rota de upload nova exige entrada em `_UPLOAD_PATH_RE`** ([server/upload_limits.py](server/upload_limits.py)): o teto de 50 MB é por LISTA DE CAMINHOS e fora dela o corpo inteiro vai para a RAM. O caminho `content_base64` não passa pelo middleware e tem teto próprio (`base64_exceeds`, medido no comprimento da string — decodificar para medir já é ter o arquivo na memória).
 
-## GOWA REST API (endpoints reais — v8.11.0 multi-device)
+## GOWA REST API (endpoints reais — multi-device; escritos em 8.11.0, conferidos em 9.6.0)
 
-IMPORTANTE: O GOWA v8.11.0 é multi-device. Antes de usar qualquer endpoint, é necessário criar um device via `POST /devices`. Após criação, todas as requests (exceto `/devices`) exigem header `X-Device-Id`.
+IMPORTANTE: O GOWA é multi-device. Antes de usar qualquer endpoint, é necessário criar um device via `POST /devices`. Após criação, todas as requests (exceto `/devices`) exigem header `X-Device-Id`.
 
 | Operação | Método | Endpoint | Notas |
 |---|---|---|---|

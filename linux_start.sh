@@ -60,9 +60,9 @@ echo "[linux_start] sincronizando dependências (pip install -r requirements.txt
 
 # ===== GOWA Linux binary =====
 # Equivalente ao Dockerfile: baixa a release oficial do go-whatsapp-web-multidevice
-# se o binário local não existir. .gitignore exclui bin/gowa — cada máquina
-# baixa o seu na 1ª execução.
-if [ ! -x ./bin/gowa ]; then
+# se o binário local não existir OU se bin/.gowa_stamp divergir de GOWA_VERSION (um git pull
+# que sobe a versão re-baixa o binário). .gitignore exclui bin/gowa — cada máquina baixa o seu.
+if [ ! -x ./bin/gowa ] || [ "$(cat bin/.gowa_stamp 2>/dev/null)" != "$GOWA_VERSION" ]; then
     require_cmd curl  || exit 1
     require_cmd unzip || exit 1
     case "$(uname -m)" in
@@ -85,8 +85,11 @@ if [ ! -x ./bin/gowa ]; then
         ls -la "$tmpdir/extract" || true
         exit 1
     fi
-    cp "$tmpdir/extract/linux-${TARGETARCH}" ./bin/gowa
-    chmod +x ./bin/gowa
+    # cp + mv: trocar o arquivo em uso por rename não dá "Text file busy".
+    cp "$tmpdir/extract/linux-${TARGETARCH}" ./bin/gowa.new
+    chmod +x ./bin/gowa.new
+    mv -f ./bin/gowa.new ./bin/gowa
+    echo "$GOWA_VERSION" > ./bin/.gowa_stamp
     rm -rf "$tmpdir"
     trap - EXIT
     echo "[linux_start] GOWA pronto em ./bin/gowa"

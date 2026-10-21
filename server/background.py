@@ -25,6 +25,11 @@ EMPTY_CONV_TTL_MINUTES_DEFAULT = 30
 # duplicates connected post-QR (plano 32 F4).
 CHANNEL_IDENTITY_SWEEP_INTERVAL = 15  # seconds
 
+# Automatic AI re-enabling (plano 178): how often the rule is evaluated, and the head
+# start after boot (lets the channels connect before the first pass).
+AI_REACTIVATION_INTERVAL = 60  # seconds
+AI_REACTIVATION_DELAY = 20     # seconds
+
 # Loop-delay monitor tick and warn threshold (plano 169 B1a).
 LOOP_DELAY_CHECK_INTERVAL = 0.5  # seconds
 LOOP_DELAY_WARN_THRESHOLD = 1.0  # seconds of extra delay beyond the requested sleep
@@ -365,6 +370,31 @@ async def empty_conversation_sweep_loop(deps):
             await asyncio.sleep(5)
             slept += 5
 
+
+async def ai_reactivation_loop(deps):
+    """Turn the AI back on per the rule in Configurações de IA → Automações (plano 178).
+
+    Wakes every ``AI_REACTIVATION_INTERVAL`` seconds. The rule itself (what is due,
+    who qualifies) lives in :mod:`app.services.ai_reactivation_service`; this only
+    paces it and keeps one failed pass from stopping the loop. Sleeps in short slices
+    so a shutdown is not held up by the interval.
+    """
+    from app.services import ai_reactivation_service
+
+    state = deps.state
+    slept = 0
+    while slept < AI_REACTIVATION_DELAY and not state.stop_event.is_set():
+        await asyncio.sleep(5)
+        slept += 5
+    while not state.stop_event.is_set():
+        try:
+            await ai_reactivation_service.run_once(deps)
+        except Exception as e:
+            logger.error("[AI reactivation] pass failed: %s", e)
+        slept = 0
+        while slept < AI_REACTIVATION_INTERVAL and not state.stop_event.is_set():
+            await asyncio.sleep(5)
+            slept += 5
 
 WEBHOOK_TICK_SECONDS = 5
 WEBHOOK_PURGE_INTERVAL = 3600

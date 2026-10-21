@@ -849,9 +849,18 @@ class ContactMemory:
         return deduped
 
     def set_wa_name(self, wa_name: str) -> None:
-        """Set contact name from WhatsApp pushName if no manual name exists."""
-        current = self.info.get("name", "")
+        """Set contact name from WhatsApp pushName if no manual name exists.
+
+        Decides from the name currently in the DATABASE, not from this cached
+        object: ``ContactMemory`` is cached per (channel, phone), and the name can
+        be changed behind its back (panel edit on another channel's instance, the
+        Trackify plugin pulling the CRM name). Trusting the cache let a stale
+        ``~Fulano`` overwrite a real name on the next inbound message.
+        """
+        row = contact_repo.get(self.id) or {}
+        current = row.get("name", self.info.get("name", "")) or ""
         if current and not current.startswith("~"):
+            self.info["name"] = current     # resync the cache with the real name
             return
         new_name = f"~{wa_name}"
         if current != new_name:

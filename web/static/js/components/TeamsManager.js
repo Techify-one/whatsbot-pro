@@ -1,6 +1,7 @@
-// Administração de Times (plano 166/U2). Superfície própria /teams, gated por
-// team.manage. Create e edit usam o mesmo formulário e enviam uma única intenção
-// completa; autorização e invariantes continuam pertencendo ao backend.
+// Administração de Times (plano 166/U2). Sub-aba "Times" da tela Usuários
+// (/users/teams), gated por team.manage — independente de users.manage. Create e
+// edit usam o mesmo formulário e enviam uma única intenção completa; autorização
+// e invariantes continuam pertencendo ao backend.
 
 import { h } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
@@ -9,10 +10,13 @@ import { getTeams, createTeam, updateTeam, deleteTeam } from '../services/api.js
 import { useDeepLink } from '../hooks/useDeepLink.js';
 import {
   ACCESS_MODES,
+  AUTO_ASSIGN_MODES,
+  DEFAULT_AUTO_ASSIGN_MODE,
   ROUTING_MODES,
   accessLabel,
   filterTeamMembers,
   initialTeamForm,
+  isAutoAssign,
   routingLabel,
   routingTargetLabel,
   teamFormPayload,
@@ -86,6 +90,7 @@ function TeamForm({ team = null, users = [], aiAgents = [], busy = false, server
 
   const set = (field, value) => setForm(previous => ({ ...previous, [field]: value }));
   const filteredUsers = filterTeamMembers(users, memberQuery);
+  const autoAssign = isAutoAssign(form.routingMode);
   const selectedCount = form.memberIds.length;
   const memberUsers = users.filter(user => form.memberIds.some(id => sameId(id, user.id)));
   const defaultUserListed = memberUsers.some(user => sameId(user.id, form.defaultUserId));
@@ -115,181 +120,197 @@ function TeamForm({ team = null, users = [], aiAgents = [], busy = false, server
     else onCancel();
   };
 
+  // Mesmo desenho de Usuários / Grupos de permissão: uma coluna, campos de largura
+  // total, botões à direita no fim. Criar = painel próprio com título; editar =
+  // dentro do card (sem moldura extra), como o RoleCard.
   return html`
-    <form onSubmit=${submit} class="bg-wa-panel border border-wa-border rounded-lg overflow-hidden">
-      <div class="px-4 py-3 border-b border-wa-border flex items-center justify-between gap-3">
+    <form onSubmit=${submit} class=${team ? '' : 'bg-wa-panel border border-wa-border rounded-lg p-4 mb-4'}>
+      ${!team ? html`<div class="text-[14px] font-medium text-wa-text mb-3">Novo time</div>` : null}
+      <div class="flex flex-col gap-3">
         <div>
-          <div class="text-[15px] font-semibold text-wa-text">${team ? `Editar ${team.name}` : 'Novo time'}</div>
-          <div class="text-[12px] text-wa-secondary">Configuração salva em uma única operação.</div>
+          <label for="team-name" class="block text-[12px] text-wa-secondary mb-1">Nome</label>
+          <input ref=${nameRef} id="team-name" class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+            type="text" placeholder="ex: Comercial" value=${form.name} aria-invalid=${!!errors.name}
+            aria-describedby=${errors.name ? 'team-name-error' : null}
+            onInput=${(event) => set('name', event.target.value)}
+            onBlur=${() => {
+              if (!form.name.trim()) setErrors(previous => ({ ...previous, name: 'Informe um nome para o time.' }));
+            }} />
+          <${FieldError} id="team-name-error">${errors.name}</${FieldError}>
         </div>
-        ${team && !activeFlag(team) ? html`<span class="px-2 py-1 rounded-full bg-wa-hover text-wa-secondary text-[11px]">Inativo</span>` : null}
-      </div>
 
-      <div class="p-4 grid grid-cols-1 xl:grid-cols-2 gap-5">
-        <section class="space-y-3" aria-labelledby="team-basic-title">
-          <div id="team-basic-title" class="text-[13px] font-semibold text-wa-text">Dados e membros</div>
-          <div>
-            <label for="team-name" class="block text-[12px] text-wa-secondary mb-1">Nome</label>
-            <input ref=${nameRef} id="team-name" class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-              type="text" value=${form.name} aria-invalid=${!!errors.name}
-              aria-describedby=${errors.name ? 'team-name-error' : null}
-              onInput=${(event) => set('name', event.target.value)}
-              onBlur=${() => {
-                if (!form.name.trim()) setErrors(previous => ({ ...previous, name: 'Informe um nome para o time.' }));
-              }} />
-            <${FieldError} id="team-name-error">${errors.name}</${FieldError}>
-          </div>
-          <div>
-            <label for="team-description" class="block text-[12px] text-wa-secondary mb-1">Descrição</label>
-            <textarea id="team-description" rows="2" class="wa-field w-full px-3 py-2 rounded-md text-[14px] resize-y"
-              value=${form.description} onInput=${(event) => set('description', event.target.value)} />
-          </div>
-          <div>
-            <div class="flex items-center justify-between gap-2 mb-1">
-              <label for="team-member-search" class="text-[12px] text-wa-secondary">Membros</label>
-              <span class="text-[11px] tabular-nums text-wa-secondary">${selectedCount} selecionado(s)</span>
-            </div>
-            <input id="team-member-search" type="search" value=${memberQuery} placeholder="Buscar por nome ou e-mail"
-              class="wa-field w-full px-3 py-2 rounded-md text-[13px] mb-2"
-              onInput=${(event) => setMemberQuery(event.target.value)} />
-            <div class="border border-wa-border rounded-md bg-wa-bg max-h-[230px] overflow-y-auto wa-scrollbar">
-              ${filteredUsers.length ? filteredUsers.map(user => {
-                const selected = form.memberIds.some(id => sameId(id, user.id));
-                const inactive = !activeFlag(user);
-                return html`
-                  <label key=${user.id} class="flex items-start gap-2 px-3 py-2 border-b border-wa-border last:border-b-0 ${inactive && !selected ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer hover:bg-wa-hover'}">
-                    <input type="checkbox" class="mt-0.5" checked=${selected}
-                      disabled=${inactive && !selected} onChange=${() => toggleMember(user)} />
-                    <span class="min-w-0 flex-1">
-                      <span class="block text-[13px] text-wa-text truncate">${user.name || user.email}</span>
-                      <span class="block text-[11px] text-wa-secondary truncate">${user.email || ''}${inactive ? ' · inativo' : ''}</span>
-                    </span>
-                  </label>`;
-              }) : html`
-                <div class="px-3 py-4 text-[13px] text-wa-secondary text-center">
-                  ${memberQuery ? 'Nenhum usuário encontrado.' : 'Nenhum usuário disponível.'}
-                </div>`}
-            </div>
-            <${FieldError} id="team-members-error">${errors.members}</${FieldError}>
-          </div>
-        </section>
+        <div>
+          <label for="team-description" class="block text-[12px] text-wa-secondary mb-1">Descrição</label>
+          <textarea id="team-description" rows="2" class="wa-field w-full px-3 py-2 rounded-md text-[14px] resize-y"
+            value=${form.description} onInput=${(event) => set('description', event.target.value)} />
+        </div>
 
-        <div class="space-y-5">
-          <section aria-labelledby="team-access-title">
-            <div id="team-access-title" class="text-[13px] font-semibold text-wa-text mb-2">Acesso</div>
-            <div class="space-y-2" role="radiogroup" aria-describedby="team-access-help">
-              ${ACCESS_MODES.map(option => html`
-                <label key=${option.value} class="flex items-start gap-2 rounded-md border border-wa-border bg-wa-bg px-3 py-2 cursor-pointer hover:bg-wa-hover">
-                  <input type="radio" name="team-access" value=${option.value}
-                    checked=${form.accessMode === option.value}
-                    onChange=${() => setForm(previous => ({
-                      ...previous,
-                      accessMode: option.value,
-                      visibleToAssignee: option.value === 'open' ? false : previous.visibleToAssignee,
-                    }))} />
-                  <span>
-                    <span class="block text-[13px] font-medium text-wa-text">${option.label}</span>
-                    <span class="block text-[11px] leading-relaxed text-wa-secondary">${option.description}</span>
+        <div>
+          <div class="flex items-center justify-between gap-2 mb-1">
+            <label for="team-member-search" class="text-[12px] text-wa-secondary">Membros</label>
+            <span class="text-[12px] tabular-nums text-wa-secondary">${selectedCount} selecionado(s)</span>
+          </div>
+          <input id="team-member-search" type="search" value=${memberQuery} placeholder="Buscar por nome ou e-mail"
+            class="wa-field w-full px-3 py-2 rounded-md text-[14px] mb-2"
+            onInput=${(event) => setMemberQuery(event.target.value)} />
+          <div class="border border-wa-border rounded-md bg-wa-bg max-h-[230px] overflow-y-auto wa-scrollbar">
+            ${filteredUsers.length ? filteredUsers.map(user => {
+              const selected = form.memberIds.some(id => sameId(id, user.id));
+              const inactive = !activeFlag(user);
+              return html`
+                <label key=${user.id} class="flex items-start gap-2 px-3 py-2 border-b border-wa-border last:border-b-0 ${inactive && !selected ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer hover:bg-wa-hover'}">
+                  <input type="checkbox" class="mt-1" checked=${selected}
+                    disabled=${inactive && !selected} onChange=${() => toggleMember(user)} />
+                  <span class="min-w-0 flex-1 flex items-baseline gap-2 flex-wrap">
+                    <span class="text-[14px] text-wa-text">${user.name || user.email}</span>
+                    <span class="text-[12px] text-wa-secondary break-all">${user.email || ''}${inactive ? ' · inativo' : ''}</span>
                   </span>
-                </label>`)}
-            </div>
-            <div id="team-access-help" class="sr-only">O modo privado também protege acesso direto e mídia.</div>
-            <${FieldError} id="team-access-error">${errors.accessMode}</${FieldError}>
-
-            ${form.accessMode !== 'open' ? html`
-              <label class="flex items-start gap-2 mt-3 rounded-md border border-wa-border bg-wa-bg px-3 py-2 cursor-pointer">
-                <input type="checkbox" class="mt-0.5" checked=${form.visibleToAssignee}
-                  onChange=${(event) => set('visibleToAssignee', event.target.checked)} />
-                <span>
-                  <span class="block text-[13px] text-wa-text">Responsável pode visualizar</span>
-                  <span class="block text-[11px] leading-relaxed text-wa-secondary">Permite que o responsável veja sua conversa mesmo sem pertencer ao time.</span>
-                </span>
-              </label>` : null}
-
-            ${team && freshState.accessMode === 'private' && form.accessMode !== 'private' ? html`
-              <div class="mt-3 rounded-md border border-wa-border bg-wa-bg px-3 py-2">
-                <div class="text-[12px] text-red-500 font-medium">Este ajuste amplia o acesso às conversas.</div>
-                <label class="flex items-start gap-2 mt-2 cursor-pointer">
-                  <input type="checkbox" class="mt-0.5" checked=${form.confirmAccessExpansion}
-                    onChange=${(event) => set('confirmAccessExpansion', event.target.checked)} />
-                  <span class="text-[12px] text-wa-text">Confirmo que pessoas fora do time poderão ter mais acesso.</span>
-                </label>
-                <${FieldError} id="team-expansion-error">${errors.confirmAccessExpansion}</${FieldError}>
-              </div>` : null}
-          </section>
-
-          <section aria-labelledby="team-routing-title">
-            <div id="team-routing-title" class="text-[13px] font-semibold text-wa-text mb-2">Distribuição</div>
-            <label for="team-routing" class="block text-[12px] text-wa-secondary mb-1">Estratégia</label>
-            <select id="team-routing" class="wa-field w-full px-3 py-2 rounded-md text-[14px]" value=${form.routingMode}
-              onChange=${(event) => setForm(previous => ({
-                ...previous,
-                routingMode: event.target.value,
-                defaultUserId: event.target.value === 'fixed_user' ? previous.defaultUserId : '',
-                defaultAgentKey: event.target.value === 'fixed_ai' ? previous.defaultAgentKey : '',
-              }))}>
-              ${ROUTING_MODES.map(option => html`<option value=${option.value}>${option.label}</option>`)}
-            </select>
-            <div class="text-[11px] text-wa-secondary mt-1">${ROUTING_MODES.find(option => option.value === form.routingMode)?.description}</div>
-            <${FieldError} id="team-routing-error">${errors.routingMode}</${FieldError}>
-
-            ${form.routingMode === 'fixed_user' ? html`
-              <div class="mt-3">
-                <label for="team-default-user" class="block text-[12px] text-wa-secondary mb-1">Atendente fixo</label>
-                <select id="team-default-user" class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-                  value=${form.defaultUserId} aria-invalid=${!!errors.defaultUserId}
-                  onChange=${(event) => set('defaultUserId', event.target.value)}>
-                  <option value="">Selecione…</option>
-                  ${form.defaultUserId && !defaultUserListed ? html`
-                    <option value=${form.defaultUserId} disabled>Destino indisponível</option>
-                  ` : null}
-                  ${memberUsers.map(user => html`
-                    <option value=${String(user.id)} disabled=${!activeFlag(user)}>
-                      ${user.name || user.email}${activeFlag(user) ? '' : ' (inativo)'}
-                    </option>`)}
-                </select>
-                <${FieldError} id="team-default-user-error">${errors.defaultUserId}</${FieldError}>
-              </div>` : null}
-
-            ${form.routingMode === 'fixed_ai' ? html`
-              <div class="mt-3">
-                <label for="team-default-ai" class="block text-[12px] text-wa-secondary mb-1">Agente de IA</label>
-                <select id="team-default-ai" class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
-                  value=${form.defaultAgentKey} aria-invalid=${!!errors.defaultAgentKey}
-                  onChange=${(event) => set('defaultAgentKey', event.target.value)}>
-                  <option value="">Selecione…</option>
-                  ${form.defaultAgentKey && !defaultAgentListed ? html`
-                    <option value=${form.defaultAgentKey} disabled>Destino indisponível</option>
-                  ` : null}
-                  ${aiAgents.map(agent => html`
-                    <option value=${agent.agent_key} disabled=${!activeFlag(agent, 'enabled')}>
-                      ${agent.display_name || agent.agent_key}${activeFlag(agent, 'enabled') ? '' : ' (desabilitado)'}
-                    </option>`)}
-                </select>
-                <${FieldError} id="team-default-ai-error">${errors.defaultAgentKey}</${FieldError}>
-              </div>` : null}
-
-            <label class="flex items-start gap-2 mt-3 rounded-md border border-wa-border bg-wa-bg px-3 py-2 cursor-pointer">
-              <input type="checkbox" class="mt-0.5" checked=${form.aiAssignable}
-                onChange=${(event) => set('aiAssignable', event.target.checked)} />
-              <span>
-                <span class="block text-[13px] text-wa-text">IA pode encaminhar para este time</span>
-                <span class="block text-[11px] leading-relaxed text-wa-secondary">Controla se ferramentas de IA podem escolher este time como destino.</span>
-              </span>
-            </label>
-          </section>
+                </label>`;
+            }) : html`
+              <div class="px-3 py-4 text-[13px] text-wa-secondary text-center">
+                ${memberQuery ? 'Nenhum usuário encontrado.' : 'Nenhum usuário disponível.'}
+              </div>`}
+          </div>
+          <${FieldError} id="team-members-error">${errors.members}</${FieldError}>
         </div>
-      </div>
 
-      ${serverError ? html`
-        <div role="alert" aria-live="assertive" class="mx-4 mb-3 rounded-md border border-wa-border bg-wa-bg px-3 py-2 text-[13px] text-red-500">${serverError}</div>
-      ` : null}
+        <div role="radiogroup" aria-labelledby="team-access-title" aria-describedby="team-access-help">
+          <div id="team-access-title" class="block text-[12px] text-wa-secondary mb-1">Acesso</div>
+          <div class="flex flex-col gap-1.5">
+            ${ACCESS_MODES.map(option => html`
+              <label key=${option.value} class="flex items-start gap-2 cursor-pointer">
+                <input type="radio" name="team-access" class="mt-1" value=${option.value}
+                  checked=${form.accessMode === option.value}
+                  onChange=${() => setForm(previous => ({
+                    ...previous,
+                    accessMode: option.value,
+                    visibleToAssignee: option.value === 'open' ? false : previous.visibleToAssignee,
+                  }))} />
+                <span>
+                  <span class="block text-[14px] text-wa-text">${option.label}</span>
+                  <span class="block text-[12px] text-wa-secondary">${option.description}</span>
+                </span>
+              </label>`)}
+          </div>
+          <div id="team-access-help" class="sr-only">O modo privado também protege acesso direto e mídia.</div>
+          <${FieldError} id="team-access-error">${errors.accessMode}</${FieldError}>
 
-      <div class="sticky bottom-0 bg-wa-panel border-t border-wa-border px-4 py-3 flex justify-end gap-2">
-        <button type="button" class="px-3 py-2 rounded-md border border-wa-border bg-wa-bg text-[14px] text-wa-text hover:bg-wa-hover"
-          onClick=${requestCancel} disabled=${busy}>Cancelar</button>
-        <button type="submit" class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 disabled:opacity-50"
-          disabled=${busy}>${busy ? 'Salvando…' : team ? 'Salvar alterações' : 'Criar time'}</button>
+          ${form.accessMode !== 'open' ? html`
+            <label class="flex items-start gap-2 mt-3 cursor-pointer">
+              <input type="checkbox" class="mt-1" checked=${form.visibleToAssignee}
+                onChange=${(event) => set('visibleToAssignee', event.target.checked)} />
+              <span>
+                <span class="block text-[14px] text-wa-text">Responsável pode visualizar</span>
+                <span class="block text-[12px] text-wa-secondary">Permite que o responsável veja sua conversa mesmo sem pertencer ao time.</span>
+              </span>
+            </label>` : null}
+
+          ${team && freshState.accessMode === 'private' && form.accessMode !== 'private' ? html`
+            <div class="mt-3 rounded-md border border-wa-border bg-wa-bg px-3 py-2">
+              <div class="text-[12px] text-red-500 font-medium">Este ajuste amplia o acesso às conversas.</div>
+              <label class="flex items-start gap-2 mt-2 cursor-pointer">
+                <input type="checkbox" class="mt-0.5" checked=${form.confirmAccessExpansion}
+                  onChange=${(event) => set('confirmAccessExpansion', event.target.checked)} />
+                <span class="text-[12px] text-wa-text">Confirmo que pessoas fora do time poderão ter mais acesso.</span>
+              </label>
+              <${FieldError} id="team-expansion-error">${errors.confirmAccessExpansion}</${FieldError}>
+            </div>` : null}
+        </div>
+
+        <div>
+          <div id="team-routing-title" class="block text-[12px] text-wa-secondary mb-1">Atribuição automática do time</div>
+          <div class="flex items-center gap-3">
+            <span id="team-auto-assign-label" class="text-[14px] text-wa-text">Atribuir conversas automaticamente</span>
+            <button type="button" role="switch" aria-checked=${autoAssign}
+              aria-labelledby="team-auto-assign-label"
+              onClick=${() => setForm(previous => ({
+                ...previous,
+                routingMode: isAutoAssign(previous.routingMode) ? 'manual' : DEFAULT_AUTO_ASSIGN_MODE,
+                defaultUserId: '',
+                defaultAgentKey: '',
+              }))}
+              class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-wa-teal focus-visible:ring-offset-1 ${autoAssign ? 'bg-wa-teal' : 'bg-wa-border'}">
+              <span class="inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${autoAssign ? 'translate-x-5' : 'translate-x-0.5'}"></span>
+            </button>
+          </div>
+          <div class="text-[12px] text-wa-secondary mt-0.5">
+            ${autoAssign
+              ? 'Ao encaminhar uma conversa para este time, ela é atribuída pela estratégia escolhida abaixo.'
+              : 'Desligado: a conversa fica no time, sem responsável, até alguém assumir.'}
+          </div>
+          <${FieldError} id="team-routing-error">${errors.routingMode}</${FieldError}>
+
+          ${autoAssign ? html`
+            <div class="mt-3">
+              <label for="team-routing" class="block text-[12px] text-wa-secondary mb-1">Estratégia</label>
+              <select id="team-routing" class="wa-field w-full px-3 py-2 rounded-md text-[14px]" value=${form.routingMode}
+                onChange=${(event) => setForm(previous => ({
+                  ...previous,
+                  routingMode: event.target.value,
+                  defaultUserId: event.target.value === 'fixed_user' ? previous.defaultUserId : '',
+                  defaultAgentKey: event.target.value === 'fixed_ai' ? previous.defaultAgentKey : '',
+                }))}>
+                ${AUTO_ASSIGN_MODES.map(option => html`<option key=${option.value} value=${option.value}>${option.label}</option>`)}
+              </select>
+              <div class="text-[12px] text-wa-secondary mt-1">${ROUTING_MODES.find(option => option.value === form.routingMode)?.description}</div>
+            </div>` : null}
+
+          ${form.routingMode === 'fixed_user' ? html`
+            <div class="mt-3">
+              <label for="team-default-user" class="block text-[12px] text-wa-secondary mb-1">Atendente fixo</label>
+              <select id="team-default-user" class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+                value=${form.defaultUserId} aria-invalid=${!!errors.defaultUserId}
+                onChange=${(event) => set('defaultUserId', event.target.value)}>
+                <option value="">Selecione…</option>
+                ${form.defaultUserId && !defaultUserListed ? html`
+                  <option value=${form.defaultUserId} disabled>Destino indisponível</option>
+                ` : null}
+                ${memberUsers.map(user => html`
+                  <option value=${String(user.id)} disabled=${!activeFlag(user)}>
+                    ${user.name || user.email}${activeFlag(user) ? '' : ' (inativo)'}
+                  </option>`)}
+              </select>
+              <${FieldError} id="team-default-user-error">${errors.defaultUserId}</${FieldError}>
+            </div>` : null}
+
+          ${form.routingMode === 'fixed_ai' ? html`
+            <div class="mt-3">
+              <label for="team-default-ai" class="block text-[12px] text-wa-secondary mb-1">Agente de IA</label>
+              <select id="team-default-ai" class="wa-field w-full px-3 py-2 rounded-md text-[14px]"
+                value=${form.defaultAgentKey} aria-invalid=${!!errors.defaultAgentKey}
+                onChange=${(event) => set('defaultAgentKey', event.target.value)}>
+                <option value="">Selecione…</option>
+                ${form.defaultAgentKey && !defaultAgentListed ? html`
+                  <option value=${form.defaultAgentKey} disabled>Destino indisponível</option>
+                ` : null}
+                ${aiAgents.map(agent => html`
+                  <option value=${agent.agent_key} disabled=${!activeFlag(agent, 'enabled')}>
+                    ${agent.display_name || agent.agent_key}${activeFlag(agent, 'enabled') ? '' : ' (desabilitado)'}
+                  </option>`)}
+              </select>
+              <${FieldError} id="team-default-ai-error">${errors.defaultAgentKey}</${FieldError}>
+            </div>` : null}
+        </div>
+
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="checkbox" class="mt-1" checked=${form.aiAssignable}
+            onChange=${(event) => set('aiAssignable', event.target.checked)} />
+          <span>
+            <span class="block text-[14px] text-wa-text">IA pode encaminhar para este time</span>
+            <span class="block text-[12px] text-wa-secondary">Controla se ferramentas de IA podem escolher este time como destino.</span>
+          </span>
+        </label>
+
+        ${serverError ? html`
+          <div role="alert" aria-live="assertive" class="text-[13px] text-red-500">${serverError}</div>
+        ` : null}
+
+        <div class="flex gap-2 justify-end">
+          <button type="button" class="px-3 py-2 rounded-md text-[14px] text-wa-text hover:bg-wa-hover transition-colors"
+            onClick=${requestCancel} disabled=${busy}>Cancelar</button>
+          <button type="submit" class="px-4 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity disabled:opacity-50"
+            disabled=${busy}>${busy ? 'Salvando…' : team ? 'Salvar alterações' : 'Criar time'}</button>
+        </div>
       </div>
 
       ${discarding ? html`
@@ -307,24 +328,24 @@ function TeamCard({ team, users, aiAgents, editing, busy, error, onOpen, onClose
   const countKnown = Number.isInteger(team.conversation_count);
   const canHardDelete = !activeFlag(team) && countKnown && team.conversation_count === 0;
   return html`
-    <article class="bg-wa-panel border border-wa-border rounded-lg">
-      <div class="px-3 py-2.5 flex items-start gap-3">
+    <article class="bg-wa-panel border border-wa-border rounded-lg p-3">
+      <div class="flex items-start gap-3 flex-wrap">
         <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-1.5 flex-wrap">
-            <span class="text-[14px] text-wa-text font-medium truncate">${team.name}</span>
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-[14px] text-wa-text font-medium">${team.name}</span>
             <span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">${accessLabel(team)}</span>
             <span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">${routingLabel(team)}</span>
             ${!activeFlag(team) ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Inativo</span>` : null}
             ${team.ai_assignable ? html`<span class="px-2 py-0.5 rounded-full text-[11px] bg-wa-hover text-wa-secondary">Disponível para IA</span>` : null}
           </div>
-          <div class="text-[12px] text-wa-secondary mt-1 truncate">
+          <div class="text-[12px] text-wa-secondary mt-0.5 break-words">
             ${(team.member_user_ids || []).length} membro(s)${target ? ` · ${target}` : ''}${countKnown ? ` · ${team.conversation_count} conversa(s)` : ''}
           </div>
-          ${team.description ? html`<div class="text-[12px] text-wa-secondary mt-0.5 truncate">${team.description}</div>` : null}
+          ${team.description ? html`<div class="text-[12px] text-wa-secondary mt-0.5 break-words">${team.description}</div>` : null}
         </div>
         ${!editing ? html`
           <div class="flex gap-1 shrink-0 flex-wrap justify-end">
-            <a href=${`/teams/${team.id}`} onClick=${(event) => {
+            <a href=${`/users/teams/${team.id}`} onClick=${(event) => {
               if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
               event.preventDefault(); onOpen();
             }} class="px-2 py-1 rounded-md text-[13px] text-wa-text hover:bg-wa-hover no-underline">Editar</a>
@@ -339,7 +360,7 @@ function TeamCard({ team, users, aiAgents, editing, busy, error, onOpen, onClose
           </div>` : null}
       </div>
       ${editing ? html`
-        <div class="border-t border-wa-border p-3">
+        <div class="mt-3 border-t border-wa-border pt-3">
           <${TeamForm} team=${team} users=${users} aiAgents=${aiAgents} busy=${busy}
             serverError=${error} onSubmit=${(data) => onSave(team, data)} onCancel=${onClose} />
         </div>` : null}
@@ -378,14 +399,20 @@ export default function TeamsManager({ initialEntity = null }) {
 
   useEffect(() => { load(); }, []);
 
+  // /teams[/id] é o caminho antigo (Times já teve rota própria): normaliza para a
+  // sub-aba de Usuários, só depois do gate de permissão da própria sub-aba.
   useEffect(() => {
-    if (!window.location.pathname.startsWith('/users/teams')) return;
-    const suffix = window.location.pathname.slice('/users/teams'.length);
-    history.replaceState(null, '', `/teams${suffix}${window.location.search}`);
+    const path = window.location.pathname;
+    if (path === '/teams' || path.startsWith('/teams/')) {
+      history.replaceState(null, '', `/users${path}${window.location.search}`);
+    }
   }, []);
 
   const pushUrl = useDeepLink({
-    tab: 'teams', resolve: initialEntity, ready: !loading,
+    tab: 'users',
+    resolve: initialEntity && initialEntity.sub === 'teams'
+      ? { sub: 'teams', id: initialEntity.id } : null,
+    ready: !loading,
     open: (selection) => {
       if (!selection || selection.id == null) { setCreating(false); setEditingId(null); return; }
       if (selection.id === 'new') { setCreating(true); setEditingId(null); return; }
@@ -395,7 +422,7 @@ export default function TeamsManager({ initialEntity = null }) {
   });
 
   const navigate = (selection) => {
-    pushUrl(selection);
+    pushUrl(selection ? { sub: 'teams', id: selection.id } : { sub: 'teams' });
     const params = new URLSearchParams(window.location.search);
     if (query.trim()) params.set('q', query.trim());
     else params.delete('q');
@@ -458,22 +485,29 @@ export default function TeamsManager({ initialEntity = null }) {
   }
 
   return html`
-    <div class="space-y-3">
-      <div class="flex items-center gap-2 flex-wrap">
-        <input type="search" value=${query} placeholder="Buscar times" aria-label="Buscar times"
-          class="wa-field min-w-[220px] flex-1 px-3 py-2 rounded-md text-[14px]"
-          onInput=${(event) => setQuery(event.target.value)} />
-        <span class="text-[12px] tabular-nums text-wa-secondary">${filteredTeams.length} de ${teams.length}</span>
+    <div>
+      <div class="flex items-center justify-between mb-4">
+        <p class="text-[13px] text-wa-secondary">
+          Times organizam quem enxerga e atende cada conversa e como ela é distribuída.
+        </p>
         ${!creating && editingId == null ? html`
-          <a href="/teams/new" class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 no-underline"
+          <a href="/users/teams/new" class="px-3 py-2 rounded-md text-[14px] text-white bg-wa-teal hover:opacity-90 transition-opacity shrink-0 no-underline"
             onClick=${(event) => {
               if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
               event.preventDefault(); setCreating(true); setEditingId(null); setError(''); navigate({ id: 'new' });
             }}>+ Novo time</a>` : null}
       </div>
 
+      ${teams.length > 0 ? html`
+        <div class="flex items-center gap-2 mb-3">
+          <input type="search" value=${query} placeholder="Buscar times" aria-label="Buscar times"
+            class="wa-field flex-1 min-w-0 px-3 py-2 rounded-md text-[14px]"
+            onInput=${(event) => setQuery(event.target.value)} />
+          <span class="text-[12px] tabular-nums text-wa-secondary shrink-0">${filteredTeams.length} de ${teams.length}</span>
+        </div>` : null}
+
       ${error && !creating && editingId == null ? html`
-        <div role="alert" aria-live="assertive" class="rounded-md border border-wa-border bg-wa-panel px-3 py-2 flex items-center justify-between gap-3">
+        <div role="alert" aria-live="assertive" class="mb-3 flex items-center justify-between gap-3">
           <span class="text-[13px] text-red-500">${error}</span>
           <button type="button" class="text-[13px] text-wa-teal" onClick=${() => load({ keepRows: teams.length > 0 })}>Tentar novamente</button>
         </div>` : null}
@@ -482,24 +516,20 @@ export default function TeamsManager({ initialEntity = null }) {
         <${TeamForm} users=${users} aiAgents=${aiAgents} busy=${busy} serverError=${error}
           onSubmit=${create} onCancel=${() => { setCreating(false); setError(''); navigate(null); }} />` : null}
 
-      ${loading && teams.length === 0 ? html`
-        <div aria-label="Carregando times" class="space-y-2">
-          ${[1, 2, 3].map(index => html`<div key=${index} class="h-[72px] rounded-lg bg-wa-panel border border-wa-border animate-pulse-slow"></div>`)}
-        </div>` : null}
+      ${loading && teams.length === 0 ? html`<div class="text-[14px] text-wa-secondary">Carregando…</div>` : null}
 
       ${!loading && teams.length === 0 && !creating && !error ? html`
-        <div class="rounded-lg border border-wa-border bg-wa-panel px-4 py-8 text-center">
-          <div class="text-[14px] text-wa-text">Nenhum time cadastrado.</div>
-          <div class="text-[12px] text-wa-secondary mt-1">Crie o primeiro time para organizar acesso e distribuição.</div>
+        <div class="text-[14px] text-wa-secondary text-center py-8">
+          Nenhum time cadastrado ainda. Clique em <span class="font-medium">+ Novo time</span> para criar.
         </div>` : null}
 
       ${!loading && teams.length > 0 && filteredTeams.length === 0 ? html`
-        <div class="rounded-lg border border-wa-border bg-wa-panel px-4 py-6 text-center text-[13px] text-wa-secondary">
+        <div class="text-[14px] text-wa-secondary text-center py-6">
           Nenhum time corresponde a “${query}”.
           <button type="button" class="ml-1 text-wa-teal" onClick=${() => setQuery('')}>Limpar busca</button>
         </div>` : null}
 
-      <div class="space-y-2 ${loading && teams.length ? 'opacity-60' : ''}" aria-busy=${loading}>
+      <div class="flex flex-col gap-2 ${loading && teams.length ? 'opacity-60' : ''}" aria-busy=${loading}>
         ${filteredTeams.map(team => html`
           <${TeamCard} key=${team.id} team=${team} users=${users} aiAgents=${aiAgents}
             editing=${sameId(editingId, team.id)} busy=${busy} error=${sameId(editingId, team.id) ? error : ''}

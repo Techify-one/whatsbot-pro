@@ -9,9 +9,9 @@ import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
 import { listChannelAssignableUsers } from '../../services/api.js';
 import {
-  aiDefaultsFrom, buildCreatePayload, initialConfigValues, validateCredentials,
+  aiDefaultsFrom, buildCreatePayload, initialConfigValues, missingRequired, validateCredentials,
 } from './constants.js';
-import { ConfigFields, CredentialFields, FormComponentLoader } from './DescriptorFields.js';
+import { ConfigFields, CredentialFields, DescriptorFields, FormComponentLoader } from './DescriptorFields.js';
 import { AiSettingsFields } from './AiSettingsFields.js';
 import { AgentPicker } from './AgentPicker.js';
 
@@ -80,13 +80,13 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
 
   // Required credentials come from the descriptor's fields (capability-driven on
   // the backend). Without them the channel would be born "dead" (never connects).
-  const requiredKeys = ((descriptor && descriptor.credential_fields) || [])
-    .filter((f) => f.required).map((f) => f.key);
-  const credsOk = requiredKeys.every((k) => (credValues[k] || '').toString().trim());
+  // `required` num campo escondido por `show_if` NÃO conta (plano 176): senão um lado
+  // desligado travaria o botão Criar por um campo que o operador nem vê.
+  const credsOk = missingRequired(descriptor, credValues, configValues).length === 0;
   // Formato das credenciais preenchidas, dirigido pelo descriptor (plano 104 F3):
   // um valor autopreenchido pelo navegador (senha do painel no "Proxy de saída")
   // não chega a ser salvo. O servidor revalida — isto aqui é só o aviso na hora.
-  const credErrors = validateCredentials(descriptor, credValues);
+  const credErrors = validateCredentials(descriptor, credValues, configValues);
   const canSave = !busy && !!descriptor && displayName.trim() && credsOk
     && !Object.keys(credErrors).length;
 
@@ -124,10 +124,17 @@ export function ChannelForm({ onCreated, onCancel, onProviderChange, initialProv
         </div>
 
         ${descriptor ? html`
-          <${ConfigFields} fields=${descriptor.config_fields} values=${configValues}
-            onChange=${setConfig} editMode=${false} busy=${busy} />
-          <${CredentialFields} fields=${descriptor.credential_fields} values=${credValues}
-            onChange=${setCred} editMode=${false} busy=${busy} errors=${credErrors} />
+          ${descriptor.form_order ? html`
+            <${DescriptorFields} descriptor=${descriptor} configValues=${configValues}
+              credValues=${credValues} setConfig=${setConfig} setCred=${setCred}
+              editMode=${false} busy=${busy} errors=${credErrors} />
+          ` : html`
+            <${ConfigFields} fields=${descriptor.config_fields} values=${configValues}
+              onChange=${setConfig} editMode=${false} busy=${busy} credValues=${credValues} />
+            <${CredentialFields} fields=${descriptor.credential_fields} values=${credValues}
+              onChange=${setCred} editMode=${false} busy=${busy} errors=${credErrors}
+              configValues=${configValues} />
+          `}
           ${descriptor.form_component ? html`
             <${FormComponentLoader} path=${descriptor.form_component}
               descriptor=${descriptor} mode="create"

@@ -141,8 +141,9 @@ fi
 echo "[OK] pip disponivel."
 
 # ===== 3. VERIFICAR / BAIXAR O BINARIO GOWA (macOS) =====
-# .gitignore exclui bin/gowa — cada Mac baixa a release oficial na 1a execucao.
-if [ ! -x ./bin/gowa ]; then
+# .gitignore exclui bin/gowa — cada Mac baixa a release oficial na 1a execucao, e de novo
+# quando bin/.gowa_stamp diverge de GOWA_VERSION (um git pull que sobe a versao).
+if [ ! -x ./bin/gowa ] || [ "$(cat bin/.gowa_stamp 2>/dev/null)" != "$GOWA_VERSION" ]; then
     case "$(uname -m)" in
         arm64)         GOWA_ARCH="arm64" ;;
         x86_64|amd64)  GOWA_ARCH="amd64" ;;
@@ -176,8 +177,10 @@ if [ ! -x ./bin/gowa ]; then
         read -r -p "Pressione ENTER para sair..." _
         exit 1
     fi
-    cp "$gowa_bin" ./bin/gowa
-    chmod +x ./bin/gowa
+    cp "$gowa_bin" ./bin/gowa.new
+    chmod +x ./bin/gowa.new
+    mv -f ./bin/gowa.new ./bin/gowa
+    echo "$GOWA_VERSION" > ./bin/.gowa_stamp
     # Remove a quarentena do Gatekeeper (binario baixado da internet seria
     # bloqueado por "developer cannot be verified").
     xattr -dr com.apple.quarantine ./bin/gowa 2>/dev/null || true

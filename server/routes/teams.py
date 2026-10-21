@@ -53,6 +53,10 @@ def _admin_catalogs(teams: list[dict],
         {
             "agent_key": agent["agent_key"],
             "display_name": agent.get("display_name") or agent["agent_key"],
+            # A lista já vem filtrada por ``enabled``; o campo vai explícito
+            # porque o editor trata a ausência dele como "desabilitado" e bloqueia
+            # a opção (contrato em docs/UI_TIMES.md).
+            "enabled": True,
         }
         for agent in agent_repo.list_all() if agent.get("enabled")
     ]

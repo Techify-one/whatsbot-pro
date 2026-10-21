@@ -145,8 +145,11 @@ def test_routing_schema_matches_contract(_engine_ready):
     assert {"default_user_id", "default_agent_key", "ai_assignable"} <= set(team_columns)
     assert "routing_team_ids" in {
         column["name"] for column in inspector.get_columns("ai_agents")}
+    # Cursor do round-robin é UM por time (rodízio entre o time, não entre inboxes).
     assert inspector.get_pk_constraint("team_routing_state")["constrained_columns"] == [
-        "team_id", "inbox_id"]
+        "team_id"]
+    assert "inbox_id" not in {
+        column["name"] for column in inspector.get_columns("team_routing_state")}
 
 
 def test_agent_routing_team_allowlist_round_trip_and_history(routing_world):
@@ -311,7 +314,7 @@ def test_inactive_team_falls_back_without_losing_team_link(routing_world):
     assert result.after.ai_active is False
 
 
-def test_round_robin_cycles_and_isolates_cursor_by_inbox(routing_world):
+def test_round_robin_cursor_is_shared_across_inboxes(routing_world):
     from app.services import team_routing_service
 
     inbox_a = routing_world.inbox()
@@ -324,17 +327,38 @@ def test_round_robin_cycles_and_isolates_cursor_by_inbox(routing_world):
     conv_a = routing_world.conversation(inbox_a)
     conv_b = routing_world.conversation(inbox_b)
 
-    chosen_a = [
-        team_routing_service.route_to_team_sync(conv_a["id"], team["id"])
-        .after.assignee_user_id
-        for _ in range(4)
-    ]
-    assert chosen_a == [ids[0], ids[1], ids[2], ids[0]]
+    def route(conv):
+        return (team_routing_service.route_to_team_sync(conv["id"], team["id"])
+                .after.assignee_user_id)
 
-    # Inbox B owns a distinct cursor and starts its own sequence at A.
-    first_b = team_routing_service.route_to_team_sync(conv_b["id"], team["id"])
-    assert first_b.after.assignee_user_id == ids[0]
+    # One rotation for the whole team, whatever the inbox of the conversation.
+    chosen = [route(conv_a), route(conv_b), route(conv_a), route(conv_b)]
+    assert chosen == [ids[0], ids[1], ids[2], ids[0]]
 
+def test_round_robin_skips_members_outside_the_conversation_inbox(routing_world):
+    from app.services import team_routing_service
+
+    inbox_a = routing_world.inbox()
+    inbox_b = routing_world.inbox()
+    first, second, third = (routing_world.user() for _ in range(3))
+    ids = [first["id"], second["id"], third["id"]]
+    # `second` belongs to the team but only to inbox B.
+    routing_world.memberships(inbox_a, [first["id"], third["id"]])
+    routing_world.memberships(inbox_b, ids)
+    team = routing_world.team(mode="round_robin", members=ids)
+    conv_a = routing_world.conversation(inbox_a)
+    conv_b = routing_world.conversation(inbox_b)
+
+    def route(conv):
+        return (team_routing_service.route_to_team_sync(conv["id"], team["id"])
+                .after.assignee_user_id)
+
+    # A: first -> (second is not in A) third; B continues the SAME round after
+    # third and wraps to first; A then takes the next eligible after first.
+    assert route(conv_a) == first["id"]
+    assert route(conv_a) == third["id"]
+    assert route(conv_b) == first["id"]
+    assert route(conv_a) == third["id"]
 
 def test_round_robin_removed_cursor_restarts_at_first_eligible(routing_world):
     from app.services import team_routing_service
@@ -400,7 +424,7 @@ def test_cursor_and_conversation_roll_back_together(routing_world, monkeypatch):
     with pytest.raises(RuntimeError, match="forced write failure"):
         team_routing_repo.route_to_team(conv["id"], team["id"])
 
-    assert team_routing_repo.routing_state(team["id"], inbox_id) is None
+    assert team_routing_repo.routing_state(team["id"]) is None
     after = conversation_repo.get(conv["id"])
     assert after["team_id"] == before["team_id"]
     assert after["assignee_user_id"] == before["assignee_user_id"]

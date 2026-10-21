@@ -1,6 +1,6 @@
 id: gowa
-name: WhatsApp (GOWA)
-version: 1.4.0
+name: Canal · WhatsApp (GOWA)
+version: 1.5.0
 whatsbot_api_version: ">=1.0,<2.0"
 description: >-
   Caixa de entrada WhatsApp via GOWA (go-whatsapp-web-multidevice), conectada por
@@ -8,6 +8,10 @@ description: >-
   desativar ou desinstalar derruba a conexão e o sistema segue rodando com as
   caixas de entrada restantes. Vem incluso e ATIVO por padrão; desinstalável pela
   tela de Plugins.
+  A 1.5.0 traz o atualizador do binário do GOWA (aba Configurar: versão em uso,
+  verificar no GitHub, atualizar com checksum e rollback automático, reverter) e
+  corrige o link "Reconectar agora" do alerta de desconexão, que apontava para uma
+  tela inexistente: agora abre Canais já no QR da caixa que caiu. Sem migração.
   A 1.4.0 fecha a lacuna de auditoria do plano 148: quando o Telegram promove o
   grupo de alerta a supergrupo e o chat_id muda sozinho, a atualização passa a
   deixar rastro em /audit com ator system — sem isso a trilha juraria que o

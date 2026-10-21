@@ -52,7 +52,7 @@ import { sendPrivateAudio, sendPrivateImage, sendPrivateDocument } from '../../.
 import { buildQueueItems, audioQueueItem, progressLabel } from '../../../services/mediaQueue.js';
 import { applyUploadLimits, limitsMessage, MAX_FILES_PER_DROP } from '../../../services/uploadLimits.js';
 import { checkMediaFile, limitsSummary, isAttachmentOfKind } from '../../../services/mediaLimits.js';
-import { captionTargetIndex } from '../../../services/composerSubmit.js';
+import { captionTargetIndex, groupableItems } from '../../../services/composerSubmit.js';
 import { notify } from '../../../services/notify.js';
 import { toComposerNfc } from '../../../utils/composerPaste.js';
 
@@ -572,12 +572,101 @@ export function useMediaUpload({
     }
   }
 
+  // ── Envio AGRUPADO (plano 177) ──────────────────────────────────
+  // Todos os arquivos (menos áudio, que é nota de voz) saem numa chamada só, e o
+  // canal os entrega como UMA mensagem — e-mail: um e-mail, N anexos, a legenda é o
+  // corpo. O histórico guarda uma bolha por arquivo (como o e-mail RECEBIDO), então
+  // aqui nascem N bolhas otimistas e o servidor devolve `msg_ids`, um por arquivo, na
+  // MESMA ordem — a regra `<id>#<n>` mora só no backend.
+  //
+  // ⚠️ Tudo-ou-nada, ao contrário do envio sequencial: se o servidor recusa, NENHUM
+  // arquivo saiu, então as bolhas somem e a FILA VOLTA para a bandeja (o operador não
+  // perde o que montou). Nunca "parcial".
+  async function sendGroup(queue, caption) {
+    const groupable = groupableItems(queue);
+    const rest = queue.filter(item => !groupable.includes(item));
+    const kinds = groupable.map(item =>
+      (item.kind === 'video' && !api.sendVideo) ? 'document' : item.kind);
+    const captionIdx = caption ? captionTargetIndex(groupable) : -1;
+    const verb = sandbox ? 'recebido' : 'enviado';
+    const base = { role: 'assistant', status: 'operator',
+                   sent_by_name: (currentUser && currentUser.name) || undefined };
+    const stamp = Date.now() / 1000;
+    const bubbles = groupable.map((item, i) => {
+      const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const source = item.blob || item.file;
+      const localUrl = item.previewUrl || (source ? URL.createObjectURL(source) : null);
+      const own = i === captionIdx ? caption : '';
+      const kind = kinds[i];
+      const content = kind === 'document'
+        ? (own ? `[Documento ${verb}: ${item.filename}]\n${own}` : `[Documento ${verb}: ${item.filename}]`)
+        : kind === 'video' ? (own || '[Vídeo]') : own;
+      return { ...base, content, media_type: kind, media_path: localUrl,
+               ts: stamp, _localId: localId, _status: 'sending', _isLocalBlob: true };
+    });
+    const localIds = bubbles.map(b => b._localId);
+    setContactData(prev => prev ? {
+      ...prev, messages: [...(prev.messages || []), ...bubbles],
+    } : prev);
+
+    const dropBubbles = () => setContactData(prev => (prev && prev.messages) ? {
+      ...prev, messages: prev.messages.filter(m => !localIds.includes(m._localId)),
+    } : prev);
+
+    try {
+      const res = await api.sendMediaGroup(
+        phone, groupable.map(item => item.file || item.blob), kinds, caption,
+        conversationId, channelId);
+      if (res && res.ok) {
+        const ids = (res.data && Array.isArray(res.data.msg_ids)) ? res.data.msg_ids : [];
+        setContactData(prev => {
+          if (!prev || !prev.messages) return prev;
+          const messages = prev.messages.flatMap(m => {
+            const at = localIds.indexOf(m._localId);
+            if (at === -1) return [m];
+            const ackMsgId = ids[at] || null;
+            // A cópia do servidor pode ter chegado ANTES do ACK (mesma corrida do
+            // envio de um arquivo só): então a bolha local é descartada em vez de
+            // virar a segunda metade do par.
+            if (ackMsgId && prev.messages.some(o => o.msg_id === ackMsgId && o._localId !== m._localId)) {
+              return [];
+            }
+            return [{ ...m, _status: null, status: 'operator',
+                      ...(ackMsgId ? { msg_id: ackMsgId } : {}) }];
+          });
+          return { ...prev, messages };
+        });
+        return { ok: true, rest };
+      }
+      // Nada saiu: some com as bolhas e DEVOLVE a fila.
+      dropBubbles();
+      const limitReason = (res && res.data
+        && ['too_big', 'bad_format', 'bad_codec'].includes(res.data.reason))
+        ? res.data.reason : null;
+      if (limitReason) {
+        setRejection({
+          reason: limitReason === 'too_big' ? 'too_big' : 'bad_format',
+          message: res.error || 'Arquivo não compatível com este canal.',
+          detail: '',
+        });
+      }
+      if (res && res.data && res.data.reason === 'session_window_closed' && conversationId != null) {
+        openTemplatePicker();
+      }
+      return { ok: false, error: res && res.error, restore: true };
+    } catch (err) {
+      console.error('Send media group error:', err);
+      dropBubbles();
+      return { ok: false, error: String(err), restore: true };
+    }
+  }
+
   // ── Envio da FILA (sequencial) ──────────────────────────────────
   // Falha parcial (P4): NÃO aborta o lote — marca o item como falho na bolha e
   // segue para o próximo. A exceção é a janela de 24h fechada, que vale para a
   // conversa inteira: aí para e abre o seletor de template.
   /** @param {string} [captionArg] - legenda do lote (o texto do compositor). */
-  async function confirmQueue(captionArg = '') {
+  async function confirmQueue(captionArg = '', { group = false } = {}) {
     if (!pendingQueue.length || sending) return false;
     const isPrivate = mode === 'private';
     // 24h window closed (WhatsApp Cloud): media also requires a template.
@@ -605,6 +694,27 @@ export function useMediaUpload({
     // ao operador e o envio nunca discordem. `done` é o índice do item corrente
     // (ele só é incrementado depois do envio).
     const captionIndex = caption ? captionTargetIndex(queue) : -1;
+
+    if (group && !isPrivate && groupableItems(queue).length >= 2) {
+      const res = await sendGroup(queue, caption);
+      setSentCount(queue.length);
+      if (!res.ok) {
+        // Nada saiu — devolve a fila (as miniaturas, os blobs e as prévias continuam
+        // vivos: só foram tirados da bandeja, não revogados).
+        setPendingQueue(queue);
+        notify(res.error || 'Não foi possível enviar os anexos.', { kind: 'error' });
+      } else if (res.rest && res.rest.length) {
+        // Áudio gravado que ficou de fora do grupo: segue pelo envio normal, depois.
+        for (const item of res.rest) await sendOne(item, '', null);
+      }
+      setSending(false);
+      setSentCount(0);
+      setSendTotal(0);
+      if (res.ok && onSent) {
+        try { await onSent(); } catch (_) { /* envio confirmou; recarga é best-effort */ }
+      }
+      return !!res.ok;
+    }
 
     let done = 0;
     let failures = 0;

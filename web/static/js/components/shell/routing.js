@@ -24,7 +24,8 @@ export const CORE_ROUTES = {
   '/quick-replies': 'quick-replies',
   '/custom-attributes': 'custom-attributes',
   '/runtime': 'runtime',
-  '/teams': 'teams',
+  // Alias legado: Times voltou a ser sub-aba de Usuários (/users/teams).
+  '/teams': 'users',
   '/users': 'users',
   '/audit': 'audit',
   '/api-keys': 'api-keys',
@@ -46,7 +47,6 @@ export const CORE_TAB_PATHS = {
   'quick-replies': '/quick-replies',
   'custom-attributes': '/custom-attributes',
   runtime: '/runtime',
-  teams: '/teams',
   users: '/users',
   audit: '/audit',
   'api-keys': '/api-keys',
