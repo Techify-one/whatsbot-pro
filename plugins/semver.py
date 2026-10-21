@@ -100,11 +100,7 @@ logger = logging.getLogger(__name__)
 # ``None`` (nunca descarta) preserva todo provider existente; GOWA é o único
 # que o sobrescreve hoje. Plugin que precise do seam declara ``">=1.10,<2.0"``;
 # quem só quer degradar continua em ``">=1.0,<2.0"``.
-# 1.11.0: ``ChannelCapabilities.media_group`` + ``Channel.send_media_group`` (plano 177:
-# "Agrupar" anexos numa só mensagem). Ambos com default que preserva todo provider
-# existente. Plugin que o declare usa ``">=1.11,<2.0"``; o de e-mail degrada sozinho
-# num core anterior (ver ``_GROUP_CAPABILITY`` dele) e segue em ``">=1.1,<2.0"``.
-WHATSBOT_API_VERSION = "1.11.0"
+WHATSBOT_API_VERSION = "1.10.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+].*)?$")
 _COMPARATOR_RE = re.compile(r"^(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+){0,2}(?:[-+].*)?)$")

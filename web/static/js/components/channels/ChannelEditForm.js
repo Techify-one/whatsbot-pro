@@ -12,7 +12,7 @@ import {
   parseChannelConfig, aiDefaultsFrom, buildEditPayload, validateCredentials,
   withResolvedMediaModes,
 } from './constants.js';
-import { ConfigFields, CredentialFields, DescriptorFields, FormComponentLoader } from './DescriptorFields.js';
+import { ConfigFields, CredentialFields, FormComponentLoader } from './DescriptorFields.js';
 import { EmbedSnippetBlock } from './notices.js';
 import { AiSettingsFields } from './AiSettingsFields.js';
 import { AgentPicker } from './AgentPicker.js';
@@ -90,7 +90,7 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
 
   // Formato das credenciais SUBMETIDAS (plano 104 F3). Campo em branco = "manter
   // a atual" ⇒ nunca revalida o que já está no banco (row legada não trava).
-  const credErrors = validateCredentials(descriptor, credValues, configValues);
+  const credErrors = validateCredentials(descriptor, credValues);
   const hasCredErrors = Object.keys(credErrors).length > 0;
 
   async function save() {
@@ -149,30 +149,20 @@ export function ChannelEditForm({ channel, descriptor, onSaved, onCancel, aiDefa
             </div>
           ` : null}
 
-          ${descriptor && descriptor.form_order && (hasConfig || hasCreds) ? html`
+          ${hasConfig ? html`
             <div class="border-t border-wa-border pt-3 flex flex-col gap-3">
-              <div class="text-[12px] text-wa-secondary">Credenciais — deixe em branco para manter a atual.</div>
-              <${DescriptorFields} descriptor=${descriptor} configValues=${configValues}
-                credValues=${credValues} setConfig=${setConfig} setCred=${setCred}
-                editMode=${true} busy=${busy} errors=${credErrors} />
+              <${ConfigFields} fields=${descriptor.config_fields} values=${configValues}
+                onChange=${setConfig} editMode=${true} busy=${busy} />
             </div>
-          ` : html`
-            ${hasConfig ? html`
-              <div class="border-t border-wa-border pt-3 flex flex-col gap-3">
-                <${ConfigFields} fields=${descriptor.config_fields} values=${configValues}
-                  onChange=${setConfig} editMode=${true} busy=${busy} credValues=${credValues} />
-              </div>
-            ` : null}
+          ` : null}
 
-            ${hasCreds ? html`
-              <div class="border-t border-wa-border pt-3 flex flex-col gap-2">
-                <div class="text-[12px] text-wa-secondary">Credenciais — deixe em branco para manter a atual.</div>
-                <${CredentialFields} fields=${descriptor.credential_fields} values=${credValues}
-                  onChange=${setCred} editMode=${true} busy=${busy} errors=${credErrors}
-                  configValues=${configValues} />
-              </div>
-            ` : null}
-          `}
+          ${hasCreds ? html`
+            <div class="border-t border-wa-border pt-3 flex flex-col gap-2">
+              <div class="text-[12px] text-wa-secondary">Credenciais — deixe em branco para manter a atual.</div>
+              <${CredentialFields} fields=${descriptor.credential_fields} values=${credValues}
+                onChange=${setCred} editMode=${true} busy=${busy} errors=${credErrors} />
+            </div>
+          ` : null}
 
           ${descriptor && descriptor.form_component ? html`
             <div class="border-t border-wa-border pt-3">

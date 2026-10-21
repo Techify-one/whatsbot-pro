@@ -7,7 +7,7 @@
 import { h } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import htm from 'htm';
-import { fieldVisible, orderedFields, randomToken, secretInputProps } from './constants.js';
+import { randomToken, secretInputProps } from './constants.js';
 
 const html = htm.bind(h);
 
@@ -185,10 +185,8 @@ function ConfigField({ field, value, onChange, busy }) {
 
 // Render all credential fields of a descriptor. values = {key: string}.
 // ``errors`` (opcional) = {key: mensagem} de validateCredentials (plano 104 F3).
-export function CredentialFields({ fields, values, onChange, editMode, busy, errors, configValues }) {
-  // `show_if` (plano 176): campo escondido não é renderizado. Sem `configValues` e sem
-  // `show_if` nos campos, nada muda para o provider.
-  const list = (fields || []).filter((f) => fieldVisible(f, configValues, values));
+export function CredentialFields({ fields, values, onChange, editMode, busy, errors }) {
+  const list = fields || [];
   if (!list.length) return null;
   return html`${list.map((field) => html`<${CredentialField} key=${field.key}
     field=${field} value=${(values || {})[field.key]} onChange=${onChange}
@@ -197,36 +195,10 @@ export function CredentialFields({ fields, values, onChange, editMode, busy, err
 
 // Render all config fields of a descriptor. In edit mode, `generated` fields are
 // immutable (assigned at create) and skipped. values = {key: value}.
-export function ConfigFields({ fields, values, onChange, editMode, busy, credValues }) {
-  const list = (fields || [])
-    .filter((f) => !(editMode && f.type === 'generated'))
-    .filter((f) => fieldVisible(f, values, credValues));
+export function ConfigFields({ fields, values, onChange, editMode, busy }) {
+  const list = (fields || []).filter((f) => !(editMode && f.type === 'generated'));
   if (!list.length) return null;
   return html`${list.map((field) => html`<${ConfigField} key=${field.key}
     field=${field} value=${(values || {})[field.key]} onChange=${onChange}
     busy=${busy} />`)}`;
-}
-
-// Config + credenciais INTERCALADOS na ordem do `form_order` do descriptor (plano 176).
-// Usado só quando o provider declara `form_order`; sem ele o formulário segue com os dois
-// blocos de sempre. Campo com `show_if` ganha um recuo com filete: é o que mostra, na
-// tela, que ele pertence ao checkbox logo acima.
-export function DescriptorFields({ descriptor, configValues, credValues, setConfig, setCred,
-  editMode, busy, errors }) {
-  const items = orderedFields(descriptor)
-    .filter(({ kind, field }) => !(editMode && kind === 'config' && field.type === 'generated'))
-    .filter(({ field }) => fieldVisible(field, configValues, credValues));
-  if (!items.length) return null;
-  return html`${items.map(({ kind, field }) => {
-    const node = kind === 'config'
-      ? html`<${ConfigField} key=${field.key} field=${field}
-          value=${(configValues || {})[field.key]} onChange=${setConfig} busy=${busy} />`
-      : html`<${CredentialField} key=${field.key} field=${field}
-          value=${(credValues || {})[field.key]} onChange=${setCred} editMode=${editMode}
-          busy=${busy} error=${(errors || {})[field.key]} />`;
-    return field.show_if
-      ? html`<div key=${'w:' + kind + ':' + field.key}
-          class="pl-3 border-l-2 border-wa-border flex flex-col gap-3">${node}</div>`
-      : node;
-  })}`;
 }

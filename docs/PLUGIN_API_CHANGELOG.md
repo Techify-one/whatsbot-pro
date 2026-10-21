@@ -107,38 +107,6 @@ aditiva). Contrato completo em [docs/PLUGINS.md](PLUGINS.md).
 
 ---
 
-## 1.11.0 — 2026-10-14 · `ChannelCapabilities.media_group` + `Channel.send_media_group` — "Agrupar" anexos (plano 177)
-
-**Aditiva em `channels/base.py`, com defaults que preservam todo provider
-existente.** Um plugin de canal que não declare a capability não muda em nada.
-
-### O seam
-
-- `ChannelCapabilities.media_group: bool = False` — o canal entrega VÁRIOS
-  arquivos como UMA mensagem do provedor (e-mail: um e-mail, N anexos). Dirige o
-  envio agrupado do compositor (automático para 2+ anexos que não sejam áudio)
-  **por capability**, nunca por nome de provider.
-- `Channel.send_media_group(chat_id, items, *, caption="") -> SendResult` — o
-  default recusa (`media_group_not_supported`). `items` é uma lista de
-  `{"kind", "path", "filename"}`; `caption` é o texto único do grupo.
-  `media_group=True` **obriga** a implementar o método.
-
-### Contrato com o histórico
-
-O core grava **uma linha por arquivo** (`messages` guarda uma mídia por linha,
-como o e-mail recebido). O `external_msg_id` devolvido é UM só: o ÚLTIMO arquivo
-o guarda verbatim (é o que a resposta do cliente vai citar) e os anteriores
-recebem `<id>#<n>`. ⚠️ Ids repetidos entre as linhas fariam o painel FUNDIR as
-bolhas (`reconcileByMsgId`).
-
-### Para o plugin
-
-Declarar a capability num core anterior levanta `TypeError` (campo desconhecido
-de dataclass) e o plugin **não carrega**. Fica condicionado à presença do campo
-(`"media_group" in ChannelCapabilities.__dataclass_fields__`) — num core
-anterior o canal segue como sempre foi, um e-mail por arquivo. Documentar
-"core antes do zip".
-
 ## 1.10.0 — 2026-09-28 · `Channel.should_drop_inbound` — descarte de JID não permitido na ENTRADA (plano 173)
 
 **Aditiva em `channels/base.py`, com default que preserva todo provider

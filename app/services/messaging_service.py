@@ -291,10 +291,6 @@ _MEDIA_KIND_SPEC: dict[str, dict] = {
 
 MEDIA_KINDS = tuple(_MEDIA_KIND_SPEC)
 
-# Teto de arquivos num envio agrupado (plano 177) — o MESMO da fila do painel
-# (``MAX_FILES_PER_DROP`` em ``uploadLimits.js``).
-MAX_GROUP_FILES = 10
-
 
 def _unlink(path: Path) -> None:
     """Remove um upload que acabou de ser recusado (sem órfão em ``statics/outbox``)."""
@@ -549,13 +545,8 @@ class MessagingService:
                          transcribe: bool = False,
                          sent_by_user_id: int | None = None,
                          sent_by_name: str | None = None,
-                         wire_phone: str | None = None,
-                         sent_msg_id: str | None = None) -> dict:
+                         wire_phone: str | None = None) -> dict:
         """Send an operator-uploaded media file and persist/broadcast/emit it (R14).
-
-        ``sent_msg_id`` (plano 177): the file ALREADY left the building — inside a
-        grouped send (:meth:`send_media_group_upload`) — so the provider call is
-        skipped and only the persist/broadcast/emit tail runs, under that id.
 
         UNIFIES the three near-duplicate operator send handlers
         (``send-image`` / ``send-audio`` / ``send-document``) that lived in
@@ -597,9 +588,7 @@ class MessagingService:
         wire = wire_phone or phone
         msg_id = None
         try:
-            if sent_msg_id is not None:
-                msg_id = sent_msg_id
-            elif not is_sandbox:
+            if not is_sandbox:
                 res = await asyncio.to_thread(
                     outbound.send_media, channel_id, wire, kind, str(dest),
                     caption=caption, filename=filename)
@@ -804,159 +793,6 @@ class MessagingService:
                 "conversation_id": result.get("conversation_id"),
                 "channel_id": resolved_channel, "kind": kind,
                 "sandbox": is_sandbox}
-
-    # ── Operator media GROUP ("Agrupar" — plano 177) ────────────────────────
-
-    async def send_media_group_upload(self, *, phone: str, files: list[dict],
-                                      caption: str = "",
-                                      conversation_id=None, channel_id=None,
-                                      sent_by_user_id: int | None = None,
-                                      sent_by_name: str | None = None,
-                                      inbox_guard=None) -> dict:
-        """Envia VÁRIOS arquivos do operador como UMA mensagem do provedor.
-
-        Só existe para canal que declara ``ChannelCapabilities.media_group`` (e-mail:
-        um e-mail, N anexos, a legenda é o corpo). Os demais seguem mandando um
-        arquivo por mensagem pela fila do painel — nenhum canal é nomeado aqui.
-
-        ``files`` é uma lista de ``{"kind", "data", "filename", "content_type"}``.
-
-        A ORDEM é a de :meth:`send_media_upload` (inbox → sandbox → canal → tomada
-        humana → janela → preparo), e o preparo roda por arquivo, com os MESMOS
-        limites e transcodes. O envio ao provedor é UM só (``Channel.send_media_group``).
-
-        ⚠️ **Persistência: uma linha por arquivo.** ``messages`` guarda uma mídia por
-        linha (``media_type``/``media_path``) e o painel renderiza uma bolha por linha —
-        igual ao e-mail RECEBIDO, em que cada anexo é uma bolha. A legenda vai na
-        bolha do ÚLTIMO arquivo que a aceita (mesma regra de ``captionTargetIndex`` no
-        painel). O id do provedor é UM só (é o ``Message-ID`` que a resposta do cliente
-        vai citar) e fica NA ÚLTIMA bolha; as anteriores ganham ``<id>#<n>`` porque a
-        reconciliação do painel por ``msg_id`` FUNDE bolhas de mesmo id numa só.
-
-        Tudo-ou-nada: se um arquivo for recusado ou o provedor falhar, NADA é gravado
-        no histórico nem enviado (o painel devolve a fila ao operador).
-        """
-        if not files:
-            return {"ok": False, "reason": "empty_group", "status": 400,
-                    "message": "Nenhum arquivo para enviar."}
-        if len(files) > MAX_GROUP_FILES:
-            return {"ok": False, "reason": "too_many_files", "status": 400,
-                    "message": f"Só é possível agrupar {MAX_GROUP_FILES} arquivos por vez."}
-        for item in files:
-            if item.get("kind") not in _MEDIA_KIND_SPEC:
-                return {"ok": False, "reason": "invalid_kind", "status": 400,
-                        "message": ("Tipo de mídia inválido. Use um de: "
-                                    + ", ".join(sorted(_MEDIA_KIND_SPEC)) + ".")}
-
-        outbound = self.outbound
-        caption = caption or ""
-
-        if inbox_guard is not None:
-            denied = await inbox_guard()
-            if denied:
-                return denied
-
-        is_sandbox = await asyncio.to_thread(is_sandbox_contact, phone)
-        resolved_channel = await asyncio.to_thread(
-            resolve_channel_id, phone, conversation_id, channel_id)
-
-        # Capacidade ANTES de gravar qualquer coisa em disco. Sandbox não vai ao
-        # provedor, então não depende dela.
-        if not is_sandbox and not outbound.supports(resolved_channel, "media_group"):
-            return {"ok": False, "reason": "group_not_supported", "status": 400,
-                    "message": "Este canal não envia vários arquivos numa só mensagem."}
-
-        abort_ai_cycle(self._deps, resolved_channel, phone)
-        wire_phone = await asyncio.to_thread(wire_target, phone, conversation_id)
-
-        if not is_sandbox:
-            block = await asyncio.to_thread(
-                session_window_block, outbound, resolved_channel,
-                conversation_id, phone)
-            if block:
-                return {"ok": False, "reason": block["reason"], "status": 409,
-                        "message": block["message"],
-                        "data": {"reason": block["reason"]}}
-
-        prepared: list[dict] = []
-        for item in files:
-            kind = item["kind"]
-            spec = _MEDIA_KIND_SPEC[kind]
-            safe_name = Path(item.get("filename") or "arquivo").name
-            res = await self._prepare_media_file(
-                spec, kind, item["data"], filename=item.get("filename"),
-                safe_name=safe_name, content_type=item.get("content_type"),
-                channel_id=resolved_channel, is_sandbox=is_sandbox)
-            if not res["ok"]:
-                for done in prepared:       # sem órfão em statics/outbox
-                    _unlink(done["dest"])
-                return res
-            prepared.append({"kind": kind, "spec": spec, "dest": res["dest"],
-                             "safe_name": safe_name})
-
-        # A legenda mora no ÚLTIMO arquivo que a aceita (áudio é pulado).
-        caption_idx = next((i for i in range(len(prepared) - 1, -1, -1)
-                            if prepared[i]["spec"]["send_caption"]),
-                           len(prepared) - 1)
-
-        group_msg_id = ""
-        if not is_sandbox:
-            send = await asyncio.to_thread(
-                outbound.send_media_group, resolved_channel, wire_phone,
-                [{"kind": p["kind"], "path": str(p["dest"]),
-                  "filename": p["safe_name"]} for p in prepared],
-                caption=caption)
-            if not send.ok:
-                for p in prepared:
-                    _unlink(p["dest"])
-                logger.error("[Send] Failed to send media group to %s: %s",
-                             phone, send.error)
-                await self.error_bubble(
-                    phone, f"Falha ao enviar os anexos: {send.error}",
-                    channel_id=resolved_channel)
-                return {"ok": False, "reason": "send_failed", "status": 500,
-                        "message": f"Falha ao enviar os anexos: {send.error}",
-                        "provider_error": send.error or ""}
-            group_msg_id = send.external_msg_id or ""
-
-        last = len(prepared) - 1
-        results: list[dict] = []
-        msg_ids: list[str | None] = []
-        for i, p in enumerate(prepared):
-            item_caption = caption if i == caption_idx else ""
-            content, emit_text = p["spec"]["body"](item_caption, p["safe_name"])
-            # Último = id do provedor; os anteriores, `<id>#<n>` (identidade própria).
-            if is_sandbox:
-                bubble_id = None
-            elif i == last:
-                bubble_id = group_msg_id
-            else:
-                bubble_id = f"{group_msg_id}#{i + 1}" if group_msg_id else ""
-            r = await self.send_media(
-                channel_id=resolved_channel, phone=phone, kind=p["kind"], dest=p["dest"],
-                is_sandbox=is_sandbox, content=content, emit_text=emit_text,
-                error_label=p["spec"]["error_label"],
-                transcribe=p["spec"]["transcribe"],
-                sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
-                wire_phone=wire_phone, sent_msg_id=bubble_id)
-            results.append(r)
-            msg_ids.append(bubble_id)
-
-        failed = [r for r in results if not r.get("ok")]
-        if failed:
-            # O e-mail JÁ saiu: dizer "falhou" faria o operador reenviar e o cliente
-            # receber duas vezes. Só a gravação local de alguma bolha falhou.
-            logger.error("[Send] Media group to %s sent, but %d bubble(s) not saved",
-                         phone, len(failed))
-        tail = results[-1] if results[-1].get("ok") else next(
-            (r for r in reversed(results) if r.get("ok")), {})
-        # ``msg_ids`` (um por arquivo, na ordem do envio) é o que o painel adota nas bolhas
-        # otimistas — a regra ``<id>#<n>`` mora SÓ aqui, o cliente não a recalcula.
-        return {"ok": True, "msg_id": group_msg_id or None, "msg_ids": msg_ids,
-                "media_path": tail.get("media_path"),
-                "conversation_id": tail.get("conversation_id"),
-                "channel_id": resolved_channel, "kind": "group",
-                "count": len(prepared), "sandbox": is_sandbox}
 
     async def _prepare_media_file(self, spec, kind: str, data: bytes, *,
                                   filename: str | None, safe_name: str,

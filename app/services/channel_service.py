@@ -277,63 +277,7 @@ def required_credentials(deps, provider: str) -> list[str]:
         return []
 
 
-def config_as_dict(value) -> dict:
-    """``channels.config`` (JSON em texto, dict ou vazio) como dict. Nunca levanta."""
-    if isinstance(value, str) and value:
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return {}
-    return value if isinstance(value, dict) else {}
-
-
-def field_visible(field: dict, config: dict | None, creds: dict | None) -> bool:
-    """O campo do descriptor está visível para estes valores? (``show_if``, plano 176)
-
-    Espelho EXATO de ``fieldVisible`` em ``web/static/js/components/channels/constants.js``
-    — o servidor não confia no cliente, então a mesma regra decide aqui o que é
-    obrigatório e o que tem o formato validado. O provider DECLARA
-    ``"show_if": {"key": <outro campo>, "equals": <valor>}``; o core só AVALIA, sem
-    ``if provider ==``.
-
-    * ``key`` é lida de ``config`` e, se ausente lá, de ``creds``;
-    * sem ``equals``, o campo aparece quando o outro for ``True``;
-    * comparação por igualdade TIPADA (``True`` ≠ ``"true"``): o config chega em JSON;
-    * ``show_if`` malformado ⇒ visível (fail-open: provider mal declarado não pode
-      esconder um campo obrigatório).
-    """
-    cond = field.get("show_if") if isinstance(field, dict) else None
-    if not isinstance(cond, dict) or not cond.get("key"):
-        return True
-    cfg, cred = config or {}, creds or {}
-    key = cond["key"]
-    current = cfg[key] if key in cfg else cred.get(key)
-    if "equals" not in cond:
-        return current is True
-    expected = cond["equals"]
-    # ⚠️ Em Python ``1 == True`` e ``0 == False``; em JS ``1 === true`` é falso. Sem exigir
-    # o MESMO tipo, ``{"imap_enabled": 1}`` mostraria o bloco no servidor e o esconderia no
-    # formulário, e os dois discordariam sobre o que é obrigatório.
-    return type(current) is type(expected) and current == expected
-
-
-def config_with_defaults(desc: dict, config: dict | None) -> dict:
-    """``config`` submetido completado com o ``default`` de cada ``config_fields`` ausente.
-
-    O formulário sempre envia todas as chaves (semeia ``initialConfigValues``), mas um
-    cliente de API pode omitir um checkbox. Sem isto a chave ausente leria como "não
-    marcado" e ESCONDERIA os campos que ele controla, tirando-os da obrigatoriedade: um
-    canal nasceria sem servidor nem senha. Com o default do provider, omitir = o padrão.
-    """
-    out = dict(config or {})
-    for f in desc.get("config_fields") or []:
-        key = f.get("key")
-        if key and key not in out and "default" in f:
-            out[key] = f["default"]
-    return out
-
-
-def creation_required_credentials(deps, provider: str, config: dict | None = None) -> list[str]:
+def creation_required_credentials(deps, provider: str) -> list[str]:
     """Credential keys mandatory when creating a NEW channel.
 
     Creation policy already lives in the provider descriptor's
@@ -342,28 +286,20 @@ def creation_required_credentials(deps, provider: str, config: dict | None = Non
     existing rows and feeds the panel's zombie-channel warning.  Usually the two
     sets coincide; a provider can use a stricter creation policy during a legacy
     migration without falsely marking old, compatible rows as disconnected.
-
-    ``config`` (opcional) é o config SUBMETIDO: campo ``required`` escondido por
-    ``show_if`` não é obrigatório (plano 176) — sem isso um provider com blocos
-    opcionais nunca poderia ser criado com um deles desligado. Sem ``config`` nada
-    é escondido, que é o comportamento de sempre.
     """
     try:
         desc = provider_descriptor(deps, provider)
-        effective = config_with_defaults(desc, config)
         return [
             str(field.get("key"))
             for field in desc.get("credential_fields") or []
             if field.get("key") and field.get("required")
-            and field_visible(field, effective, None)
         ]
     except Exception:
         # Keep the historical best-effort behavior for a broken provider probe.
         return []
 
 
-def credential_format_errors(deps, provider: str, submitted_creds: dict,
-                             config: dict | None = None) -> dict:
+def credential_format_errors(deps, provider: str, submitted_creds: dict) -> dict:
     """Erros de FORMATO das credenciais submetidas (plano 104 F3).
 
     Genérico e dirigido pelo descriptor: o provider declara
@@ -382,9 +318,6 @@ def credential_format_errors(deps, provider: str, submitted_creds: dict,
     ⚠️ A mensagem cita SÓ o campo, nunca o valor recusado — ele pode ser a senha
     que o navegador preencheu sozinho, e vazaria em log/resposta.
 
-    Campo escondido por ``show_if`` (plano 176, segundo ``config``) não é validado: o
-    operador não o vê, então recusá-lo seria um erro sem como corrigir.
-
     :returns: ``{credential_key: mensagem}`` — vazio quando tudo passa.
     """
     creds = submitted_creds or {}
@@ -395,13 +328,10 @@ def credential_format_errors(deps, provider: str, submitted_creds: dict,
     except Exception:  # noqa: BLE001 — provider quebrado não bloqueia o save
         return {}
     out: dict[str, str] = {}
-    effective = config_with_defaults(desc, config)
     for field in desc.get("credential_fields") or []:
         pattern = field.get("pattern")
         key = field.get("key")
         if not pattern or not key or key not in creds:
-            continue
-        if not field_visible(field, effective, creds):
             continue
         value = str(creds.get(key) or "").strip()
         if not value or value.startswith("••••"):

@@ -1,7 +1,7 @@
 import { h } from 'preact';
 import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
 import htm from 'htm';
-import { sendMessage, sendImage, sendAudio, sendDocument, sendVideo, sendMediaGroup } from '../../services/api.js';
+import { sendMessage, sendImage, sendAudio, sendDocument, sendVideo } from '../../services/api.js';
 import { BackArrowIcon, DefaultAvatar, GroupAvatar } from './icons.js';
 import { isSameDay, formatDateSeparator, avatarUrl } from './utils.js';
 import { formatWhatsApp, toWhatsAppMarkup } from '../../utils/formatWhatsApp.js';
@@ -37,7 +37,7 @@ import { stripGroupPrefix } from '../../services/composerTokens.js';
 import { senderColor, quotedMediaText, cardStateKey, isCollapsibleCard, isOperatorMessage, isAiContentLabel } from '../../services/messageView.js';
 import { hasPermission } from '../../utils/permissions.js';
 import { transitionAfterOutput } from '../../services/outputTransition.js';
-import { submitPlan, isAudioOnly, canGroup } from '../../services/composerSubmit.js';
+import { submitPlan, isAudioOnly } from '../../services/composerSubmit.js';
 
 const html = htm.bind(h);
 
@@ -147,7 +147,7 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   // Effective send API. Sandbox injects local (no-GOWA) endpoints; the contact
   // chat uses the real ones.
   const _api = {
-    sendText: sendMessage, sendImage, sendAudio, sendDocument, sendVideo, sendMediaGroup,
+    sendText: sendMessage, sendImage, sendAudio, sendDocument, sendVideo,
     ...(api || {}),
   };
 
@@ -270,9 +270,6 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   //  • editSupported: só mostra "Editar" quando o canal edita e não é sandbox.
   const revokeSupported = sandbox || !(contact && contact.revoke_supported === false);
   const editSupported = !sandbox && !!(contact && contact.edit_supported);
-  // Envio agrupado de anexos numa só mensagem (plano 177): só onde o canal declara a capability
-  // (e-mail). Nunca por nome de provider; sandbox não sai para o provedor.
-  const mediaGroupSupported = !sandbox && !!(contact && contact.media_group_supported);
   // Limites de mídia declarados pelo canal (tamanho/formato). O compositor usa
   // pra bloquear o anexo incompatível com um popup ANTES de tentar enviar. Canal
   // sem limites (GOWA/Telegram) manda `{}` e nada é bloqueado.
@@ -387,13 +384,6 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
   });
   autocompleteRef.current = autocomplete;
 
-  // Envio agrupado (plano 177) é AUTOMÁTICO, sem chip: `canGroup` olha capability do
-  // canal, modo e a fila (2+ arquivos fora o áudio). Canal que não declara
-  // `media_group` nunca agrupa — segue um arquivo por mensagem, como sempre.
-  const groupAvailable = canGroup({
-    supported: mediaGroupSupported, sandbox, mode: composer.mode, queue: media.pendingQueue,
-  });
-
   // ── O gesto de ENVIAR (plano 124) ────────────────────────────────
   // Um só ponto de decisão para o botão e para a tecla Enter: a regra pura mora
   // em `services/composerSubmit.js`, aqui fica só a execução. Com anexo na
@@ -409,7 +399,6 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
       mode: composer.mode,
       sessionClosed,
       sending: media.sending,
-      group: groupAvailable,
     });
 
     if (plan.action === 'noop') return false;
@@ -437,14 +426,13 @@ export function ContactDetail({ phone, conversationId = null, channelId = null, 
     // WhatsApp (*negrito*) — senão o mesmo texto sairia diferente só por ter
     // anexo junto.
     // `confirmQueue` já chama `onSent` → `finishSuccessfulOutput(true)`.
-    const okMedia = await media.confirmQueue(toWhatsAppMarkup(plan.caption),
-      { group: plan.action === 'media_group' });
+    const okMedia = await media.confirmQueue(toWhatsAppMarkup(plan.caption));
     // F8 item 4: quem manda uma imagem também continua digitando em seguida —
     // só o caminho de TEXTO devolvia o foco (`useComposer`).
     focusComposer();
     return okMedia;
   }, [composer, media, sessionClosed, composerSend, finishSuccessfulOutput,
-      openTemplatePicker, focusComposer, groupAvailable]);
+      openTemplatePicker, focusComposer]);
 
   const composerUi = { ...composer, handleSend: handleSendGuarded,
                        handleRetry: handleRetryGuarded };

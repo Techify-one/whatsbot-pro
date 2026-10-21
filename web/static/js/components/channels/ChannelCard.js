@@ -29,7 +29,7 @@ export function ChannelCard({ channel, onToggle, onDelete, onPurge, onRefresh, o
   // (capability-driven via the providers fetch, local fallback otherwise). A
   // credential-only provider missing these can never connect — flag it with a
   // shortcut to Editar instead of leaving the raw "missing_credentials" error.
-  const missingCreds = missingCredsFor(channel, requiredCreds, descriptor);
+  const missingCreds = missingCredsFor(channel, requiredCreds);
   // The backend status() returns this raw code for the same condition; the
   // friendly warning below replaces it, so don't show both.
   const showRawError = channel.last_error && channel.last_error !== 'missing_credentials';

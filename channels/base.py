@@ -137,14 +137,6 @@ class ChannelCapabilities:
     # WhatsApp providers can (GOWA ``/message/{id}/update``, Cloud messages endpoint
     # with ``message_id``); gates the "Editar" menu item.
     edit_message: bool = False
-    # Whether the provider can deliver SEVERAL files as ONE message (plano 177 — envio
-    # agrupado no compositor). E-mail can (one message, N attachments, the caption is the
-    # body); WhatsApp/Telegram/Meta cannot, they send one message per file. When ``True``
-    # the panel groups ANY queue of 2+ non-audio files automatically (no toggle); when
-    # ``False`` the queue keeps going one file per message. Driven by CAPABILITY, never
-    # provider name. ``True`` obliges the provider to implement
-    # :meth:`Channel.send_media_group`.
-    media_group: bool = False
     inbound_route: str = "path"           # "path" | "poll" | "none"
     # Whether this provider's access token EXPIRES and must be renewed in the
     # background (plano 46 · 01-C, D8). ``False`` = the token never expires by time
@@ -296,19 +288,7 @@ class Channel(ABC):
     #     "ai_sequential_default": bool,     # default for config.ai.ai_sequential_enabled
     #     "post_create": None | {...},       # declarative post-create UX (see below)
     #     "form_component": None | "/plugins/<id>/static/<x>.js",  # optional rich form
-    #     "form_order": [key, ...],          # optional: interleave config + credential
-    #                                        # fields (default: all config, then all creds)
     #   }
-    #
-    # Conditional field (plano 176): a ``credential_fields``/``config_fields`` entry may
-    # declare ``"show_if": {"key": <other field>, "equals": <value>}``. The field exists
-    # only while that other field holds that value (no ``equals`` ⇒ while it is ``True``).
-    # Hidden fields are also dropped from "required", from the format check and from the
-    # create/edit payload. ``key`` is read from the config first, then the credentials;
-    # a missing config key falls back to that field's ``default``. Equality is TYPED
-    # (``True`` != ``"true"`` != ``1``). Malformed ``show_if`` ⇒ the field stays visible.
-    # Core predecessors ignore both keys and show every field (plugin degrades, still
-    # works). Evaluated by ``channel_service.field_visible`` / ``constants.js fieldVisible``.
     #
     # Field ``type`` values the generic form understands: ``text``, ``secret``,
     # ``token_suggest`` (text + a "suggest random token" button), ``multiselect``
@@ -482,21 +462,6 @@ class Channel(ABC):
     @abstractmethod
     def send_media(self, chat_id: str, kind: str, path_or_url: str, *,
                    caption: str = "", filename=None) -> SendResult: ...
-
-    def send_media_group(self, chat_id: str, items: list, *,
-                         caption: str = "") -> SendResult:
-        """Deliver ``items`` as ONE message (plano 177). Optional, capability-gated
-        (``ChannelCapabilities.media_group``); the default refuses so a provider that
-        cannot group degrades cleanly instead of pretending to.
-
-        ``items`` is a list of ``{"kind", "path", "filename"}`` dicts (``path`` is a
-        local file, ``filename`` may be ``None``); ``caption`` is the single text that
-        goes with the whole group. ``SendResult.external_msg_id`` is the id of the ONE
-        message that left. The core persists one bubble per file: the LAST bubble keeps
-        that id verbatim (it is what the customer's reply will quote) and the earlier
-        ones get ``<id>#<n>`` — so every bubble has its own identity, which the panel's
-        reconciliation by ``msg_id`` requires. Driven by CAPABILITY, never provider name."""
-        return SendResult(ok=False, error="media_group_not_supported")
 
     # Optional, default no-op
     def mark_read(self, chat_id: str, msg_id: str) -> None: ...

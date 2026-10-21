@@ -39,9 +39,6 @@ def test_a_rota_de_midia_da_v1_tem_teto(path):
     "/api/contacts/5511999999999/send-audio",
     "/api/contacts/5511999999999/send-video",
     "/api/contacts/5511999999999/send-document",
-    # "Agrupar" (plano 177): N arquivos no MESMO corpo. Fora da regex o corpo inteiro
-    # iria para a RAM, e aqui o total é a SOMA de até 10 arquivos.
-    "/api/contacts/5511999999999/send-media-group",
     "/api/contacts/import",
     "/api/sandbox/send-image",
 ])

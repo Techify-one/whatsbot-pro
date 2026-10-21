@@ -335,10 +335,7 @@ def register_routes(app, deps):
         # stricter during a legacy migration (for example a new signing secret that
         # old rows may temporarily omit without becoming zombie channels).
         submitted_creds = body.get("credentials") or {}
-        # ``config`` submetido decide quais campos ``show_if`` estão escondidos (plano 176).
-        submitted_config = svc.config_as_dict(body.get("config"))
-        missing_creds = [k for k in svc.creation_required_credentials(
-                             deps, provider, submitted_config)
+        missing_creds = [k for k in svc.creation_required_credentials(deps, provider)
                          if not str(submitted_creds.get(k) or "").strip()]
         if missing_creds:
             return _err(
@@ -348,8 +345,7 @@ def register_routes(app, deps):
         # ``credential_fields[].pattern``; o core só avalia — sem `if provider ==`.
         # A mensagem cita o campo, NUNCA o valor (pode ser a senha que o
         # navegador preencheu sozinho no campo de proxy).
-        fmt_errors = svc.credential_format_errors(
-            deps, provider, submitted_creds, submitted_config)
+        fmt_errors = svc.credential_format_errors(deps, provider, submitted_creds)
         if fmt_errors:
             return _err(" ".join(fmt_errors[k] for k in sorted(fmt_errors)), 400)
         config = body.get("config")
@@ -396,12 +392,8 @@ def register_routes(app, deps):
         # Só o que foi SUBMETIDO é validado (plano 104 F3): campo em branco = "manter
         # a atual", então uma row legada com credencial fora do formato nunca trava
         # a edição de outro campo.
-        # Na edição o config novo (se vier) vale; senão vale o salvo, que é quem diz
-        # quais campos ``show_if`` estão escondidos (plano 176).
-        effective_config = (svc.config_as_dict(body.get("config")) if "config" in body
-                            else svc.config_as_dict(row.get("config")))
         fmt_errors = svc.credential_format_errors(
-            deps, row.get("provider"), body.get("credentials") or {}, effective_config)
+            deps, row.get("provider"), body.get("credentials") or {})
         if fmt_errors:
             return _err(" ".join(fmt_errors[k] for k in sorted(fmt_errors)), 400)
         try:
