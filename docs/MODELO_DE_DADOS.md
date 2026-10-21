@@ -37,5 +37,6 @@ o QUE cada coluna significa e por que existe — o que o DDL não conta.
 | `plugins` | Plugins descobertos no filesystem (id, version, enabled, load_error) |
 | `plugin_migrations` | Versões de SQL migrations já aplicadas, por plugin |
 | `plugin_<id>_*` | Tabelas criadas por plugins via suas migrations (prefixo obrigatório) |
+| `atendimentos` (coluna `ai_disabled_at`) | Plano 178 — epoch de quando a IA foi desligada **nesta** conversa; `NULL` = IA ligada ou desconhecido (legado, sem backfill). É a âncora da espera da religação automática da IA. Carimbada por `conversation_repo.ai_disabled_at_expr` (1→0 grava `now`, 0→1 limpa, 0→0 **mantém**) em TRÊS pontos: `_update`, `_insert_conversation` e `team_routing_repo._write_conversation`. Escritor novo de `ai_active` que não use a função esquece o carimbo em silêncio. Ver [IA.md](IA.md) |
 | `tool_overrides` | Override por-tool (enabled, description, display_label). Row criada automaticamente para cada tool registrada (core + plugin) |
 

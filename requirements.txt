@@ -10,3 +10,4 @@ alembic>=1.13,<2.0
 psycopg[binary]>=3.1
 segno>=1.6,<2.0
 passlib[argon2]>=1.7.4
+tzdata>=2024.1

@@ -149,7 +149,7 @@ export default function AgentEngine({ initialEntity, currentUser }) {
       ${tab === 'agents' && allowedIds.has('agents') ? html`<${AgentsManager} initialEntity=${initialEntity} currentUser=${currentUser} />` : null}
       ${tab === 'variables' && allowedIds.has('variables') ? html`<${VariablesEditor} initialEntity=${initialEntity} />` : null}
       ${tab === 'tools' && allowedIds.has('tools') ? html`<${ToolsUnified} initialEntity=${initialEntity} currentUser=${currentUser} />` : null}
-      ${tab === 'general' && allowedIds.has('general') ? html`<${GeneralSettings} />` : null}
+      ${tab === 'general' && allowedIds.has('general') ? html`<${GeneralSettings} currentUser=${currentUser} />` : null}
     </div>
   `;
 }

@@ -153,6 +153,23 @@ async def fetch_provision_number() -> str:
     return (await fetch_provision_target()).number
 
 
+def _remember_provision_phone(phone: str) -> None:
+    """Append the RESOLVED provisioning number to ``provisioning_phones`` (plano 178).
+
+    The destination comes from ``/service_number`` and can be rotated, so the literal
+    in ``config/settings.py`` goes stale. The automatic AI re-enabling excludes every
+    number kept here: that contact's AI is off ON PURPOSE and must never come back.
+    No duplicates; best-effort (a config failure must not break the provisioning)."""
+    from db.repositories import config_repo
+    try:
+        known = config_repo.get("provisioning_phones", []) or []
+        if not isinstance(known, list):
+            known = []
+        if phone not in known:
+            config_repo.set("provisioning_phones", [*known, phone])
+    except Exception as e:
+        logger.warning("Setup: could not remember the provisioning number: %s", e)
+
 async def request_key(deps) -> tuple[str, dict]:
     """Send the Techify provisioning message and arm the key polling.
 
@@ -215,6 +232,7 @@ async def request_key(deps) -> tuple[str, dict]:
             jid = f"{provision_number}@s.whatsapp.net"
             conv = conversation_repo.resolve_for_contact(contact.id, jid)
             conversation_repo.set_ai_active(conv["id"], 0)
+            _remember_provision_phone(provision_number)
         await asyncio.to_thread(_disable_provision_ai)
     except Exception as e:
         logger.warning(

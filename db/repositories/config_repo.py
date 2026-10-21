@@ -64,6 +64,36 @@ def set_many(data: dict) -> None:
             ))
 
 
+def advance_if_older(key: str, threshold: float, new_value: float) -> bool:
+    """Atomically set a numeric ``key`` to ``new_value`` iff its current value is
+    older than ``threshold`` (missing / non-numeric counts as 0). Returns whether
+    THIS caller won the claim (plano 178).
+
+    Built for "run this scheduled slot exactly once" across instances sharing one
+    database: read, compare and write happen in ONE short transaction under a
+    transaction-level advisory lock keyed on the config key, so two instances
+    cannot both see the old value. ``pg_try_advisory_xact_lock`` (not the session
+    flavour) on purpose: the lock dies with the transaction, which is the only kind
+    that is safe behind PgBouncer in transaction mode. The loser does not wait: it
+    gets ``False`` and the slot is already being served by the winner."""
+    from sqlalchemy import func
+    with get_engine().begin() as conn:
+        if not conn.execute(select(func.pg_try_advisory_xact_lock(
+                func.hashtext("config:" + key)))).scalar():
+            return False
+        raw = conn.execute(
+            select(config.c.value).where(config.c.key == key)).scalar_one_or_none()
+        try:
+            current = float(_decode(raw)) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            current = 0.0
+        if current >= float(threshold):
+            return False
+        conn.execute(upsert(
+            config, {"key": key, "value": json.dumps(float(new_value))},
+            conflict_cols=["key"], update_cols=["value"]))
+    return True
+
 def delete_prefix(prefix: str) -> int:
     """Delete every config key starting with ``prefix``. Returns row count."""
     with get_engine().begin() as conn:

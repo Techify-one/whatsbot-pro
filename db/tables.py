@@ -627,6 +627,10 @@ atendimentos = Table(
     Column("team_id", Integer, ForeignKey("teams.id", ondelete="SET NULL")),  # NULLABLE, FK (plano 153)
     Column("priority", Text),
     Column("ai_active", Integer, nullable=False, server_default="1"),   # gate IA nível 3
+    # plano 178: epoch de quando a IA foi desligada NESTA conversa (NULL = IA ligada ou
+    # desconhecido). Carimbado em toda escrita de ai_active por conversation_repo.
+    # ai_disabled_at_expr — é a âncora da espera da religação automática.
+    Column("ai_disabled_at", Float),
     Column("active_agent_key", Text),                          # plano 06: agente da conversa
     # plano 28: origem do atendimento — 'inbound' (cliente iniciou), 'outbound'/'manual'
     # (operador), 'imported' (import de chats). Dirige o gate de visibilidade da sidebar

@@ -156,6 +156,8 @@ def _insert_conversation(conn, *, inbox_id: int, contact_id: int, contact_inbox_
         display_id=display_id, inbox_id=inbox_id, contact_id=contact_id,
         contact_inbox_id=contact_inbox_id, status=status, is_archived=is_archived,
         ai_active=ai_active, active_agent_key=active_agent_key, origin=origin,
+        # plano 178: nascida com a IA desligada conta como "desligada agora".
+        ai_disabled_at=None if ai_active else now,
         assignee_user_id=assignee_user_id,
         opened_at=opened, last_activity_at=opened,
         custom_attributes={}, created_at=now, updated_at=now,
@@ -869,8 +871,29 @@ def count(*, status: str | None = None) -> int:
         return conn.execute(stmt).scalar() or 0
 
 
+def ai_disabled_at_expr(new_ai_active, now: float):
+    """SQL for ``atendimentos.ai_disabled_at`` on an UPDATE that sets ``ai_active``
+    (plano 178). The single stamping rule, shared by every writer of the gate:
+
+      * ``ai_active`` going 1 → 0 stamps ``now``;
+      * going 0 → 1 clears it (NULL);
+      * 0 → 0 keeps the old stamp (switching it off twice must not restart the wait).
+
+    A CASE evaluated by the database, not a read-then-write in Python: on an UPDATE
+    the right-hand side sees the OLD row, so two concurrent writers cannot both
+    believe they are the one that flipped the gate."""
+    if new_ai_active:
+        return None
+    return case(
+        (conversations.c.ai_active != 0, now),
+        else_=conversations.c.ai_disabled_at,
+    )
+
 def _update(conv_id: int, values: dict) -> dict | None:
-    values = {**values, "updated_at": time.time()}
+    now = time.time()
+    values = {**values, "updated_at": now}
+    if values.get("ai_active") is not None:
+        values["ai_disabled_at"] = ai_disabled_at_expr(values["ai_active"], now)
     with get_engine().begin() as conn:
         conn.execute(update(conversations).where(conversations.c.id == conv_id).values(**values))
     return get(conv_id)
@@ -927,6 +950,67 @@ def set_team(conv_id: int, team_id: int | None) -> dict | None:
     ``assignee_user_id`` (D1) — pure data write, no exclusion with anything else."""
     return _update(conv_id, {"team_id": team_id})
 
+
+def ai_off_for_reactivation(include_groups_archived: bool,
+                            exclude_phones: list[str] | None = None) -> list[dict]:
+    """OPEN conversations where the AI is not in charge, with who spoke last among
+    the humans (plano 178 — feeds the automatic re-enabling of the AI).
+
+    A conversation qualifies when ``ai_active = 0`` OR a human is assigned (a human
+    in charge silences the AI even with ``ai_active = 1``, plano 96). ``last_role``
+    is ``'user'`` (the customer) or ``'assistant'`` (the attendant: panel or phone,
+    stored with ``status='operator'``); ``None`` when no human message exists. The
+    AI's own replies (``status='sent'``), private notes, transcriptions, tool and
+    system rows NEVER count — otherwise the farewell the AI sends while handing the
+    chat over would restart the wait. Known blind spot: with
+    ``audio_transcription_target='chat'`` the transcription is saved as an operator
+    message and reads as the attendant.
+
+    Looked up by ``conversation_id`` (index ``idx_msg_conversation_ts``), so the
+    answer is per channel, not per contact. Rows from channels with no inbox link are
+    skipped (nothing to gate on). Groups and archived conversations — the
+    conversation flag OR the chat-level one the webhook mirrors on the contact —
+    come back only when asked for. ``exclude_phones`` are contacts whose AI is off on
+    purpose (provisioning); the Brazilian 8/9-digit variants of each are excluded too.
+    """
+    from channels.br_phone import br_phone_variants
+
+    skipped = sorted({v for p in (exclude_phones or []) if p
+                      for v in br_phone_variants(str(p))})
+    human = and_(
+        messages.c.conversation_id == conversations.c.id,
+        or_(messages.c.role == "user",
+            and_(messages.c.role == "assistant", messages.c.status == "operator")),
+    )
+    last_ts = (select(messages.c.ts).where(human)
+               .order_by(messages.c.ts.desc(), messages.c.id.desc())
+               .limit(1).correlate(conversations).scalar_subquery())
+    last_role = (select(messages.c.role).where(human)
+                 .order_by(messages.c.ts.desc(), messages.c.id.desc())
+                 .limit(1).correlate(conversations).scalar_subquery())
+    stmt = (
+        select(
+            conversations.c.id, conversations.c.contact_id, conversations.c.inbox_id,
+            conversations.c.ai_active, conversations.c.assignee_user_id,
+            conversations.c.ai_disabled_at, conversations.c.created_at,
+            contacts.c.phone, inboxes.c.channel_id, inboxes.c.agent_bot_enabled,
+            last_ts.label("last_ts"), last_role.label("last_role"),
+        )
+        .select_from(conversations
+                     .join(contacts, contacts.c.id == conversations.c.contact_id)
+                     .join(inboxes, inboxes.c.id == conversations.c.inbox_id))
+        .where(conversations.c.status == "open")
+        .where(or_(conversations.c.ai_active == 0,
+                   conversations.c.assignee_user_id.isnot(None)))
+        .where(inboxes.c.channel_id.isnot(None))
+    )
+    if not include_groups_archived:
+        stmt = stmt.where(contacts.c.is_group == 0, contacts.c.is_archived == 0,
+                          conversations.c.is_archived == 0)
+    if skipped:
+        stmt = stmt.where(contacts.c.phone.notin_(skipped))
+    with get_engine().connect() as conn:
+        return [dict(r) for r in conn.execute(stmt).mappings().all()]
 
 def set_ai_active(conv_id: int, ai_active: int) -> dict | None:
     """Pause/resume the AI for a specific conversation (gate nível conversa)."""

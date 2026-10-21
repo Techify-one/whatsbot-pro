@@ -170,6 +170,27 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # e cortada do contexto do LLM se algum padrão casar (``agent/history_filter.py``).
     # Default ``[]`` = nada cortado (retrocompatível). Editável em Configurações → IA.
     ConfigKey("ai_history_exclude_patterns", default=[], exposed=True, writable=True),
+    # plano 178 — religar a IA automaticamente nas conversas em que ela ficou parada
+    # (card "Automações" em Configurações de IA). Regra por tempo parado
+    # (minutes/hours/days) ou por agenda (schedule: dias da semana + horário). GLOBAL,
+    # sem override por canal. O PUT valida cada chave com
+    # ``app.services.ai_reactivation_service.clean`` (lixo é descartado sem derrubar o
+    # resto) e o GET devolve a regra efetiva já normalizada. ``last_run`` e
+    # ``provisioning_phones`` são ESTADO do servidor: nunca editáveis pela API.
+    ConfigKey("ai_reactivation_enabled", default=False, exposed=True, writable=True),
+    ConfigKey("ai_reactivation_unit", default="hours", exposed=True, writable=True),
+    ConfigKey("ai_reactivation_value", default=24, exposed=True, writable=True),
+    ConfigKey("ai_reactivation_weekdays", default=[0, 1, 2, 3, 4], exposed=True, writable=True),
+    ConfigKey("ai_reactivation_time", default="08:00", exposed=True, writable=True),
+    ConfigKey("ai_reactivation_last_sender", default="both", exposed=True, writable=True),
+    ConfigKey("ai_reactivation_include_groups_archived", default=False,
+              exposed=True, writable=True),
+    ConfigKey("ai_reactivation_timezone", default="", exposed=True, writable=True),
+    ConfigKey("ai_reactivation_last_run", default=0.0),
+    # Números de provisionamento já resolvidos (o destino real vem de /service_number e
+    # pode ser rotacionado): a IA desses contatos está desligada DE PROPÓSITO e a
+    # religação automática nunca pode devolvê-la. Anexado por provisioning_service.
+    ConfigKey("provisioning_phones", default=[]),
     ConfigKey("message_batch_delay", default=3.0, exposed=True, writable=True),
     ConfigKey("split_messages", default=True, exposed=True, writable=True),
     ConfigKey("split_message_delay", default=2.0, exposed=True, writable=True),
@@ -308,6 +329,9 @@ def _build_default_config() -> dict:
     return {ck.key: ck.default for ck in CONFIG_KEYS if ck.default is not _NO_SEED}
 
 
+# Plano 178: permissão que governa as chaves ``ai_reactivation_*`` (ver _TAB_PERMISSION).
+AI_REACTIVATION_PERMISSION = "agent.reactivation.manage"
+
 def exposed_config_keys() -> list[ConfigKey]:
     """Keys returned by ``GET /api/config`` (in declaration order)."""
     return [ck for ck in CONFIG_KEYS if ck.exposed]
@@ -330,6 +354,15 @@ _TAB_PERMISSION: dict[str, str] = {
     **{k: "settings.advanced" for k in (
         "public_base_url", "max_executions", "audit_retention_days")},
     **{k: "settings.notifications" for k in ("notify_private_messages",)},
+    # Plano 178 — o card "Automações". ⚠️ Diferente das abas acima, aqui o
+    # ``settings.manage`` NÃO basta: ``PUT /api/config`` exige
+    # ``AI_REACTIVATION_PERMISSION`` para estas chaves mesmo de quem tem o genérico
+    # (senão não haveria como tirar o acesso de alguém que já tem ``settings.manage``).
+    **{k: AI_REACTIVATION_PERMISSION for k in (
+        "ai_reactivation_enabled", "ai_reactivation_unit", "ai_reactivation_value",
+        "ai_reactivation_weekdays", "ai_reactivation_time",
+        "ai_reactivation_last_sender", "ai_reactivation_include_groups_archived",
+        "ai_reactivation_timezone")},
     # O padrão da equipe de som é editado nas abas Notificações (ativação) e Sons
     # (som/volume/duração); a aba Sons é pessoal, então quem administra o padrão
     # entra por ``settings.notifications`` ou ``settings.manage``.
@@ -338,7 +371,10 @@ _TAB_PERMISSION: dict[str, str] = {
 
 
 def config_key_permission(key: str) -> str | None:
-    """Permissão granular que TAMBÉM autoriza escrever ``key`` (ou ``None``)."""
+    """Permissão granular que TAMBÉM autoriza escrever ``key`` (ou ``None``).
+
+    Exceção (plano 178): as chaves ``ai_reactivation_*`` exigem a permissão daqui
+    MESMO de quem tem ``settings.manage`` — o ``PUT /api/config`` aplica isso."""
     return _TAB_PERMISSION.get(key)
 
 

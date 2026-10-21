@@ -15,6 +15,7 @@ from sqlalchemy import and_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.engine import get_engine
+from db.repositories.conversation_repo import ai_disabled_at_expr
 from db.tables import (
     ai_agents,
     conversations,
@@ -204,6 +205,9 @@ def route_to_team(
             "assignee_user_id": assignee_user_id,
             "active_agent_key": active_agent_key,
             "ai_active": ai_active,
+            # plano 178: este caminho escreve ai_active sem passar por ``_update``,
+            # então carimba pela MESMA regra (1→0 carimba, 0→1 limpa, 0→0 mantém).
+            "ai_disabled_at": ai_disabled_at_expr(ai_active, now),
             "updated_at": now,
         }
         _write_conversation(conn, conversation_id, values)

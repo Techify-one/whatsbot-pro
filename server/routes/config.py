@@ -11,8 +11,10 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import Request
 
-from config.settings import (LLM_API_BASE_URL, config_key_permission,
-                             exposed_config_keys, writable_config_keys)
+from config.settings import (AI_REACTIVATION_PERMISSION, LLM_API_BASE_URL,
+                             config_key_permission, exposed_config_keys,
+                             writable_config_keys)
+from app.services import ai_reactivation_service
 from server.authz import check, permission_denied
 from server.helpers import _ok, _err, _mask_key
 from server import balance_monitor
@@ -117,6 +119,10 @@ def register_routes(app, deps):
         out = {"openrouter_api_key": _mask_key(settings.get("openrouter_api_key", ""))}
         for ck in exposed_config_keys():
             out[ck.key] = settings.get(ck.key, ck.effective_get_default)
+        # plano 178: a regra de religar a IA sai SEMPRE bem formada (lixo gravado à mão
+        # no banco cai no default por chave), do mesmo ``read_config`` que o laço usa.
+        for name, value in ai_reactivation_service.read_config(settings).items():
+            out[ai_reactivation_service.KEY_PREFIX + name] = value
         out["has_password"] = False
         return _ok(out)
 
@@ -138,6 +144,16 @@ def register_routes(app, deps):
         allowed_keys = writable_config_keys()
         if not can_all:
             allowed_keys = allowed_keys & authorized
+        # plano 178 — o religamento da IA tem permissão PRÓPRIA e o ``settings.manage``
+        # genérico NÃO basta: ele devolve a IA a conversas de outras pessoas, e se o
+        # genérico bastasse não haveria como tirar o acesso de quem já o tem. Sem a
+        # permissão as chaves são descartadas (a tela salva tudo junto); um corpo que
+        # traz SÓ essas chaves é um pedido que não faz nada, então responde 403.
+        if not check(request, AI_REACTIVATION_PERMISSION):
+            prefix = ai_reactivation_service.KEY_PREFIX
+            if body and all(str(k).startswith(prefix) for k in body):
+                return permission_denied(request, AI_REACTIVATION_PERMISSION)
+            allowed_keys = {k for k in allowed_keys if not k.startswith(prefix)}
         keys_changed = []
         audit_before = {}   # {key: old_value} for the audit trail
         audit_after = {}    # {key: new_value} for the audit trail
@@ -157,6 +173,12 @@ def register_routes(app, deps):
                     norm = sound_catalog.normalize(value, sparse=False)
                     value = norm if norm.get("events") else sound_catalog.normalize(
                         SOUND_SETTINGS_SEED, sparse=False)
+                # plano 178: religar a IA automaticamente — cada chave é validada e o
+                # lixo é DESCARTADO sem derrubar o resto do PUT (a tela salva tudo junto).
+                if key.startswith(ai_reactivation_service.KEY_PREFIX):
+                    value = ai_reactivation_service.clean(key, value)
+                    if value is ai_reactivation_service.INVALID:
+                        continue
                 audit_before[key] = settings.get(key)
                 settings[key] = value
                 audit_after[key] = value

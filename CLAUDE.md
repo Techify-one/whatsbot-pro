@@ -253,6 +253,8 @@ O loop de raciocínio + tool calling roda no **AGNO** ([agent/agno_engine.py](ag
 
 ⚠️ **A IA pode se despedir ao transferir** (plano 122): `transfer_to_human` fecha o gate DENTRO do turno, e o guard descartava a despedida que aquele mesmo turno acabou de escrever — foram **226 transferências mudas** em produção. O perdão é o kwarg `allow_self_handoff`, derivado pelo call site do próprio turno. **A época vem PRIMEIRO e o perdão nunca a alcança** — inverter as duas linhas devolve o bug do plano 96 em silêncio. O card "🤖 A IA assumiu a conversa" fica no predicado **ESTRITO** (não recebe o perdão): turno que terminou em transferência não é takeover.
 
+⚠️ **Religar a IA automaticamente (plano 178) é config GLOBAL e religa por `conversation_service.set_ai(…, 1)`, nunca por escrita própria**; a espera conta de `atendimentos.ai_disabled_at`, e **todo escritor novo de `ai_active` tem de carimbá-lo** via `conversation_repo.ai_disabled_at_expr` (INSERT e roteamento por time não passam por `_update`). [docs/IA.md](docs/IA.md)
+
 ⚠️ **Time (`atendimentos.team_id`, plano 153) é campo INDEPENDENTE do `assignee_user_id`** — `conversation_service.assign_team` nunca passa pelo cotovelo `_transfer` (que existe só porque assignee/agente-de-IA/gate-da-IA SÃO mutuamente exclusivos); é escrita isolada, como `set_agent`.
 
 ⚠️ **Trava de escrita (plano 167)**: o guard reprova LETRA não-latina, nunca emoji nem inglês — endurecê-lo entra em laço com prompts que mandam usar emoji; uma re-geração sem tools e, se falhar, envia a original. [docs/IA.md](docs/IA.md)
