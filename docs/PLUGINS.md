@@ -325,3 +325,25 @@ Use o slash command `/new-plugin` no Claude Code. O comando lê os arquivos de r
 - Export: `GET /api/plugins/<id>/export` retorna um `.zip` da pasta (excluindo `__pycache__/` e arquivos `.db`).
 - Import: `POST /api/plugins/import` (multipart) exige um único manifest na raiz, checa colisão de `id` e path traversal e extrai em `storages/plugins/<id>/`. A validação completa/compatibilidade do manifest ocorre no discovery/load; o importado fica `enabled=0` até o usuário ativar pela UI.
 - Build publicado: no repositório `whatsbot-pro-plugins`, rode `python3 scripts/build_plugins.py <id>` ou `--all`; `--check` valida que cada `<id>.zip` corresponde byte a byte a `src/`. O builder rejeita testes, caches, bancos, segredos e traversal dentro da fonte instalável.
+
+### Arquivos do plugin em `statics/outbox` (plano 179)
+
+A tela **Arquivos** ([API_REST.md](API_REST.md#arquivos-ver-o-que-ocupa-espaço-e-apagar-a-mídia-das-conversas-plano-179)) apaga mídia de
+conversa — e um plugin que reenvia o mesmo arquivo (`arquivos_suporte`, anexo do `retornos`, cabeçalho de template do `whatsapp_cloud`) não pode
+perdê-lo por isso. A regra é uma **convenção de host** (API de plugins **1.12.0**):
+
+> Uma coluna chamada **`media_path`** numa tabela `plugin_<id>_*` declara que aquele arquivo é **do plugin**. A tela Arquivos nunca apaga o
+> arquivo físico; só o tira das conversas (as mensagens ficam `media_path=NULL`, `media_state='removed'`, e a bolha mostra "Arquivo removido").
+
+- **Descoberta automática** (`db/repositories/plugin_media_repo.py`): `information_schema.columns`, cache de 60 s; o nome da tabela é validado com
+  `^plugin_[a-z0-9_]+$` antes de virar identificador e a consulta é montada por `sqlalchemy.table()`, nunca por f-string. Não há o que declarar no manifesto.
+- **Quem é o dono:** o **prefixo mais longo** do nome da tabela que casa com um id da tabela `plugins` — o id pode ter `_`, então
+  `plugin_arquivos_suporte_arquivos` não se resolve por `split`.
+- **⚠️ Fail-closed:** erro na descoberta ou na consulta ⇒ **nenhum** arquivo de `statics/outbox` é apagado naquela chamada (as mensagens ainda são
+  tiradas, e a resposta traz `kept_unknown`). Na dúvida, guarda; nunca o contrário.
+- **Por que convenção e não filtro do bus:** o bus isola a exceção deixando o valor passar (fail-open — o oposto do necessário), exigiria mudar os 3
+  plugins e um plugin antigo num core novo ficaria sem proteção. A convenção protege os três HOJE, sem zip novo.
+- **Limitação:** plugin que guarde o caminho numa coluna de **outro nome** não é protegido. A alternativa por manifesto (`owned_media: [{table, column}]`)
+  fica para quando surgir esse caso — o parser de manifesto ignora chave desconhecida, então um zip novo carregaria num core antigo.
+- `pagamentos` grava em `statics/outbox` mas **não** guarda o caminho (o QR `pix_<txid>.png` é regenerado a cada envio), então não precisa de proteção.
+- Plugin que dependa da proteção declara `whatsbot_api_version: ">=1.12,<2.0"`. Remover a convenção seria MAJOR ([PLUGIN_API_CHANGELOG.md](PLUGIN_API_CHANGELOG.md)).

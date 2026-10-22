@@ -36,6 +36,7 @@ class ResourceType:
     API_KEY = "api_key"
     WEBHOOK = "webhook"
     CREDENTIAL = "credential"
+    FILE = "file"
 
 
 class AuditAction:
@@ -66,6 +67,10 @@ class AuditAction:
     # Alguém clicou no olho e viu o valor de UM campo. Registra credencial + campo,
     # NUNCA o valor — é o rastro de quem leu o quê, e quando.
     CREDENTIAL_REVEAL = "credential.reveal"
+    # Tela Arquivos (plano 179): UMA linha por chamada de exclusão, só contagens, bytes
+    # e nomes em disco. Conversa nunca entra na trilha (nem o nome dado pelo remetente).
+    # Gravado direto com ``audit_listener.record`` (não está em AUDITABLE_EVENTS).
+    FILES_DELETE = "files.delete"
     ROLE_ASSIGN = "role.assign"
     # Config / IA engine (plano 06)
     CONFIG_UPDATE = "config.update"

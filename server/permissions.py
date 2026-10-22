@@ -27,6 +27,7 @@ ROLE_DEFAULTS = {
         "conversation.team.assign", "conversation.team.assign_any", "team.manage",
         "conversation.resolve", "contact.read", "contact.write", "contact.import",
         "channel.manage", "settings.manage", "plugins.manage", "billing.manage",
+        "files.manage",
         # Abas de Configurações Gerais (a aba "Sons" é pessoal, sem permissão).
         "settings.general", "settings.advanced", "settings.notifications",
         # IA granular (substitui o antigo agent.manage — gestor recebe todas).

@@ -337,6 +337,8 @@ export const MEDIA_ID_WAIT_MS = 30000;
  * estado ANTES de qualquer rede, para ser testável com `node --test`:
  *
  *   - 'local'   — blob da bolha otimista do operador; usa o `media_path` direto.
+ *   - 'removed' — plano 179: a tela Arquivos tirou o arquivo (`media_state === 'removed'`,
+ *                 `media_path` zerado). Não é falha: a bolha mostra "Arquivo removido".
  *   - 'none'    — sem `media_path`; nada a buscar nem a falhar.
  *   - 'fetch'   — tem `_id`/`id`: busca /api/messages/{id}/media com o Bearer.
  *   - 'pending' — tem `msg_id` mas ainda não tem `_id`: é o `new_message` de t=0 do
@@ -344,12 +346,13 @@ export const MEDIA_ID_WAIT_MS = 30000;
  *                 segundos e o hook de WS o adota. NÃO é falha.
  *   - 'failed'  — nenhum identificador: a identidade nunca vai chegar.
  *
- * @param {{_isLocalBlob?:boolean, media_path?:string|null, id?:number, _id?:number, msg_id?:string}|null} message
- * @returns {'local'|'none'|'fetch'|'pending'|'failed'}
+ * @param {{_isLocalBlob?:boolean, media_path?:string|null, media_state?:string|null, id?:number, _id?:number, msg_id?:string}|null} message
+ * @returns {'local'|'removed'|'none'|'fetch'|'pending'|'failed'}
  */
 export function mediaFetchPlan(message) {
   if (!message) return 'none';
   if (message._isLocalBlob) return 'local';
+  if (message.media_state === 'removed') return 'removed';
   if (!message.media_path) return 'none';
   if (message.id ?? message._id) return 'fetch';
   return message.msg_id ? 'pending' : 'failed';

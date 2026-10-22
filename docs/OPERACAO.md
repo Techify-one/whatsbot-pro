@@ -50,3 +50,14 @@ Persistência de `statics/`/`storages/` no Coolify tem passo a passo em
   - **GOWA ≥ 9.0** baixa e serve um dashboard próprio em `/` (do GitHub, em runtime). O plugin exporta `APP_UI_ENABLED=false` (`setdefault`); o 8.x ignora a variável. **Não existe a flag `--ui-auto-update` na CLI do 8.11** — é env, e só a partir do 9.
   - **Versão viva**: `/app/info` existe só do 9.0 em diante; no 8.x a versão sai da página `/` (`probe_running_version`). Essa é a fonte de "o que está rodando", não o arquivo.
   - **`BASELINE_VERSION` (`updater.py`) é piso CONSERVADOR — não suba junto com o `ARG GOWA_VERSION` do Dockerfile nem com `scripts/_common.sh`.** Ele só vale quando nada diz a versão do binário de `bin/` (sem `.gowa_stamp` nem arquivo `GOWA_VERSION`). Alto demais é o lado perigoso: um gerenciado real mais novo que o piso seria IGNORADO em favor do bundled velho. Baixo demais é inócuo (o gerenciado vence). O que vale como "em uso" é sempre a sondagem do processo vivo (`probe_running_version`).
+
+## Tela Arquivos: o que a barra de espaço mede (plano 179)
+
+A barra mostra o **disco real do servidor**: `shutil.disk_usage` do sistema de arquivos onde fica `statics/`, mais quanto o WhatsBot ocupa (Recebidos, Enviados e
+"Sistema e dados do app" = `storages/`, `logs/` e as outras pastas de `statics/`). **Não** há limite configurável (`disk_limit_gb`) — o número que importa é o do disco.
+
+- Aviso amarelo com o disco ≥ 80 % usado, vermelho ≥ 95 %.
+- **Docker/Coolify:** `disk_usage` do `/app/statics` mede o sistema de arquivos **por trás do volume**, ou seja, o disco do host — não uma cota do contêiner.
+- **Várias réplicas:** cada uma tem o próprio `statics/` (storage de mídia é por instância, por desenho), e a tela mostra o disco **da réplica que respondeu**.
+- Quem tem escopo (inbox/time) vê a barra do disco (infraestrutura, não dado de conversa) e **só** o total do que pode abrir.
+- Nada apaga arquivo de conversa sozinho (nem excluir conversa/contato, nem retenção): sem esta tela os arquivos só se acumulam em `statics/media` e `statics/outbox`.

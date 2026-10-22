@@ -658,6 +658,26 @@ export function useConversationWsEvents(opts) {
     const { action, phone, msg_id, db_id } = messageAction;
     if (phone && phone !== selectedRef.current) return;
     const matches = (m) => (msg_id && m.msg_id === msg_id) || (db_id && (m._id === db_id || m.id === db_id));
+    // plano 179: a tela Arquivos tirou o arquivo destas mensagens — a bolha vira
+    // "Arquivo removido" sem recarregar. O evento chega roteado por conversa (só a quem a
+    // vê) e vem sem `phone`; casa pelo `_id` de cada mensagem do lote.
+    if (action === 'media_removed') {
+      const ids = new Set((messageAction.messages || []).map(x => x._id));
+      if (!ids.size) return;
+      setContactData(prev => {
+        if (!prev || !prev.messages) return prev;
+        let changed = false;
+        const updated = prev.messages.map(m => {
+          if (ids.has(m._id) && m.media_state !== 'removed') {
+            changed = true;
+            return { ...m, media_state: 'removed', media_path: null };
+          }
+          return m;
+        });
+        return changed ? { ...prev, messages: updated } : prev;
+      });
+      return;
+    }
     // Edit: swap the content in place + mark edited (no revoke).
     if (action === 'edited') {
       const { content, edited_ts } = messageAction;

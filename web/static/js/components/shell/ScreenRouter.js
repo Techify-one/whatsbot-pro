@@ -24,6 +24,7 @@ import CustomAttributesManager from '../CustomAttributesManager.js';
 import RuntimePanel from '../RuntimePanel.js';
 import UsersManager from '../UsersManager.js';
 import AuditLog from '../AuditLog.js';
+import { FileManager } from '../FileManager.js';
 import IntegrationsScreen from '../IntegrationsScreen.js';
 import AgentEngine from '../ai/AgentEngine.js';
 import { PageHeader } from './GearMenu.js';
@@ -105,6 +106,15 @@ export function ScreenRouter({
     return html`<div class="w-full p-4">
         <${PageHeader} title="API e Webhooks" onBack=${() => setTab('contacts')} />
         <${IntegrationsScreen} currentUser=${currentUser} />
+      </div>`;
+  }
+  if (tab === 'files') {
+    if (!hasPermission(currentUser, 'files.manage')) {
+      return html`<${PermissionDenied} label="os arquivos" />`;
+    }
+    return html`<div class="w-full p-4">
+        <${PageHeader} title="Arquivos" onBack=${() => setTab('contacts')} />
+        <${FileManager} />
       </div>`;
   }
   if (tab === 'audit') {

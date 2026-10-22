@@ -30,6 +30,9 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     ("team.manage",           "Criar, editar, desativar e gerenciar membros de times"),
     ("channel.manage",        "Configurar canais/números"),
     ("settings.manage",       "Configurações globais"),
+    # Plano 179 — tela Arquivos. Apagar é irreversível e a bolha vira "Arquivo
+    # removido" para TODOS os que veem a conversa; por isso permissão própria.
+    ("files.manage",          "Arquivos: ver, baixar e apagar mídia de conversas"),
     # Abas de "Configurações Gerais" — acesso granular por aba (a aba "Sons" é
     # PESSOAL e não exige permissão). Quem tinha ``settings.manage`` recebeu as
     # três na migração ``*_settings_tab_perms``; elas gateiam TAMBÉM a escrita,
@@ -153,6 +156,7 @@ PERMISSION_GROUPS: dict[str, tuple[str, str]] = {
     "sandbox.use": ("core", _G_AI),
     # Configurações e sistema
     "settings.manage": ("core", _G_SETTINGS),
+    "files.manage": ("core", _G_SETTINGS),
     "settings.general": ("core", _G_SETTINGS),
     "settings.advanced": ("core", _G_SETTINGS),
     "settings.notifications": ("core", _G_SETTINGS),

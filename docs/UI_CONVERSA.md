@@ -370,3 +370,18 @@ autoritativo que o traga e que o `byId` adote. Não "conserte" mandando `_id` no
 isso exigiria mover o broadcast para depois do INSERT e reabriria a janela do plano 57. A rede é
 [test_media_broadcast_identity_contract.py](../tests/contracts/test_media_broadcast_identity_contract.py)
 (lado do backend) + `node --test web/static/js/services/messages.test.js` (o frontend adota).
+
+## Bolha "Arquivo removido" — a tela Arquivos tirou a mídia (plano 179)
+
+Quando a tela Arquivos apaga (ou só tira das conversas) um arquivo, cada mensagem que apontava para ele fica com `media_path = NULL` e
+`media_state = 'removed'`, **mantendo o `media_type`**. A bolha mostra um cartão neutro "Arquivo removido" (*title*: "Apagado na tela Arquivos"),
+**não** "Mídia indisponível" — aquilo é falha de carga; isto foi uma decisão de alguém. A legenda do cliente (`media_caption`) continua visível.
+
+- **A decisão é pura:** `mediaFetchPlan` ([messageView.js](../web/static/js/services/messageView.js)) devolve `'removed'` ANTES de olhar `media_path`/`_id`
+  (um `_id` não leva a nada: o arquivo não existe mais). Blob local da bolha otimista continua `'local'`. Coberto em `messageView.test.js`.
+- ⚠️ **`messages.js` é WHITELIST:** `reconcileByMsgId` precisa listar `media_state` (e zerar `media_path`), senão uma linha reconciliada depois da remoção
+  volta a tentar buscar o arquivo e o campo some **sem erro**.
+- **Ao vivo:** `message_media_updated` chega por `useWebSocket` → `onMessageAction` (`action: 'media_removed'`) → `useConversationWsEvents`, que casa as bolhas
+  pelo `_id` de cada item. O evento vem roteado por conversa (só a quem a vê) e **sem `phone`**.
+- **IA:** `agent/memory.py:_build_image_content` tem guard explícito para `media_path` vazio — antes só era seguro **por acaso** (`Path("")` vira a raiz do projeto).
+- Fachada `/api/v1` e widget `website` já tratam `media_path` nulo; `media_state` **não** foi acrescentado à v1 (aditivo, avaliar com o contrato dela).

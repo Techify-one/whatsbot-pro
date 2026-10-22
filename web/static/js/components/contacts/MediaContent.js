@@ -106,8 +106,26 @@ function MediaWithFallback({ kind, src, isLocalBlob, alt, className, style, onCl
 export function MediaContent({ message, displayContent, fmt, selectionMode = false }) {
   const m = message;
   const protectedKind = ['image', 'audio', 'video', 'sticker', 'document'].includes(m.media_type);
-  const media = useAuthorizedMedia(protectedKind ? m : null);
+  // plano 179: a tela Arquivos tirou o arquivo desta mensagem. NÃO é "Mídia indisponível"
+  // (falha de carga): foi uma decisão de alguém, e a legenda do cliente continua valendo.
+  const removed = protectedKind && mediaFetchPlan(m) === 'removed';
+  const media = useAuthorizedMedia(protectedKind && !removed ? m : null);
   const mediaSrc = m._isLocalBlob ? m.media_path : media.url;
+  if (removed) {
+    const removedCaption = mediaCaptionOf(m, displayContent);
+    return html`
+      <div class="flex items-center gap-2 rounded-[4px] mb-1 px-3 py-4 bg-wa-hover text-wa-secondary text-[13px]"
+           style="min-width:140px" title="Apagado na tela Arquivos.">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/>
+        </svg>
+        <span>Arquivo removido</span>
+      </div>
+      ${removedCaption && !removedCaption.startsWith('[')
+        ? html`<span dangerouslySetInnerHTML=${{ __html: fmt(removedCaption) }}></span>`
+        : null}`;
+  }
   if (protectedKind && !m._isLocalBlob && media.failed) {
     return html`
       <div class="flex items-center gap-2 rounded-[4px] mb-1 px-3 py-4 bg-wa-hover text-wa-secondary text-[13px]"

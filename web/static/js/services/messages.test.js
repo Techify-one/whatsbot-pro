@@ -464,3 +464,21 @@ test('reconcileByMsgId: não muta a lista nem a bolha de entrada', () => {
   reconcileByMsgId(base, AUTH_AUDIO);
   assert.equal(JSON.stringify(base), snapshot);
 });
+
+// ── reconcileByMsgId: media_state (plano 179) ───────────────────────────────
+
+test('reconcileByMsgId: adota media_state=removed e zera o media_path (whitelist)', () => {
+  const base = [{ msg_id: 'M1', _id: 7, media_type: 'image', media_path: 'statics/media/a.jpg' }];
+  const { messages, matched } = reconcileByMsgId(base, { msg_id: 'M1', media_state: 'removed' });
+  assert.equal(matched, true);
+  assert.equal(messages[0].media_state, 'removed');
+  assert.equal(messages[0].media_path, null);
+  assert.equal(messages[0].media_type, 'image');   // o tipo é mantido
+});
+
+test('reconcileByMsgId: sem media_state a bolha não ganha o campo', () => {
+  const base = [{ msg_id: 'M1', _id: 7, media_path: 'statics/media/a.jpg' }];
+  const { messages } = reconcileByMsgId(base, { msg_id: 'M1', content: 'x' });
+  assert.equal('media_state' in messages[0], false);
+  assert.equal(messages[0].media_path, 'statics/media/a.jpg');
+});

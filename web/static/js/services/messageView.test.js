@@ -342,3 +342,25 @@ test('mediaFetchPlan: _id 0 não é identidade (mesma regra do `!messageId` ante
 test('MEDIA_ID_WAIT_MS cobre a janela t=0 → autoritativo (~5-6 s) com folga', () => {
   assert.ok(MEDIA_ID_WAIT_MS >= 15000);
 });
+
+// ── mediaFetchPlan: 'removed' (plano 179) ───────────────────────────────────
+// A tela Arquivos tirou o arquivo: `media_path` vem NULL e `media_state` 'removed'.
+// Não é falha de carga ("Mídia indisponível") — a bolha mostra "Arquivo removido".
+
+test('mediaFetchPlan: mensagem removida pela tela Arquivos é removed, não none/failed', () => {
+  assert.equal(mediaFetchPlan({ media_state: 'removed', media_path: null, msg_id: 'X', _id: 7 }), 'removed');
+  assert.equal(mediaFetchPlan({ media_state: 'removed', msg_id: 'X' }), 'removed');
+  assert.equal(mediaFetchPlan({ media_state: 'removed' }), 'removed');
+});
+
+test('mediaFetchPlan: removed vence o _id (não tenta buscar um arquivo que não existe mais)', () => {
+  assert.notEqual(mediaFetchPlan({ media_state: 'removed', media_path: 'statics/media/a.jpg', _id: 7 }), 'fetch');
+});
+
+test('mediaFetchPlan: blob local continua local mesmo com media_state', () => {
+  assert.equal(mediaFetchPlan({ _isLocalBlob: true, media_path: 'blob:x', media_state: 'removed' }), 'local');
+});
+
+test('mediaFetchPlan: outro media_state não é removed', () => {
+  assert.equal(mediaFetchPlan({ media_state: null, media_path: 'p', _id: 1 }), 'fetch');
+});

@@ -46,6 +46,7 @@ from server.execution import (
     astamp_execution_channel, aset_execution_texts, set_current_contact_id,
 )
 from server.helpers import parse_split_reply
+from server.file_manager import clean_name as _clean_file_name, upload_name as _upload_name
 from server.upload_names import unique_media_name
 from server.transcription import (
     maybe_transcribe,
@@ -550,8 +551,14 @@ class MessagingService:
                          sent_by_user_id: int | None = None,
                          sent_by_name: str | None = None,
                          wire_phone: str | None = None,
-                         sent_msg_id: str | None = None) -> dict:
+                         sent_msg_id: str | None = None,
+                         media_name: str | None = None) -> dict:
         """Send an operator-uploaded media file and persist/broadcast/emit it (R14).
+
+        ``media_name`` (plano 179): o nome que o OPERADOR deu ao arquivo (o do upload),
+        já passado por ``upload_name`` (nome genérico do front → ``None``). Grava em
+        ``messages.media_name`` para a tela Arquivos mostrar "Contrato.pdf" em vez do
+        nome em disco.
 
         ``sent_msg_id`` (plano 177): the file ALREADY left the building — inside a
         grouped send (:meth:`send_media_group_upload`) — so the provider call is
@@ -643,7 +650,8 @@ class MessagingService:
             "filter.conversation.before_reopen", True,
             {"phone": phone, "role": "assistant", "text": emit_text})
         _saved = contact.add_message("assistant", content, media_type=kind,
-                            media_path=rel_path, status="operator", msg_id=msg_id,
+                            media_path=rel_path, media_name=media_name,
+                            status="operator", msg_id=msg_id,
                             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
                             reopen=(False if not _allow_reopen else None))
         msg_data["conversation_id"] = (_saved or {}).get("conversation_id")
@@ -790,7 +798,7 @@ class MessagingService:
             filename=(safe_name if spec["send_filename"] else None),
             error_label=spec["error_label"], transcribe=spec["transcribe"],
             sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
-            wire_phone=wire_phone)
+            wire_phone=wire_phone, media_name=(_upload_name(filename) or None))
 
         if not result["ok"]:
             verb = "Falha" if result.get("kind") == "send" else "Erro"
@@ -938,7 +946,8 @@ class MessagingService:
                 error_label=p["spec"]["error_label"],
                 transcribe=p["spec"]["transcribe"],
                 sent_by_user_id=sent_by_user_id, sent_by_name=sent_by_name,
-                wire_phone=wire_phone, sent_msg_id=bubble_id)
+                wire_phone=wire_phone, sent_msg_id=bubble_id,
+                media_name=(_upload_name(p["safe_name"]) or None))
             results.append(r)
             msg_ids.append(bubble_id)
 
@@ -2114,6 +2123,12 @@ class MessagingService:
                 # usar o ``text`` faria o rótulo inteiro virar "legenda". Provider
                 # que não declare caption ⇒ NULL, e o painel cai no fallback legado.
                 _saved_caption = (item.get("media_extras") or {}).get("caption") or None
+                # plano 179 — o nome que o REMETENTE deu ao arquivo, só quando o provider o
+                # DECLAROU em ``media_extras.file_name`` (genérico, sem ``if provider ==``).
+                # O plugin gowa declara só para documento: foto/vídeo/áudio não têm nome
+                # próprio no WhatsApp (o chatstorage inventa ``image_<data>.jpg``).
+                _saved_media_name = _clean_file_name(
+                    (item.get("media_extras") or {}).get("file_name")) or None
                 # plano 75 F3 — safety net: a media_type the panel cannot draw and
                 # with no file would persist an empty body (mute bubble). Real media
                 # without a caption keeps its empty text (it has media_path).
@@ -2124,6 +2139,7 @@ class MessagingService:
                     media_type=_saved_media_type,
                     media_path=_saved_media_path,
                     media_caption=_saved_caption,
+                    media_name=_saved_media_name,
                     msg_id=item.get("msg_id"),
                     reply_to_msg_id=item.get("reply_to_msg_id"),
                     ts=(item.get("ts") or None),  # plano 129 M5 — ts real do provedor

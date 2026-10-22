@@ -29,6 +29,7 @@ export const CORE_ROUTES = {
   '/users': 'users',
   '/audit': 'audit',
   '/api-keys': 'api-keys',
+  '/files': 'files',
   '/ai': 'ai',
   // Alias legado: a tela virou a aba "Notificações e sons" de Configurações
   // Gerais (Dashboard.js abre nela ao ver este path / ?tab=sons).
@@ -50,6 +51,7 @@ export const CORE_TAB_PATHS = {
   users: '/users',
   audit: '/audit',
   'api-keys': '/api-keys',
+  files: '/files',
   ai: '/ai',
 };
 
@@ -61,6 +63,7 @@ const LEGACY_PATH_REDIRECTS = {
   '/atendimentos': '/protocolos',
   '/painel': '/dashboard',
   '/auditoria': '/audit',
+  '/arquivos': '/files',
 };
 
 // Tab id used internally for plugin screens. We encode the plugin id and

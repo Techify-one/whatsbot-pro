@@ -226,6 +226,37 @@ Todo o resto da API é *pull*. Um CRM que precise saber "chegou mensagem" ou "co
 | Tela (abas Chaves de API / Webhooks) | [web/static/js/components/IntegrationsScreen.js](../web/static/js/components/IntegrationsScreen.js) — rota `/api-keys` |
 | Migrações | `0064_api_keys`, `0065_outbound_webhooks` |
 
+## Arquivos: ver o que ocupa espaço e apagar a mídia das conversas (plano 179)
+
+Tela **Arquivos** (`/files`, alias `/arquivos`), no menu da engrenagem logo depois de "Saldo e Recargar".
+Todas as rotas exigem **`files.manage`** (admin pelo curinga e gestor por padrão; a migration `0077` copiou o
+grant de `settings.manage` para quem já o tinha). Ela **não** depende de `conversation.read`.
+
+| Rota | O que faz |
+|---|---|
+| `GET /api/files/usage?refresh=` | Disco REAL do servidor (`shutil.disk_usage` do volume de `statics/`) + `roots` (Recebidos/Enviados) e `system_bytes` para quem vê tudo. Com escopo: `scoped: true`, sem `roots`/`system_bytes`, e só `visible` (total do que a pessoa abre) |
+| `GET /api/files/contacts?q=&limit=` | Seletor "Contato ou grupo" (nome, grupo, telefone, etiqueta), recortado pelo escopo |
+| `GET /api/files/inboxes` | Seletor "Canal", recortado pelo escopo. Existe porque `GET /api/inboxes` exige `inbox.manage` |
+| `GET /api/files` | Página **plana** de `root=received` (`statics/media`) ou `sent` (`statics/outbox`: painel, API e plugins). Filtros: `q`, `contact_id`/`contact`, `inbox_id`, `chat_type`, `kind`, `date_from`/`date_to` (epoch, `date_to` exclusivo), `orphans`, `sort`/`order`, `offset`/`limit` (≤ 500) |
+| `GET /api/files/{id}/preview?download=` | Os bytes, com o `Content-Type` decidido por `server/file_manager.preview_mime` |
+| `POST /api/files/delete` `{ids}` | Até 1000 ids por chamada (1001 ⇒ 400) |
+
+- **Os abas seguem a PASTA, não o `role`.** O eco do GOWA de um arquivo mandado pelo celular é gravado como `role='assistant'` com caminho em `statics/media` e aparece em **Recebidos**.
+- **O id é opaco e NÃO é segredo.** `base64(raiz:relativo)`: quem tem `files.manage` consegue montar o id de qualquer arquivo. Por isso a **prévia** refaz a autorização pelo CAMINHO (`media_files_repo.visible_to`, mesmo `collection_clause` das listas) e responde **404, nunca 403**, para o que a pessoa não abre. A lista é guiada pelo banco ("caminhos referenciados por mensagens de conversas que eu posso ver") e só então cruzada com o disco. Arquivo **sem conversa** só aparece para quem vê todas as conversas (por isso "só arquivos sem conversa" não existe com escopo).
+- **A exclusão NÃO é recortada por caixa de entrada** (decisão do usuário, P1): quem tem a permissão apaga qualquer arquivo, esteja ou não numa caixa dela. O escopo recorta o que se VÊ, não o que se apaga.
+- **Prévia mais ampla que `_INLINE_SAFE_MIMES`** (`server/app.py`): HEIC, AVIF, TIFF e `text/plain` saem inline aqui. Continua sem conteúdo ativo — HTML/XHTML/SVG **nunca** são inline (`attachment` + `octet-stream`), `X-Content-Type-Options: nosniff` e `Cache-Control: private, no-store`. O PDF abre num `<iframe src="blob:…">`, por isso a CSP ganhou `frame-src 'self' blob:` (`frame-ancestors 'none'` continua).
+- **Arquivo de plugin nunca sai do disco** — ver [PLUGINS.md](PLUGINS.md#arquivos-do-plugin-em-staticsoutbox-plano-179). Resposta da exclusão: `{files, bytes, failed, messages, kept_plugin, kept_unknown}`.
+- **Auditoria:** uma linha `files.delete` / `file` **por chamada**, com contagens, bytes e os nomes EM DISCO (até 100). Nunca o nome dado pelo remetente, a legenda, o texto da mensagem nem o telefone (conversa nunca entra na trilha).
+- **WebSocket:** `message_media_updated` `{conversation_id, messages: [{_id, media_state, media_path}]}` — **um evento por conversa**, ≤ 200 itens, está em `CONVERSATION_EVENTS` (sem `conversation_id` provado é **descartado** e só chega a quem vê a conversa); e `storage_changed` `{files, bytes, messages}` — só contagens, sem `conversation_id`, para a tela Arquivos de outra aba recarregar.
+- **Várias réplicas:** cada uma tem o próprio `statics/`, e a barra mostra o disco **da réplica que respondeu**.
+- **Busca:** acha pela legenda (`media_caption`), pela descrição da IA dentro do `content` e pelo nome dado pelo remetente; **não** acha só por "recebido"/"áudio" (as marcas são descartadas por `searchable_text`). ⚠️ **Limitação:** com `audio_transcription_target="private"` (padrão) a transcrição vira uma linha `role='transcription'` **sem ligação** com a mensagem do áudio, então o áudio não é achado pelo que foi dito nele.
+
+Código: [server/file_manager.py](../server/file_manager.py) (filesystem puro, sem FastAPI e sem banco),
+[server/routes/files.py](../server/routes/files.py), [db/repositories/media_files_repo.py](../db/repositories/media_files_repo.py),
+[db/repositories/plugin_media_repo.py](../db/repositories/plugin_media_repo.py); tela
+[FileManager.js](../web/static/js/components/FileManager.js). Testes: `tests/core/test_file_manager.py`,
+`tests/integration/test_files_api.py`, `test_files_permission.py`, `test_media_name.py`.
+
 ## Times: acesso, atribuição e mídia protegida (plano 166/01)
 
 Times expõem `access_mode` com três valores: `open`, `list_hidden` e `private`.

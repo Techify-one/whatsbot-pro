@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 def add(contact_id: int, role: str, content: str, *,
         media_type: str | None = None, media_path: str | None = None,
         media_caption: str | None = None,
+        media_name: str | None = None,
         status: str | None = None, msg_id: str | None = None,
         reply_to_msg_id: str | None = None,
         conversation_id: int | None = None,
@@ -39,6 +40,9 @@ def add(contact_id: int, role: str, content: str, *,
     junto da mídia. Fica fora do ``content`` de propósito: o content é reescrito
     depois pela descrição/transcrição da IA e deixa de ser separável. NULL =
     mídia sem legenda (ou mensagem que não é mídia).
+    ``media_name`` (plano 179) é o nome que o REMETENTE deu ao arquivo, só quando o
+    provider o declarou (``media_extras.file_name``) ou o operador o escolheu no
+    upload. NULL = sem nome próprio (a tela Arquivos mostra o nome em disco).
     """
     # ⚠️ Última linha de defesa (plano 141): ``ts = ts or time.time()`` PARECE um
     # guard de tipo e não é — qualquer string não-vazia é truthy e atravessava
@@ -65,6 +69,7 @@ def add(contact_id: int, role: str, content: str, *,
             media_type=media_type,
             media_path=media_path,
             media_caption=media_caption,
+            media_name=media_name,
             status=status,
             msg_id=msg_id,
             reply_to_msg_id=reply_to_msg_id,
@@ -156,6 +161,24 @@ def get_by_conversations(conversation_ids: list[int], *, limit: int | None = Non
     cond = messages.c.conversation_id.in_(conversation_ids) if conversation_ids else sa_false()
     return _keyset(cond, limit, before_id, after_id)
 
+
+def mark_media_removed(message_ids: list[int]) -> int:
+    """Plano 179: a tela Arquivos tirou o arquivo destas mensagens.
+
+    ``media_path`` vira NULL e ``media_state`` ``'removed'``; ``media_type`` é MANTIDO
+    (a bolha sabe que era uma foto/áudio e mostra "Arquivo removido"). Em lotes de 500.
+    Devolve quantas linhas mudaram."""
+    ids = [int(i) for i in dict.fromkeys(message_ids) if i is not None]
+    updated = 0
+    with get_engine().begin() as conn:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            result = conn.execute(
+                sa_update(messages)
+                .where(messages.c.id.in_(chunk))
+                .values(media_path=None, media_state="removed"))
+            updated += result.rowcount or 0
+    return updated
 
 def media_path_is_referenced(media_path: str) -> bool:
     """Whether a persisted message owns this local media path."""
@@ -957,6 +980,10 @@ def _row_to_dict(row) -> dict:
     # e o painel cai no fallback conservador por prefixo.
     if row.get("media_caption"):
         d["media_caption"] = row["media_caption"]
+    # plano 179: ``'removed'`` = o arquivo foi tirado pela tela Arquivos (a bolha
+    # mostra "Arquivo removido"). Só sai quando existe — linha normal é byte-idêntica.
+    if row.get("media_state"):
+        d["media_state"] = row["media_state"]
     # `revoked` may be absent on very old rows read before the column existed.
     # 1 = "para todos", 2 = "para mim" (see _REVOKE_CODE).
     if row.get("revoked"):

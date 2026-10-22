@@ -131,6 +131,13 @@ messages = Table(
     # ``content`` continua sendo o que o LLM lê; esta coluna é o que o humano
     # escreveu. NULL = mídia sem legenda OU linha anterior ao plano 87.
     Column("media_caption", Text),
+    # plano 179 (tela Arquivos): NULL = normal; 'removed' = o arquivo foi tirado pela
+    # tela Arquivos (``media_path`` vira NULL e a bolha mostra "Arquivo removido").
+    # Valor só do servidor, sem CHECK. ``media_name`` = o nome que o REMETENTE deu ao
+    # arquivo, só quando o provider o declarou (``media_extras.file_name``); NULL =
+    # sem nome próprio (a tela mostra o nome em disco).
+    Column("media_state", Text),
+    Column("media_name", Text),
     Column("status", Text),
     Column("msg_id", Text),
     Column("revoked", Integer, nullable=False, server_default="0"),
@@ -166,6 +173,9 @@ Index("idx_msg_contact_ts", messages.c.contact_id, messages.c.ts)
 Index("idx_msg_id", messages.c.msg_id)
 Index("idx_msg_conversation_ts", messages.c.conversation_id, messages.c.ts)
 Index("idx_msg_execution", messages.c.execution_id)
+# Plano 179 (migration 0076, criado CONCURRENTLY): cruza arquivo do disco ↔ mensagens.
+Index("idx_msg_media_path", messages.c.media_path,
+      postgresql_where=text("media_path IS NOT NULL"))
 # Índice PARCIAL (plano 62 F2, materializado na migration 0059): o scan de
 # conteúdo da busca (``contact_ids_matching_message`` em db/search/contact_search.py)
 # faz ``ORDER BY ts DESC LIMIT MESSAGE_SCAN_CAP`` filtrando os MESMOS 4 roles do

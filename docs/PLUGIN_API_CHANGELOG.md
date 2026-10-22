@@ -107,6 +107,41 @@ aditiva). Contrato completo em [docs/PLUGINS.md](PLUGINS.md).
 
 ---
 
+## 1.12.0 — 2026-10-22 · convenção de host: coluna `media_path` em `plugin_*` — arquivo do plugin nunca sai do disco pela tela Arquivos (plano 179)
+
+**Convenção de host, sem símbolo novo.** Nenhum nome de catálogo, campo ou método
+mudou; o que mudou é um contrato novo entre o core e as tabelas de plugin.
+
+### A convenção
+
+> Uma coluna chamada `media_path` numa tabela `plugin_<id>_*` declara que aquele
+> arquivo é **do plugin**. A tela Arquivos do painel o tira das conversas (as
+> mensagens passam a mostrar "Arquivo removido"), mas **nunca apaga o arquivo físico**:
+> o plugin continua podendo enviá-lo.
+
+- O valor guardado é o caminho relativo `statics/outbox/<nome>` (com ou sem barra
+  inicial — o core casa as duas formas).
+- A descoberta é automática (`information_schema.columns`, cache de 60 s): **não há
+  nada a declarar no manifesto**. Hoje protege `arquivos_suporte`, `retornos` e
+  `whatsapp_cloud`, que já guardam o caminho assim, sem zip novo.
+- **Fail-closed:** se o core não consegue descobrir/consultar as tabelas de plugin,
+  **nenhum** arquivo de `statics/outbox` é apagado naquela chamada.
+- Plugin desativado continua dono (a tabela existe). Plugin removido
+  (`DELETE /api/plugins/{id}` derruba as tabelas) deixa de ser dono.
+
+### Para o plugin
+
+Guarde o caminho do arquivo que o plugin precisa reenviar em uma coluna `media_path`
+da sua tabela `plugin_<id>_*`. Quem guarda o caminho em coluna de outro nome **não é
+protegido** — a alternativa por declaração no manifesto (`owned_media`) fica para
+quando surgir esse caso. Plugin que dependa da proteção declara
+`whatsbot_api_version: ">=1.12,<2.0"`; os demais seguem em `">=1.0,<2.0"` (num core
+anterior a 1.12 o arquivo simplesmente não tem essa proteção).
+
+⚠️ Remover a convenção no futuro seria **MAJOR**.
+
+---
+
 ## 1.11.0 — 2026-10-14 · `ChannelCapabilities.media_group` + `Channel.send_media_group` — "Agrupar" anexos (plano 177)
 
 **Aditiva em `channels/base.py`, com defaults que preservam todo provider

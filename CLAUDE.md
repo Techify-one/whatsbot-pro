@@ -300,6 +300,10 @@ Info é salva automaticamente via tool calling do LLM e injetada no system promp
 - ⚠️ **Toda bolha de mídia precisa de `_id` para buscar o arquivo** (planos 172/175): produtor novo de `new_message` com mídia leva `_id` **ou** é seguido de um autoritativo que o `byId` (`reconcileByMsgId`) adota. O t=0 do inbound não tem `_id` **por construção** — não "conserte" no backend. [docs/UI_CONVERSA.md](docs/UI_CONVERSA.md)
 - **Digitação entre atendentes**: a rota de presença reemite `operator_typing` no WS (heartbeat de 10s, auto-limpeza em 15s no cliente), para dois atendentes não responderem por cima um do outro.
 
+## Tela Arquivos → [docs/API_REST.md](docs/API_REST.md)
+
+Permissão `files.manage` (lista/prévia recortadas pelo `ConversationAccessScope`; a exclusão NÃO). ⚠️ **Arquivo de plugin nunca sai do disco por essa tela**: a convenção é a coluna `media_path` em `plugin_*` (API 1.12.0), fail-closed — [docs/PLUGINS.md](docs/PLUGINS.md).
+
 ## Fotos de perfil (avatars)
 
 [server/avatars.py](server/avatars.py) cacheia as fotos de perfil em disco em `statics/avatars/<phone>.jpg` (servidas pelo mount estático). Como o WhatsApp não emite evento de "foto mudou", a atualização é por re-fetch do GOWA (ao abrir a conversa e numa varredura periódica de fundo — `AVATAR_REFRESH_INTERVAL = 1800s` em [server/background.py](server/background.py)), sobrescrevendo o arquivo só quando os bytes diferem. O frontend faz cache-bust pelo mtime (`avatar_v`); uma mudança dispara o WS `avatar_updated` `{phone, v}` pra atualizar ao vivo sem reload.

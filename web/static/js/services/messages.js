@@ -164,6 +164,9 @@ export function reconcileByMsgId(base, message) {
     // só o autoritativo pós-save carrega. Sem adotá-la aqui, a mídia com
     // legenda ficava muda AO VIVO e só aparecia depois do F5.
     ...(message.media_caption ? { media_caption: message.media_caption } : {}),
+    // plano 179: whitelist — campo que não é listado aqui some SEM erro. Uma linha
+    // reconciliada depois de a tela Arquivos tirar o arquivo tem de continuar "removida".
+    ...(message.media_state ? { media_state: message.media_state, media_path: null } : {}),
     // plano 175: o t=0 nasce SEM `_id` (a linha ainda não existe) e o autoritativo
     // o traz. `MediaContent` só busca /api/messages/{id}/media com um id — sem
     // adotá-lo a mídia do cliente ficava em "Mídia indisponível" até o F5. Só

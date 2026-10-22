@@ -96,6 +96,8 @@ class ConnectionManager:
         "conversation_assigned", "conversation_archived", "conversation_pinned",
         "conversation_ai_toggled", "conversation_updated", "conversation_deleted",
         "conversation_labels_changed", "agent_transfer_alert", "human_transfer_alert",
+        # plano 179: a tela Arquivos tirou a mídia de mensagens desta conversa.
+        "message_media_updated",
     }
 
     # Plano 168 I1 — chave que carrega o id de conversa POR EVENTO, checada

@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from server.auth import rbac_enforced, resolve_request_token
 from server.api_keys import KEY_HEADER as API_KEY_HEADER, resolve_api_key
 from server import authz
+from server.file_manager import FileManager
 from server.helpers import _get_web_dir
 from server.audit_listener import register_audit_listener
 from server.webhook_dispatcher import register_webhook_listener
@@ -27,7 +28,7 @@ from server.state import MemoryLogHandler, ConnectionManager, AppState
 from server.background import (ai_reactivation_loop, audit_purge_loop,
                                empty_conversation_sweep_loop, loop_delay_monitor_loop,
                                webhook_delivery_loop)
-from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, teams as teams_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes, api_keys as api_keys_routes, webhooks_out as webhooks_out_routes, ai_credentials as ai_credentials_routes
+from server.routes import logs, sandbox, config, whatsapp, websocket, usage, contacts, webhook, auth, tags, executions, setup as setup_routes, plugins as plugins_routes, tools as tools_routes, admin as admin_routes, ai_engine as ai_engine_routes, quick_replies as quick_replies_routes, custom_attributes as custom_attributes_routes, runtime as runtime_routes, channels as channels_routes, channel_webhook as channel_webhook_routes, inboxes as inboxes_routes, users as users_routes, roles as roles_routes, teams as teams_routes, conversations as conversations_routes, conversation_labels as conversation_labels_routes, saved_filters as saved_filters_routes, sound_prefs as sound_prefs_routes, account as account_routes, audit as audit_routes, api_keys as api_keys_routes, webhooks_out as webhooks_out_routes, ai_credentials as ai_credentials_routes, files as files_routes
 from server.routes import v1 as v1_routes
 from db.repositories import tool_override_repo
 from agent import group_mentions, agent_factory
@@ -139,6 +140,9 @@ class ServerDeps:
     broadcast_tool_calls: object = None
     # Set by webhook.register_routes — provider-agnostic inbound funnel (plano 11).
     ingest_event: object = None
+    # Tela Arquivos (plano 179): ``FileManager`` sobre ``statics/{media,outbox}``. Lido a
+    # cada request pelas rotas, para os testes apontarem para um ``tmp_path``.
+    file_manager: object = None
 
 
 # ── Factory ───────────────────────────────────────────────────────────────
@@ -357,6 +361,7 @@ def create_app(
         plugins_registry=registry,
         channel_registry=channel_registry,
         outbound_router=outbound_router,
+        file_manager=FileManager(settings.data_dir),
     )
 
     # Group @mention resolution service (members lookup + name/number mapping).
@@ -683,11 +688,11 @@ def create_app(
         "/", "/contacts", "/dashboard", "/sandbox", "/costs", "/executions",
         "/plugins", "/quick-replies", "/custom-attributes", "/runtime", "/users",
         "/conversations", "/protocolos", "/attendances", "/audit", "/ai",
-        "/channels", "/api-keys", "/sounds", "/wizard", "/teams",
+        "/channels", "/api-keys", "/sounds", "/wizard", "/teams", "/files",
         # Legacy PT aliases (kept so a hard reload on an old bookmark still serves
         # index.html; the frontend rewrites them to the English path via
         # redirectLegacyPath).
-        "/contatos", "/painel", "/atendimentos", "/auditoria",
+        "/contatos", "/painel", "/atendimentos", "/auditoria", "/arquivos",
     )
     _SPA_PATHS = set(_CORE_SPA_PATHS) | _PLUGIN_SPA_PATHS
 
@@ -865,6 +870,10 @@ def create_app(
                 "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: blob:; "
                 "media-src 'self' data: blob:; "
+                # Prévia de PDF da tela Arquivos (plano 179): <iframe src="blob:…">.
+                # Só iframes de blob da PRÓPRIA página — ``frame-ancestors 'none'``
+                # (quem pode nos embutir) continua valendo.
+                "frame-src 'self' blob:; "
                 # www.cloudflare.com: ÚNICA chamada externa do painel — o
                 # /cdn-cgi/trace de onde o navegador descobre o próprio IP
                 # público para a auditoria (plano 86; ver services/publicIp.js).
@@ -999,6 +1008,7 @@ def create_app(
     audit_routes.register_routes(app, deps)
     api_keys_routes.register_routes(app, deps)
     webhooks_out_routes.register_routes(app, deps)
+    files_routes.register_routes(app, deps)
     # Fachada versionada para integrações externas (a chave X-Api-Key vale
     # aqui e em todo /api/*, D2 — a autenticação é do middleware, não da rota).
     v1_routes.register_routes(app, deps)

@@ -27,6 +27,7 @@ from server.authz import (current_user, permission_denied, can_access_inbox,
                           visible_inbox_ids, conversation_access_scope)
 from server.avatars import avatar_version, refresh_and_broadcast
 from server.helpers import _ok, _err, parse_split_reply
+from server.file_manager import upload_name as _upload_name
 from server.upload_names import unique_media_name
 from server.pagination import (CAP_LIST, CAP_MSGS, PAGE_LIST, PAGE_MSGS,
                                clamp_limit, clamp_offset)
@@ -1824,6 +1825,7 @@ def register_routes(app, deps):
             saved_row = contact.add_message(
                 "private_note", db_content,
                 media_type=kind, media_path=rel_path,
+                media_name=(_upload_name(upload.filename) or None),   # plano 179
                 sent_by_user_id=(_u.get("id") if _u else None),
                 sent_by_name=(_u.get("name") if _u else None))
             return contact.id, saved_row

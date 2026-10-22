@@ -42,6 +42,8 @@ export function useWebSocket({ onStatus, onQrUpdate, onGowaStatus, onConfigSaved
       message_revoked: onMessageAction ? (d) => onMessageAction({ ...d, action: 'revoked' }) : undefined,
       message_deleted: onMessageAction ? (d) => onMessageAction({ ...d, action: 'deleted' }) : undefined,
       message_edited: onMessageAction ? (d) => onMessageAction({ ...d, action: 'edited' }) : undefined,
+      // plano 179: a tela Arquivos tirou a mídia de mensagens desta conversa.
+      message_media_updated: onMessageAction ? (d) => onMessageAction({ ...d, action: 'media_removed' }) : undefined,
       message_reaction: onMessageReaction,
       avatar_updated: onAvatarUpdated,
       group_participants_changed: onGroupParticipantsChanged,

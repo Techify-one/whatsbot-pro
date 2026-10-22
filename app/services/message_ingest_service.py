@@ -33,6 +33,7 @@ from channels import jid_allowed
 from db.repositories import channel_repo, contact_repo, conversation_repo
 from plugins.events import apply_filter, emit_with_filter
 from app.services.realtime_broadcast import build_inbound_saved_message
+from server.file_manager import clean_name as _clean_file_name
 from server.transcription import placeholder_for_unrenderable
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,15 @@ async def apply_message_filter(filter_name: str, msg: dict, extras: dict):
 _GOWA_CHANNEL_ID = "default"
 _ALLOWED_JID_CACHE: dict = {"types": None, "ts": 0.0}
 _ALLOWED_JID_TTL = 30.0
+
+
+def _declared_file_name(media_extras) -> str | None:
+    """O nome que o REMETENTE deu ao arquivo (plano 179), só se o provider o DECLAROU em
+    ``media_extras.file_name`` — genérico, sem ``if provider ==``. ``None`` = sem nome
+    próprio (a tela Arquivos mostra o nome em disco)."""
+    if not isinstance(media_extras, dict):
+        return None
+    return _clean_file_name(media_extras.get("file_name")) or None
 
 
 def _read_gowa_allowed_jid_types() -> list[str]:
@@ -282,6 +292,7 @@ class MessageIngestService:
             contact.add_message, "assistant", text,
             media_type=media_type, media_path=media_path, msg_id=msg_id,
             reply_to_msg_id=reply_to, status="operator",
+            media_name=_declared_file_name(media_extras),   # plano 179
             ts=(event.ts or None))  # plano 129 M7 — ts real do provedor (echo)
         # `_id` (plano 175): o eco não tem autoritativo pós-save que o traga depois —
         # sem ele a bolha de mídia fica em "Mídia indisponível" até o F5.
@@ -537,6 +548,7 @@ class MessageIngestService:
             saved = await asyncio.to_thread(
                 contact.add_message, "user", ui_text,
                 media_type=media_type, media_path=media_path,
+                media_name=_declared_file_name(media_extras),   # plano 179
                 msg_id=msg_id, reply_to_msg_id=reply_to, reopen=_reopen,
                 ts=(event.ts or None))  # plano 129 M6 — grupo sem @menção
             # plano 57: new_message autoritativo pós-save (grupo sem @menção — 1 linha).
