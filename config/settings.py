@@ -221,10 +221,11 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     # faltava aqui, então o campo do ConfigPanel nunca persistia (era inerte).
     ConfigKey("audit_retention_days", exposed=True, get_default=365, writable=True),
     # plano 36 F3 — KILL-SWITCH da captura do contexto enviado à IA (system prompt
-    # + histórico) no step ``llm_context``. Default OFF (conservador: o banco não
-    # cresce até o operador ligar para depurar). Toggle na tela de Execuções.
+    # + histórico) no step ``llm_context``. Toggle na tela de Execuções.
     # plano 51 (01 F2): default ON — captura o prompt+histórico EXATO por hop
     # (step llm_context) para a melhoria agêntica; kill-switch continua editável.
+    # plano 182: o system prompt é gravado INTEIRO (o banco cresce ~12–36 mil chars
+    # por salto de agente); desligar é o freio se isso pesar.
     ConfigKey("execution_capture_context", default=True, exposed=True, writable=True),
     # plano 36 F3 — retenção de execuções por dias (poda no mesmo loop do
     # ``max_executions``, via ``delete_older_than``). 0 = desligado (só a poda por

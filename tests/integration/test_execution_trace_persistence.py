@@ -75,9 +75,11 @@ def test_exact_context_reads_llm_context_per_hop(_engine_ready):
                             {"tool": "transferir_agente",
                              "args": {"destino": "comercial"}},
                             agent_key="roteador")
+    # plano 182: `chars`/`truncated` (aditivos) chegam intactos ao consumidor.
     execution_repo.add_step(eid, "llm_context",
                             {"model": "m2", "messages": [
-                                {"role": "system", "content": "prompt comercial"}]},
+                                {"role": "system", "content": "prompt comercial",
+                                 "truncated": False, "chars": 16}]},
                             agent_key="comercial")
     _routing(eid, [{"from": "roteador", "to": "comercial", "depth": 1,
                     "reason": "quer comprar"}])
@@ -92,6 +94,8 @@ def test_exact_context_reads_llm_context_per_hop(_engine_ready):
     hops = execution_trace.exact_context(execution)
     assert [h["agent_key"] for h in hops] == ["roteador", "comercial"]
     assert hops[0]["messages"][0]["content"] == "prompt roteador"
+    assert hops[1]["messages"][0]["chars"] == 16
+    assert hops[1]["messages"][0]["truncated"] is False
 
 
 def test_single_agent_chain_from_agent_key(_engine_ready):

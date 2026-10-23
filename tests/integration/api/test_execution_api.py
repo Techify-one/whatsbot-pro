@@ -226,6 +226,82 @@ def test_llm_context_truncates_long_message(_engine_ready):
         config_repo.set("execution_capture_context", False)
 
 
+# ── plano 182: system prompt inteiro, orçamento do histórico separado ───────
+
+def _capture(system, convo):
+    """Roda a captura numa execução nova e devolve as messages gravadas."""
+    config_repo.set("execution_capture_context", True)
+    try:
+        eid = _mk_exec()
+        set_current_execution(eid)
+        engine._capture_llm_context(system, convo, "m")
+        set_current_execution(None)
+        row = execution_repo.get_by_id(eid)
+        ctx = [s for s in row["steps"] if s["step_type"] == "llm_context"][0]
+        return ctx["data"]["messages"]
+    finally:
+        config_repo.set("execution_capture_context", False)
+
+
+def test_llm_context_system_prompt_stored_whole(_engine_ready):
+    system = "linha de instrução do agente.\n" * 1100  # ~33 mil, com espaços
+    msgs = _capture(system, [_Msg("user", "oi")])
+    sys_msg = msgs[0]
+    assert sys_msg["role"] == "system"
+    assert sys_msg["truncated"] is False
+    assert sys_msg["content"] == system
+    assert sys_msg["chars"] == len(system)
+    assert "scrubbed" not in sys_msg
+
+
+def test_llm_context_big_system_does_not_erase_history(_engine_ready):
+    # Regressão do orçamento: o system NÃO entra no total do histórico. Se entrasse,
+    # um prompt de ~33 mil caracteres (> 20.000) trocaria o histórico por
+    # "… (contexto truncado)".
+    system = "linha de instrução do agente.\n" * 1100
+    convo = [_Msg("user", "primeira"), _Msg("assistant", "segunda"),
+             _Msg("user", "terceira")]
+    msgs = _capture(system, convo)
+    assert [m["content"] for m in msgs[1:]] == ["primeira", "segunda", "terceira"]
+    assert not any(m["content"] == "… (contexto truncado)" for m in msgs)
+
+
+def test_llm_context_history_still_respects_total_budget(_engine_ready):
+    # O teto de 20.000 do histórico continua valendo (só o system saiu da conta).
+    convo = [_Msg("user", "palavra " * 400) for _ in range(12)]  # ~2.000 por msg
+    msgs = _capture("sys", convo)
+    assert msgs[-1] == {"role": "system", "content": "… (contexto truncado)",
+                        "truncated": True}
+    assert len(msgs) < 1 + len(convo) + 1
+
+
+def test_llm_context_system_above_safety_cap_is_cut(_engine_ready):
+    system = "x " * (engine.LLM_CONTEXT_SYSTEM_MAX_CHARS // 2 + 500)
+    msgs = _capture(system, [_Msg("user", "oi")])
+    sys_msg = msgs[0]
+    assert sys_msg["truncated"] is True
+    assert sys_msg["content"].endswith("… (truncado)")
+    assert sys_msg["chars"] == len(system)  # tamanho original preservado p/ a UI
+    assert len(sys_msg["content"]) < len(system)
+
+
+def test_llm_context_history_message_still_truncated_and_has_chars(_engine_ready):
+    long_text = "palavra " * 400
+    msgs = _capture("sys", [_Msg("user", long_text)])
+    user = msgs[1]
+    assert user["truncated"] is True
+    assert user["chars"] == len(long_text)
+    assert user["content"].endswith("… (truncado)")
+
+
+def test_llm_context_marks_scrubbed_base64(_engine_ready):
+    system = "prompt com anexo data:image/png;base64," + "A" * 300 + " fim"
+    msgs = _capture(system, [_Msg("user", "oi")])
+    assert msgs[0]["scrubbed"] is True
+    assert "[base64 removido]" in msgs[0]["content"]
+    assert "scrubbed" not in msgs[1]
+
+
 # ── F3: pruning (count + days, CASCADE) ──────────────────────────────────────
 
 def test_prune_by_days_cascades_steps(_engine_ready):

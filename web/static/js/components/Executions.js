@@ -9,6 +9,7 @@ import { useUrlState } from '../hooks/useUrlState.js';
 import { readParams, writeParams, str, enumStr, int } from '../services/urlState.js';
 import { CopyLinkButton } from '../utils/copyDeepLink.js';
 import { shouldOpenInNewTab } from '../services/spaLink.js';
+import { PromptViewer } from './executions/PromptViewer.js';
 
 const html = htm.bind(h);
 
@@ -338,11 +339,15 @@ function ContextStepCard({ data, expandSignal }) {
       <div class="mt-1 space-y-1">
         ${data.model ? html`<div class="text-xs text-wa-secondary">modelo: <span class="font-mono text-wa-text">${data.model}</span></div>` : null}
         ${msgs.map((m, i) => html`
-          <div key=${i} class="border border-wa-border rounded p-2 bg-wa-panel">
-            <div class="text-xs font-medium text-wa-secondary mb-0.5">
-              ${m.role}${m.truncated ? html`<span class="opacity-70"> · truncado</span>` : null}
-            </div>
-            <pre class="text-xs text-wa-text whitespace-pre-wrap break-words">${m.content}</pre>
+          <div key=${i} class="min-w-0 border border-wa-border rounded p-2 bg-wa-panel">
+            ${m.role === 'system'
+              ? html`<${PromptViewer} msg=${m} />`
+              : html`
+                <div class="text-xs font-medium text-wa-secondary mb-0.5">
+                  ${m.role}${m.truncated ? html`<span class="opacity-70"> · truncado</span>` : null}
+                </div>
+                <pre class="text-xs text-wa-text whitespace-pre-wrap break-words">${m.content}</pre>
+              `}
           </div>
         `)}
       </div>
@@ -573,7 +578,9 @@ export function Executions() {
   const [selected, setSelected] = useState(null);
   const [selectedData, setSelectedData] = useState(null);
   const [focusStep, setFocusStep] = useState(stepFromUrl());  // ?step do detalhe
-  // plano 36 F3/F5: kill-switch da captura do contexto enviado à IA (default OFF).
+  // plano 36 F3/F5: kill-switch da captura do contexto enviado à IA. Default ON desde
+  // o plano 51 (a melhoria agêntica lê o prompt exato); o estado inicial aqui é só
+  // até o getConfig responder.
   const [captureContext, setCaptureContext] = useState(false);
   const PAGE_SIZE = 30;
 
@@ -828,7 +835,7 @@ export function Executions() {
           <div class="flex items-center gap-3 flex-wrap">
             <label
               class="flex items-center gap-2 text-xs text-wa-secondary cursor-pointer select-none"
-              title="Salva o system prompt + histórico enviado à IA em cada execução (para depurar). Aumenta o tamanho do banco — desligue quando não precisar."
+              title="Salva o system prompt COMPLETO + o histórico enviado à IA em cada execução (para depurar). Aumenta o tamanho do banco — desligue quando não precisar."
             >
               <input type="checkbox" checked=${captureContext} onChange=${toggleCapture} class="accent-wa-teal" />
               Capturar contexto enviado à IA

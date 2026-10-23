@@ -91,8 +91,15 @@ def _truncate_result(value, limit: int = TOOL_RESULT_MAX_CHARS):
 # kill-switch (default ON since plano 51 — the agentic improvement needs the EXACT
 # prompt/history the model saw; the switch remains to turn it off). Each message is
 # truncated and base64 blobs are scrubbed so a media-heavy turn does not bloat the DB.
+#
+# plano 182: o SYSTEM prompt é gravado inteiro (o operador precisa conferir o que os
+# plugins injetaram — oferta em foco, termos de recomendação, data/hora). ⚠️ O orçamento
+# do HISTÓRICO é separado: o system NÃO entra em ``total``. Se entrasse, um prompt de
+# ~30 mil caracteres já nasceria acima de LLM_CONTEXT_TOTAL_MAX_CHARS e todo o histórico
+# viraria "… (contexto truncado)". O teto do system é só uma rede de segurança.
 LLM_CONTEXT_MSG_MAX_CHARS = 2000
 LLM_CONTEXT_TOTAL_MAX_CHARS = 20000
+LLM_CONTEXT_SYSTEM_MAX_CHARS = 200_000
 _BASE64_DATA_URI_RE = re.compile(r"data:[^;,\s]*;base64,[A-Za-z0-9+/=]+")
 _LONG_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
 
@@ -112,43 +119,61 @@ def _context_capture_enabled() -> bool:
 
 
 def _scrub_and_truncate(content, limit: int = LLM_CONTEXT_MSG_MAX_CHARS):
-    """Return (scrubbed+truncated string, truncated_flag) for one context message."""
+    """Return ``(text, truncated, chars, scrubbed)`` for one context message.
+
+    ``chars`` is the size AFTER the base64 scrub but BEFORE the cut (so the panel can
+    say "2.000 de 31.563"); ``scrubbed`` is True when a base64 blob was replaced.
+    """
     try:
         s = content if isinstance(content, str) else str(content)
     except Exception:
-        return "", False
+        return "", False, 0, False
+    original = s
     s = _BASE64_DATA_URI_RE.sub("[base64 removido]", s)
     s = _LONG_BASE64_RE.sub("[base64 removido]", s)
-    if len(s) > limit:
-        return s[:limit] + "… (truncado)", True
-    return s, False
+    scrubbed = s != original
+    chars = len(s)
+    if chars > limit:
+        return s[:limit] + "… (truncado)", True, chars, scrubbed
+    return s, False, chars, scrubbed
+
+
+def _context_message(role: str, content, limit: int) -> tuple[dict, int]:
+    """One ``messages[]`` entry of the ``llm_context`` step + its stored length."""
+    c, tr, chars, scrubbed = _scrub_and_truncate(content, limit)
+    entry = {"role": role, "content": c, "truncated": tr, "chars": chars}
+    if scrubbed:
+        entry["scrubbed"] = True
+    return entry, len(c)
 
 
 def _capture_llm_context(system_prompt, convo, model_id) -> None:
     """Emit an ``llm_context`` step with the system prompt + message array.
 
     No-op when the kill-switch is OFF. Fully best-effort — any failure is swallowed
-    so context capture never breaks the turn. Base64 media blobs are scrubbed and
-    every message is truncated (per-message + total cap).
+    so context capture never breaks the turn. Base64 media blobs are scrubbed. The
+    system prompt is stored whole (safety cap only) and is OUTSIDE the history budget;
+    each history message is truncated per-message plus a total cap (plano 182).
     """
     if not _context_capture_enabled():
         return
     try:
         msgs: list[dict] = []
-        total = 0
+        total = 0  # history only — the system prompt must not eat this budget
         if system_prompt:
-            c, tr = _scrub_and_truncate(system_prompt)
-            msgs.append({"role": "system", "content": c, "truncated": tr})
-            total += len(c)
+            entry, _ = _context_message("system", system_prompt,
+                                        LLM_CONTEXT_SYSTEM_MAX_CHARS)
+            msgs.append(entry)
         for m in convo:
             if total >= LLM_CONTEXT_TOTAL_MAX_CHARS:
                 msgs.append({"role": "system", "content": "… (contexto truncado)",
                              "truncated": True})
                 break
-            c, tr = _scrub_and_truncate(getattr(m, "content", "") or "")
-            msgs.append({"role": getattr(m, "role", "user") or "user",
-                         "content": c, "truncated": tr})
-            total += len(c)
+            entry, stored = _context_message(
+                getattr(m, "role", "user") or "user",
+                getattr(m, "content", "") or "", LLM_CONTEXT_MSG_MAX_CHARS)
+            msgs.append(entry)
+            total += stored
         track_step("llm_context", {"model": model_id, "engine": "agno", "messages": msgs})
     except Exception:
         logger.debug("llm_context capture failed", exc_info=True)
