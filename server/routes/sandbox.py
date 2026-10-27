@@ -13,7 +13,9 @@ from pathlib import Path
 
 from fastapi import Depends, File, Form, UploadFile
 
+from db import audit_actions
 from db.repositories import channel_repo, config_repo, message_repo
+from server import audit_listener
 from server.deps import require_permission, install_exception_handlers
 from server.execution import (
     astart_execution, aend_execution, atrack_step, prune_executions,
@@ -446,10 +448,23 @@ def register_routes(app, deps):
     @app.post("/api/sandbox/clear",
               dependencies=[Depends(require_permission("sandbox.use"))])
     async def sandbox_clear(body: dict):
-        """Clear conversation history for a sandbox phone number."""
+        """Clear the history of ONE sandbox/test number.
+
+        ⚠️ Sem telefone NÃO vira "limpar tudo" (apagava as mensagens de todo cliente
+        real em cache), e só limpa número que o próprio Sandbox marcou
+        (``sandbox_contact.<phone>``) — o telefone de um cliente digitado no campo é
+        recusado, não apagado."""
         phone = (body.get("phone") or "").strip()
-        if phone:
-            agent_handler.clear_conversation(phone)
-        else:
-            agent_handler.clear_all_conversations()
-        return _ok({"message": "Conversa limpa."})
+        if not phone:
+            return _err("Informe o telefone do Sandbox.")
+        flagged = await asyncio.to_thread(config_repo.get, f"{SANDBOX_CONTACT_PREFIX}{phone}")
+        if not flagged:
+            return _err("Este número não é de teste do Sandbox — nada foi apagado.", status=403)
+        removed = await asyncio.to_thread(agent_handler.clear_conversation, phone)
+        await asyncio.to_thread(
+            audit_listener.record,
+            action=audit_actions.AuditAction.SANDBOX_CLEAR,
+            resource_type=audit_actions.ResourceType.CONTACT,
+            resource_id=phone, after={"messages_removed": removed})
+        logger.info("[Sandbox] cleared %d message(s) of %s", removed, phone)
+        return _ok({"message": "Conversa limpa.", "removed": removed})

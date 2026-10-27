@@ -7,6 +7,7 @@ import {
 } from '../services/api.js';
 import { ContactDetail } from './contacts/ContactDetail.js';
 import { isSameMessage } from './contacts/utils.js';
+import { notify } from '../services/notify.js';
 
 const html = htm.bind(h);
 
@@ -176,7 +177,10 @@ export function Sandbox({ newMessage }) {
   };
 
   async function handleClear() {
-    await sandboxClear(activePhone);
+    if (!activePhone) return;
+    if (!confirm(`Apagar TODAS as mensagens de ${activePhone}? Isso não pode ser desfeito.`)) return;
+    const res = await sandboxClear(activePhone);
+    if (!res.ok) { notify(res.error, { kind: 'error' }); return; }
     setContactData({ messages: [], info: {} });
   }
 
@@ -200,7 +204,8 @@ export function Sandbox({ newMessage }) {
         >Logs</button>
         <button
           onClick=${handleClear}
-          class="text-[12px] text-wa-secondary hover:text-red-500 border border-wa-border rounded px-[10px] py-[4px] transition-colors"
+          disabled=${!activePhone}
+          class="text-[12px] text-wa-secondary hover:text-red-500 border border-wa-border rounded px-[10px] py-[4px] transition-colors disabled:opacity-50"
         >Limpar conversa</button>
       </div>
 

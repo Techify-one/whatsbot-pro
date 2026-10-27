@@ -864,10 +864,11 @@ def update_msg_id_and_status(message_id: int, msg_id: str, status: str) -> None:
         )
 
 
-def delete_all(contact_id: int) -> None:
-    """Delete all messages for a contact."""
+def delete_all(contact_id: int) -> int:
+    """Delete all messages for a contact. Returns how many rows were removed."""
     with get_engine().begin() as conn:
-        conn.execute(sa_delete(messages).where(messages.c.contact_id == contact_id))
+        return conn.execute(
+            sa_delete(messages).where(messages.c.contact_id == contact_id)).rowcount
 
 
 def get_by_db_id(message_id: int) -> dict | None:

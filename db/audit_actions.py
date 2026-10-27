@@ -71,6 +71,9 @@ class AuditAction:
     # e nomes em disco. Conversa nunca entra na trilha (nem o nome dado pelo remetente).
     # Gravado direto com ``audit_listener.record`` (não está em AUDITABLE_EVENTS).
     FILES_DELETE = "files.delete"
+    # "Limpar conversa" do Sandbox: quem apagou o histórico de qual número de teste e
+    # quantas linhas saíram — nunca o conteúdo. Gravado direto com ``audit_listener.record``.
+    SANDBOX_CLEAR = "sandbox.clear"
     ROLE_ASSIGN = "role.assign"
     # Config / IA engine (plano 06)
     CONFIG_UPDATE = "config.update"

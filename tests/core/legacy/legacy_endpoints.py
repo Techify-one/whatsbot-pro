@@ -5801,7 +5801,10 @@ r = client.post("/api/sandbox/clear", json={"phone": "sandbox_test"})
 check("POST /sandbox/clear -> 200", r.status_code == 200)
 
 r = client.post("/api/sandbox/clear", json={})
-check("POST /sandbox/clear (all) -> 200", r.status_code == 200)
+check("POST /sandbox/clear (sem telefone) -> 400, nunca 'limpar tudo'", r.status_code == 400)
+
+r = client.post("/api/sandbox/clear", json={"phone": "5511900000099"})
+check("POST /sandbox/clear (número que não é de teste) -> 403", r.status_code == 403)
 
 # ═══════════════════════════════════════════════════════════════════
 #  22. Frontend routes (SPA)

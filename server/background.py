@@ -358,10 +358,14 @@ async def empty_conversation_sweep_loop(deps):
                     try:
                         await conversation_service.delete(deps, g)
                     except Exception:
-                        logger.debug("[GhostSweep] delete failed for conv %s", g.get("id"))
+                        logger.warning("[GhostSweep] delete failed for conv %s", g.get("id"),
+                                       exc_info=True)
                 if ghosts:
-                    logger.info("[GhostSweep] removed %d empty inbound ghost conversation(s)",
-                                len(ghosts))
+                    # ids (conversa, contato): é o único rastro de uma varredura — sem
+                    # eles não dá para saber DEPOIS qual conversa sumiu.
+                    logger.info("[GhostSweep] removed %d empty inbound ghost conversation(s) "
+                                "(conv, contact): %s", len(ghosts),
+                                [(g["id"], g["contact_id"]) for g in ghosts])
         except Exception as e:
             logger.warning("[GhostSweep] loop error: %s", e)
 

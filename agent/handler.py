@@ -451,11 +451,8 @@ class AgentHandler:
         if msg and msg.get("_id"):
             message_repo.update_content(msg["_id"], new_content)
 
-    def clear_conversation(self, sender: str):
+    def clear_conversation(self, sender: str) -> int:
+        """Apaga as mensagens de UM contato; devolve quantas saíram. Não existe
+        "limpar tudo": a versão que varria ``_contacts`` apagava clientes reais."""
         contact = self._get_contact(sender)
-        message_repo.delete_all(contact.id)
-
-    def clear_all_conversations(self):
-        for contact in self._contacts.values():
-            message_repo.delete_all(contact.id)
-        self._contacts.clear()
+        return message_repo.delete_all(contact.id)

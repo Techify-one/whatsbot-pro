@@ -1135,21 +1135,22 @@ def delete(conv_id: int) -> int | None:
 def find_empty_inbound_ghosts(cutoff_ts: float, limit: int = 200) -> list[dict]:
     """Inbound "ghost" conversations to sweep (plano 28 Fase 5).
 
-    A ghost is ``origin='inbound'`` + created before ``cutoff_ts`` + NO VISIBLE
-    message — the conversation was materialized at ingest (t=0) but the batch that
-    would persist its first customer message never ran (shutdown/crash between t=0 and
-    t≈3s). "Visible" excludes the panel-only roles (``LIST_PANEL_ONLY_ROLES``): the t=0
-    materialization ALSO writes a ``conversation_event`` "created" card, so a real
-    ghost is never literally message-less — it has only that card. The TTL sweep
-    removes these so they don't linger as permanently-empty rows. The TTL (default
-    30 min) is far longer than the batch delay (~3s), so a legitimate brand-new
-    conversation is never caught. Returns minimal dicts for delete+broadcast."""
-    from db.repositories._mapping import LIST_PANEL_ONLY_ROLES
+    A ghost is ``origin='inbound'`` + created before ``cutoff_ts`` + NO message other
+    than the lifecycle card — the conversation was materialized at ingest (t=0) but the
+    batch that would persist its first customer message never ran (shutdown/crash
+    between t=0 and t≈3s). The t=0 materialization ALSO writes a ``conversation_event``
+    "created" card, so a real ghost is never literally message-less — it has only that
+    card. ⚠️ ONLY ``conversation_event`` is ignorable here: ``private_note``,
+    ``tool_call``, ``transcription`` and the like prove the thread was used, and the
+    sweep is a hard DELETE (it used to read the whole panel-only set as "empty" and
+    took the notes along). The TTL (default 30 min) is far longer than the batch delay
+    (~3s), so a legitimate brand-new conversation is never caught. Returns minimal
+    dicts for delete+broadcast."""
     # Um card de sistema notificado por plugin (ex.: aviso de dúvida de aula) conta como
     # mensagem visível: senão a conversa criada só por ele seria varrida como fantasma.
     no_visible_msg = ~(select(messages.c.id)
                        .where(messages.c.conversation_id == conversations.c.id)
-                       .where(conversation_query.visible_message_clause(LIST_PANEL_ONLY_ROLES))
+                       .where(conversation_query.visible_message_clause(("conversation_event",)))
                        .exists())
     stmt = (select(conversations.c.id, conversations.c.contact_id,
                    conversations.c.display_id, conversations.c.inbox_id,
